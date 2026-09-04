@@ -5,27 +5,44 @@ type user
 
 type organization
   relations
-    define admin: [user]
     define member: [user]
 
-type project
+type conversation_group
   relations
     define organization: [organization]
+    define participant: [user]
+    define member: participant and member from organization
+
+type knowledge_item
+  relations
     define owner: [user]
-    define member: [user]
-    define can_read: owner or member or admin from organization
-    define can_write: owner or admin from organization
+    define organization: [organization]
+    define conversation_group: [conversation_group]
+    define view: owner or member from organization or member from conversation_group
+    define download: owner or member from organization or member from conversation_group
 
-type file
+type knowledge_original
   relations
-    define project: [project]
-    define reader: [user]
-    define editor: [user]
-    define can_read: reader or editor or can_read from project
-    define can_write: editor or can_write from project
+    define parent: [knowledge_item]
+    define owner: [user]
+    define viewer: [user]
+    define eligible_viewer: owner or viewer
+    define view: eligible_viewer and view from parent
 
-type conversation
+type attachment_meta
   relations
-    define project: [project]
-    define reader: [user]
-    define can_read: reader or can_read from project
+    define owner: [user]
+    define organization: [organization]
+    define conversation_group: [conversation_group]
+    define view: owner or member from organization or member from conversation_group
+
+type attachment_content
+  relations
+    define parent: [attachment_meta]
+    define accessor: [user, organization#member, conversation_group#member]
+    define viewer: [user]
+    define downloader: [user]
+    define content_viewer: accessor or viewer
+    define content_downloader: accessor or downloader
+    define view: content_viewer and view from parent
+    define download: content_downloader and view from parent

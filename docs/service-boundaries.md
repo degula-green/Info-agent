@@ -42,6 +42,10 @@ RecordAudit(...)
 
 资源权限动作只有 `view` 和 `download`，不使用一个笼统的 `canAccess` 代替。“共享私聊”是模块二的业务操作，不是资源权限动作。
 
+模块一对外只接受用户主体；后台服务身份通过 `caller_service` 认证，不作为 OpenFGA 资源主体。统一 Access Check 使用 `resource_part` 区分 `display/original/metadata/content`：展示内容映射到 `knowledge_item`，敏感原文映射到 `knowledge_original`，附件元数据映射到 `attachment_meta`，附件内容查看和下载映射到 `attachment_content`。本地表格按附件处理，第一期没有独立的 `spreadsheet` 权限资源类型。
+
+模块一必须校验关系写入白名单：同一资源的 `owner`、`organization`、`conversation_group` 基础范围互斥；群聊只接收 `participant` 和唯一 `organization`，有效成员由 OpenFGA 计算为平台参与者与当前组织成员的交集；父资源关系必须指向正确对象。普通附件写 `accessor`，受保护群聊附件不得写 `accessor`。资源删除时撤销基础关系，数据库生命周期由业务接口检查。
+
 知识库展示与归属约定：私人知识库包含私人私聊会话和私人本地文件库；公司知识库按群聊展示消息及该群聊文件，并另设一个公司文件库，汇总所有群聊文件和公司本地上传文件。汇总展示不改变资源权限：群聊文件仍按 `conversation_members` 独立鉴权，公司本地上传文件按 `organization_members` 鉴权。
 
 ## 二、模块二：连接器、消息采集与知识管理
@@ -82,10 +86,11 @@ connector → ingestion → normalization → knowledge → security → deliver
 
 #### 隐私与权限编排
 
-- 判断消息或附件是否需要隐私识别。
-- 异步执行敏感信息识别并保存敏感等级、识别状态和策略版本。
+- 只判断组织群聊消息或附件是否需要隐私识别。
+- 异步执行组织群聊敏感信息识别并保存敏感等级、识别状态和策略版本。
 - 根据知识来源确定私人所有者、组织成员或群聊成员访问范围。
-- 隐私识别只负责敏感标签、审计、脱敏或阻断处理，不改变已确定的成员范围。
+- 私人聊天、私人本地上传、公司本地上传和共享私聊直接标记为无需识别；公司本地上传和共享私聊不脱敏且不进入审批限制。
+- 组织群聊敏感文本生成脱敏展示内容并保护原文；受保护群聊附件只开放元数据，内容查看和下载分别审批。
 - 调用模块一写入或撤销 OpenFGA 关系。
 - 只有权限准备完成后，才向模块三发布可处理事件。
 
@@ -189,6 +194,7 @@ last_cursor 或 last_success_at
 - 消费模块二发布的 `knowledge.ready` 等事件。
 - 消费 `document.processing.requested`，完成附件预处理并返回提取结果。
 - 附件预处理和 MinerU 解析。
+- 根据 `attachments[].content_access_required` 阻止受保护附件的原始解析文本进入普通索引。
 - 文本切块、Embedding、全文/向量索引。
 - Elasticsearch、多路召回、混合检索和重排。
 - 搜索历史、RAG 上下文构造、LLM 回答和 QA 会话记录。
@@ -240,10 +246,10 @@ acl_version
 7. 平台消息规范化为 UnifiedMessage
 8. 保存私人或组织消息、附件元数据、会话、发送人和知识归属
 9. 私人会话只保存私人消息；按条共享由独立的用户请求触发，采集时不自动创建组织引用
-10. 文本写入 privacy.scan.requested Outbox；附件写入 document.processing.requested
-11. 附件由模块三预解析，模块二对提取文本执行隐私识别
-12. 模块二根据知识来源确定访问范围；隐私结果只用于标签、审计、脱敏或阻断
-13. 模块二调用模块一登记消息、KnowledgeItem 和附件的 view/download 关系
+10. 仅组织群聊文本写入 privacy.scan.requested Outbox；附件写入 document.processing.requested
+11. 组织群聊附件由模块三预解析后执行隐私识别；其他附件只解析并直接设置 security_status=not_required
+12. 普通群聊附件写入群成员 accessor；受保护群聊附件不写 accessor，等待 view/download 审批
+13. 模块二调用模块一登记消息、KnowledgeItem、附件及父资源关系
 14. content、ownership、security、permission 均 ready
 15. 模块二发布 knowledge.ready
 16. 模块三读取指定版本，解析、切块、向量化并建立索引
@@ -253,7 +259,7 @@ Redis 只是性能优化；数据库唯一键才是最终幂等保障。采集�
 
 ## 六、隐私识别与 Outbox
 
-“写入隐私识别任务”和“异步执行隐私识别”是两个阶段：
+组织群聊的“写入隐私识别任务”和“异步执行隐私识别”是两个阶段：
 
 ```text
 保存消息时：创建 privacy_scan_task，状态为 pending
@@ -271,7 +277,7 @@ processing → succeeded 或 failed
 写入 privacy.scan.requested Outbox 记录
 ```
 
-`privacy.scan.requested` 只是“任务已登记并等待执行”，不是识别完成。Outbox 保证消息保存成功后，隐私任务不会因为进程崩溃而丢失，并支持重试、扩展多个 worker 和审计追踪。
+`privacy.scan.requested` 只是“组织群聊任务已登记并等待执行”，不是识别完成。Outbox 保证消息保存成功后，隐私任务不会因为进程崩溃而丢失，并支持重试、扩展多个 worker 和审计追踪。私人聊天、本地上传和共享私聊不写入该事件，直接设置 `security_status=not_required`。
 
 访问范围首先由资源来源确定：
 
@@ -281,7 +287,7 @@ processing → succeeded 或 failed
 公司群聊消息及群聊文件       conversation_members
 ```
 
-隐私识别只产生敏感标签、审计记录、脱敏内容或处理阻断，不把公司本地上传和共享私聊改成部分成员可见。
+公司本地上传和共享私聊不执行隐私识别或脱敏，始终按 `organization_members` 开放查看和下载。组织群聊文本可生成敏感标签、审计记录和脱敏内容；普通群聊附件按群成员开放，受保护群聊附件只展示元数据并对内容查看、下载分别审批。
 
 ## 七、就绪状态与交接闸门
 

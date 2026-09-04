@@ -48,7 +48,23 @@ POST /internal/access/audit
 
 模块二根据资源来源确定访问范围，并调用模块一写入或撤销 OpenFGA 关系；模块一负责校验调用方、执行 OpenFGA、返回 `acl_version` 并记录审计。模块三只能调用 Check，不得自行定义或修改权限模型。
 
+Access Check 的 `subject_type` 固定为 `user`，后台服务身份通过通用上下文中的 `caller_service` 传递。`resource_part` 与 OpenFGA 对象固定映射如下：
+
+```text
+message/knowledge_item + display  → knowledge_item
+message/knowledge_item + original → knowledge_original
+attachment + metadata             → attachment_meta
+attachment + content + view       → attachment_content.view
+attachment + content + download   → attachment_content.download
+```
+
+`original` 和 `metadata` 只允许 `view`；`display` 和 `content` 允许 `view/download`。本地表格按附件处理，第一期不使用独立的 `spreadsheet` 权限资源类型。
+
 访问范围固定为：私人知识 `owner_only`；公司本地上传和共享私聊为 `organization_members`；公司群聊消息及文件为 `conversation_members`。公司本地上传不需要逐用户配置文件 ACL，但访问时仍须校验组织成员身份。
+
+模块一的关系写入接口必须根据模块二提交的资源来源执行白名单校验，并保证 `owner`、`organization`、`conversation_group` 三种基础范围互斥。群聊只写有效平台成员的 `participant` 和唯一的 `organization`；OpenFGA 以 `participant and organization#member` 计算有效 `member`。退出群聊时删除 `participant`，退出组织时删除 `organization#member`。
+
+`knowledge_original.parent` 和 `attachment_content.parent` 必须指向正确的父资源。父关系只参与权限交集，不单独授予内容权限。普通附件内容写入与基础范围一致的 `accessor`；受保护群聊附件不得存在 `accessor`，审批后分别写入具体用户的 `viewer` 或 `downloader`。资源删除时撤销基础关系，数据库生命周期仍由业务接口检查。
 
 知识库展示与归属约定：私人知识库包含私人私聊会话和私人本地文件库；公司知识库按群聊展示消息及该群聊文件，并另设一个公司文件库，汇总所有群聊文件和公司本地上传文件。汇总展示不改变资源权限：群聊文件仍按 `conversation_members` 独立鉴权，公司本地上传文件按 `organization_members` 鉴权。
 
@@ -88,6 +104,7 @@ POST /internal/access/audit
 - `lifecycle_status` 当前只使用 `active`，为未来编辑/撤回预留。
 - `security_status` 表示隐私识别状态；`sensitivity` 表示识别结果。
 - `acl_version` 对应模块一当前权限关系版本。
+- `attachments[].content_access_required` 表示附件内容是否需要显式授权；模块三不得将值为 `true` 的附件原始解析文本写入普通索引。
 - `knowledge_scope` 表示知识属于私人知识库还是组织知识库；`access_scope` 表示实际访问范围。
 - `upload_destination` 只用于本地上传，可为 `private_local_library` 或 `organization_file_library`。
 - 共享私聊的组织引用通过 `sharing` 记录来源，不代表新增的权限动作。
@@ -148,10 +165,10 @@ processing.failed
 4. Redis 快速判重，数据库唯一键做最终幂等。
 5. 将平台消息规范化为统一对象。
 6. 保存消息、附件元数据、会话、发送人和知识归属。
-7. 文本消息在同一事务写入 privacy.scan.requested Outbox；带附件的消息写入 document.processing.requested。
-8. 附件由模块三预解析并返回 document.extracted，模块二再对提取文本执行隐私识别。
-9. 模块二根据消息来源确定固定访问范围；隐私结果只用于标签、审计、脱敏或阻断处理。
-10. 模块二调用模块一登记消息、KnowledgeItem 和附件的访问关系。
+7. 仅组织群聊文本在同一事务写入 privacy.scan.requested Outbox；带附件的消息写入 document.processing.requested。
+8. 组织群聊附件由模块三预解析并返回 document.extracted，模块二再对提取文本执行隐私识别；其他来源只执行解析，不执行隐私识别。
+9. 模块二根据消息来源确定固定访问范围。普通群聊附件写入群成员 `accessor`；受保护群聊附件不写 `accessor`，等待查看或下载审批。
+10. 模块二调用模块一登记消息、KnowledgeItem、附件及其父资源关系。
 11. 所有就绪条件满足后发布 knowledge.ready。
 12. 模块三读取指定版本，解析、切块、向量化并建立索引。
 13. 模块三发布 processing.completed 或 processing.failed。
@@ -212,13 +229,15 @@ POST /knowledge/attachments
 
 ## 7. 隐私识别与权限状态
 
-保存消息时只登记任务，不同步等待识别：
+只有组织群聊登记隐私任务，保存时不等待同步识别：
 
 ```text
 privacy_scan_task: pending → processing → succeeded / failed
 ```
 
-`privacy.scan.requested` 表示任务已可靠登记，不表示识别完成。访问范围先由资源来源确定：私人内容为 `owner_only`，公司本地上传和共享私聊为 `organization_members`，群聊消息及文件为 `conversation_members`。隐私结果只用于敏感标签、审计、脱敏或阻断处理，不改变上述成员范围。OpenFGA 保存关系，不保存正文或隐私原因。
+`privacy.scan.requested` 表示组织群聊的任务已可靠登记，不表示识别完成。私人聊天、私人本地上传、公司本地上传和共享私聊不创建该事件，创建时直接设置 `security_status=not_required`，其中公司本地上传和共享私聊即使包含敏感内容也不执行识别、脱敏或审批限制。
+
+组织群聊文本的隐私结果用于敏感标签、审计和脱敏；敏感原文通过 `knowledge_original.view` 申请。组织群聊附件识别为普通时写入 `accessor`，识别为受保护时只展示元数据且不得写入 `accessor`，内容查看和下载分别审批。OpenFGA 保存关系，不保存正文或隐私原因。
 
 模块二在交给模块三前维护以下闸门：
 
@@ -253,8 +272,11 @@ processing       blocked | pending | processing | completed | failed
 ## 9. 用户访问流程
 
 ```text
-查看消息：前端 → 模块二 → 模块一 Check(view) → 返回原文/脱敏内容/拒绝
-下载附件：前端 → 模块二 → 模块一 Check(download) → 生成临时地址并记录审计
+查看消息展示内容：前端 → 模块二 → 模块一 Check(message, display, view) → 返回普通/脱敏内容或拒绝
+查看敏感原文：前端 → 模块二 → 模块一 Check(message, original, view) → 返回原文或拒绝
+查看附件元数据：前端 → 模块二 → 模块一 Check(attachment, metadata, view) → 返回文件信息或拒绝
+查看附件内容：前端 → 模块二 → 模块一 Check(attachment, content, view) → 返回预览或拒绝
+下载附件：前端 → 模块二 → 模块一 Check(attachment, content, download) → 生成临时地址并记录审计
 搜索：前端 → 模块三 → 模块一批量 Check(view) → 权限过滤后返回
 问答：前端 → 模块三 → 检索候选 → 模块一 Check(view) → 过滤上下文 → LLM 回答
 ```
@@ -284,3 +306,6 @@ processing       blocked | pending | processing | completed | failed
 8. 旧 `content_version` 任务不能覆盖新版本索引。
 9. 私人本地上传只能由所有者查看和下载，公司本地上传只能由绑定组织成员查看和下载。
 10. 私聊按条共享允许混合选择文字、文件和图片消息，只为 `message_ids` 中的消息产生组织逻辑引用，且不复制底层正文和文件。
+11. 非组织群聊来源不产生 `privacy.scan.requested`，并以 `security_status=not_required` 进入后续流程。
+12. 普通群聊附件可由有效群成员查看和下载；受保护群聊附件无审批时只能查看元数据。
+13. 用户退出群聊或组织后，即使显式授权关系尚未清理，也无法继续访问敏感原文或受保护附件内容。

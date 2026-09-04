@@ -105,12 +105,22 @@
     {
       "if": {"properties": {"source": {"properties": {"source_type": {"enum": ["platform_conversation", "private_conversation", "shared_private_item"]}}}}},
       "then": {"properties": {"source": {"properties": {"upload_destination": {"type": "null"}}}}}
+    },
+    {
+      "if": {"properties": {"source": {"properties": {"source_type": {"enum": ["private_conversation", "local_upload", "shared_private_item"]}}}}},
+      "then": {
+        "properties": {
+          "security_status": {"const": "not_required"},
+          "sensitivity": {"type": "null"},
+          "attachments": {"items": {"properties": {"content_access_required": {"const": false}}}}
+        }
+      }
     }
   ],
   "$defs": {
     "attachmentRef": {
       "type": "object",
-      "required": ["attachment_id", "source_private_attachment_id", "file_name", "mime_type", "size_bytes", "object_ref", "content_hash", "content_version", "access_scope", "acl_version"],
+      "required": ["attachment_id", "source_private_attachment_id", "file_name", "mime_type", "size_bytes", "object_ref", "content_hash", "content_version", "access_scope", "content_access_required", "acl_version"],
       "properties": {
         "attachment_id": {"type": "string", "minLength": 1},
         "source_private_attachment_id": {"type": ["string", "null"], "minLength": 1},
@@ -121,6 +131,7 @@
         "content_hash": {"type": "string", "pattern": "^sha256:.+"},
         "content_version": {"type": "integer", "minimum": 1},
         "access_scope": {"type": "string", "enum": ["owner_only", "organization_members", "conversation_members"]},
+        "content_access_required": {"type": "boolean"},
         "acl_version": {"type": "integer", "minimum": 0}
       },
       "allOf": [

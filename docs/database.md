@@ -41,9 +41,10 @@
 - 本地上传一期仅支持附件，目标可选择私人本地知识库或公司文件库。
 - 资源动作只有 `view` 和 `download`；共享和审批属于业务流程，不是 OpenFGA 动作。
 - 普通或脱敏文本可按基础访问范围查看；敏感原文必须申请 `view`。
-- 受保护附件只展示文件存在及元数据；查看内容或下载文件必须分别取得 `view` / `download` 授权。
+- 仅组织群聊执行隐私识别。普通群聊附件按群成员范围查看和下载；受保护群聊附件只展示文件存在及元数据，查看内容或下载文件必须分别取得 `view` / `download` 授权。
 - 私人知识一期不创建访问申请；所有者直接拥有私人资源的 `view/download`。数据库保留私人申请扩展字段，但当前申请接口只处理组织资源。
 - 个人可以在同一次操作中混合选择一条或多条文字、文件、图片等私聊消息共享到组织；组织逻辑副本默认对该组织成员可 `view/download`，未选择的消息不进入组织知识库。
+- 私人聊天、私人本地上传、公司本地上传和共享私聊不执行隐私识别或脱敏；公司本地上传和共享私聊不因内容敏感改为部分成员可见。
 - 一期不处理已采集消息的编辑、撤回和删除，`content_version` 初始固定为 `1`。
 
 ### 1.4 敏感内容资源分层
@@ -191,7 +192,7 @@ conversation_ingestions
 
 ### 2.7 `iam.access_requests`（受保护资源访问申请与授权表）
 
-用途：保存组织资源的敏感文本原文和受保护附件内容申请、单次审批、授权同步、有效期和撤销；私人资源一期不使用本表。第二版将原审批记录和显式授权表合并到本表。
+用途：保存组织群聊敏感文本原文和受保护群聊附件内容申请、单次审批、授权同步、有效期和撤销；私人资源、公司本地上传和共享私聊一期不使用本表。第二版将原审批记录和显式授权表合并到本表。
 
 | 字段名 | 字段类型 | 主键 | 可空 | 默认值 | 索引 / 约束 | 注释 |
 |---|---|---:|---:|---|---|---|
@@ -219,7 +220,7 @@ conversation_ingestions
 | `created_at` | TIMESTAMPTZ | 否 | 否 | `CURRENT_TIMESTAMP` | 索引 | 创建时间 |
 | `updated_at` | TIMESTAMPTZ | 否 | 否 | `CURRENT_TIMESTAMP` | 无 | 更新时间 |
 
-关键约束：同一用户、资源和动作只允许一个 `pending` 申请；`resource_scope='private'` 时 `organization_id` 必须为空，`resource_scope='organization'` 时 `organization_id` 必须非空。一期申请接口只接受组织资源，私人资源由所有者直接访问，不创建申请记录。只在 `status='approved' AND fga_sync_status='synced'` 且授权未过期时视为显式授权。数据库记录负责审批和生命周期，OpenFGA tuple 负责在线鉴权。
+关键约束：同一用户、资源和动作只允许一个 `pending` 申请；`resource_scope='private'` 时 `organization_id` 必须为空，`resource_scope='organization'` 时 `organization_id` 必须非空。一期申请接口只接受 `source_type='platform_conversation'` 的组织群聊敏感原文和受保护附件内容；拒绝私人资源、公司本地上传和共享私聊。只在 `status='approved' AND fga_sync_status='synced'` 且授权未过期时视为显式授权。数据库记录负责审批和生命周期，OpenFGA tuple 负责在线鉴权。
 
 ### 2.8 `iam.audit_logs`（IAM 审计日志表）
 
@@ -318,7 +319,7 @@ conversation_ingestions
 | `created_at` | TIMESTAMPTZ | 否 | 否 | `CURRENT_TIMESTAMP` | 无 | 创建时间 |
 | `updated_at` | TIMESTAMPTZ | 否 | 否 | `CURRENT_TIMESTAMP` | 无 | 更新时间 |
 
-关键约束：`UNIQUE (conversation_ingestion_id, external_identity_id)`。同步后只将“外部身份已映射到内部用户、内部用户仍属于接入组织、群成员有效”的交集写入 OpenFGA 用户组。
+关键约束：`UNIQUE (conversation_ingestion_id, external_identity_id)`。同步后将“外部身份已映射到内部用户且群成员有效”的用户写为对应 `conversation_group` 的 `participant`，并为该群写入唯一的 `organization`；OpenFGA 通过 `participant and organization#member` 动态计算有效 `member`。退出群聊时删除 `participant`，退出组织时删除 `organization#member`，无需等待逐群清理即可失权。
 
 ### 3.5 `knowledge.conversation_ingestions`（会话接入表）
 
@@ -342,7 +343,7 @@ conversation_ingestions
 | `created_by_user_id` | UUID | 否 | 否 | 无 | 索引 | 发起接入的内部用户 |
 | `requested_start_at` | TIMESTAMPTZ | 否 | 是 | `NULL` | 无 | 用户选择的采集起点 |
 | `effective_start_at` | TIMESTAMPTZ | 否 | 是 | `NULL` | 无 | 平台实际可采集起点 |
-| `permission_group_key` | VARCHAR(255) | 否 | 是 | `NULL` | 唯一索引 | 组织群聊对应的 OpenFGA group key |
+| `permission_group_key` | VARCHAR(255) | 否 | 是 | `NULL` | 唯一索引 | 组织群聊对应的 OpenFGA conversation_group key |
 | `acl_version` | BIGINT | 否 | 否 | `0` | CHECK `>= 0` | 权限事实版本 |
 | `status` | VARCHAR(32) | 否 | 否 | `'active'` | 索引；CHECK | `active`、`paused`、`detached`、`error` |
 | `pause_reason` | VARCHAR(100) | 否 | 是 | `NULL` | 无 | 如 `no_available_collector` |
@@ -436,10 +437,10 @@ conversation_ingestions
 | `content_hash` | CHAR(64) | 否 | 否 | 无 | 索引 | 文件 SHA-256 |
 | `content_version` | INTEGER | 否 | 否 | `1` | CHECK `>= 1` | 一期固定 1 |
 | `metadata_access_scope` | VARCHAR(32) | 否 | 否 | 无 | CHECK | 与所属知识的基础范围一致 |
-| `content_access_scope` | VARCHAR(32) | 否 | 否 | 无 | CHECK | 基础范围；受保护时还需显式授权 |
+| `content_access_scope` | VARCHAR(32) | 否 | 否 | 无 | CHECK | 基础范围；仅受保护群聊附件还需显式授权 |
 | `acl_version` | BIGINT | 否 | 否 | `0` | CHECK `>= 0` | 附件资源权限版本 |
 | `encrypted` | BOOLEAN | 否 | 否 | `FALSE` | 无 | 对象是否加密保存 |
-| `content_access_required` | BOOLEAN | 否 | 否 | `FALSE` | 索引 | 是否必须申请附件内容权限 |
+| `content_access_required` | BOOLEAN | 否 | 否 | `FALSE` | 索引 | 是否必须申请附件内容权限；仅组织群聊附件允许为真 |
 | `upload_status` | VARCHAR(16) | 否 | 否 | `'pending'` | 索引；CHECK | `pending`、`validating`、`uploading`、`uploaded`、`failed`、`duplicate` |
 | `upload_error` | TEXT | 否 | 是 | `NULL` | 无 | 上传失败摘要 |
 | `uploaded_at` | TIMESTAMPTZ | 否 | 是 | `NULL` | 无 | 对象存储写入完成时间 |
@@ -450,7 +451,7 @@ conversation_ingestions
 | `created_at` | TIMESTAMPTZ | 否 | 否 | `CURRENT_TIMESTAMP` | 索引 | 创建时间 |
 | `updated_at` | TIMESTAMPTZ | 否 | 否 | `CURRENT_TIMESTAMP` | 无 | 更新时间 |
 
-约束：`message_id` 与 `uploaded_by_user_id` 至少一个非空；本地上传必须填写 `upload_destination`、`request_id` 和 `upload_status`；平台附件的 `upload_destination` 为空且上传完成后置为 `uploaded`。本地上传使用 `UNIQUE (request_id) WHERE upload_destination IS NOT NULL` 幂等；平台附件不使用全局 `request_id`，使用 `message_id + 外部附件 ID` 或采集来源组合键幂等。校验失败、对象存储失败写入 `upload_status='failed'` 和 `upload_error`；content_hash 已存在且复用已有对象时写入 `upload_status='duplicate'`。`source_private_attachment_id` 为本表自引用逻辑外键，只有共享私人文件时填写，并创建新的组织逻辑附件 ID。文件库是聚合视图，群聊附件仍保持 `conversation_members`，不能因为出现在公司文件库而扩大权限。
+约束：`message_id` 与 `uploaded_by_user_id` 至少一个非空；本地上传必须填写 `upload_destination`、`request_id` 和 `upload_status`；平台附件的 `upload_destination` 为空且上传完成后置为 `uploaded`。本地上传使用 `UNIQUE (request_id) WHERE upload_destination IS NOT NULL` 幂等；平台附件不使用全局 `request_id`，使用 `message_id + 外部附件 ID` 或采集来源组合键幂等。校验失败、对象存储失败写入 `upload_status='failed'` 和 `upload_error`；content_hash 已存在且复用已有对象时写入 `upload_status='duplicate'`。`source_private_attachment_id` 为本表自引用逻辑外键，只有共享私人文件时填写，并创建新的组织逻辑附件 ID。文件库是聚合视图，群聊附件仍保持 `conversation_members`，不能因为出现在公司文件库而扩大权限。私人聊天、本地上传和共享私聊附件的 `content_access_required` 必须为假；普通群聊附件写入群成员 `accessor`，受保护群聊附件不得写入 `accessor`。
 
 ### 3.10 `knowledge.knowledge_items`（知识条目表）
 
@@ -495,7 +496,7 @@ conversation_ingestions
 | `created_at` | TIMESTAMPTZ | 否 | 否 | `CURRENT_TIMESTAMP` | 索引 | 创建时间 |
 | `updated_at` | TIMESTAMPTZ | 否 | 否 | `CURRENT_TIMESTAMP` | 无 | 更新时间 |
 
-约束：私人知识必须 `owner_user_id NOT NULL AND organization_id IS NULL AND access_scope='owner_only'`；组织知识反之。来源类型约束为：`local_upload` 必须有 `source_attachment_id`；`private_conversation` 必须有 `source_message_id`；`shared_private_item` 必须有 `source_private_item_id`、`share_request_id`、`shared_by_user_id` 和 `shared_at`；`platform_conversation` 必须有 `conversation_ingestion_id`，且其 `access_scope='conversation_members'`。这些关联存在性可用行级 CHECK 约束，跨记录归属和所有权由模块二在事务中校验。只有四个就绪字段全为真时才允许登记唯一的 `knowledge.ready` 事件。共享文字消息时只创建组织知识引用；共享文件或图片消息时创建组织知识引用及该消息自身的组织逻辑附件引用。普通内容复用不可变对象和解析结果，只有脱敏派生内容新建对象。未选择共享的私人消息不会产生组织副本。
+约束：私人知识必须 `owner_user_id NOT NULL AND organization_id IS NULL AND access_scope='owner_only'`；组织知识反之。来源类型约束为：`local_upload` 必须有 `source_attachment_id`；`private_conversation` 必须有 `source_message_id`；`shared_private_item` 必须有 `source_private_item_id`、`share_request_id`、`shared_by_user_id` 和 `shared_at`；`platform_conversation` 必须有 `conversation_ingestion_id`，且其 `access_scope='conversation_members'`。这些关联存在性可用行级 CHECK 约束，跨记录归属和所有权由模块二在事务中校验。`private_conversation`、`local_upload` 和 `shared_private_item` 创建时必须设置 `security_status='not_required'`、`security_ready=TRUE`，且不登记隐私任务；仅 `platform_conversation` 执行隐私识别。只有四个就绪字段全为真时才允许登记唯一的 `knowledge.ready` 事件。共享文字消息时只创建组织知识引用；共享文件或图片消息时创建组织知识引用及该消息自身的组织逻辑附件引用。普通内容复用不可变对象和解析结果，只有组织群聊的脱敏派生内容新建对象。未选择共享的私人消息不会产生组织副本。
 共享幂等约束：`UNIQUE (share_request_id, source_private_item_id)`，允许同一请求共享多条不同私人内容，但同一私人内容不会重复创建组织副本。
 
 ### 3.11 `knowledge.outbox_events`（知识服务事务事件表）
@@ -667,62 +668,69 @@ knowledge_chunks_v1
 
 Elasticsearch 不能只存向量和元数据，否则无法进行 BM25 与混合检索。受保护文本原文、附件二进制及仅审批后可看的原始解析文本均不得进入普通索引。
 
-## 6. OpenFGA 初版模型说明
+## 6. OpenFGA 权限模型
 
-权限动作只保留 `view` 和 `download`。基础资源通过 owner、组织成员或动态群聊用户组取得权限；敏感原文与附件内容通过审批后给用户写显式关系。
+权限动作只保留 `view` 和 `download`。基础资源通过 owner、组织成员或动态群聊用户组取得权限；组织群聊的敏感原文与受保护附件内容通过审批后给用户写显式关系。
 
 ```text
+model
+  schema 1.1
+
 type user
 
 type organization
   relations
     define member: [user]
 
-type group
+type conversation_group
   relations
-    define member: [user]
+    define organization: [organization]
+    define participant: [user]
+    define member: participant and member from organization
 
 type knowledge_item
   relations
     define owner: [user]
     define organization: [organization]
-    define conversation_group: [group]
-    define viewer: [user]
-    define downloader: [user]
-    define view: owner or viewer or member from organization or member from conversation_group
-    define download: owner or downloader or member from organization or member from conversation_group
+    define conversation_group: [conversation_group]
+    define view: owner or member from organization or member from conversation_group
+    define download: owner or member from organization or member from conversation_group
 
 type knowledge_original
   relations
     define parent: [knowledge_item]
+    define owner: [user]
     define viewer: [user]
-    define view: viewer
+    define eligible_viewer: owner or viewer
+    define view: eligible_viewer and view from parent
 
 type attachment_meta
   relations
     define owner: [user]
     define organization: [organization]
-    define conversation_group: [group]
-    define viewer: [user]
-    define view: owner or viewer or member from organization or member from conversation_group
+    define conversation_group: [conversation_group]
+    define view: owner or member from organization or member from conversation_group
 
 type attachment_content
   relations
     define parent: [attachment_meta]
+    define accessor: [user, organization#member, conversation_group#member]
     define viewer: [user]
     define downloader: [user]
-    define view: viewer
-    define download: downloader
+    define content_viewer: accessor or viewer
+    define content_downloader: accessor or downloader
+    define view: content_viewer and view from parent
+    define download: content_downloader and view from parent
 ```
 
-这是业务语义草案，最终 DSL 需用 OpenFGA CLI 验证。所有基础范围默认同时授予 `view` 和 `download`：私人资源向 owner 写入两种关系；组织本地上传、共享私聊资源向组织成员继承两种关系；群聊资源向动态会话用户组继承两种关系。受保护附件只在审批通过后写用户级 `viewer/downloader` tuple。敏感原文通常只授予 `knowledge_original.view`，不默认提供下载动作。信息管理员和该会话采集者拥有审批资格，不等于天然拥有原文查看或附件下载权限；Owner 如需审批，应同时具备信息管理员角色。
+模块一必须按资源来源限制 tuple 写入。`owner`、`organization`、`conversation_group` 三种基础范围互斥；群聊写唯一 `organization` 和有效平台成员的 `participant`。私人附件向所有者写 `accessor`；公司本地上传和共享私聊向组织成员写 `accessor`；普通群聊附件向动态群成员写 `accessor`；受保护群聊附件不得存在 `accessor`，审批后只写用户级 `viewer/downloader`。两个 `parent` 只作为当前父资源可见性的交集闸门，不会独立授予内容权限。信息管理员和该会话采集者拥有审批资格，不等于天然拥有原文查看或附件下载权限。
 
 ## 7. 关键事务与幂等
 
 1. 接受邀请：锁定邀请、校验用户没有其他有效组织、创建或恢复成员关系并赋默认角色，应在一个 IAM 事务内完成。
 2. 批准退出：锁定成员与 Owner 集合、保证组织仍有 Owner、更新成员状态并撤销角色和相关 OpenFGA 关系。
 3. 审批组织资源访问：锁定申请、校验审批人当前资格、落审批结果；私人资源一期由所有者直接访问，不创建申请记录。OpenFGA 同步失败时保持 `fga_sync_status='failed'` 并重试，不能误判为已授权。
-4. 保存消息：统一消息、消息来源、知识条目以及 `privacy.scan.requested` Outbox 在同一事务提交后，才能推进对应采集者检查点。
+4. 保存消息：组织群聊的统一消息、消息来源、知识条目以及 `privacy.scan.requested` Outbox 在同一事务提交后，才能推进对应采集者检查点；其他来源不创建隐私事件并直接标记 `security_status='not_required'`。
 5. 私人消息批次共享：校验所有者、组织成员资格以及全部 `message_ids` 均属于该私聊，以 `share_request_id` 保证请求幂等，并按 `share_batch_id + source_private_item_id` 创建组织逻辑引用；一次请求可混合选择文字、文件和图片消息，未选中的消息不得创建组织引用。
 6. 本地上传：先以 `attachments.request_id` 幂等创建记录，状态按 `pending → validating → uploading → uploaded` 流转；校验失败或对象存储失败为 `failed`，哈希复用已有对象为 `duplicate`。只有 `uploaded` 后才发布 `document.processing.requested`。
 7. 多采集者去重：先用 `collector_id + external_message_id` 去重来源，再用 `conversation_ingestion_id + external_message_id` 合并统一消息。
@@ -808,8 +816,9 @@ type attachment_content
 | `sharing.share_request_id` | `knowledge_items.share_request_id`，表示本次共享 API 请求的幂等键 |
 | `sharing.share_batch_id` | `knowledge_items.share_batch_id`，表示本次通过 `message_ids` 选择的一组文字、文件或图片消息；单条共享时也生成批次 ID |
 | `attachments.source_private_attachment_id` | `knowledge.attachments.source_private_attachment_id` |
+| `attachments.content_access_required` | `knowledge.attachments.content_access_required`；为真时原始解析文本不得进入普通索引 |
 | `attachments.acl_version` | `knowledge.attachments.acl_version` |
 
-`access-check.schema.json` 的 `resource_type` 仍使用 `message`、`attachment`、`knowledge_item`、`spreadsheet`。敏感原文和附件内容在数据库与 OpenFGA 中可以使用更细的内部对象类型，但对外 Access Check 仍需由模块一统一映射，不能由模块二或模块三自行扩展动作。
+`access-check.schema.json` 的 `resource_type` 使用 `message`、`attachment`、`knowledge_item`，本地表格按附件处理。`resource_part` 将 `message/knowledge_item` 限定为 `display/original`，将 `attachment` 限定为 `metadata/content`；`original` 和 `metadata` 只允许 `view`。模块一统一将其映射到 `knowledge_item`、`knowledge_original`、`attachment_meta`、`attachment_content`，模块二和模块三不得自行扩展动作或内部对象类型。
 
 Contract 的 `sharing` 对象用于描述一次被选中的消息共享；文字、文件和图片消息可以在同一批次中混合选择，系统只处理 `message_ids` 中的消息，不自动包含未选择的消息。一期不支持整个私聊持续共享，也不自动共享后续消息。

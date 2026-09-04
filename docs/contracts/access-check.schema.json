@@ -3,15 +3,30 @@
   "$id": "https://z-agent.local/contracts/access-check.schema.json",
   "title": "AccessCheckRequest",
   "type": "object",
-  "required": ["organization_id", "resource_type", "resource_id", "action", "subject_type", "subject_id"],
+  "required": ["organization_id", "resource_type", "resource_part", "resource_id", "action", "subject_type", "subject_id"],
   "properties": {
     "organization_id": {"type": ["string", "null"], "minLength": 1},
-    "resource_type": {"type": "string", "enum": ["message", "attachment", "knowledge_item", "spreadsheet"]},
+    "resource_type": {"type": "string", "enum": ["message", "attachment", "knowledge_item"]},
+    "resource_part": {"type": "string", "enum": ["display", "original", "metadata", "content"]},
     "resource_id": {"type": "string", "minLength": 1},
     "action": {"type": "string", "enum": ["view", "download"]},
-    "subject_type": {"type": "string", "enum": ["user", "service"]},
+    "subject_type": {"const": "user"},
     "subject_id": {"type": "string", "minLength": 1},
     "acl_version": {"type": "integer", "minimum": 0}
   },
+  "allOf": [
+    {
+      "if": {"properties": {"resource_type": {"enum": ["message", "knowledge_item"]}}},
+      "then": {"properties": {"resource_part": {"enum": ["display", "original"]}}}
+    },
+    {
+      "if": {"properties": {"resource_type": {"const": "attachment"}}},
+      "then": {"properties": {"resource_part": {"enum": ["metadata", "content"]}}}
+    },
+    {
+      "if": {"properties": {"resource_part": {"enum": ["original", "metadata"]}}},
+      "then": {"properties": {"action": {"const": "view"}}}
+    }
+  ],
   "additionalProperties": false
 }
