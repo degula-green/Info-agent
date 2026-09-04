@@ -1,17 +1,30 @@
 package httpapi
 
 import (
+	"log/slog"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
 )
 
-func NewRouter() *gin.Engine {
-	r := gin.New()
-	r.Use(gin.Logger(), gin.Recovery())
-	r.GET("/health", health)
-	r.GET("/api/info", info)
-	return r
+func NewRouter(authentication Authentication, cookies RefreshCookieConfig, logger *slog.Logger) *gin.Engine {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	handler := NewAuthHandler(authentication, cookies, logger)
+
+	router := gin.New()
+	router.Use(RequestID(), gin.Logger(), gin.Recovery())
+	router.GET("/health", health)
+	router.GET("/api/info", info)
+
+	auth := router.Group("/auth")
+	auth.POST("/login", handler.Login)
+	auth.POST("/refresh", handler.Refresh)
+	auth.POST("/logout", handler.Logout)
+
+	router.GET("/internal/auth/verify", handler.Verify)
+	return router
 }
 
 func health(c *gin.Context) {
