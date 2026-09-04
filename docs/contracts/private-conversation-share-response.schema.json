@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://z-agent.local/contracts/private-conversation-share-response.schema.json",
+  "title": "PrivateConversationShareResponse",
+  "type": "object",
+  "required": ["request_id", "share_batch_id", "private_conversation_id", "organization_id", "status", "shared_message_count", "shared_attachment_count"],
+  "properties": {
+    "request_id": {"type": "string", "minLength": 1},
+    "share_batch_id": {"type": "string", "minLength": 1},
+    "private_conversation_id": {"type": "string", "minLength": 1},
+    "organization_id": {"type": "string", "minLength": 1},
+    "status": {"type": "string", "enum": ["accepted", "already_processed", "failed"]},
+    "shared_message_count": {"type": "integer", "minimum": 0},
+    "shared_attachment_count": {"type": "integer", "minimum": 0}
+  },
+  "additionalProperties": false
+}

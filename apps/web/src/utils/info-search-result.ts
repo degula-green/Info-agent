@@ -1,0 +1,2 @@
+import type { SearchResult } from '@/mock'
+export function mapInfoSearchResult(item: SearchResult | Record<string, any>): SearchResult { const value = item as SearchResult; return { ...value, source: value.source || String((item as any).platform || ''), platform: value.platform || 'all', excerpt: value.excerpt || value.content || value.title, score: value.score ?? 0.9, conversationId: value.conversationId || value.chatId } }

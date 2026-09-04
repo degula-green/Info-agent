@@ -1,0 +1,27 @@
+npm warn Unknown user config "//registry.npmmirror.com/" (https://registry.npmmirror.com/). This will stop working in the next major version of npm. See `npm help npmrc` for supported config options.
+
+> info-agent-prototype@1.0.0 build
+> vue-tsc --noEmit && vite build
+
+vite v7.3.6 building client environment for production...
+transforming...
+✓ 3857 modules transformed.
+rendering chunks...
+computing gzip size...
+dist/index.html                               0.40 kB │ gzip:   0.27 kB
+dist/assets/index-B6KKqtbp.css              477.76 kB │ gzip:  57.11 kB
+dist/assets/ProfilePage-ChcRTcwH.js           3.07 kB │ gzip:   1.64 kB
+dist/assets/AuthPage-C4gfnG7e.js              3.14 kB │ gzip:   1.81 kB
+dist/assets/AppShell-xU1ilj5z.js              3.73 kB │ gzip:   1.80 kB
+dist/assets/DashboardPage-B_r4dBwj.js         4.38 kB │ gzip:   1.90 kB
+dist/assets/ConversationPage-CYLamAE6.js      4.87 kB │ gzip:   2.14 kB
+dist/assets/ChatPage-CeSuDFIX.js              4.98 kB │ gzip:   2.48 kB
+dist/assets/SearchPage-CgpOmt_u.js            5.09 kB │ gzip:   2.39 kB
+dist/assets/KnowledgePage-BWlM6QOg.js         5.97 kB │ gzip:   2.54 kB
+dist/assets/index-CTRiUBxx.js             1,423.58 kB │ gzip: 382.89 kB
+
+(!) Some chunks are larger than 500 kB after minification. Consider:
+- Using dynamic import() to code-split the application
+- Use build.rollupOptions.output.manualChunks to improve chunking: https://rollupjs.org/configuration-options/#output-manualchunks
+- Adjust chunk size limit for this warning via build.chunkSizeWarningLimit.
+✓ built in 41.14s

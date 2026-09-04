@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://z-agent.local/contracts/private-conversation-share-request.schema.json",
+  "title": "PrivateConversationShareRequest",
+  "description": "Shares only the explicitly selected message records to the user's bound organization once. Text, file, and image messages may be selected together; unselected messages are never included automatically.",
+  "type": "object",
+  "required": ["request_id", "trace_id", "private_conversation_id", "message_ids"],
+  "properties": {
+    "request_id": {"type": "string", "minLength": 1},
+    "trace_id": {"type": "string", "minLength": 1},
+    "private_conversation_id": {"type": "string", "minLength": 1},
+    "message_ids": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string", "minLength": 1}}
+  },
+  "additionalProperties": false
+}

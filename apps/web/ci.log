@@ -1,0 +1,8 @@
+npm warn Unknown user config "//registry.npmmirror.com/" (https://registry.npmmirror.com/). This will stop working in the next major version of npm. See `npm help npmrc` for supported config options.
+
+added 76 packages, and audited 77 packages in 1m
+
+11 packages are looking for funding
+  run `npm fund` for details
+
+found 0 vulnerabilities

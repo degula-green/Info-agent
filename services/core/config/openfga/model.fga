@@ -1,0 +1,31 @@
+model
+  schema 1.1
+
+type user
+
+type organization
+  relations
+    define admin: [user]
+    define member: [user]
+
+type project
+  relations
+    define organization: [organization]
+    define owner: [user]
+    define member: [user]
+    define can_read: owner or member or admin from organization
+    define can_write: owner or admin from organization
+
+type file
+  relations
+    define project: [project]
+    define reader: [user]
+    define editor: [user]
+    define can_read: reader or editor or can_read from project
+    define can_write: editor or can_write from project
+
+type conversation
+  relations
+    define project: [project]
+    define reader: [user]
+    define can_read: reader or can_read from project

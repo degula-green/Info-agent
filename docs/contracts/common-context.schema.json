@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://z-agent.local/contracts/common-context.schema.json",
+  "title": "CommonContext",
+  "type": "object",
+  "required": ["request_id", "trace_id", "organization_id"],
+  "properties": {
+    "request_id": {"type": "string", "minLength": 1},
+    "trace_id": {"type": "string", "minLength": 1},
+    "organization_id": {"type": ["string", "null"], "minLength": 1},
+    "actor_id": {"type": ["string", "null"], "minLength": 1},
+    "caller_service": {"type": ["string", "null"], "minLength": 1}
+  },
+  "anyOf": [
+    {"required": ["actor_id"], "properties": {"actor_id": {"type": "string", "minLength": 1}}},
+    {"required": ["caller_service"], "properties": {"caller_service": {"type": "string", "minLength": 1}}}
+  ],
+  "additionalProperties": false
+}

@@ -1,0 +1,22 @@
+{
+  "settings": {
+    "number_of_shards": 1,
+    "number_of_replicas": 0
+  },
+  "mappings": {
+    "properties": {
+      "content": { "type": "text" },
+      "embedding": {
+        "type": "dense_vector",
+        "index": true,
+        "similarity": "cosine"
+      },
+      "file_id": { "type": "keyword" },
+      "project_id": { "type": "keyword" },
+      "organization_id": { "type": "keyword" },
+      "source_type": { "type": "keyword" },
+      "source_position": { "type": "keyword" },
+      "created_at": { "type": "date" }
+    }
+  }
+}

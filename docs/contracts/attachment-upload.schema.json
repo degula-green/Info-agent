@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://z-agent.local/contracts/attachment-upload.schema.json",
+  "title": "AttachmentUploadRequestMetadata",
+  "description": "JSON metadata carried with the multipart local attachment upload.",
+  "type": "object",
+  "required": ["request_id", "trace_id", "upload_destination", "organization_id", "file_name", "mime_type", "size_bytes", "content_hash"],
+  "properties": {
+    "request_id": {"type": "string", "minLength": 1},
+    "trace_id": {"type": "string", "minLength": 1},
+    "upload_destination": {"type": "string", "enum": ["private_local_library", "organization_file_library"]},
+    "organization_id": {"type": ["string", "null"], "minLength": 1},
+    "file_name": {"type": "string", "minLength": 1},
+    "mime_type": {"type": "string", "minLength": 1},
+    "size_bytes": {"type": "integer", "minimum": 0},
+    "content_hash": {"type": "string", "pattern": "^sha256:.+"}
+  },
+  "allOf": [
+    {"if": {"properties": {"upload_destination": {"const": "private_local_library"}}}, "then": {"properties": {"organization_id": {"type": "null"}}}},
+    {"if": {"properties": {"upload_destination": {"const": "organization_file_library"}}}, "then": {"properties": {"organization_id": {"type": "string", "minLength": 1}}}}
+  ],
+  "additionalProperties": false
+}

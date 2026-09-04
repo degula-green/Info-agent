@@ -1,0 +1,10 @@
+.env
+services/*/.env
+node_modules/
+dist/
+__pycache__/
+*.pyc
+.venv/
+.deps/
+.deps311/
+.runtime/

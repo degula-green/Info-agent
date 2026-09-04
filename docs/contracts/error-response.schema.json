@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://z-agent.local/contracts/error-response.schema.json",
+  "title": "ErrorResponse",
+  "type": "object",
+  "required": ["code", "message", "request_id", "retryable"],
+  "properties": {
+    "code": {"type": "string", "minLength": 1},
+    "message": {"type": "string"},
+    "request_id": {"type": "string", "minLength": 1},
+    "retryable": {"type": "boolean"},
+    "details": {"type": "object"}
+  },
+  "additionalProperties": false
+}

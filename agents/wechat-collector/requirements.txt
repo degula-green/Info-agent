@@ -1,0 +1,1 @@
+# WeChat library and HTTP client dependencies will be added with the collector implementation.
