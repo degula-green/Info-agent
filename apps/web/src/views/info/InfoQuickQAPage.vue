@@ -17,7 +17,7 @@
             </div>
             <div v-else class="qa-answer__content" v-html="renderQaMarkdown(message.text, loading && index === messages.length - 1)"></div>
             <span v-if="loading && index === messages.length - 1" class="qa-stream-caret" aria-hidden="true"></span>
-            <div v-if="!loading" class="qa-answer__meta"><t-icon name="file" />{{ scopeLabel }} · {{ modeLabel }} · 混合检索</div>
+            <div v-if="!loading" class="qa-answer__meta"><t-icon name="file" />{{ scopeLabel }} · {{ modeLabel }} · 当前知识库数据</div>
             <div v-if="!loading && message.citations?.length" class="qa-citations" aria-label="回答引用">
               <button type="button" class="qa-citations__toggle" :aria-expanded="isCitationsExpanded(index)" @click="toggleCitations(index)">
                 <span><t-icon name="file" />{{ message.citations.length }} 条来源</span>

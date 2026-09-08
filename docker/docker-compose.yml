@@ -8,31 +8,133 @@ services:
     build: ../services/core
     environment:
       CORE_REDIS_DATABASE: ${CORE_REDIS_DATABASE:-1}
-      CORE_REDIS_URL: ${CORE_REDIS_URL:-redis://127.0.0.1:6379/1}
-      CORE_DATABASE_URL: ${CORE_DATABASE_URL:-postgresql://127.0.0.1:5432/info_agent}
+      CORE_REDIS_URL: ${CORE_REDIS_URL:-redis://redis:6379/1}
+      CORE_DATABASE_URL: ${CORE_DATABASE_URL:-postgresql://postgres:postgres@postgres:5432/info_agent}
       CORE_DATABASE_SCHEMA: ${CORE_DATABASE_SCHEMA:-public}
-      CORE_MINIO_ENDPOINT: ${CORE_MINIO_ENDPOINT:-127.0.0.1:9000}
-      CORE_MINIO_ACCESS_KEY: ${CORE_MINIO_ACCESS_KEY:-}
-      CORE_MINIO_SECRET_KEY: ${CORE_MINIO_SECRET_KEY:-}
+      CORE_MINIO_ENDPOINT: ${CORE_MINIO_ENDPOINT:-minio:9000}
+      CORE_MINIO_ACCESS_KEY: ${CORE_MINIO_ACCESS_KEY:-minioadmin}
+      CORE_MINIO_SECRET_KEY: ${CORE_MINIO_SECRET_KEY:-minioadmin}
       CORE_MINIO_BUCKET: ${CORE_MINIO_BUCKET:-info-agent}
+    depends_on:
+      - postgres
+      - redis
+      - minio
     expose:
       - "8080"
 
   knowledge-service:
     build: ../services/knowledge
+    environment:
+      KNOWLEDGE_HTTP_PORT: 8090
+      KNOWLEDGE_DATABASE_URL: ${KNOWLEDGE_DATABASE_URL:-postgresql://postgres:postgres@postgres:5432/info_agent}
+      KNOWLEDGE_DATABASE_SCHEMA: ${KNOWLEDGE_DATABASE_SCHEMA:-knowledge}
+      KNOWLEDGE_REDIS_URL: ${KNOWLEDGE_REDIS_URL:-redis://redis:6379/1}
+      KNOWLEDGE_REDIS_REQUIRED: ${KNOWLEDGE_REDIS_REQUIRED:-true}
+      KNOWLEDGE_MINIO_ENDPOINT: ${KNOWLEDGE_MINIO_ENDPOINT:-minio:9000}
+      KNOWLEDGE_MINIO_ACCESS_KEY: ${KNOWLEDGE_MINIO_ACCESS_KEY:-minioadmin}
+      KNOWLEDGE_MINIO_SECRET_KEY: ${KNOWLEDGE_MINIO_SECRET_KEY:-minioadmin}
+      KNOWLEDGE_MINIO_BUCKET: ${KNOWLEDGE_MINIO_BUCKET:-info-agent}
+      KNOWLEDGE_CORE_URL: ${KNOWLEDGE_CORE_URL:-http://core-service:8080}
+      KNOWLEDGE_CORE_SERVICE_TOKEN: ${KNOWLEDGE_CORE_SERVICE_TOKEN:-}
+      KNOWLEDGE_INTERNAL_SERVICE_TOKEN: ${KNOWLEDGE_INTERNAL_SERVICE_TOKEN:-}
+      KNOWLEDGE_JWT_SECRET: ${KNOWLEDGE_JWT_SECRET:-}
+      KNOWLEDGE_JWT_PUBLIC_KEY: ${KNOWLEDGE_JWT_PUBLIC_KEY:-}
+      KNOWLEDGE_JWT_ISSUER: ${KNOWLEDGE_JWT_ISSUER:-info-agent-core}
+      KNOWLEDGE_JWT_AUDIENCE: ${KNOWLEDGE_JWT_AUDIENCE:-info-agent-api}
+      KNOWLEDGE_JWT_REQUIRED: ${KNOWLEDGE_JWT_REQUIRED:-true}
+      KNOWLEDGE_ENCRYPTION_KEY_VERSION: ${KNOWLEDGE_ENCRYPTION_KEY_VERSION:-v1}
+      KNOWLEDGE_ENCRYPTION_KEYS: ${KNOWLEDGE_ENCRYPTION_KEYS:-}
+      KNOWLEDGE_FEISHU_CLIENT_ID: ${KNOWLEDGE_FEISHU_CLIENT_ID:-}
+      KNOWLEDGE_FEISHU_CLIENT_SECRET: ${KNOWLEDGE_FEISHU_CLIENT_SECRET:-}
+      KNOWLEDGE_FEISHU_REDIRECT_URI: ${KNOWLEDGE_FEISHU_REDIRECT_URI:-}
+      KNOWLEDGE_FRONTEND_URL: ${KNOWLEDGE_FRONTEND_URL:-http://localhost/profile}
+      KNOWLEDGE_WECHAT_COLLECTOR_URL: ${KNOWLEDGE_WECHAT_COLLECTOR_URL:-http://wechat-collector:8091}
+      KNOWLEDGE_COLLECTOR_INTERNAL_TOKEN: ${COLLECTOR_INTERNAL_TOKEN:-local-development-only}
+    depends_on:
+      knowledge-migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_started
+      minio:
+        condition: service_started
+      core-service:
+        condition: service_started
+      wechat-collector:
+        condition: service_started
     expose:
       - "8090"
+
+  wechat-collector:
+    build: ../services/collectors/wechat
+    environment:
+      COLLECTOR_INTERNAL_TOKEN: ${COLLECTOR_INTERNAL_TOKEN:-local-development-only}
+      KNOWLEDGE_BASE_URL: ${KNOWLEDGE_BASE_URL:-http://knowledge:8090}
+      KNOWLEDGE_INTERNAL_SERVICE_TOKEN: ${KNOWLEDGE_INTERNAL_SERVICE_TOKEN:-}
+      WECHAT_COLLECTOR_PORT: 8091
+    expose:
+      - "8091"
 
   rag-service:
     build: ../services/rag
     environment:
-      ELASTICSEARCH_URL: http://elasticsearch:9200
+      ELASTICSEARCH_URL: ${ELASTICSEARCH_URL:-http://elasticsearch:9200}
       ELASTICSEARCH_USERNAME: ${ELASTICSEARCH_USERNAME:-}
       ELASTICSEARCH_PASSWORD: ${ELASTICSEARCH_PASSWORD:-}
     expose:
       - "8000"
     depends_on:
       - elasticsearch
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-info_agent}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+
+  knowledge-migrate:
+    image: postgres:16-alpine
+    environment:
+      KNOWLEDGE_DATABASE_URL: ${KNOWLEDGE_DATABASE_URL:-postgresql://postgres:postgres@postgres:5432/info_agent}
+      PGPASSWORD: ${POSTGRES_PASSWORD:-postgres}
+    command:
+      - sh
+      - -ec
+      - psql --dbname="$${KNOWLEDGE_DATABASE_URL}" --set=ON_ERROR_STOP=1 --file=/migrations/20260905_knowledge_connectors.sql
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ../db/migrations/20260905_knowledge_connectors.sql:/migrations/20260905_knowledge_connectors.sql:ro
+    restart: "no"
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio-data:/data
 
   nginx:
     image: nginx:1.27-alpine
@@ -66,3 +168,6 @@ services:
 
 volumes:
   elasticsearch-data:
+  postgres-data:
+  redis-data:
+  minio-data:

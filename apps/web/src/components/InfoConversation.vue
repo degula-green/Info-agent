@@ -15,9 +15,9 @@
           <p>{{ sourceName(chat.source) }} · {{ chat.isDirect ? '私聊' : `${chat.members} 位成员` }} · 最近同步 {{ chat.lastSync }}</p>
         </div>
         <span class="chat-status" :class="`chat-status--${chat.collectionStatus}`"><i />{{ statusLabel(chat.collectionStatus) }}</span>
-        <t-button variant="outline" :theme="chat.collectionStatus === 'collecting' ? 'warning' : 'primary'" @click="emit('toggle', chat)">
-          <template #icon><t-icon :name="chat.collectionStatus === 'collecting' ? 'pause-circle' : 'play-circle'" /></template>
-          {{ chat.collectionStatus === 'collecting' ? '停止采集' : chat.collectionStatus === 'missing' || chat.collectionStatus === 'paused' ? '继续采集' : '开始采集' }}
+        <t-button variant="outline" :theme="chat.collectionStatus === 'collecting' ? 'warning' : 'primary'" :disabled="chat.collectionStatus === 'detached'" @click="emit('toggle', chat)">
+          <template #icon><t-icon :name="chat.collectionStatus === 'detached' ? 'stop-circle' : chat.collectionStatus === 'collecting' ? 'pause-circle' : 'play-circle'" /></template>
+          {{ chat.collectionStatus === 'detached' ? '已解除接入' : chat.collectionStatus === 'collecting' ? '停止采集' : chat.collectionStatus === 'missing' || chat.collectionStatus === 'paused' ? '继续采集' : '开始采集' }}
         </t-button>
       </div>
     </div>
@@ -96,8 +96,7 @@
         </header>
 
         <main class="detail-modal__body">
-          <t-textarea v-if="editing" v-model="draft" class="message-editor" :autosize="{ minRows: 8, maxRows: 18 }" placeholder="消息内容" autofocus />
-          <div v-else-if="isRichMessage(displayMessageContent(activeMessage.content))" class="message-content message-content--rich" v-html="sanitizeHTML(displayMessageContent(activeMessage.content))"></div>
+          <div v-if="isRichMessage(displayMessageContent(activeMessage.content))" class="message-content message-content--rich" v-html="sanitizeHTML(displayMessageContent(activeMessage.content))"></div>
           <pre v-else class="message-content">{{ displayMessageContent(activeMessage.content) || '（空消息）' }}</pre>
         </main>
 
@@ -108,13 +107,6 @@
             <span class="record-id">消息 ID: {{ activeMessage.sourceMessageId || activeMessage.id }}</span>
           </div>
           <div class="detail-modal__actions">
-            <t-button v-if="editing" variant="outline" @click="cancelEdit">取消</t-button>
-            <t-button v-if="!editing" variant="outline" theme="primary" @click="editing = true">
-              <template #icon><t-icon name="edit" /></template>编辑
-            </t-button>
-            <t-button v-else theme="primary" @click="save">
-              <template #icon><t-icon name="check" /></template>保存
-            </t-button>
             <t-button variant="outline" @click="downloadMessage">
               <template #icon><t-icon name="download" /></template>下载
             </t-button>
@@ -158,8 +150,8 @@
             <span>{{ fileStatus(activeFile) }}</span>
             <span class="record-id">文档 ID: {{ activeFile.documentId ?? activeFile.id }}</span>
           </div>
-          <t-button variant="outline" :loading="fileDownloading" @click="downloadFile">
-            <template #icon><t-icon name="download" /></template>下载
+          <t-button variant="outline" :loading="fileDownloading" :disabled="activeFile.contentAccessRequired" @click="downloadFile">
+            <template #icon><t-icon :name="activeFile.contentAccessRequired ? 'lock-on' : 'download'" /></template>{{ activeFile.contentAccessRequired ? '内容受保护' : '下载' }}
           </t-button>
         </footer>
       </article>
@@ -169,7 +161,7 @@
 
 <script setup lang="ts">
 import { computed, ref } from 'vue'
-import { getKnowledgeAttachmentContent } from '@/mock-api/info-knowledge'
+import { getKnowledgeAttachmentContent } from '@/api/info-knowledge'
 import InfoAttachmentPreview from '@/components/InfoAttachmentPreview.vue'
 import type { CollectionStatus, InfoChat, InfoFile, InfoMessage } from '@/mock'
 import { sourceName } from '@/mock'
@@ -194,7 +186,6 @@ const emit = defineEmits<{
   (event: 'back'): void
   (event: 'toggle', chat: InfoChat): void
   (event: 'toast', text: string): void
-  (event: 'edit', payload: { kind: string; chatId: string; recordId: string; content: string }): void
 }>()
 
 const chat = computed(() => props.chat)
@@ -202,8 +193,6 @@ const messageDialogVisible = ref(false)
 const fileDialogVisible = ref(false)
 const activeMessage = ref<InfoMessage | null>(null)
 const activeFile = ref<InfoFile | null>(null)
-const draft = ref('')
-const editing = ref(false)
 const fileDownloading = ref(false)
 
 const items = computed<ConversationItem[]>(() => [
@@ -224,7 +213,7 @@ const items = computed<ConversationItem[]>(() => [
       kind: 'file' as const,
       name: file.name,
       detail: `${file.uploader} · ${file.type}`,
-      status: file.documentStatus === 'failed' ? '解析失败' : file.documentStatus === 'completed' ? '解析完成' : file.documentStatus || file.parseStatus || '待解析',
+      status: file.contentAccessRequired ? '仅元数据' : file.documentStatus === 'failed' ? '解析失败' : file.documentStatus === 'completed' ? '解析完成' : file.documentStatus || file.parseStatus || '待解析',
       size: file.size,
       type: file.type,
       source: sourceName(chat.value.source),
@@ -237,14 +226,16 @@ const collectionHint = computed(() => chat.value.collectionStatus === 'collectin
   ? '持续采集中'
   : chat.value.collectionStatus === 'paused'
     ? '已停止采集，可重新选择起点'
+    : chat.value.collectionStatus === 'detached'
+      ? '已解除接入，不能继续采集'
     : chat.value.collectionStatus === 'missing'
       ? '飞书中已找不到该群聊，历史内容仍保留'
       : '尚未开始采集')
 
-function statusLabel(status: CollectionStatus) { return status === 'collecting' ? '采集中' : status === 'paused' ? '已停止采集' : status === 'missing' ? '群聊已不存在' : '未开始' }
+function statusLabel(status: CollectionStatus) { return status === 'collecting' ? '采集中' : status === 'paused' ? '已停止采集' : status === 'detached' ? '已解除接入' : status === 'missing' ? '群聊已不存在' : status === 'error' ? '采集异常' : '未开始' }
 function openItem(item: ConversationItem) { if (item.kind === 'message' && item.message) openMessage(item.message); if (item.kind === 'file' && item.file) openFile(item.file) }
-function openMessage(message: InfoMessage) { activeMessage.value = message; activeFile.value = null; draft.value = message.content; editing.value = false; messageDialogVisible.value = true }
-function openFile(file: InfoFile) { activeFile.value = file; activeMessage.value = null; editing.value = false; fileDialogVisible.value = true }
+function openMessage(message: InfoMessage) { activeMessage.value = message; activeFile.value = null; messageDialogVisible.value = true }
+function openFile(file: InfoFile) { activeFile.value = file; activeMessage.value = null; fileDialogVisible.value = true }
 
 function messageStatus(status?: string | null) {
   if (status === 'failed') return '索引失败'
@@ -283,6 +274,7 @@ function displayMessageContent(content?: string | null) {
 }
 
 function fileStatus(file: InfoFile) {
+  if (file.contentAccessRequired) return '受保护，仅展示元数据'
   const status = file.documentStatus || file.parseStatus
   if (status === 'failed') return '解析失败'
   if (status === 'completed') return '解析完成'
@@ -298,19 +290,6 @@ function statusTone(status?: string | null) {
 function fileTypeLabel(file: InfoFile) {
   const type = String(file.type || '').replace(/^\./, '')
   return (type || file.name.split('.').pop() || 'FILE').toUpperCase()
-}
-
-function cancelEdit() {
-  draft.value = activeMessage.value?.content || ''
-  editing.value = false
-}
-
-function save() {
-  if (activeMessage.value) {
-    emit('edit', { kind: '消息', chatId: chat.value.id, recordId: activeMessage.value.id, content: draft.value })
-    activeMessage.value.content = draft.value
-  }
-  editing.value = false
 }
 
 function saveBlob(blob: Blob, fileName: string) {
@@ -329,7 +308,7 @@ function downloadMessage() {
 }
 
 async function downloadFile() {
-  if (!activeFile.value || fileDownloading.value) return
+  if (!activeFile.value || activeFile.value.contentAccessRequired || fileDownloading.value) return
   fileDownloading.value = true
   try {
     const blob = await getKnowledgeAttachmentContent(activeFile.value.id, true)
@@ -356,7 +335,9 @@ async function downloadFile() {
 .chat-status i { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
 .chat-status--collecting { color: var(--td-success-color); }
 .chat-status--paused { color: var(--td-warning-color); }
+.chat-status--detached { color: var(--td-text-color-placeholder); }
 .chat-status--missing { color: var(--td-error-color); }
+.chat-status--error { color: var(--td-error-color); }
 .conversation-meta { display: flex; flex-wrap: wrap; gap: 16px; margin-bottom: 23px; color: var(--td-text-color-placeholder); font-size: 11px; }
 .conversation-meta span { display: inline-flex; align-items: center; gap: 5px; }
 .conversation-meta svg { width: 13px; }

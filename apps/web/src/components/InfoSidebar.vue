@@ -553,6 +553,63 @@ const navItems = [
 }
 
 @media (max-width: 700px) {
+	.info-sidebar,
+	.info-sidebar--collapsed {
+		flex-basis: 68px;
+		width: 68px;
+		padding: 0 0 12px;
+		border-right-color: var(--td-component-stroke, #e7e7e7);
+	}
+
+	.info-sidebar__header,
+	.info-sidebar--collapsed .info-sidebar__header {
+		justify-content: center;
+		height: 68px;
+		min-height: 68px;
+		padding: 0;
+	}
+
+	.info-brand,
+	.sidebar-toggle,
+	.sidebar-history,
+	.sidebar-nav__item span,
+	.sidebar-nav__shortcut,
+	.sidebar-user__name,
+	.sidebar-user__chevron {
+		display: none;
+	}
+
+	.sidebar-nav,
+	.info-sidebar--collapsed .sidebar-nav {
+		gap: 8px;
+		margin-top: 0;
+	}
+
+	.sidebar-nav__item,
+	.info-sidebar--collapsed .sidebar-nav__item {
+		justify-content: center;
+		min-height: 44px;
+		padding: 0;
+		border-radius: 8px;
+	}
+
+	.info-sidebar__footer,
+	.info-sidebar--collapsed .info-sidebar__footer {
+		display: flex;
+		align-items: center;
+		flex-direction: column;
+		width: 100%;
+		padding: 0;
+	}
+
+	.sidebar-user,
+	.info-sidebar--collapsed .sidebar-user {
+		justify-content: center;
+		width: 44px;
+		min-height: 44px;
+		padding: 0;
+	}
+
   .sidebar-user-menu {
     right: 8px;
     width: min(252px, calc(100vw - 32px));

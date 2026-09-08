@@ -21,7 +21,7 @@
       <div class="info-shell__content"><RouterView /></div>
     </main>
     <InfoCommandPalette :visible="paletteVisible" :query="paletteQuery" :results="paletteResults" :loading="paletteLoading" :recent-searches="store.recentSearches" @update:visible="paletteVisible = $event" @search="runPaletteSearch" @select="selectPaletteResult" />
-    <InfoResultDrawer v-model:visible="drawerVisible" :result="drawerResult" @toast="toast" @save="saveDrawerResult" />
+    <InfoResultDrawer v-model:visible="drawerVisible" :result="drawerResult" @toast="toast" />
     <t-dialog v-model:visible="toastDialogVisible" header="提示" :footer="false" width="360px"><p class="info-toast-dialog">{{ toastText }}</p></t-dialog>
     <t-dialog
       v-model:visible="renameDialogVisible"
@@ -77,8 +77,6 @@ import { type SearchResult } from '@/mock'
 import { useInfoMockStore } from '@/stores/infoMock'
 import { normalizeSourceKey, useInfoKnowledgeStore } from '@/stores/infoKnowledge'
 import { getProfile } from '@/mock-api/info-profile'
-import { searchInfo } from '@/mock-api/info-search'
-import { mapInfoSearchResult } from '@/utils/info-search-result'
 import { listQaConversations, type QaConversation } from '@/mock-api/qa-history'
 import { renameQaConversation, deleteQaConversation } from '@/mock-api/qa-history'
 
@@ -208,10 +206,10 @@ function runPaletteSearch(query: string, committed = false) {
   paletteLoading.value = true
   paletteSearchTimer = setTimeout(async () => {
     try {
-      const response = await searchInfo({ query: normalized, page: 1, page_size: 20 }) as any
+      await knowledgeStore.ensureSources()
       if (seq !== paletteSearchSeq) return
       paletteLoading.value = false
-      paletteResults.value = (Array.isArray(response?.items) ? response.items : []).filter((item: any) => item.kind !== 'qa').map((item: any) => mapInfoSearchResult(item))
+      paletteResults.value = knowledgeStore.search(normalized).slice(0, 20)
       if (committed) store.addRecentSearch(normalized)
     } catch { if (seq === paletteSearchSeq) { paletteResults.value = []; paletteLoading.value = false } }
   }, 180)
@@ -221,7 +219,6 @@ function selectPaletteResult(result: SearchResult) {
   if (result.kind === 'chat' && result.chatId) { router.push(`/knowledge/${result.platform}/conversations/${result.chatId}`); return }
   drawerResult.value = result; drawerVisible.value = true
 }
-function saveDrawerResult(result: SearchResult, draft: string) { if (result.kind === 'message' && result.chatId && result.recordId) store.updateMessage(result.chatId, result.recordId, draft); if (result.kind === 'file' && result.chatId && result.recordId) store.updateFile(result.chatId, result.recordId, draft); toast('内容已更新到本地 Mock 数据') }
 function toast(text: string) { MessagePlugin.success(text) }
 </script>
 

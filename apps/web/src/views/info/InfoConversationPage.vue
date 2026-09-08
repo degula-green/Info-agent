@@ -1,6 +1,6 @@
 <template>
-  <InfoConversation v-if="chat" :chat="chat" @back="router.push(`/knowledge/${chat.source}`)" @toggle="toggleChat" @edit="saveEdit" @toast="toast" />
-  <div v-else-if="loading" class="conversation-missing"><t-icon name="loading" size="28px" /><h3>正在加载会话</h3><p>正在从 Core 同步消息和附件。</p></div>
+  <InfoConversation v-if="chat" :chat="chat" @back="router.push(`/knowledge/${chat.source}`)" @toggle="toggleChat" @toast="toast" />
+  <div v-else-if="loading" class="conversation-missing"><t-icon name="loading" size="28px" /><h3>正在加载会话</h3><p>正在从 Knowledge 加载消息和附件。</p></div>
   <div v-else class="conversation-missing"><t-icon name="error-circle" size="28px" /><h3>找不到这个会话</h3><t-button theme="primary" @click="router.push('/knowledge')">返回知识库</t-button></div>
 
   <t-dialog
@@ -13,9 +13,7 @@
   >
     <div v-if="pendingResumeChat" class="resume-dialog">
       <p v-if="pendingResumeChat.collectionStatus === 'missing'" class="resume-dialog__warning">飞书中暂时找不到这个群聊。确认开始采集时会再次检查群聊是否存在。</p>
-      <p>为「{{ pendingResumeChat.name }}」选择采集起点。留空则从现在开始。</p>
-      <t-form-item label="采集开始时间"><t-input v-model="resumeStart" type="date" clearable /></t-form-item>
-      <div class="resume-dialog__note"><t-icon name="info-circle" />再次开启时默认参考上次停止采集的时间。</div>
+       <p>为「{{ pendingResumeChat.name }}」恢复采集，将从已保存的检查点继续。</p>
     </div>
   </t-dialog>
 </template>
@@ -35,27 +33,24 @@ const pollTimer = ref<number | null>(null)
 const resumeDialogVisible = ref(false)
 const resumeLoading = ref(false)
 const pendingResumeChat = ref<InfoChat | null>(null)
-const resumeStart = ref('')
-
-function dateInputValue(value?: string | null) { return value ? value.slice(0, 10) : '' }
 
 async function toggleChat(current: any) {
+  if (current.collectionStatus === 'detached') return
   if (current.collectionStatus === 'collecting') {
     await store.pauseConversation(sourceKey.value, current.externalId || current.id)
     toast('已停止采集')
     return
   }
   pendingResumeChat.value = current as InfoChat
-  resumeStart.value = dateInputValue(current.lastStoppedAt) || current.historyStart || ''
   resumeDialogVisible.value = true
 }
 
 async function confirmResume() {
   const current = pendingResumeChat.value
-  if (!current || resumeLoading.value) return
+  if (!current || current.collectionStatus === 'detached' || resumeLoading.value) return
   resumeLoading.value = true
   try {
-    await store.accessSession(sourceKey.value, current.externalId || current.id, resumeStart.value || null)
+    await store.resumeConversation(sourceKey.value, current.id)
     await store.loadConversation(sourceKey.value, conversationId.value, true)
     resumeDialogVisible.value = false
     pendingResumeChat.value = null
@@ -65,11 +60,6 @@ async function confirmResume() {
   } finally {
     resumeLoading.value = false
   }
-}
-function saveEdit(payload: { kind: string; chatId: string; recordId: string; content: string }) {
-  if (payload.kind === '消息') store.updateMessage(payload.chatId, payload.recordId, payload.content)
-  else store.updateFile(payload.chatId, payload.recordId, payload.content)
-  toast('内容已更新')
 }
 function toast(text: string) { MessagePlugin.success(text) }
 async function loadCurrentConversation(platform: string, id: string, force = false) {

@@ -17,7 +17,7 @@
           ref="inputRef"
           v-model="localQuery"
           class="cmdk__input"
-          placeholder="输入关键词或问题描述，同时触发关键词和向量检索。"
+          placeholder="输入关键词，搜索当前已加载的会话、消息和附件。"
           autocomplete="off"
           spellcheck="false"
           @keydown.stop="onInputKeyDown"
@@ -36,7 +36,7 @@
               :index="0"
               icon-name="search"
               title="输入关键词或问题描述开始检索"
-              subtitle="自动同时进行关键词和向量检索，支持群聊、消息、文件和历史问答"
+              subtitle="搜索当前已加载的群聊、消息和文件"
               :selected="selectedIndex === 0"
               @primary="focusInput"
               @hover="selectedIndex = $event"
@@ -158,7 +158,7 @@
         <span><kbd>Enter</kbd> 打开</span>
         <span><kbd>Tab</kbd> 切换结果</span>
         <span><kbd>Esc</kbd> 关闭</span>
-        <span class="cmdk__mode-label">自动混合检索</span>
+        <span class="cmdk__mode-label">当前已加载数据</span>
       </div>
     </div>
   </t-dialog>

@@ -1,5 +1,5 @@
 <template>
-  <InfoKnowledgeBases :sources="store.sources" :initial-source-key="sourceKey" :access-loading="store.loading" @profile="router.push('/profile')" @home="router.push('/knowledge')" @chat="openChat" @open-source="openSource" @access="accessSession" @toggle="pauseSession" @refresh-access="refreshAccessSessions" @toast="toast" />
+  <InfoKnowledgeBases :sources="store.sources" :initial-source-key="sourceKey" :access-loading="store.loading" :load-error="store.loadError" @profile="router.push('/profile')" @home="router.push('/knowledge')" @chat="openChat" @open-source="openSource" @access="accessSession" @toggle="pauseSession" @resume="resumeSession" @remove-collector="removeCollector" @refresh-access="refreshAccessSessions" @toast="toast" />
 </template>
 <script setup lang="ts">
 import { computed, onMounted, watch } from 'vue'
@@ -25,6 +25,22 @@ async function pauseSession(source: 'feishu' | 'wecom' | 'wechat', sessionId: st
     if (chat) toast(`已停止「${chat.name}」的采集`)
   } catch (error: any) {
     MessagePlugin.error(error?.message || '无法停止采集')
+  }
+}
+async function resumeSession(source: 'feishu' | 'wecom' | 'wechat', sessionId: string) {
+  try {
+    const chat = await store.resumeConversation(source, sessionId)
+    if (chat) toast(`已恢复「${chat.name}」的采集`)
+  } catch (error: any) {
+    MessagePlugin.error(error?.message || '无法恢复采集')
+  }
+}
+async function removeCollector(source: 'feishu' | 'wecom' | 'wechat', sessionId: string, collectorID: string) {
+  try {
+    await store.removeCollector(source, sessionId, collectorID)
+    toast('已移除协同采集者')
+  } catch (error: any) {
+    MessagePlugin.error(error?.message || '无法移除采集者')
   }
 }
 function toast(text: string) { MessagePlugin.success(text) }

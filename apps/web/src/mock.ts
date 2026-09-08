@@ -1,7 +1,22 @@
 export type SourceKey = 'feishu' | 'wecom' | 'wechat'
-export type CollectionStatus = 'not_started' | 'collecting' | 'paused' | 'missing'
+export type CollectionStatus = 'not_started' | 'collecting' | 'paused' | 'detached' | 'missing' | 'error'
 
 export interface InfoAttachment { id: string; name: string; type: 'file' | 'image' }
+
+export interface InfoCollector {
+  id: string
+  collectorUserId: string
+  role: 'primary' | 'supplemental' | string
+  status: 'active' | 'unavailable' | 'removed' | string
+  lastCursor?: string
+  lastSuccessAt?: string | null
+  lastAttemptAt?: string | null
+  nextPollAt?: string | null
+  consecutiveFailures?: number
+  lastError?: string | null
+  agentOnline?: boolean
+  lastHeartbeatAt?: string | null
+}
 
 export interface InfoMessage {
   id: string; sender: string; content: string; time: string; timestamp: string
@@ -12,7 +27,7 @@ export interface InfoMessage {
 export interface InfoFile {
   id: string; name: string; type: string; size: string; time: string
   uploadedAt: string; uploader: string; content: string; documentId?: number | null; documentStatus?: string | null
-  parseStatus?: string; previewCapability?: string; isDeleted?: boolean; fileSizeBytes?: number | null
+  parseStatus?: string; previewCapability?: string; contentAccessRequired?: boolean; isDeleted?: boolean; fileSizeBytes?: number | null
 }
 
 export interface InfoChat {
@@ -22,16 +37,19 @@ export interface InfoChat {
   externalId?: string; lastSeenAt?: string | null; messageCount?: number; attachmentCount?: number; selected?: boolean
   historyStartAt?: string | null; lastStoppedAt?: string | null; remoteExists?: boolean
   isDirect?: boolean
+  collectors?: InfoCollector[]
 }
 
 export interface InfoAvailableSession {
   id: string; name: string; members: number; isDirect?: boolean; externalId?: string; lastSeenAt?: string | null; messageCount?: number; attachmentCount?: number
+  attachedConversationId?: string; currentUserCollector?: boolean
 }
 
 export interface InfoSource {
   key: SourceKey; name: string; kbName: string; description: string
   account: string; bound: boolean; chats: InfoChat[]; availableSessions: InfoAvailableSession[]
-  selectedConversationCount?: number; lastSyncAt?: string | null; enabled?: boolean; available?: boolean; historyStartAt?: string | null; lastError?: string | null; status?: 'unbound' | 'active' | 'paused' | 'error' | 'offline'
+  selectedConversationCount?: number; lastSyncAt?: string | null; enabled?: boolean; available?: boolean; historyStartAt?: string | null; lastError?: string | null; status?: 'unbound' | 'active' | 'paused' | 'error' | 'offline' | 'expired' | 'revoked' | 'reauthorization_required'
+  agentOnline?: boolean; lastHeartbeatAt?: string | null
 }
 
 export interface QASession {
@@ -43,7 +61,7 @@ export interface SearchResult {
   id: string; kind: 'chat' | 'message' | 'file' | 'qa'; title: string; subtitle: string
   source: string; platform: SourceKey | 'all' | 'qa'; chatId?: string; recordId?: string
   content?: string; context?: InfoMessage[]; sender?: string; uploader?: string
-  time?: string; score?: number; question?: string; answer?: string; citations?: Array<Record<string, unknown>>; conversationId?: string; excerpt?: string
+  time?: string; score?: number; question?: string; answer?: string; citations?: Array<Record<string, unknown>>; conversationId?: string; excerpt?: string; contentAccessRequired?: boolean
 }
 
 export interface InfoProfile { nickname: string; email: string; avatar: string }
@@ -112,7 +130,7 @@ export function searchMock(query: string, platform: SourceKey | 'all' = 'all', s
   for (const source of visibleSources) for (const currentChat of source.chats) {
     if (`${currentChat.name} ${source.name}`.toLowerCase().includes(q)) results.push({ id: `chat-${currentChat.id}`, kind: 'chat', title: currentChat.name, subtitle: `${source.name} · ${currentChat.members} 人 · 最近消息 ${currentChat.recentMessageTime}`, source: source.name, platform: source.key, chatId: currentChat.id, score: 0.96 })
     for (const message of currentChat.messages) if (`${message.sender} ${message.content}`.toLowerCase().includes(q)) results.push({ id: `message-${message.id}`, kind: 'message', title: message.content, subtitle: `${source.name} · ${currentChat.name} · ${message.sender} · ${message.time}`, source: source.name, platform: source.key, chatId: currentChat.id, recordId: message.id, content: message.content, sender: message.sender, time: message.time, context: currentChat.messages, score: 0.91 })
-    for (const file of currentChat.files) if (`${file.name} ${file.content} ${file.uploader}`.toLowerCase().includes(q)) results.push({ id: `file-${file.id}`, kind: 'file', title: file.name, subtitle: `${source.name} · ${currentChat.name} · ${file.uploader} · ${file.uploadedAt}`, source: source.name, platform: source.key, chatId: currentChat.id, recordId: file.id, content: file.content, uploader: file.uploader, time: file.uploadedAt, score: 0.89 })
+    for (const file of currentChat.files) if (`${file.name} ${file.content} ${file.uploader}`.toLowerCase().includes(q)) results.push({ id: `file-${file.id}`, kind: 'file', title: file.name, subtitle: `${source.name} · ${currentChat.name} · ${file.uploader} · ${file.uploadedAt}`, source: source.name, platform: source.key, chatId: currentChat.id, recordId: file.id, content: file.content, uploader: file.uploader, time: file.uploadedAt, contentAccessRequired: file.contentAccessRequired, score: 0.89 })
   }
   for (const qa of qaList) if ((platform === 'all' || qa.source === sourceName(platform)) && `${qa.question} ${qa.answer} ${qa.summary}`.toLowerCase().includes(q)) results.push({ id: qa.id, kind: 'qa', title: qa.question, subtitle: `${qa.source} · ${qa.time} · ${qa.summary}`, source: qa.source, platform: 'qa', recordId: qa.id, content: qa.answer, time: qa.time, score: 0.86 })
   return results

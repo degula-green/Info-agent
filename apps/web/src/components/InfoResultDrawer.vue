@@ -5,21 +5,49 @@
       <div v-if="result.kind === 'message'" class="result-drawer__facts"><span><b>来源平台</b>{{ result.source }}</span><span><b>来源会话</b>{{ result.subtitle.split(' · ')[1] || '—' }}</span><span><b>发送人 / 时间</b>{{ result.sender || '—' }} · {{ result.time || '—' }}</span></div>
       <div v-if="result.kind === 'file'" class="result-drawer__file"><t-icon name="file" /><div><strong>{{ result.title }}</strong><small>{{ result.source }} · {{ result.uploader || '—' }} · {{ result.time || '—' }}</small></div></div>
       <div v-if="result.kind === 'message' && result.context?.length" class="result-drawer__context"><div class="result-drawer__context-title">上下文消息</div><div v-for="item in result.context" :key="item.id" class="result-drawer__context-item"><strong>{{ item.sender }}</strong><span>{{ item.content }}</span><time>{{ item.time }}</time></div></div>
-      <t-textarea v-model="draft" :readonly="!editing" :autosize="{ minRows: 10, maxRows: 24 }" :placeholder="result.kind === 'qa' ? '问答内容' : '检索内容'" />
-      <div class="result-drawer__actions"><t-button v-if="result.kind !== 'qa' && !editing" variant="outline" @click="editing = true"><template #icon><t-icon name="edit" /></template>编辑</t-button><t-button v-else-if="result.kind !== 'qa'" theme="primary" @click="save"><template #icon><t-icon name="check" /></template>保存</t-button><t-button variant="outline" @click="$emit('toast', '已生成下载文件（原型演示）')"><template #icon><t-icon name="download" /></template>下载</t-button></div>
+      <t-textarea :model-value="result.content || result.subtitle || ''" readonly :autosize="{ minRows: 10, maxRows: 24 }" :placeholder="result.kind === 'qa' ? '问答内容' : '检索内容'" />
+      <div class="result-drawer__actions"><t-button variant="outline" :loading="fileDownloading" :disabled="Boolean(result.contentAccessRequired)" @click="downloadResult"><template #icon><t-icon :name="result.contentAccessRequired ? 'lock-on' : 'download'" /></template>{{ result.contentAccessRequired ? '内容受保护' : '下载' }}</t-button></div>
     </div>
   </t-drawer>
 </template>
 
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, ref } from 'vue'
+import { MessagePlugin } from 'tdesign-vue-next'
+import { getKnowledgeAttachmentContent } from '@/api/info-knowledge'
 import type { SearchResult } from '../mock'
 
 const props = defineProps<{ visible: boolean; result: SearchResult | null }>()
-const emit = defineEmits<{ (event: 'update:visible', value: boolean): void; (event: 'toast', text: string): void; (event: 'save', result: SearchResult, draft: string): void }>()
-const open = computed({ get: () => props.visible, set: (value: boolean) => emit('update:visible', value) }); const draft = ref(''); const editing = ref(false)
-watch(() => props.result, (result) => { draft.value = result?.content || result?.subtitle || ''; editing.value = false }, { immediate: true })
-function save() { editing.value = false; if (props.result) emit('save', props.result, draft.value); emit('toast', '内容已保存到本地 Mock 数据') }
+const emit = defineEmits<{ (event: 'update:visible', value: boolean): void; (event: 'toast', text: string): void }>()
+const open = computed({ get: () => props.visible, set: (value: boolean) => emit('update:visible', value) })
+const fileDownloading = ref(false)
+
+async function downloadResult() {
+  const result = props.result
+  if (!result) return
+  if (result.kind !== 'file' || !result.recordId) {
+    emit('toast', '当前结果没有可下载的附件内容')
+    return
+  }
+  if (result.contentAccessRequired) return
+  if (fileDownloading.value) return
+  fileDownloading.value = true
+  try {
+    const blob = await getKnowledgeAttachmentContent(result.recordId, true)
+    const url = URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = url
+    link.download = result.title || 'attachment'
+    document.body.appendChild(link)
+    link.click()
+    link.remove()
+    URL.revokeObjectURL(url)
+  } catch (error: any) {
+    MessagePlugin.error(error?.message || '附件下载失败')
+  } finally {
+    fileDownloading.value = false
+  }
+}
 </script>
 
 <style lang="less" scoped>

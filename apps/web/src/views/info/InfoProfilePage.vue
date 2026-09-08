@@ -37,7 +37,7 @@
           <span class="profile-panel__icon"><t-icon name="link-1" /></span>
           <div>
             <h2 id="connector-title">连接器</h2>
-            <p>绑定后开放对应知识库，数据仅本人可见</p>
+            <p>私聊进入私人知识库，群聊按组织成员范围共享</p>
           </div>
         </div>
         <div class="connector-list">
@@ -49,7 +49,7 @@
             </div>
             <t-tag :theme="connector.bound ? 'success' : 'default'" variant="light">{{ connectorStatus(connector) }}</t-tag>
             <t-button class="connector-action" :theme="connector.bound || connector.cleanup_pending ? 'default' : 'primary'" :variant="connector.bound || connector.cleanup_pending ? 'outline' : 'base'" size="medium" :loading="connectorPending[connector.platform]" :disabled="connector.availability !== 'available' || connectorPending[connector.platform]" @click="handleConnector(connector)">
-              {{ connector.cleanup_pending ? '重试解绑' : connector.bound ? '解除绑定' : connector.availability === 'available' ? `绑定${connector.display_name}` : '暂未开放' }}
+				{{ connector.cleanup_pending ? '重试解绑' : connector.status === 'expired' && connector.platform === 'feishu' ? '重新授权' : connector.bound ? '解除绑定' : connector.availability === 'available' ? `绑定${connector.display_name}` : '暂未开放' }}
             </t-button>
           </div>
         </div>
@@ -75,14 +75,14 @@
         <div class="auth-dialog__scope">
           <span><t-icon name="check-circle-filled" />读取会话消息</span>
           <span><t-icon name="check-circle-filled" />读取文件和图片</span>
-          <span><t-icon name="lock-on" />数据仅本人可见</span>
+          <span><t-icon name="lock-on" />按会话归属控制访问范围</span>
         </div>
       </div>
     </t-dialog>
-    <t-dialog v-model:visible="wechatDialogVisible" header="绑定个人微信" :confirm-btn="'确认绑定'" :cancel-btn="'取消'" :confirm-loading="wechatBinding" @confirm="confirmWechatBind">
+    <t-dialog v-model:visible="wechatDialogVisible" header="绑定个人微信" confirm-btn="确认绑定" cancel-btn="取消" :confirm-loading="wechatBinding" :close-on-overlay-click="!wechatBinding" @confirm="confirmWechatBind">
       <t-form :data="wechatForm" label-align="top">
         <t-form-item label="微信 ID"><t-input v-model="wechatForm.wxid" placeholder="例如 wxid_xxx" /></t-form-item>
-        <t-form-item label="本机微信数据目录"><t-input v-model="wechatForm.db_dir" placeholder="仅本机开发环境可用" /></t-form-item>
+        <t-form-item label="本机微信数据目录"><t-input v-model="wechatForm.db_dir" placeholder="例如 C:\\Users\\..." /></t-form-item>
       </t-form>
     </t-dialog>
     <t-dialog v-model:visible="restoreDialogVisible" header="恢复演示数据" :confirm-btn="{ content: '恢复数据', theme: 'danger' }" cancel-btn="取消" @confirm="restoreDemo">
@@ -93,15 +93,19 @@
 
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { MessagePlugin } from 'tdesign-vue-next'
 import { sourceColor } from '@/mock'
 import { useInfoMockStore } from '@/stores/infoMock'
-import { bindWechat, getConnectors, getProfile, type Connector, type ConnectorPlatform, type Profile, unbindConnector, updateProfile, uploadAvatar } from '@/mock-api/info-profile'
+import { bindWechat, connectorCatalog, getConnectors, getFeishuAuthorizeURL, getProfile, type Connector, type ConnectorPlatform, type Profile, unbindConnector, updateProfile, uploadAvatar } from '@/api/info-profile'
+import { oauthCallbackNotice } from '@/knowledge-mapping'
 
 const store = useInfoMockStore()
+const route = useRoute()
+const router = useRouter()
 const profile = ref<Profile>({ id: 0, username: '', nickname: store.profile.nickname, email: store.profile.email, avatar_url: null, updated_at: '' })
 const form = reactive({ nickname: store.profile.nickname })
-const connectors = ref<Connector[]>([])
+const connectors = ref<Connector[]>(connectorCatalog())
 const avatarInput = ref<HTMLInputElement | null>(null)
 const feishuDialogVisible = ref(false)
 const wechatDialogVisible = ref(false)
@@ -120,11 +124,16 @@ function syncProfile(value: Profile) {
   store.updateProfile({ nickname: value.nickname, email: value.email, avatar: value.nickname.slice(0, 1) || '我' })
 }
 async function loadPage() {
-  try {
-    const [nextProfile, nextConnectors] = await Promise.all([getProfile(), getConnectors()])
-    syncProfile(nextProfile)
-    connectors.value = nextConnectors
-  } catch (cause) { MessagePlugin.error(errorMessage(cause, '个人中心加载失败，请重新登录后再试')) }
+  const profileRequest = getProfile().then(syncProfile).catch((cause) => {
+    MessagePlugin.error(errorMessage(cause, '个人资料加载失败'))
+  })
+  const connectorRequest = getConnectors().then((items) => {
+    connectors.value = items.length ? items : connectorCatalog()
+  }).catch((cause) => {
+    connectors.value = connectorCatalog()
+    MessagePlugin.error(errorMessage(cause, '连接器服务未启动，请启动 Knowledge 服务后重试'))
+  })
+  await Promise.all([profileRequest, connectorRequest])
 }
 async function saveProfile() {
   try { syncProfile(await updateProfile(form.nickname)); MessagePlugin.success('个人资料已保存') }
@@ -140,17 +149,37 @@ async function onAvatarSelected(event: Event) {
 function connectorStatus(connector: Connector) {
   if (connector.availability !== 'available') return '暂未开放'
   if (connector.cleanup_pending) return '待完成解绑'
-  return ({ unbound: '未绑定', active: '已绑定', paused: '已暂停', error: '异常', offline: '离线' } as Record<string, string>)[connector.status]
+  return ({ unbound: '未绑定', active: '已绑定', expired: '需要重新授权', reauthorization_required: '需要重新授权', revoked: '已撤销', paused: '已暂停', error: '异常', offline: '离线' } as Record<string, string>)[connector.status] || '状态未知'
 }
 function connectorSummary(connector: Connector) {
   if (connector.availability !== 'available') return '该连接器暂未开放'
   if (connector.cleanup_pending) return connector.last_error === 'wechat_stop_failed' ? '采集器尚未停止，请重试解绑' : '认证凭据尚未清理，请重试解绑'
   if (!connector.bound) return `未绑定，绑定后开放${connector.display_name}知识库`
+  if (connector.status === 'expired' || connector.status === 'reauthorization_required') return '授权已失效，请重新授权'
+  if (connector.platform === 'wechat') {
+    if (connector.agent_online === false) return 'Agent 当前离线，请检查本机 Agent'
+    if (connector.agent_online === true && connector.last_heartbeat_at) return `Agent 在线 · 最近心跳 ${heartbeatAge(connector.last_heartbeat_at)}`
+    return '已绑定，等待 Agent heartbeat'
+  }
   return connector.account_name || '已绑定，等待同步账号信息'
+}
+function heartbeatAge(value?: string | null) {
+  if (!value) return '未知'
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return '未知'
+  const seconds = Math.max(0, Math.floor((Date.now() - date.getTime()) / 1000))
+  if (seconds < 60) return '刚刚'
+  if (seconds < 3600) return `${Math.floor(seconds / 60)} 分钟前`
+  if (seconds < 86400) return `${Math.floor(seconds / 3600)} 小时前`
+  return date.toLocaleDateString('zh-CN')
 }
 async function refreshConnectors() { connectors.value = await getConnectors() }
 async function handleConnector(connector: Connector) {
-  if (connectorPending[connector.platform]) return
+	if (connectorPending[connector.platform]) return
+	if (connector.platform === 'feishu' && (connector.status === 'expired' || connector.status === 'reauthorization_required')) {
+		feishuDialogVisible.value = true
+		return
+	}
   if (connector.bound || connector.cleanup_pending) {
     connectorPending[connector.platform] = true
     try { await unbindConnector(connector.platform); await refreshConnectors(); MessagePlugin.success(`已解除${connector.display_name}绑定`) }
@@ -168,37 +197,34 @@ async function confirmFeishuBind() {
   if (feishuBinding.value) return
   feishuBinding.value = true
   try {
-    await new Promise((resolve) => window.setTimeout(resolve, 320))
-    store.bindSource('feishu')
-    feishuDialogVisible.value = false
-    await refreshConnectors()
-    MessagePlugin.success('飞书已绑定')
+	const current = connectors.value.find((item) => item.platform === 'feishu')
+	const url = await getFeishuAuthorizeURL(current?.status === 'expired' ? 'rebind' : 'bind')
+    window.location.assign(url)
   } catch (cause) { MessagePlugin.error(errorMessage(cause, '飞书授权暂不可用')) }
   finally { feishuBinding.value = false }
 }
-function isAbsoluteLocalPath(value: string) { return /^(?:[a-zA-Z]:[\\/]|\\\\|\/)/.test(value.trim()) }
-function normalizedWechatBinding() {
-  const wxid = wechatForm.wxid.trim()
-  const dbDir = wechatForm.db_dir.trim()
-  if (!wxid || !dbDir) { MessagePlugin.warning('请填写微信 ID 和本机微信数据目录'); return null }
-  if (isAbsoluteLocalPath(wxid) || !isAbsoluteLocalPath(dbDir)) {
-    MessagePlugin.warning('未找到本地微信数据库，请检查微信 ID 和数据目录')
-    return null
-  }
-  return { wxid, db_dir: dbDir }
-}
 async function confirmWechatBind() {
   if (wechatBinding.value) return
-  const input = normalizedWechatBinding()
-  if (!input) return
+  if (!wechatForm.wxid.trim() || !wechatForm.db_dir.trim()) { MessagePlugin.warning('请填写微信 ID 和本机微信数据目录'); return }
   wechatBinding.value = true
   try {
-    await bindWechat(input, wechatRebind.value)
+    await bindWechat(wechatForm.wxid.trim(), wechatForm.db_dir.trim(), wechatRebind.value)
     wechatDialogVisible.value = false
     await refreshConnectors()
-    MessagePlugin.success('个人微信已绑定')
+    MessagePlugin.success('个人微信已绑定，采集器已启动')
   } catch (cause) { MessagePlugin.error(errorMessage(cause, '个人微信绑定失败')) }
   finally { wechatBinding.value = false }
+}
+async function handleOAuthCallback() {
+  const notice = oauthCallbackNotice(route.query)
+  if (!notice) return
+  if (notice.kind === 'success') MessagePlugin.success(notice.message)
+  else MessagePlugin.error(notice.message)
+  const query = { ...route.query }
+  delete query.connector
+  delete query.status
+  delete query.error
+  await router.replace({ path: route.path, query })
 }
 async function restoreDemo() {
   store.resetDemo()
@@ -206,10 +232,12 @@ async function restoreDemo() {
   await loadPage()
   MessagePlugin.success('演示数据已恢复')
 }
-onMounted(loadPage)
+onMounted(async () => { await loadPage(); await handleOAuthCallback() })
 </script>
 
 <style lang="less" scoped>
+.wechat-pairing-status { display: grid; gap: 6px; margin-top: 14px; padding: 12px; border: 1px solid var(--td-component-stroke); border-radius: 8px; color: var(--td-text-color-secondary); font-size: 12px; }.wechat-pairing-status strong { color: var(--td-brand-color); font-size: 20px; letter-spacing: 2px; }
+.connector-devices { display: grid; flex: 1 0 calc(100% - 52px); gap: 4px; margin-left: 52px; }.connector-device { display: flex; align-items: center; justify-content: space-between; gap: 12px; color: var(--td-text-color-secondary); font-size: 12px; }
 .profile-page {
   width: min(920px, 100%);
   margin: 0 auto;
@@ -286,6 +314,7 @@ onMounted(loadPage)
 
 .profile-layout {
   display: grid;
+  grid-template-columns: 1fr;
   gap: 20px;
 }
 
@@ -383,6 +412,7 @@ onMounted(loadPage)
 .connector-row {
   gap: 14px;
   min-height: 84px;
+	flex-wrap: wrap;
 }
 
 .connector-mark {
@@ -566,7 +596,17 @@ onMounted(loadPage)
 
   .connector-row > .t-button {
     margin-left: 52px;
+		height: 44px;
   }
+
+	.connector-devices {
+		flex-basis: 100%;
+		margin-left: 52px;
+	}
+
+	.connector-device > .t-button {
+		min-height: 44px;
+	}
 
   .profile-actions {
     flex-wrap: wrap;
