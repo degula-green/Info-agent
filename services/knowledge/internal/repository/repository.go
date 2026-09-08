@@ -121,6 +121,8 @@ func discardMessage(input IngestMessageInput) bool {
 
 func classifyMessage(input IngestMessageInput) (bool, string) { return privacy.Scan(input.Content) }
 
+type PendingMessage struct { Message domain.Message; OriginalContent string }
+
 // CalculatePayloadHash defines the cross-language business payload contract.
 // It excludes payload_hash itself, includes every other message field (including
 // attachment metadata), sorts object keys, emits UTF-8 JSON without HTML
@@ -291,6 +293,8 @@ type Repository interface {
 	SetConversationStatus(ctx context.Context, conversationID, status, reason string) error
 
 	IngestMessage(ctx context.Context, input IngestMessageInput) (*IngestResult, error)
+	ListPendingMessages(ctx context.Context, limit int) ([]PendingMessage, error)
+	CompleteMessageClassification(ctx context.Context, messageID, displayContent string, sensitive bool) error
 	Heartbeat(ctx context.Context, collectorID string, now time.Time) (*domain.Collector, error)
 	RecordCollectorFailure(ctx context.Context, collectorID, lastError string, nextPollAt, now time.Time) error
 	RecordCursorReceipt(ctx context.Context, collectorID, cursor string, now time.Time) error

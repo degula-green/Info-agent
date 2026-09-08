@@ -28,6 +28,7 @@ type MemoryStore struct {
 	conversations  map[string]domain.ConversationIngestion
 	collectors     map[string]domain.Collector
 	messages       map[string]domain.Message
+	privateContent map[string]string
 	sources        map[string]domain.MessageSource
 	attachments    map[string]domain.Attachment
 	cursorReceipts map[string]time.Time
@@ -50,6 +51,7 @@ func NewMemoryStore() *MemoryStore {
 		devices: map[string]domain.AgentDevice{}, discoveries: map[string]domain.Discovery{},
 		conversations: map[string]domain.ConversationIngestion{}, collectors: map[string]domain.Collector{},
 		messages: map[string]domain.Message{}, sources: map[string]domain.MessageSource{},
+		privateContent: map[string]string{},
 		attachments: map[string]domain.Attachment{}, identities: map[string]ExternalIdentity{},
 		cursorReceipts: map[string]time.Time{},
 		memberships:    map[string]domain.ConversationMembership{},
@@ -1064,10 +1066,10 @@ func (s *MemoryStore) IngestMessage(ctx context.Context, input IngestMessageInpu
 		return nil, apperror.New("external_id_conflict", "external message id has conflicting content", 409, false)
 	}
 	if !exists {
-		sensitive, redacted := classifyMessage(input)
-		message = domain.Message{ID: uuid.NewString(), ConversationID: conversation.ID, ExternalMessageID: input.ExternalMessageID, SenderIdentityID: s.ensureIdentityLocked(conversation.Platform, conversation.WorkspaceKey, input.SenderExternalID, input.SenderDisplayName), SenderDisplayName: input.SenderDisplayName, MessageType: input.MessageType, Content: redacted, Sensitive: sensitive, ClassificationStatus: "succeeded", ContentHash: input.ContentHash, ContentVersion: 1, SentAt: input.SentAt.UTC(), LifecycleStatus: "active", VectorStatus: "pending", CreatedAt: now}
+		message = domain.Message{ID: uuid.NewString(), ConversationID: conversation.ID, ExternalMessageID: input.ExternalMessageID, SenderIdentityID: s.ensureIdentityLocked(conversation.Platform, conversation.WorkspaceKey, input.SenderExternalID, input.SenderDisplayName), SenderDisplayName: input.SenderDisplayName, MessageType: input.MessageType, Content: "", Sensitive: false, ClassificationStatus: "pending", ContentHash: input.ContentHash, ContentVersion: 1, SentAt: input.SentAt.UTC(), LifecycleStatus: "active", VectorStatus: "pending", CreatedAt: now}
 		s.messages[key] = message
-		s.addEventLocked(ctx, "message.ready", conversation, map[string]any{"resource_type": "message", "resource_id": message.ID, "content_version": 1, "sensitive": sensitive, "content_access_required": sensitive})
+		s.privateContent[message.ID] = input.Content
+		if input.MessageType == "text" { s.addEventLocked(ctx, "privacy.scan.requested", conversation, map[string]any{"message_id": message.ID, "content_version": 1}) }
 	}
 	sourceKey := message.ID + "|" + input.CollectorID
 	if source, sourceExists := s.sources[sourceKey]; !sourceExists {
@@ -1097,6 +1099,18 @@ func (s *MemoryStore) IngestMessage(ctx context.Context, input IngestMessageInpu
 	}
 	result.Message = cloneMessage(message)
 	return result, nil
+}
+
+func (s *MemoryStore) ListPendingMessages(_ context.Context, limit int) ([]PendingMessage, error) {
+	s.mu.RLock(); defer s.mu.RUnlock(); out := []PendingMessage{}
+	for _, m := range s.messages { if m.ClassificationStatus == "pending" { out = append(out, PendingMessage{Message: cloneMessage(m), OriginalContent: s.privateContent[m.ID]}) } }
+	if limit > 0 && len(out) > limit { out = out[:limit] }; return out, nil
+}
+
+func (s *MemoryStore) CompleteMessageClassification(ctx context.Context, id, displayContent string, sensitive bool) error {
+	s.mu.Lock(); defer s.mu.Unlock();
+	for key, m := range s.messages { if m.ID == id { m.Content, m.Sensitive, m.ClassificationStatus = displayContent, sensitive, "succeeded"; s.messages[key] = m; if c, ok := s.conversations[m.ConversationID]; ok { s.addEventLocked(ctx, "message.ready", c, map[string]any{"resource_type":"message", "resource_id":id, "content_version":m.ContentVersion, "sensitive":sensitive, "content_access_required":sensitive}) }; return nil } }
+	return apperror.New("message_not_found", "message not found", 404, false)
 }
 
 func (s *MemoryStore) Heartbeat(_ context.Context, collectorID string, _ time.Time) (*domain.Collector, error) {

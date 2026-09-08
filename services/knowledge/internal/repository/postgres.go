@@ -880,8 +880,7 @@ func (s *PostgresStore) IngestMessage(ctx context.Context, input IngestMessageIn
 		identity = identityID
 	}
 	messageID := uuid.NewString()
-	sensitive, displayContent := classifyMessage(input)
-	tag, err := tx.Exec(ctx, `INSERT INTO knowledge.messages (id,conversation_ingestion_id,external_message_id,sender_identity_id,sender_display_name,message_type,normalized_content,content_hash,sent_at,sensitive,classification_status) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'succeeded') ON CONFLICT (conversation_ingestion_id,external_message_id) DO NOTHING`, messageID, conversationID, input.ExternalMessageID, identity, nilString(input.SenderDisplayName), input.MessageType, displayContent, input.ContentHash, input.SentAt, sensitive)
+	tag, err := tx.Exec(ctx, `INSERT INTO knowledge.messages (id,conversation_ingestion_id,external_message_id,sender_identity_id,sender_display_name,message_type,normalized_content,content_hash,sent_at,sensitive,classification_status) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,FALSE,'pending') ON CONFLICT (conversation_ingestion_id,external_message_id) DO NOTHING`, messageID, conversationID, input.ExternalMessageID, identity, nilString(input.SenderDisplayName), input.MessageType, nilString(""), input.ContentHash, input.SentAt)
 	if err != nil {
 		return nil, dbError(err)
 	}
@@ -930,8 +929,9 @@ func (s *PostgresStore) IngestMessage(ctx context.Context, input IngestMessageIn
 		}
 	}
 	if !duplicate {
-		payload, _ := json.Marshal(map[string]any{"resource_type": "message", "resource_id": messageID, "content_version": 1, "sensitive": sensitive, "content_access_required": sensitive})
-		_, err = tx.Exec(ctx, `INSERT INTO knowledge.outbox_events (id,event_type,trace_id,organization_id,payload) VALUES ($1,'message.ready',$2,$3,$4)`, uuid.NewString(), traceID, nilString(org), payload)
+		if _, err = tx.Exec(ctx, `INSERT INTO knowledge.message_private_content (message_id,content) VALUES ($1,$2)`, messageID, input.Content); err != nil { return nil, dbError(err) }
+		payload, _ := json.Marshal(map[string]any{"message_id": messageID, "content_version": 1})
+		_, err = tx.Exec(ctx, `INSERT INTO knowledge.outbox_events (id,event_type,trace_id,organization_id,payload) VALUES ($1,'privacy.scan.requested',$2,$3,$4)`, uuid.NewString(), traceID, nilString(org), payload)
 		if err != nil {
 			return nil, dbError(err)
 		}
@@ -940,7 +940,7 @@ func (s *PostgresStore) IngestMessage(ctx context.Context, input IngestMessageIn
 		return nil, dbError(err)
 	}
 	now := time.Now().UTC()
-	message := domain.Message{ID: messageID, ConversationID: conversationID, ExternalMessageID: input.ExternalMessageID, SenderDisplayName: input.SenderDisplayName, MessageType: input.MessageType, Content: displayContent, Sensitive: sensitive, ClassificationStatus: "succeeded", ContentHash: input.ContentHash, ContentVersion: 1, SentAt: input.SentAt, LifecycleStatus: "active", VectorStatus: "pending", Attachments: attachments, CreatedAt: now}
+	message := domain.Message{ID: messageID, ConversationID: conversationID, ExternalMessageID: input.ExternalMessageID, SenderDisplayName: input.SenderDisplayName, MessageType: input.MessageType, Content: "", Sensitive: false, ClassificationStatus: "pending", ContentHash: input.ContentHash, ContentVersion: 1, SentAt: input.SentAt, LifecycleStatus: "active", VectorStatus: "pending", Attachments: attachments, CreatedAt: now}
 	return &IngestResult{Message: message, Attachments: attachments, Duplicate: duplicate, CursorUpdated: false}, nil
 }
 
@@ -1069,6 +1069,24 @@ func (s *PostgresStore) CompleteAttachment(ctx context.Context, id, objectRef, c
 	}
 	if err := tx.Commit(ctx); err != nil { return nil, dbError(err) }
 	return a, nil
+}
+
+func (s *PostgresStore) ListPendingMessages(ctx context.Context, limit int) ([]PendingMessage, error) {
+	if limit <= 0 || limit > 200 { limit = 200 }
+	rows, err := s.pool.Query(ctx, `SELECT m.id::text,m.conversation_ingestion_id::text,m.external_message_id,COALESCE(m.sender_identity_id::text,''),COALESCE(m.sender_display_name,''),m.message_type,COALESCE(m.normalized_content_ref,''),COALESCE(m.normalized_content,''),m.content_hash,m.content_version,m.sent_at,m.lifecycle_status,m.vector_status,m.created_at,m.sensitive,m.classification_status,p.content FROM knowledge.messages m JOIN knowledge.message_private_content p ON p.message_id=m.id WHERE m.classification_status='pending' ORDER BY m.created_at LIMIT $1`, limit)
+	if err != nil { return nil, dbError(err) }; defer rows.Close(); out := []PendingMessage{}
+	for rows.Next() { var m domain.Message; var raw string; if err := rows.Scan(&m.ID,&m.ConversationID,&m.ExternalMessageID,&m.SenderIdentityID,&m.SenderDisplayName,&m.MessageType,&m.NormalizedContentRef,&m.Content,&m.ContentHash,&m.ContentVersion,&m.SentAt,&m.LifecycleStatus,&m.VectorStatus,&m.CreatedAt,&m.Sensitive,&m.ClassificationStatus,&raw); err != nil { return nil, dbError(err) }; out = append(out, PendingMessage{Message:m, OriginalContent:raw}) }
+	return out, dbError(rows.Err())
+}
+
+func (s *PostgresStore) CompleteMessageClassification(ctx context.Context, messageID, displayContent string, sensitive bool) error {
+	tx, err := s.pool.Begin(ctx); if err != nil { return dbError(err) }; defer tx.Rollback(ctx)
+	var conversationID, org string
+	if err = tx.QueryRow(ctx, `UPDATE knowledge.messages SET normalized_content=$2,sensitive=$3,classification_status='succeeded' WHERE id=$1 AND classification_status='pending' RETURNING conversation_ingestion_id::text`, messageID, displayContent, sensitive).Scan(&conversationID); err != nil { if errors.Is(err, pgx.ErrNoRows) { return apperror.New("message_not_found", "message is not pending", 404, false) }; return dbError(err) }
+	if err = tx.QueryRow(ctx, `SELECT COALESCE(organization_id::text,'') FROM knowledge.conversation_ingestions WHERE id=$1`, conversationID).Scan(&org); err != nil { return dbError(err) }
+	payload, _ := json.Marshal(map[string]any{"resource_type":"message", "resource_id":messageID, "content_version":1, "sensitive":sensitive, "content_access_required":sensitive})
+	if _, err = tx.Exec(ctx, `INSERT INTO knowledge.outbox_events (id,event_type,trace_id,organization_id,payload) VALUES ($1,'message.ready',$2,$3,$4)`, uuid.NewString(), uuid.NewString(), nilString(org), payload); err != nil { return dbError(err) }
+	return dbError(tx.Commit(ctx))
 }
 func (s *PostgresStore) FailAttachment(ctx context.Context, id, message string) error {
 	_, err := s.pool.Exec(ctx, `UPDATE knowledge.attachments SET content_status='failed',last_error=$2,updated_at=now() WHERE id=$1`, id, message)

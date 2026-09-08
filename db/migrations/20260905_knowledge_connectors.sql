@@ -143,6 +143,11 @@ ALTER TABLE knowledge.messages ADD COLUMN IF NOT EXISTS sender_display_name VARC
 ALTER TABLE knowledge.messages ADD COLUMN IF NOT EXISTS vector_status VARCHAR(32) NOT NULL DEFAULT 'pending';
 ALTER TABLE knowledge.messages ADD COLUMN IF NOT EXISTS sensitive BOOLEAN NOT NULL DEFAULT FALSE;
 ALTER TABLE knowledge.messages ADD COLUMN IF NOT EXISTS classification_status VARCHAR(32) NOT NULL DEFAULT 'pending';
+CREATE TABLE IF NOT EXISTS knowledge.message_private_content (
+    message_id UUID PRIMARY KEY REFERENCES knowledge.messages(id) ON DELETE CASCADE,
+    content TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
 
 CREATE TABLE IF NOT EXISTS knowledge.message_sources (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

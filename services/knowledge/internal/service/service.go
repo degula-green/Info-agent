@@ -22,6 +22,7 @@ import (
 	"info-agent/knowledge/internal/kv"
 	"info-agent/knowledge/internal/objectstore"
 	"info-agent/knowledge/internal/platform"
+	"info-agent/knowledge/internal/privacy"
 	"info-agent/knowledge/internal/repository"
 	"info-agent/knowledge/internal/trace"
 	"info-agent/knowledge/internal/vault"
@@ -1238,13 +1239,25 @@ func (s *Service) PublishOutbox(ctx context.Context) error {
 		return err
 	}
 	for _, event := range events {
-		if err := s.KV.Publish(ctx, "knowledge:events", event); err != nil {
+		if err := s.KV.Publish(ctx, "knowledge:ready", event); err != nil {
 			return err
 		}
 		now := s.Now()
 		if err := s.Repo.MarkOutboxPublished(ctx, event.ID, now); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+// ProcessPrivacy scans protected pending message content and only then opens
+// the message.ready gate. Failures leave the resource pending for retry.
+func (s *Service) ProcessPrivacy(ctx context.Context) error {
+	pending, err := s.Repo.ListPendingMessages(ctx, 100)
+	if err != nil { return err }
+	for _, item := range pending {
+		sensitive, display := privacy.Scan(item.OriginalContent)
+		if err := s.Repo.CompleteMessageClassification(ctx, item.Message.ID, display, sensitive); err != nil { return err }
 	}
 	return nil
 }

@@ -247,7 +247,13 @@ func TestMemoryFiltersSystemAndRedactsSensitiveContent(t *testing.T) {
 	makeInput := func(id, typ, content string) IngestMessageInput { in := IngestMessageInput{CollectorID: collector.ID, ExternalConversationID: "filter-chat", ExternalMessageID: id, MessageType: typ, Content: content, ContentHash: hashForTest(content), SentAt: now, Cursor: id}; in.PayloadHash, _ = CalculatePayloadHash(in); return in }
 	filtered, err := repo.IngestMessage(ctx, makeInput("system-1", "system", "joined")); if err != nil || !filtered.Discarded { t.Fatalf("system message was not filtered: %+v %v", filtered, err) }
 	saved, err := repo.IngestMessage(ctx, makeInput("secret-1", "text", "password=abc123")); if err != nil { t.Fatal(err) }
-	if !saved.Message.Sensitive || saved.Message.Content == "password=abc123" { t.Fatalf("secret was exposed: %+v", saved.Message) }
+	if saved.Message.Sensitive || saved.Message.Content != "" || saved.Message.ClassificationStatus != "pending" { t.Fatalf("message was exposed before scan: %+v", saved.Message) }
+	pending, _ := repo.ListPendingMessages(ctx, 10)
+	if len(pending) != 1 || pending[0].OriginalContent != "password=abc123" { t.Fatalf("protected pending content missing: %+v", pending) }
+	sensitive, display := classifyMessage(makeInput("secret-1", "text", pending[0].OriginalContent))
+	if err := repo.CompleteMessageClassification(ctx, saved.Message.ID, display, sensitive); err != nil { t.Fatal(err) }
+	updated, _ := repo.ListMessages(ctx, conversation.ID, 10, "")
+	if len(updated) != 1 || !updated[0].Sensitive || updated[0].Content == "password=abc123" { t.Fatalf("secret was exposed after scan: %+v", updated) }
 	events, _ := repo.GetOutbox(ctx, 10); found := false; for _, event := range events { if event.EventType == "message.ready" { found = true } }; if !found { t.Fatal("message.ready event missing") }
 }
 
