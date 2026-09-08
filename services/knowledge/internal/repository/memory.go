@@ -12,6 +12,7 @@ import (
 	"github.com/google/uuid"
 	"info-agent/knowledge/internal/apperror"
 	"info-agent/knowledge/internal/domain"
+	"info-agent/knowledge/internal/privacy"
 	"info-agent/knowledge/internal/trace"
 )
 
@@ -1030,6 +1031,9 @@ func (s *MemoryStore) IngestMessage(ctx context.Context, input IngestMessageInpu
 	if err := validateIngestInput(input); err != nil {
 		return nil, err
 	}
+	if discardMessage(input) {
+		return &IngestResult{Discarded: true, CursorUpdated: false}, nil
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	collector, ok := s.collectors[input.CollectorID]
@@ -1060,11 +1064,10 @@ func (s *MemoryStore) IngestMessage(ctx context.Context, input IngestMessageInpu
 		return nil, apperror.New("external_id_conflict", "external message id has conflicting content", 409, false)
 	}
 	if !exists {
-		message = domain.Message{ID: uuid.NewString(), ConversationID: conversation.ID, ExternalMessageID: input.ExternalMessageID, SenderIdentityID: s.ensureIdentityLocked(conversation.Platform, conversation.WorkspaceKey, input.SenderExternalID, input.SenderDisplayName), SenderDisplayName: input.SenderDisplayName, MessageType: input.MessageType, Content: input.Content, ContentHash: input.ContentHash, ContentVersion: 1, SentAt: input.SentAt.UTC(), LifecycleStatus: "active", VectorStatus: "pending", CreatedAt: now}
+		sensitive, redacted := classifyMessage(input)
+		message = domain.Message{ID: uuid.NewString(), ConversationID: conversation.ID, ExternalMessageID: input.ExternalMessageID, SenderIdentityID: s.ensureIdentityLocked(conversation.Platform, conversation.WorkspaceKey, input.SenderExternalID, input.SenderDisplayName), SenderDisplayName: input.SenderDisplayName, MessageType: input.MessageType, Content: redacted, Sensitive: sensitive, ClassificationStatus: "succeeded", ContentHash: input.ContentHash, ContentVersion: 1, SentAt: input.SentAt.UTC(), LifecycleStatus: "active", VectorStatus: "pending", CreatedAt: now}
 		s.messages[key] = message
-		if conversation.IngestionScope == "organization" && input.MessageType == "text" {
-			s.addEventLocked(ctx, "privacy.scan.requested", conversation, map[string]any{"message_id": message.ID, "content_version": 1})
-		}
+		s.addEventLocked(ctx, "message.ready", conversation, map[string]any{"resource_type": "message", "resource_id": message.ID, "content_version": 1, "sensitive": sensitive, "content_access_required": sensitive})
 	}
 	sourceKey := message.ID + "|" + input.CollectorID
 	if source, sourceExists := s.sources[sourceKey]; !sourceExists {
@@ -1085,10 +1088,12 @@ func (s *MemoryStore) IngestMessage(ctx context.Context, input IngestMessageInpu
 			result.Attachments = append(result.Attachments, cloneAttachment(existing))
 			continue
 		}
-		attachment := domain.Attachment{ID: uuid.NewString(), ConversationID: conversation.ID, MessageID: message.ID, ExternalAttachmentID: a.ExternalAttachmentID, FileName: sanitizeName(a.FileName), MIMEType: a.MIMEType, SizeBytes: a.SizeBytes, ContentHash: a.ContentHash, ContentVersion: 1, ContentStatus: "pending", AccessScope: "conversation_members", ContentAccessRequired: conversation.IngestionScope == "organization", PreviewCapability: previewCapability(a.MIMEType), CreatedAt: now, UpdatedAt: now}
+		name := sanitizeName(a.FileName)
+		sensitive := privacy.SensitiveAttachmentName(name)
+		attachment := domain.Attachment{ID: uuid.NewString(), ConversationID: conversation.ID, MessageID: message.ID, ExternalAttachmentID: a.ExternalAttachmentID, FileName: name, MIMEType: a.MIMEType, SizeBytes: a.SizeBytes, ContentHash: a.ContentHash, ContentVersion: 1, ContentStatus: "pending", AccessScope: "conversation_members", ContentAccessRequired: conversation.IngestionScope == "organization" || sensitive, Sensitive: sensitive, ClassificationStatus: "succeeded", PreviewCapability: previewCapability(a.MIMEType), CreatedAt: now, UpdatedAt: now}
 		s.attachments[attachmentKey] = attachment
 		result.Attachments = append(result.Attachments, cloneAttachment(attachment))
-		s.addEventLocked(ctx, "document.processing.requested", conversation, map[string]any{"message_id": message.ID, "attachment_id": attachment.ID, "content_version": 1})
+		s.addEventLocked(ctx, "attachment.processing.requested", conversation, map[string]any{"resource_id": attachment.ID, "content_version": 1})
 	}
 	result.Message = cloneMessage(message)
 	return result, nil
@@ -1198,18 +1203,27 @@ func (s *MemoryStore) GetAttachment(_ context.Context, id string) (*domain.Attac
 	return nil, apperror.New("attachment_not_found", "attachment not found", 404, false)
 }
 
-func (s *MemoryStore) CompleteAttachment(_ context.Context, id, objectRef, contentHash string, size int64, status string) (*domain.Attachment, error) {
+func (s *MemoryStore) CompleteAttachment(ctx context.Context, id, objectRef, contentHash string, size int64, status string) (*domain.Attachment, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for key, a := range s.attachments {
 		if a.ID != id {
 			continue
 		}
+		if a.ContentStatus == "ready" && strings.EqualFold(a.ContentHash, contentHash) {
+			out := cloneAttachment(a)
+			return &out, nil
+		}
 		if contentHash != "" && a.ContentHash != "" && a.ContentHash != contentHash {
 			return nil, apperror.New("attachment_hash_mismatch", "attachment hash does not match metadata", 400, false)
 		}
 		a.ObjectRef, a.ContentHash, a.SizeBytes, a.ContentStatus, a.UpdatedAt = objectRef, contentHash, size, status, time.Now().UTC()
 		s.attachments[key] = a
+		if status == "ready" {
+			if conversation, ok := s.conversations[a.ConversationID]; ok {
+				s.addEventLocked(ctx, "attachment.ready", conversation, map[string]any{"resource_type": "attachment", "resource_id": a.ID, "content_version": a.ContentVersion, "sensitive": a.Sensitive, "content_access_required": a.ContentAccessRequired})
+			}
+		}
 		out := cloneAttachment(a)
 		return &out, nil
 	}

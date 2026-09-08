@@ -14,6 +14,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"info-agent/knowledge/internal/apperror"
 	"info-agent/knowledge/internal/domain"
+	"info-agent/knowledge/internal/privacy"
 	"info-agent/knowledge/internal/trace"
 )
 
@@ -846,6 +847,9 @@ func (s *PostgresStore) IngestMessage(ctx context.Context, input IngestMessageIn
 	if err := validateIngestInput(input); err != nil {
 		return nil, err
 	}
+	if discardMessage(input) {
+		return &IngestResult{Discarded: true}, nil
+	}
 	traceID := trace.TraceID(ctx)
 	if traceID == "" {
 		traceID = uuid.NewString()
@@ -876,7 +880,8 @@ func (s *PostgresStore) IngestMessage(ctx context.Context, input IngestMessageIn
 		identity = identityID
 	}
 	messageID := uuid.NewString()
-	tag, err := tx.Exec(ctx, `INSERT INTO knowledge.messages (id,conversation_ingestion_id,external_message_id,sender_identity_id,sender_display_name,message_type,normalized_content,content_hash,sent_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT (conversation_ingestion_id,external_message_id) DO NOTHING`, messageID, conversationID, input.ExternalMessageID, identity, nilString(input.SenderDisplayName), input.MessageType, input.Content, input.ContentHash, input.SentAt)
+	sensitive, displayContent := classifyMessage(input)
+	tag, err := tx.Exec(ctx, `INSERT INTO knowledge.messages (id,conversation_ingestion_id,external_message_id,sender_identity_id,sender_display_name,message_type,normalized_content,content_hash,sent_at,sensitive,classification_status) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'succeeded') ON CONFLICT (conversation_ingestion_id,external_message_id) DO NOTHING`, messageID, conversationID, input.ExternalMessageID, identity, nilString(input.SenderDisplayName), input.MessageType, displayContent, input.ContentHash, input.SentAt, sensitive)
 	if err != nil {
 		return nil, dbError(err)
 	}
@@ -902,10 +907,12 @@ func (s *PostgresStore) IngestMessage(ctx context.Context, input IngestMessageIn
 		accessRequired := scope == "organization"
 		var saved domain.Attachment
 		inserted := true
-		err = tx.QueryRow(ctx, `INSERT INTO knowledge.attachments (id,conversation_ingestion_id,message_id,external_attachment_id,file_name,mime_type,size_bytes,content_hash,access_scope,content_access_required,preview_capability) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'conversation_members',$9,$10) ON CONFLICT (conversation_ingestion_id,external_attachment_id) DO NOTHING RETURNING id::text,conversation_ingestion_id::text,COALESCE(message_id::text,''),external_attachment_id,file_name,COALESCE(mime_type,''),size_bytes,COALESCE(object_ref,''),COALESCE(content_hash,''),content_version,content_status,access_scope,content_access_required,COALESCE(preview_capability,''),COALESCE(last_error,''),created_at,updated_at`, attachmentID, conversationID, messageID, a.ExternalAttachmentID, a.FileName, nilString(a.MIMEType), a.SizeBytes, nilString(a.ContentHash), accessRequired, previewCapability(a.MIMEType)).Scan(&saved.ID, &saved.ConversationID, &saved.MessageID, &saved.ExternalAttachmentID, &saved.FileName, &saved.MIMEType, &saved.SizeBytes, &saved.ObjectRef, &saved.ContentHash, &saved.ContentVersion, &saved.ContentStatus, &saved.AccessScope, &saved.ContentAccessRequired, &saved.PreviewCapability, &saved.LastError, &saved.CreatedAt, &saved.UpdatedAt)
+		sensitiveAttachment := privacy.SensitiveAttachmentName(a.FileName)
+		accessRequired = accessRequired || sensitiveAttachment
+		err = tx.QueryRow(ctx, `INSERT INTO knowledge.attachments (id,conversation_ingestion_id,message_id,external_attachment_id,file_name,mime_type,size_bytes,content_hash,access_scope,content_access_required,preview_capability,sensitive,classification_status) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'conversation_members',$9,$10,$11,'succeeded') ON CONFLICT (conversation_ingestion_id,external_attachment_id) DO NOTHING RETURNING id::text,conversation_ingestion_id::text,COALESCE(message_id::text,''),external_attachment_id,file_name,COALESCE(mime_type,''),size_bytes,COALESCE(object_ref,''),COALESCE(content_hash,''),content_version,content_status,access_scope,content_access_required,COALESCE(preview_capability,''),COALESCE(last_error,''),created_at,updated_at,sensitive,classification_status`, attachmentID, conversationID, messageID, a.ExternalAttachmentID, a.FileName, nilString(a.MIMEType), a.SizeBytes, nilString(a.ContentHash), accessRequired, previewCapability(a.MIMEType), sensitiveAttachment).Scan(&saved.ID, &saved.ConversationID, &saved.MessageID, &saved.ExternalAttachmentID, &saved.FileName, &saved.MIMEType, &saved.SizeBytes, &saved.ObjectRef, &saved.ContentHash, &saved.ContentVersion, &saved.ContentStatus, &saved.AccessScope, &saved.ContentAccessRequired, &saved.PreviewCapability, &saved.LastError, &saved.CreatedAt, &saved.UpdatedAt, &saved.Sensitive, &saved.ClassificationStatus)
 		if errors.Is(err, pgx.ErrNoRows) {
 			inserted = false
-			err = tx.QueryRow(ctx, `SELECT id::text,conversation_ingestion_id::text,COALESCE(message_id::text,''),external_attachment_id,file_name,COALESCE(mime_type,''),size_bytes,COALESCE(object_ref,''),COALESCE(content_hash,''),content_version,content_status,access_scope,content_access_required,COALESCE(preview_capability,''),COALESCE(last_error,''),created_at,updated_at FROM knowledge.attachments WHERE conversation_ingestion_id=$1 AND external_attachment_id=$2`, conversationID, a.ExternalAttachmentID).Scan(&saved.ID, &saved.ConversationID, &saved.MessageID, &saved.ExternalAttachmentID, &saved.FileName, &saved.MIMEType, &saved.SizeBytes, &saved.ObjectRef, &saved.ContentHash, &saved.ContentVersion, &saved.ContentStatus, &saved.AccessScope, &saved.ContentAccessRequired, &saved.PreviewCapability, &saved.LastError, &saved.CreatedAt, &saved.UpdatedAt)
+			err = tx.QueryRow(ctx, `SELECT `+attachmentColumns+` FROM knowledge.attachments WHERE conversation_ingestion_id=$1 AND external_attachment_id=$2`, conversationID, a.ExternalAttachmentID).Scan(&saved.ID, &saved.ConversationID, &saved.MessageID, &saved.ExternalAttachmentID, &saved.FileName, &saved.MIMEType, &saved.SizeBytes, &saved.ObjectRef, &saved.ContentHash, &saved.ContentVersion, &saved.ContentStatus, &saved.AccessScope, &saved.ContentAccessRequired, &saved.PreviewCapability, &saved.LastError, &saved.CreatedAt, &saved.UpdatedAt, &saved.Sensitive, &saved.ClassificationStatus)
 		}
 		if err != nil {
 			return nil, dbError(err)
@@ -922,9 +929,9 @@ func (s *PostgresStore) IngestMessage(ctx context.Context, input IngestMessageIn
 			}
 		}
 	}
-	if !duplicate && scope == "organization" && input.MessageType == "text" {
-		payload, _ := json.Marshal(map[string]any{"message_id": messageID, "content_version": 1})
-		_, err = tx.Exec(ctx, `INSERT INTO knowledge.outbox_events (id,event_type,trace_id,organization_id,payload) VALUES ($1,'privacy.scan.requested',$2,$3,$4)`, uuid.NewString(), traceID, org, payload)
+	if !duplicate {
+		payload, _ := json.Marshal(map[string]any{"resource_type": "message", "resource_id": messageID, "content_version": 1, "sensitive": sensitive, "content_access_required": sensitive})
+		_, err = tx.Exec(ctx, `INSERT INTO knowledge.outbox_events (id,event_type,trace_id,organization_id,payload) VALUES ($1,'message.ready',$2,$3,$4)`, uuid.NewString(), traceID, nilString(org), payload)
 		if err != nil {
 			return nil, dbError(err)
 		}
@@ -933,7 +940,7 @@ func (s *PostgresStore) IngestMessage(ctx context.Context, input IngestMessageIn
 		return nil, dbError(err)
 	}
 	now := time.Now().UTC()
-	message := domain.Message{ID: messageID, ConversationID: conversationID, ExternalMessageID: input.ExternalMessageID, SenderDisplayName: input.SenderDisplayName, MessageType: input.MessageType, Content: input.Content, ContentHash: input.ContentHash, ContentVersion: 1, SentAt: input.SentAt, LifecycleStatus: "active", VectorStatus: "pending", Attachments: attachments, CreatedAt: now}
+	message := domain.Message{ID: messageID, ConversationID: conversationID, ExternalMessageID: input.ExternalMessageID, SenderDisplayName: input.SenderDisplayName, MessageType: input.MessageType, Content: displayContent, Sensitive: sensitive, ClassificationStatus: "succeeded", ContentHash: input.ContentHash, ContentVersion: 1, SentAt: input.SentAt, LifecycleStatus: "active", VectorStatus: "pending", Attachments: attachments, CreatedAt: now}
 	return &IngestResult{Message: message, Attachments: attachments, Duplicate: duplicate, CursorUpdated: false}, nil
 }
 
@@ -1029,11 +1036,11 @@ func (s *PostgresStore) AdvanceCursor(ctx context.Context, collectorID, cursor s
 	return dbError(tx.Commit(ctx))
 }
 
-const attachmentColumns = `id::text,conversation_ingestion_id::text,COALESCE(message_id::text,''),external_attachment_id,file_name,COALESCE(mime_type,''),size_bytes,COALESCE(object_ref,''),COALESCE(content_hash,''),content_version,content_status,access_scope,content_access_required,COALESCE(preview_capability,''),COALESCE(last_error,''),created_at,updated_at`
+const attachmentColumns = `id::text,conversation_ingestion_id::text,COALESCE(message_id::text,''),external_attachment_id,file_name,COALESCE(mime_type,''),size_bytes,COALESCE(object_ref,''),COALESCE(content_hash,''),content_version,content_status,access_scope,content_access_required,COALESCE(preview_capability,''),COALESCE(last_error,''),created_at,updated_at,sensitive,classification_status`
 
 func scanAttachment(row rowScanner) (*domain.Attachment, error) {
 	var a domain.Attachment
-	err := row.Scan(&a.ID, &a.ConversationID, &a.MessageID, &a.ExternalAttachmentID, &a.FileName, &a.MIMEType, &a.SizeBytes, &a.ObjectRef, &a.ContentHash, &a.ContentVersion, &a.ContentStatus, &a.AccessScope, &a.ContentAccessRequired, &a.PreviewCapability, &a.LastError, &a.CreatedAt, &a.UpdatedAt)
+	err := row.Scan(&a.ID, &a.ConversationID, &a.MessageID, &a.ExternalAttachmentID, &a.FileName, &a.MIMEType, &a.SizeBytes, &a.ObjectRef, &a.ContentHash, &a.ContentVersion, &a.ContentStatus, &a.AccessScope, &a.ContentAccessRequired, &a.PreviewCapability, &a.LastError, &a.CreatedAt, &a.UpdatedAt, &a.Sensitive, &a.ClassificationStatus)
 	return &a, err
 }
 func (s *PostgresStore) GetAttachment(ctx context.Context, id string) (*domain.Attachment, error) {
@@ -1044,11 +1051,24 @@ func (s *PostgresStore) GetAttachment(ctx context.Context, id string) (*domain.A
 	return a, dbError(err)
 }
 func (s *PostgresStore) CompleteAttachment(ctx context.Context, id, objectRef, contentHash string, size int64, status string) (*domain.Attachment, error) {
-	a, err := scanAttachment(s.pool.QueryRow(ctx, `UPDATE knowledge.attachments SET object_ref=$2,content_hash=$3,size_bytes=$4,content_status=$5,last_error=NULL,updated_at=now() WHERE id=$1 AND (content_hash IS NULL OR content_hash=$3) RETURNING `+attachmentColumns, id, objectRef, contentHash, size, status))
+	tx, err := s.pool.Begin(ctx)
+	if err != nil { return nil, dbError(err) }
+	defer tx.Rollback(ctx)
+	a, err := scanAttachment(tx.QueryRow(ctx, `UPDATE knowledge.attachments SET object_ref=$2,content_hash=$3,size_bytes=$4,content_status=$5,last_error=NULL,updated_at=now() WHERE id=$1 AND content_status<>'ready' AND (content_hash IS NULL OR content_hash=$3) RETURNING `+attachmentColumns, id, objectRef, contentHash, size, status))
 	if errors.Is(err, pgx.ErrNoRows) {
+		existing, lookupErr := scanAttachment(tx.QueryRow(ctx, `SELECT `+attachmentColumns+` FROM knowledge.attachments WHERE id=$1`, id))
+		if lookupErr == nil && existing.ContentStatus == "ready" && strings.EqualFold(existing.ContentHash, contentHash) { return existing, nil }
 		return nil, apperror.New("attachment_hash_mismatch", "attachment hash does not match metadata", 400, false)
 	}
-	return a, dbError(err)
+	if err != nil { return nil, dbError(err) }
+	if status == "ready" {
+		var org string
+		if lookupErr := tx.QueryRow(ctx, `SELECT COALESCE(organization_id::text,'') FROM knowledge.conversation_ingestions WHERE id=$1`, a.ConversationID).Scan(&org); lookupErr != nil { return nil, dbError(lookupErr) }
+		payload, _ := json.Marshal(map[string]any{"resource_type": "attachment", "resource_id": a.ID, "content_version": a.ContentVersion, "sensitive": a.Sensitive, "content_access_required": a.ContentAccessRequired})
+		if _, outboxErr := tx.Exec(ctx, `INSERT INTO knowledge.outbox_events (id,event_type,trace_id,organization_id,payload) VALUES ($1,'attachment.ready',$2,$3,$4)`, uuid.NewString(), uuid.NewString(), nilString(org), payload); outboxErr != nil { return nil, dbError(outboxErr) }
+	}
+	if err := tx.Commit(ctx); err != nil { return nil, dbError(err) }
+	return a, nil
 }
 func (s *PostgresStore) FailAttachment(ctx context.Context, id, message string) error {
 	_, err := s.pool.Exec(ctx, `UPDATE knowledge.attachments SET content_status='failed',last_error=$2,updated_at=now() WHERE id=$1`, id, message)
@@ -1070,7 +1090,7 @@ func (s *PostgresStore) ListMessages(ctx context.Context, conversationID string,
 			return nil, dbError(lookupErr)
 		}
 	}
-	query := `SELECT id::text,conversation_ingestion_id::text,external_message_id,COALESCE(sender_identity_id::text,''),COALESCE(sender_display_name,''),message_type,COALESCE(normalized_content_ref,''),COALESCE(normalized_content,''),content_hash,content_version,sent_at,lifecycle_status,vector_status,created_at FROM knowledge.messages WHERE conversation_ingestion_id=$1`
+	query := `SELECT id::text,conversation_ingestion_id::text,external_message_id,COALESCE(sender_identity_id::text,''),COALESCE(sender_display_name,''),message_type,COALESCE(normalized_content_ref,''),COALESCE(normalized_content,''),content_hash,content_version,sent_at,lifecycle_status,vector_status,created_at,sensitive,classification_status FROM knowledge.messages WHERE conversation_ingestion_id=$1`
 	args := []any{conversationID}
 	if !cutoff.IsZero() {
 		if cutoffID != "" {
@@ -1091,7 +1111,7 @@ func (s *PostgresStore) ListMessages(ctx context.Context, conversationID string,
 	out := []domain.Message{}
 	for rows.Next() {
 		var m domain.Message
-		if err := rows.Scan(&m.ID, &m.ConversationID, &m.ExternalMessageID, &m.SenderIdentityID, &m.SenderDisplayName, &m.MessageType, &m.NormalizedContentRef, &m.Content, &m.ContentHash, &m.ContentVersion, &m.SentAt, &m.LifecycleStatus, &m.VectorStatus, &m.CreatedAt); err != nil {
+		if err := rows.Scan(&m.ID, &m.ConversationID, &m.ExternalMessageID, &m.SenderIdentityID, &m.SenderDisplayName, &m.MessageType, &m.NormalizedContentRef, &m.Content, &m.ContentHash, &m.ContentVersion, &m.SentAt, &m.LifecycleStatus, &m.VectorStatus, &m.CreatedAt, &m.Sensitive, &m.ClassificationStatus); err != nil {
 			return nil, dbError(err)
 		}
 		attachments, attachmentErr := s.ListAttachmentsForMessage(ctx, m.ID)

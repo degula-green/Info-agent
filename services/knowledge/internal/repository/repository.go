@@ -12,6 +12,7 @@ import (
 
 	"info-agent/knowledge/internal/apperror"
 	"info-agent/knowledge/internal/domain"
+	"info-agent/knowledge/internal/privacy"
 )
 
 type AttachInput struct {
@@ -101,6 +102,24 @@ func validateIngestInput(input IngestMessageInput) error {
 	}
 	return nil
 }
+
+// discardMessage is deliberately deterministic: platform notifications,
+// empty messages and unresolved placeholders never become business records.
+func discardMessage(input IngestMessageInput) bool {
+	if input.MessageType == "system" {
+		return true
+	}
+	if strings.TrimSpace(input.Content) == "" && len(input.Attachments) == 0 {
+		return true
+	}
+	content := strings.TrimSpace(input.Content)
+	if len(input.Attachments) == 0 && (content == "[无法解析]" || content == "[表情]" || content == "[动画表情]" || content == "<msg>" ) {
+		return true
+	}
+	return false
+}
+
+func classifyMessage(input IngestMessageInput) (bool, string) { return privacy.Scan(input.Content) }
 
 // CalculatePayloadHash defines the cross-language business payload contract.
 // It excludes payload_hash itself, includes every other message field (including
@@ -198,6 +217,7 @@ type IngestResult struct {
 	Attachments   []domain.Attachment    `json:"attachments"`
 	Duplicate     bool                   `json:"duplicate"`
 	CursorUpdated bool                   `json:"cursor_updated"`
+	Discarded     bool                   `json:"discarded"`
 }
 
 type AgentPairingInput struct {

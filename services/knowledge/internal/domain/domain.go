@@ -216,6 +216,8 @@ type Message struct {
 	SenderDisplayName    string       `json:"sender_display_name,omitempty"`
 	MessageType          string       `json:"message_type"`
 	Content              string       `json:"content,omitempty"`
+	Sensitive            bool         `json:"sensitive"`
+	ClassificationStatus string       `json:"classification_status,omitempty"`
 	NormalizedContentRef string       `json:"normalized_content_ref,omitempty"`
 	ContentHash          string       `json:"content_hash"`
 	ContentVersion       int          `json:"content_version"`
@@ -250,6 +252,8 @@ type Attachment struct {
 	ContentStatus         string    `json:"content_status"`
 	AccessScope           string    `json:"access_scope"`
 	ContentAccessRequired bool      `json:"content_access_required"`
+	Sensitive             bool      `json:"sensitive"`
+	ClassificationStatus  string    `json:"classification_status,omitempty"`
 	PreviewCapability     string    `json:"preview_capability,omitempty"`
 	LastError             string    `json:"last_error,omitempty"`
 	CreatedAt             time.Time `json:"created_at"`

@@ -238,6 +238,19 @@ func TestMemoryRejectsBadPayloadHashAndUnverifiedCursor(t *testing.T) {
 	}
 }
 
+func TestMemoryFiltersSystemAndRedactsSensitiveContent(t *testing.T) {
+	repo := NewMemoryStore(); ctx := context.Background(); now := time.Now().UTC()
+	if _, err := repo.SaveConnector(ctx, domain.ConnectorAccount{ID: "filter-account", OwnerUserID: "u1", Platform: domain.PlatformWechat, ExternalAccountID: "wxid", Status: domain.ConnectorActive}); err != nil { t.Fatal(err) }
+	conversation, err := repo.AttachConversation(ctx, AttachInput{UserID: "u1", Platform: domain.PlatformWechat, ExternalConversationID: "filter-chat", ConversationType: "group", OrganizationID: "org-1", PrimaryConnectorID: "filter-account", RequestedStartAt: &now})
+	if err != nil { t.Fatal(err) }
+	collector := conversation.Collectors[0]
+	makeInput := func(id, typ, content string) IngestMessageInput { in := IngestMessageInput{CollectorID: collector.ID, ExternalConversationID: "filter-chat", ExternalMessageID: id, MessageType: typ, Content: content, ContentHash: hashForTest(content), SentAt: now, Cursor: id}; in.PayloadHash, _ = CalculatePayloadHash(in); return in }
+	filtered, err := repo.IngestMessage(ctx, makeInput("system-1", "system", "joined")); if err != nil || !filtered.Discarded { t.Fatalf("system message was not filtered: %+v %v", filtered, err) }
+	saved, err := repo.IngestMessage(ctx, makeInput("secret-1", "text", "password=abc123")); if err != nil { t.Fatal(err) }
+	if !saved.Message.Sensitive || saved.Message.Content == "password=abc123" { t.Fatalf("secret was exposed: %+v", saved.Message) }
+	events, _ := repo.GetOutbox(ctx, 10); found := false; for _, event := range events { if event.EventType == "message.ready" { found = true } }; if !found { t.Fatal("message.ready event missing") }
+}
+
 func TestMemoryListMessagesHonorsBeforeCursor(t *testing.T) {
 	repo := NewMemoryStore()
 	ctx := context.Background()
