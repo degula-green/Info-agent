@@ -236,8 +236,6 @@ onMounted(async () => { await loadPage(); await handleOAuthCallback() })
 </script>
 
 <style lang="less" scoped>
-.wechat-pairing-status { display: grid; gap: 6px; margin-top: 14px; padding: 12px; border: 1px solid var(--td-component-stroke); border-radius: 8px; color: var(--td-text-color-secondary); font-size: 12px; }.wechat-pairing-status strong { color: var(--td-brand-color); font-size: 20px; letter-spacing: 2px; }
-.connector-devices { display: grid; flex: 1 0 calc(100% - 52px); gap: 4px; margin-left: 52px; }.connector-device { display: flex; align-items: center; justify-content: space-between; gap: 12px; color: var(--td-text-color-secondary); font-size: 12px; }
 .profile-page {
   width: min(920px, 100%);
   margin: 0 auto;
@@ -598,15 +596,6 @@ onMounted(async () => { await loadPage(); await handleOAuthCallback() })
     margin-left: 52px;
 		height: 44px;
   }
-
-	.connector-devices {
-		flex-basis: 100%;
-		margin-left: 52px;
-	}
-
-	.connector-device > .t-button {
-		min-height: 44px;
-	}
 
   .profile-actions {
     flex-wrap: wrap;

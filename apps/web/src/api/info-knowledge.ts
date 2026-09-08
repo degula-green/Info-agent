@@ -16,7 +16,6 @@ export interface ConnectorDTO {
   last_error?: string | null
   agent_online?: boolean
   last_heartbeat_at?: string | null
-	devices?: Array<{ device_id: string; expires_at: string; last_seen_at?: string | null; agent_version?: string }>
 }
 export type Connector = ConnectorDTO
 
@@ -151,21 +150,10 @@ export async function getWechatConversations() { return knowledgeRequest<Record<
 export async function getWechatConfig() { return knowledgeRequest<Record<string, any>>('/connectors/wechat/config') }
 export async function saveWechatConfig(value: Record<string, any>) { return knowledgeRequest<Record<string, any>>('/connectors/wechat/config', { method: 'PUT', body: JSON.stringify(value) }) }
 
-export async function createWechatPairing(wxid = '') {
-  return knowledgeRequest<{ pairing_id: string; pairing_code: string; expires_at: string; status: string; failure_code?: string }>('/connectors/wechat/pair', { method: 'POST', body: JSON.stringify({ wxid }) })
-}
-
-export async function getWechatPairing(pairingID: string) {
-  return knowledgeRequest<{ pairing_id: string; status: string; expires_at: string; device_id?: string; connector_id?: string; failure_code?: string }>(`/connectors/wechat/pair/${encodeURIComponent(pairingID)}`)
-}
-
 export async function unbindConnector(platform: ConnectorPlatform) {
   return knowledgeRequest<{ status: string }>(`/connectors/${encodeURIComponent(platform)}`, { method: 'DELETE' })
 }
 
-export async function revokeWechatDevice(deviceID: string) {
-	return knowledgeRequest<{ status: string; device_id: string }>(`/connectors/wechat/devices/${encodeURIComponent(deviceID)}`, { method: 'DELETE' })
-}
 
 export async function discoverConversations(platform: ConnectorPlatform) {
   return knowledgeRequest<DiscoveryDTO>(`/connectors/${encodeURIComponent(platform)}/conversations/discover`)

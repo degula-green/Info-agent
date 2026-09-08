@@ -1,1 +1,0 @@
-wechatauto-replica==1.1.10.2

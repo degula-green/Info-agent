@@ -1,6 +1,6 @@
 # 架构说明
 
-当前项目采用三个业务微服务，并通过 Web 和 Nginx 对外提供能力：
+当前项目采用三个业务微服务、一个本机采集服务，并通过 Web 和 Nginx 对外提供能力：
 
 ```text
 apps/web                   Vue 3 + TypeScript 前端
@@ -8,10 +8,10 @@ gateway/nginx              统一入口与路径转发
 services/core              Go + Gin IAM 与权限服务
 services/knowledge         Go + Gin 采集与知识管理服务
 services/rag               Python + FastAPI RAG 服务
-agents/wechat-collector    本地 Python 个人微信采集端
+services/collectors/wechat 本机 Python 个人微信采集服务
 ```
 
-`agents/wechat-collector` 属于模块二的边缘采集组件，不是第四个业务微服务。它只在用户电脑上读取微信数据并调用 Knowledge Service，不直接访问 PostgreSQL、Redis、MinIO、OpenFGA 或 Elasticsearch。
+`services/collectors/wechat` 属于模块二的本机采集组件，不是业务微服务。它运行在用户电脑上读取微信数据库，并调用 Knowledge Service 的受控内部接口，不直接访问 PostgreSQL、Redis、MinIO、OpenFGA 或 Elasticsearch。应用默认按单机单实例运行；如果 Knowledge 等服务部署到远程环境，Collector 仍需在用户本机运行并通过网络访问 Knowledge。
 
 请求路径：
 

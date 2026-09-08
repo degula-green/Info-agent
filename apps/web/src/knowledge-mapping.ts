@@ -43,15 +43,6 @@ export function discoveryAction(value: { attachedConversationId?: string; curren
   return value.attachedConversationId ? 'join' : 'attach'
 }
 
-export function pairingStatusLabel(status: string, failureCode = ''): string {
-  if (status === 'pending') return '等待 Agent 配对'
-  if (status === 'consumed') return '已完成配对'
-  if (status === 'expired') return '已过期，请重新创建配对码'
-  if (status === 'failed' && failureCode === 'wechat_path_invalid') return '本机微信数据库路径无效，请检查 Agent 配置'
-  if (status === 'failed') return 'Agent 配对失败，请检查本机配置'
-  return status || '未知状态'
-}
-
 export function isHistoryStartAllowed(value: string | Date | null | undefined, now = new Date(), maxDays = 7): boolean {
   if (!value) return true
   const candidate = value instanceof Date ? value : new Date(value)

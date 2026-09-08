@@ -6,7 +6,6 @@ import {
   discoveryAction,
   mapAttachmentStatus,
   mapCollectionStatus,
-  pairingStatusLabel,
   oauthCallbackNotice,
   searchLoadedSources,
 } from '../src/knowledge-mapping.ts'
@@ -19,12 +18,7 @@ test('maps connector conversation statuses without collapsing detached into miss
   assert.equal(mapCollectionStatus('unknown'), 'not_started')
 })
 
-test('maps pairing failure and attachment processing states', () => {
-  assert.equal(pairingStatusLabel('pending'), '等待 Agent 配对')
-  assert.equal(pairingStatusLabel('consumed'), '已完成配对')
-  assert.equal(pairingStatusLabel('expired'), '已过期，请重新创建配对码')
-  assert.equal(pairingStatusLabel('failed', 'wechat_path_invalid'), '本机微信数据库路径无效，请检查 Agent 配置')
-  assert.equal(pairingStatusLabel('failed', 'other'), 'Agent 配对失败，请检查本机配置')
+test('maps attachment processing states', () => {
   assert.equal(mapAttachmentStatus('pending'), 'processing')
   assert.equal(mapAttachmentStatus('ready'), 'completed')
   assert.equal(mapAttachmentStatus('failed'), 'failed')

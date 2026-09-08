@@ -10,8 +10,8 @@ info-agent/
 │   ├── core/                # Go + Gin IAM 与权限服务
 │   ├── knowledge/           # Go + Gin 采集与知识管理服务
 │   └── rag/                 # Python + FastAPI RAG 服务
-├── agents/
-│   └── wechat-collector/    # 本地 Python 个人微信采集端
+├── services/collectors/
+│   └── wechat/              # 本机 Python 个人微信采集服务
 ├── gateway/
 │   └── nginx/               # Nginx 网关配置
 ├── db/
@@ -45,8 +45,8 @@ Nginx 网关 :80
 - `services/core`：Go + Gin，负责用户、组织、身份认证和权限。
 - `services/knowledge`：Go + Gin，负责连接器编排、消息采集、会话、附件和知识对象管理。
 - `services/rag`：Python + FastAPI，负责文本处理、Embedding、Elasticsearch 检索和 AI 问答。
-- `agents/wechat-collector`：在用户电脑上运行的 Python 采集端，未来负责读取个人微信数据并上报 Knowledge Service，不独立拥有业务数据。
-- 三个服务可以独立部署，通过 Nginx 按路径转发；微信 Agent 不加入服务器端部署。
+- `services/collectors/wechat`：在用户电脑上运行的 Python 采集服务，读取本机微信数据库并通过 Knowledge Service 受控接口上报，不独立拥有业务数据。
+- Core、Knowledge、RAG、Web 与本机 WeChat Collector 由启动脚本统一拉起，默认按单机单实例运行；Nginx 负责统一入口和路径转发。WeChat Collector 必须运行在能读取用户微信数据库的本机环境中。
 
 ### 基础设施
 
