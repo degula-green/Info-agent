@@ -12,6 +12,7 @@ import (
 
 	"info-agent/knowledge/internal/apperror"
 	"info-agent/knowledge/internal/domain"
+	"info-agent/knowledge/internal/privacy"
 )
 
 type AttachInput struct {
@@ -37,18 +38,21 @@ type CollectorInput struct {
 }
 
 type IngestMessageInput struct {
-	CollectorID            string            `json:"collector_id"`
-	ExternalConversationID string            `json:"external_conversation_id"`
-	ExternalMessageID      string            `json:"external_message_id"`
-	PayloadHash            string            `json:"payload_hash"`
-	SenderExternalID       string            `json:"sender_external_id"`
-	SenderDisplayName      string            `json:"sender_display_name"`
-	MessageType            string            `json:"message_type"`
-	Content                string            `json:"content"`
-	ContentHash            string            `json:"content_hash"`
-	SentAt                 time.Time         `json:"sent_at"`
-	Cursor                 string            `json:"cursor"`
-	Attachments            []AttachmentInput `json:"attachments"`
+	CollectorID            string `json:"collector_id"`
+	ExternalConversationID string `json:"external_conversation_id"`
+	ExternalMessageID      string `json:"external_message_id"`
+	PayloadHash            string `json:"payload_hash"`
+	SenderExternalID       string `json:"sender_external_id"`
+	SenderDisplayName      string `json:"sender_display_name"`
+	MessageType            string `json:"message_type"`
+	Content                string `json:"content"`
+	// PrivateContentCiphertext is populated by the service for private chats.
+	// It is excluded from provider payload hashing and API JSON.
+	PrivateContentCiphertext string            `json:"-"`
+	ContentHash              string            `json:"content_hash"`
+	SentAt                   time.Time         `json:"sent_at"`
+	Cursor                   string            `json:"cursor"`
+	Attachments              []AttachmentInput `json:"attachments"`
 }
 
 type AttachmentInput struct {
@@ -100,6 +104,10 @@ func validateIngestInput(input IngestMessageInput) error {
 		}
 	}
 	return nil
+}
+
+func discardMessage(input IngestMessageInput) bool {
+	return privacy.IsDiscardable(input.MessageType, input.Content, len(input.Attachments) > 0)
 }
 
 // CalculatePayloadHash defines the cross-language business payload contract.
@@ -198,6 +206,44 @@ type IngestResult struct {
 	Attachments   []domain.Attachment    `json:"attachments"`
 	Duplicate     bool                   `json:"duplicate"`
 	CursorUpdated bool                   `json:"cursor_updated"`
+	Discarded     bool                   `json:"discarded"`
+}
+
+type PendingMessage struct {
+	Message         domain.Message
+	OriginalContent string
+}
+
+type PrivateShareInput struct {
+	RequesterUserID       string
+	RequestID             string
+	TraceID               string
+	PrivateConversationID string
+	OrganizationID        string
+	MessageIDs            []string
+	AttachmentIDs         []string
+	Now                   time.Time
+}
+
+type PrivateShareResult struct {
+	RequestID             string `json:"request_id"`
+	ShareBatchID          string `json:"share_batch_id"`
+	PrivateConversationID string `json:"private_conversation_id"`
+	OrganizationID        string `json:"organization_id"`
+	Status                string `json:"status"`
+	SharedMessageCount    int    `json:"shared_message_count"`
+	SharedAttachmentCount int    `json:"shared_attachment_count"`
+}
+
+type PrivateAccessRequestInput struct {
+	RequesterUserID  string    `json:"-"`
+	ShareReferenceID string    `json:"share_reference_id"`
+	ResourceID       string    `json:"resource_id"`
+	ResourceType     string    `json:"resource_type"`
+	RequestedAction  string    `json:"requested_action"`
+	Reason           string    `json:"reason,omitempty"`
+	TraceID          string    `json:"trace_id,omitempty"`
+	Now              time.Time `json:"-"`
 }
 
 type AgentPairingInput struct {
@@ -271,6 +317,11 @@ type Repository interface {
 	SetConversationStatus(ctx context.Context, conversationID, status, reason string) error
 
 	IngestMessage(ctx context.Context, input IngestMessageInput) (*IngestResult, error)
+	ListPendingMessages(ctx context.Context, limit int) ([]PendingMessage, error)
+	CompleteMessageClassification(ctx context.Context, messageID, displayContent string, sensitive bool) error
+	SharePrivateResources(ctx context.Context, input PrivateShareInput) (*PrivateShareResult, error)
+	CreatePrivateAccessRequest(ctx context.Context, input PrivateAccessRequestInput) (*domain.PrivateAccessRequest, error)
+	ReviewPrivateAccessRequest(ctx context.Context, requestID, reviewerUserID, status, note string, now time.Time) (*domain.PrivateAccessRequest, error)
 	Heartbeat(ctx context.Context, collectorID string, now time.Time) (*domain.Collector, error)
 	RecordCollectorFailure(ctx context.Context, collectorID, lastError string, nextPollAt, now time.Time) error
 	RecordCursorReceipt(ctx context.Context, collectorID, cursor string, now time.Time) error

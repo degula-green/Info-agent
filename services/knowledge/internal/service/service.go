@@ -18,10 +18,12 @@ import (
 	"info-agent/knowledge/internal/apperror"
 	"info-agent/knowledge/internal/config"
 	"info-agent/knowledge/internal/coreclient"
+	knowledgecrypto "info-agent/knowledge/internal/crypto"
 	"info-agent/knowledge/internal/domain"
 	"info-agent/knowledge/internal/kv"
 	"info-agent/knowledge/internal/objectstore"
 	"info-agent/knowledge/internal/platform"
+	"info-agent/knowledge/internal/privacy"
 	"info-agent/knowledge/internal/repository"
 	"info-agent/knowledge/internal/trace"
 	"info-agent/knowledge/internal/vault"
@@ -36,6 +38,7 @@ type Service struct {
 	Feishu  platform.OAuthProvider
 	Core    *coreclient.Client
 	Config  config.Config
+	Keyring *knowledgecrypto.Keyring
 	Now     func() time.Time
 }
 
@@ -285,7 +288,11 @@ type oauthCompletion struct {
 }
 
 func New(repo repository.Repository, store kv.Store, vaultStore *vault.Vault, objects objectstore.Store, feishu platform.OAuthProvider, core *coreclient.Client, cfg config.Config) *Service {
-	return &Service{Repo: repo, KV: store, Vault: vaultStore, Objects: objects, Feishu: feishu, Core: core, Config: cfg, Now: func() time.Time { return time.Now().UTC() }}
+	return NewWithKeyring(repo, store, vaultStore, objects, feishu, core, cfg, nil)
+}
+
+func NewWithKeyring(repo repository.Repository, store kv.Store, vaultStore *vault.Vault, objects objectstore.Store, feishu platform.OAuthProvider, core *coreclient.Client, cfg config.Config, keyring *knowledgecrypto.Keyring) *Service {
+	return &Service{Repo: repo, KV: store, Vault: vaultStore, Objects: objects, Feishu: feishu, Core: core, Config: cfg, Keyring: keyring, Now: func() time.Time { return time.Now().UTC() }}
 }
 
 func (s *Service) ListConnectors(ctx context.Context, userID string) ([]domain.ConnectorView, error) {
@@ -1070,7 +1077,86 @@ func (s *Service) IngestMessage(ctx context.Context, input repository.IngestMess
 	if len(input.Content) > 2*1024*1024 {
 		return nil, apperror.New("message_too_large", "message content is too large", 413, false)
 	}
+	collector, err := s.Repo.GetCollector(ctx, input.CollectorID)
+	if err != nil {
+		return nil, err
+	}
+	conversation, err := s.Repo.GetConversation(ctx, collector.ConversationID)
+	if err != nil {
+		return nil, err
+	}
+	if conversation.IngestionScope == "private" && strings.TrimSpace(input.Content) != "" {
+		if s.Keyring == nil {
+			return nil, apperror.New("private_content_encryption_unavailable", "private message encryption is not configured", 503, false)
+		}
+		sealed, encryptErr := s.Keyring.Encrypt([]byte(input.Content), privateContentAAD(input.ExternalMessageID))
+		if encryptErr != nil {
+			return nil, apperror.New("private_content_encryption_failed", "private message encryption failed", 503, true)
+		}
+		input.PrivateContentCiphertext = string(sealed)
+	}
 	return s.Repo.IngestMessage(ctx, input)
+}
+
+func (s *Service) ProcessPrivacy(ctx context.Context) error {
+	pending, err := s.Repo.ListPendingMessages(ctx, 100)
+	if err != nil {
+		return err
+	}
+	for _, item := range pending {
+		original := item.OriginalContent
+		if s.Keyring != nil {
+			if plain, _, decryptErr := s.Keyring.Decrypt([]byte(original), privateContentAAD(item.Message.ExternalMessageID)); decryptErr == nil {
+				original = string(plain)
+			} else if strings.HasPrefix(strings.TrimSpace(original), "{\"key_version\"") {
+				return apperror.New("private_content_decryption_failed", "private message decryption failed", 503, true)
+			}
+		}
+		sensitive, display := privacy.Scan(original)
+		if err := s.Repo.CompleteMessageClassification(ctx, item.Message.ID, display, sensitive); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func privateContentAAD(externalMessageID string) string {
+	return "knowledge:private-message:" + strings.TrimSpace(externalMessageID)
+}
+
+func (s *Service) SharePrivateResources(ctx context.Context, userID string, input repository.PrivateShareInput) (*repository.PrivateShareResult, error) {
+	input.RequesterUserID = userID
+	conversation, err := s.Repo.GetConversation(ctx, input.PrivateConversationID)
+	if err != nil {
+		return nil, err
+	}
+	if conversation.ConversationType != "private" || conversation.OwnerUserID != userID {
+		return nil, apperror.Clone(apperror.ErrForbidden)
+	}
+	account, err := s.GetConnector(ctx, userID, domain.PlatformWechat)
+	if err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(account.DefaultOrganizationID) == "" {
+		return nil, apperror.New("organization_required", "a bound organization is required to share private resources", 400, false)
+	}
+	if err := s.requireOrganizationMember(ctx, userID, account.DefaultOrganizationID); err != nil {
+		return nil, err
+	}
+	input.OrganizationID = account.DefaultOrganizationID
+	input.TraceID = trace.TraceID(ctx)
+	input.Now = s.Now()
+	return s.Repo.SharePrivateResources(ctx, input)
+}
+
+func (s *Service) CreatePrivateAccessRequest(ctx context.Context, userID string, input repository.PrivateAccessRequestInput) (*domain.PrivateAccessRequest, error) {
+	input.RequesterUserID = userID
+	input.Now = s.Now()
+	return s.Repo.CreatePrivateAccessRequest(ctx, input)
+}
+
+func (s *Service) ReviewPrivateAccessRequest(ctx context.Context, userID, requestID, status, note string) (*domain.PrivateAccessRequest, error) {
+	return s.Repo.ReviewPrivateAccessRequest(ctx, requestID, userID, status, note, s.Now())
 }
 func (s *Service) Heartbeat(ctx context.Context, collectorID, version string) (*domain.Collector, error) {
 	now := s.Now()
@@ -1219,7 +1305,7 @@ func (s *Service) OpenAttachment(ctx context.Context, userID, id string) (*domai
 	if _, err := s.GetConversation(ctx, userID, conversation.ID); err != nil {
 		return nil, nil, err
 	}
-	if attachment.ContentAccessRequired {
+	if attachment.ContentAccessRequired && conversation.IngestionScope != "private" {
 		return nil, nil, apperror.New("attachment_content_restricted", "attachment content requires approval", 403, false)
 	}
 	if attachment.ContentStatus != "ready" || attachment.ObjectRef == "" {
@@ -1238,7 +1324,7 @@ func (s *Service) PublishOutbox(ctx context.Context) error {
 		return err
 	}
 	for _, event := range events {
-		if err := s.KV.Publish(ctx, "knowledge:events", event); err != nil {
+		if err := s.KV.Publish(ctx, "knowledge:ready", event); err != nil {
 			return err
 		}
 		now := s.Now()

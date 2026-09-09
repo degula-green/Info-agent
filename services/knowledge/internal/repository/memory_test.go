@@ -238,6 +238,133 @@ func TestMemoryRejectsBadPayloadHashAndUnverifiedCursor(t *testing.T) {
 	}
 }
 
+func TestPrivatePipelineFiltersClassifiesAndSharesExplicitResources(t *testing.T) {
+	repo := NewMemoryStore()
+	ctx := trace.WithIDs(context.Background(), "req-private", "trace-private")
+	now := time.Now().UTC()
+	if _, err := repo.SaveConnector(ctx, domain.ConnectorAccount{ID: "private-account", OwnerUserID: "owner", Platform: domain.PlatformWechat, ExternalAccountID: "wxid", DefaultOrganizationID: "org-1", Status: domain.ConnectorActive}); err != nil {
+		t.Fatal(err)
+	}
+	conversation, err := repo.AttachConversation(ctx, AttachInput{UserID: "owner", Platform: domain.PlatformWechat, ExternalConversationID: "private-chat", ConversationType: "private", RequestedStartAt: &now, PrimaryConnectorID: "private-account"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	collector := conversation.Collectors[0]
+	makeInput := func(id, content string, attachments []AttachmentInput) IngestMessageInput {
+		input := IngestMessageInput{CollectorID: collector.ID, ExternalConversationID: "private-chat", ExternalMessageID: id, MessageType: "text", Content: content, ContentHash: hashForTest(content), SentAt: now, Cursor: id, Attachments: attachments}
+		input.PayloadHash, _ = CalculatePayloadHash(input)
+		return input
+	}
+	filtered, err := repo.IngestMessage(ctx, makeInput("system", "通话通知", nil))
+	if err != nil || !filtered.Discarded {
+		t.Fatalf("system notice was not filtered: %+v %v", filtered, err)
+	}
+	input := makeInput("message-1", "password=secret-value", []AttachmentInput{{ExternalAttachmentID: "attachment-1", FileName: "private-passwords.txt", MIMEType: "text/plain", SizeBytes: 4, ContentHash: hashForTest("data")}})
+	first, err := repo.IngestMessage(ctx, input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Message.Content != "" || first.Message.ClassificationStatus != "pending" || first.Attachments[0].MessageID != "" || first.Attachments[0].AccessScope != "owner_only" || !first.Attachments[0].Sensitive {
+		t.Fatalf("private resource was not protected: %+v", first)
+	}
+	if err := repo.CompleteMessageClassification(ctx, first.Message.ID, "password=[REDACTED]", true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repo.CompleteAttachment(ctx, first.Attachments[0].ID, "attachments/private", hashForTest("data"), 4, "ready"); err != nil {
+		t.Fatal(err)
+	}
+	result, err := repo.SharePrivateResources(ctx, PrivateShareInput{RequesterUserID: "owner", RequestID: "share-1", TraceID: "trace-share", PrivateConversationID: conversation.ID, OrganizationID: "org-1", MessageIDs: []string{first.Message.ID}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != "accepted" || result.SharedMessageCount != 1 || result.SharedAttachmentCount != 0 {
+		t.Fatalf("unexpected message-only share result: %+v", result)
+	}
+	result, err = repo.SharePrivateResources(ctx, PrivateShareInput{RequesterUserID: "owner", RequestID: "share-2", TraceID: "trace-share", PrivateConversationID: conversation.ID, OrganizationID: "org-1", AttachmentIDs: []string{first.Attachments[0].ID}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.SharedMessageCount != 0 || result.SharedAttachmentCount != 1 {
+		t.Fatalf("attachment was not independently shared: %+v", result)
+	}
+	repeated, err := repo.SharePrivateResources(ctx, PrivateShareInput{RequesterUserID: "owner", RequestID: "share-1", TraceID: "trace-share", PrivateConversationID: conversation.ID, OrganizationID: "org-1", MessageIDs: []string{first.Message.ID}})
+	if err != nil || repeated.Status != "already_processed" {
+		t.Fatalf("share request was not idempotent: %+v %v", repeated, err)
+	}
+	if _, err := repo.SharePrivateResources(ctx, PrivateShareInput{RequesterUserID: "intruder", RequestID: "share-3", PrivateConversationID: conversation.ID, OrganizationID: "org-1", MessageIDs: []string{first.Message.ID}}); apperror.From(err).Code != "forbidden" {
+		t.Fatalf("private conversation leaked to another user: %v", err)
+	}
+}
+
+func TestPrivateAccessRequestValidatesShareReferenceAndSensitivity(t *testing.T) {
+	repo := NewMemoryStore()
+	ctx := trace.WithIDs(context.Background(), "req-access", "trace-access")
+	now := time.Now().UTC()
+	if _, err := repo.SaveConnector(ctx, domain.ConnectorAccount{ID: "access-account", OwnerUserID: "owner", Platform: domain.PlatformWechat, ExternalAccountID: "wxid-access", DefaultOrganizationID: "org-1", Status: domain.ConnectorActive}); err != nil {
+		t.Fatal(err)
+	}
+	conversation, err := repo.AttachConversation(ctx, AttachInput{UserID: "owner", Platform: domain.PlatformWechat, ExternalConversationID: "access-chat", ConversationType: "private", RequestedStartAt: &now, PrimaryConnectorID: "access-account"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := IngestMessageInput{CollectorID: conversation.Collectors[0].ID, ExternalConversationID: "access-chat", ExternalMessageID: "sensitive-message", MessageType: "text", Content: "token=secret", ContentHash: hashForTest("token=secret"), SentAt: now}
+	input.PayloadHash, _ = CalculatePayloadHash(input)
+	message, err := repo.IngestMessage(ctx, input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.CompleteMessageClassification(ctx, message.Message.ID, "token=[REDACTED]", true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repo.SharePrivateResources(ctx, PrivateShareInput{RequesterUserID: "owner", RequestID: "access-share", TraceID: "trace-access", PrivateConversationID: conversation.ID, OrganizationID: "org-1", MessageIDs: []string{message.Message.ID}}); err != nil {
+		t.Fatal(err)
+	}
+	events, err := repo.GetOutbox(ctx, 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var referenceID string
+	for _, event := range events {
+		if event.EventType == "private.share.ready" {
+			referenceID, _ = event.Payload["share_reference_id"].(string)
+			break
+		}
+	}
+	if referenceID == "" {
+		t.Fatalf("share reference event was not created: %+v", events)
+	}
+	if _, err := repo.CreatePrivateAccessRequest(ctx, PrivateAccessRequestInput{RequesterUserID: "member", ShareReferenceID: referenceID, ResourceID: "wrong-resource", ResourceType: "message", RequestedAction: "view"}); apperror.From(err).Code != "resource_mismatch" {
+		t.Fatalf("expected share/resource mismatch, got %v", err)
+	}
+	request, err := repo.CreatePrivateAccessRequest(ctx, PrivateAccessRequestInput{RequesterUserID: "member", ShareReferenceID: referenceID, ResourceID: message.Message.ID, ResourceType: "message", RequestedAction: "view"})
+	if err != nil || request.Status != "pending" {
+		t.Fatalf("sensitive access request was not created: %+v %v", request, err)
+	}
+
+	plainInput := IngestMessageInput{CollectorID: conversation.Collectors[0].ID, ExternalConversationID: "access-chat", ExternalMessageID: "plain-message", MessageType: "text", Content: "hello", ContentHash: hashForTest("hello"), SentAt: now}
+	plainInput.PayloadHash, _ = CalculatePayloadHash(plainInput)
+	plain, err := repo.IngestMessage(ctx, plainInput)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.CompleteMessageClassification(ctx, plain.Message.ID, "hello", false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repo.SharePrivateResources(ctx, PrivateShareInput{RequesterUserID: "owner", RequestID: "plain-share", TraceID: "trace-access", PrivateConversationID: conversation.ID, OrganizationID: "org-1", MessageIDs: []string{plain.Message.ID}}); err != nil {
+		t.Fatal(err)
+	}
+	events, _ = repo.GetOutbox(ctx, 30)
+	var plainReference string
+	for _, event := range events {
+		if event.EventType == "private.share.ready" && event.Payload["source_private_resource_id"] == plain.Message.ID {
+			plainReference, _ = event.Payload["share_reference_id"].(string)
+		}
+	}
+	if _, err := repo.CreatePrivateAccessRequest(ctx, PrivateAccessRequestInput{RequesterUserID: "member", ShareReferenceID: plainReference, ResourceID: plain.Message.ID, ResourceType: "message", RequestedAction: "view"}); apperror.From(err).Code != "approval_not_required" {
+		t.Fatalf("expected non-sensitive resource to skip approval, got %v", err)
+	}
+}
+
 func TestMemoryListMessagesHonorsBeforeCursor(t *testing.T) {
 	repo := NewMemoryStore()
 	ctx := context.Background()

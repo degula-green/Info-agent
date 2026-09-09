@@ -4,6 +4,8 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
+	"fmt"
 	"sort"
 	"strings"
 	"sync"
@@ -12,6 +14,7 @@ import (
 	"github.com/google/uuid"
 	"info-agent/knowledge/internal/apperror"
 	"info-agent/knowledge/internal/domain"
+	"info-agent/knowledge/internal/privacy"
 	"info-agent/knowledge/internal/trace"
 )
 
@@ -27,12 +30,16 @@ type MemoryStore struct {
 	conversations  map[string]domain.ConversationIngestion
 	collectors     map[string]domain.Collector
 	messages       map[string]domain.Message
+	privateContent map[string]string
 	sources        map[string]domain.MessageSource
 	attachments    map[string]domain.Attachment
 	cursorReceipts map[string]time.Time
 	identities     map[string]ExternalIdentity
 	memberships    map[string]domain.ConversationMembership
 	outbox         map[string]domain.OutboxEvent
+	shareRequests  map[string]domain.PrivateShareRequest
+	shareRefs      map[string]domain.PrivateShareReference
+	accessRequests map[string]domain.PrivateAccessRequest
 	wechatConfigs  map[string]domain.WechatCollectionConfig
 	wechatRuntime  map[string]domain.WechatCollectorRuntime
 }
@@ -48,24 +55,71 @@ func NewMemoryStore() *MemoryStore {
 		connectors: map[string]domain.ConnectorAccount{}, pairings: map[string]domain.Pairing{},
 		devices: map[string]domain.AgentDevice{}, discoveries: map[string]domain.Discovery{},
 		conversations: map[string]domain.ConversationIngestion{}, collectors: map[string]domain.Collector{},
-		messages: map[string]domain.Message{}, sources: map[string]domain.MessageSource{},
+		messages: map[string]domain.Message{}, privateContent: map[string]string{}, sources: map[string]domain.MessageSource{},
 		attachments: map[string]domain.Attachment{}, identities: map[string]ExternalIdentity{},
 		cursorReceipts: map[string]time.Time{},
 		memberships:    map[string]domain.ConversationMembership{},
-		outbox:         map[string]domain.OutboxEvent{},
-		wechatConfigs:  map[string]domain.WechatCollectionConfig{}, wechatRuntime: map[string]domain.WechatCollectorRuntime{},
+		outbox:         map[string]domain.OutboxEvent{}, shareRequests: map[string]domain.PrivateShareRequest{}, shareRefs: map[string]domain.PrivateShareReference{}, accessRequests: map[string]domain.PrivateAccessRequest{},
+		wechatConfigs: map[string]domain.WechatCollectionConfig{}, wechatRuntime: map[string]domain.WechatCollectorRuntime{},
 	}
 }
 
 func (s *MemoryStore) GetWechatConfig(_ context.Context, connectorID string) (*domain.WechatCollectionConfig, error) {
-	s.mu.RLock(); defer s.mu.RUnlock(); v, ok := s.wechatConfigs[connectorID]; if !ok { return &domain.WechatCollectionConfig{ConnectorID: connectorID, SelectedConversations: []string{}, Enabled: true, ListenMode: "whitelist"}, nil }; c := v; c.SelectedConversations = append([]string(nil), v.SelectedConversations...); return &c, nil
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	v, ok := s.wechatConfigs[connectorID]
+	if !ok {
+		return &domain.WechatCollectionConfig{ConnectorID: connectorID, SelectedConversations: []string{}, Enabled: true, ListenMode: "whitelist"}, nil
+	}
+	c := v
+	c.SelectedConversations = append([]string(nil), v.SelectedConversations...)
+	return &c, nil
 }
 func (s *MemoryStore) SaveWechatConfig(_ context.Context, c domain.WechatCollectionConfig) (*domain.WechatCollectionConfig, error) {
-	s.mu.Lock(); defer s.mu.Unlock(); if c.ListenMode == "" { c.ListenMode = "whitelist" }; c.SelectedConversations = append([]string(nil), c.SelectedConversations...); c.UpdatedAt = time.Now().UTC(); s.wechatConfigs[c.ConnectorID] = c; out := c; return &out, nil
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if c.ListenMode == "" {
+		c.ListenMode = "whitelist"
+	}
+	c.SelectedConversations = append([]string(nil), c.SelectedConversations...)
+	c.UpdatedAt = time.Now().UTC()
+	s.wechatConfigs[c.ConnectorID] = c
+	out := c
+	return &out, nil
 }
-func (s *MemoryStore) GetWechatRuntime(_ context.Context, connectorID string) (*domain.WechatCollectorRuntime, error) { s.mu.RLock(); defer s.mu.RUnlock(); v, ok := s.wechatRuntime[connectorID]; if !ok { return &domain.WechatCollectorRuntime{ConnectorID: connectorID, Status: "stopped"}, nil }; out := v; return &out, nil }
-func (s *MemoryStore) UpsertWechatRuntime(_ context.Context, v domain.WechatCollectorRuntime) (*domain.WechatCollectorRuntime, error) { s.mu.Lock(); defer s.mu.Unlock(); v.UpdatedAt = time.Now().UTC(); s.wechatRuntime[v.ConnectorID] = v; out := v; return &out, nil }
-func (s *MemoryStore) UpdateWechatRuntime(_ context.Context, id, status, lastError string, heartbeat, collectedAt *time.Time) error { s.mu.Lock(); defer s.mu.Unlock(); v := s.wechatRuntime[id]; v.ConnectorID=id; if status != "" { v.Status=status }; v.LastError=lastError; v.LastHeartbeatAt=heartbeat; v.LastCollectedAt=collectedAt; v.UpdatedAt=time.Now().UTC(); s.wechatRuntime[id]=v; return nil }
+func (s *MemoryStore) GetWechatRuntime(_ context.Context, connectorID string) (*domain.WechatCollectorRuntime, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	v, ok := s.wechatRuntime[connectorID]
+	if !ok {
+		return &domain.WechatCollectorRuntime{ConnectorID: connectorID, Status: "stopped"}, nil
+	}
+	out := v
+	return &out, nil
+}
+func (s *MemoryStore) UpsertWechatRuntime(_ context.Context, v domain.WechatCollectorRuntime) (*domain.WechatCollectorRuntime, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	v.UpdatedAt = time.Now().UTC()
+	s.wechatRuntime[v.ConnectorID] = v
+	out := v
+	return &out, nil
+}
+func (s *MemoryStore) UpdateWechatRuntime(_ context.Context, id, status, lastError string, heartbeat, collectedAt *time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	v := s.wechatRuntime[id]
+	v.ConnectorID = id
+	if status != "" {
+		v.Status = status
+	}
+	v.LastError = lastError
+	v.LastHeartbeatAt = heartbeat
+	v.LastCollectedAt = collectedAt
+	v.UpdatedAt = time.Now().UTC()
+	s.wechatRuntime[id] = v
+	return nil
+}
 
 func (s *MemoryStore) Close() error { return nil }
 
@@ -1030,6 +1084,9 @@ func (s *MemoryStore) IngestMessage(ctx context.Context, input IngestMessageInpu
 	if err := validateIngestInput(input); err != nil {
 		return nil, err
 	}
+	if discardMessage(input) {
+		return &IngestResult{Discarded: true}, nil
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	collector, ok := s.collectors[input.CollectorID]
@@ -1060,10 +1117,19 @@ func (s *MemoryStore) IngestMessage(ctx context.Context, input IngestMessageInpu
 		return nil, apperror.New("external_id_conflict", "external message id has conflicting content", 409, false)
 	}
 	if !exists {
-		message = domain.Message{ID: uuid.NewString(), ConversationID: conversation.ID, ExternalMessageID: input.ExternalMessageID, SenderIdentityID: s.ensureIdentityLocked(conversation.Platform, conversation.WorkspaceKey, input.SenderExternalID, input.SenderDisplayName), SenderDisplayName: input.SenderDisplayName, MessageType: input.MessageType, Content: input.Content, ContentHash: input.ContentHash, ContentVersion: 1, SentAt: input.SentAt.UTC(), LifecycleStatus: "active", VectorStatus: "pending", CreatedAt: now}
+		message = domain.Message{ID: uuid.NewString(), ConversationID: conversation.ID, ExternalMessageID: input.ExternalMessageID, SenderIdentityID: s.ensureIdentityLocked(conversation.Platform, conversation.WorkspaceKey, input.SenderExternalID, input.SenderDisplayName), SenderDisplayName: input.SenderDisplayName, MessageType: input.MessageType, Content: "", Sensitive: false, ClassificationStatus: "pending", ContentHash: input.ContentHash, ContentVersion: 1, SentAt: input.SentAt.UTC(), LifecycleStatus: "active", VectorStatus: "pending", CreatedAt: now}
 		s.messages[key] = message
-		if conversation.IngestionScope == "organization" && input.MessageType == "text" {
-			s.addEventLocked(ctx, "privacy.scan.requested", conversation, map[string]any{"message_id": message.ID, "content_version": 1})
+		if input.PrivateContentCiphertext != "" {
+			s.privateContent[message.ID] = input.PrivateContentCiphertext
+		} else {
+			s.privateContent[message.ID] = input.Content
+		}
+		if input.Content == "" {
+			message.ClassificationStatus = "succeeded"
+			s.messages[key] = message
+			s.addReadyEventLocked(ctx, conversation, "message", message.ID, message.ContentVersion, false, false)
+		} else {
+			s.addEventLocked(ctx, "privacy.scan.requested", conversation, map[string]any{"resource_type": "message", "resource_id": message.ID, "content_version": 1})
 		}
 	}
 	sourceKey := message.ID + "|" + input.CollectorID
@@ -1085,10 +1151,20 @@ func (s *MemoryStore) IngestMessage(ctx context.Context, input IngestMessageInpu
 			result.Attachments = append(result.Attachments, cloneAttachment(existing))
 			continue
 		}
-		attachment := domain.Attachment{ID: uuid.NewString(), ConversationID: conversation.ID, MessageID: message.ID, ExternalAttachmentID: a.ExternalAttachmentID, FileName: sanitizeName(a.FileName), MIMEType: a.MIMEType, SizeBytes: a.SizeBytes, ContentHash: a.ContentHash, ContentVersion: 1, ContentStatus: "pending", AccessScope: "conversation_members", ContentAccessRequired: conversation.IngestionScope == "organization", PreviewCapability: previewCapability(a.MIMEType), CreatedAt: now, UpdatedAt: now}
+		name := sanitizeName(a.FileName)
+		sensitive := privacy.SensitiveAttachmentName(name)
+		scope := "owner_only"
+		if conversation.IngestionScope == "organization" {
+			scope = "conversation_members"
+		}
+		messageID := message.ID
+		if conversation.IngestionScope == "private" {
+			messageID = ""
+		}
+		attachment := domain.Attachment{ID: uuid.NewString(), ConversationID: conversation.ID, MessageID: messageID, ExternalAttachmentID: a.ExternalAttachmentID, FileName: name, MIMEType: a.MIMEType, SizeBytes: a.SizeBytes, ContentHash: a.ContentHash, ContentVersion: 1, ContentStatus: "pending", AccessScope: scope, ContentAccessRequired: sensitive || conversation.IngestionScope == "organization", Sensitive: sensitive, ClassificationStatus: "succeeded", PreviewCapability: previewCapability(a.MIMEType), CreatedAt: now, UpdatedAt: now}
 		s.attachments[attachmentKey] = attachment
 		result.Attachments = append(result.Attachments, cloneAttachment(attachment))
-		s.addEventLocked(ctx, "document.processing.requested", conversation, map[string]any{"message_id": message.ID, "attachment_id": attachment.ID, "content_version": 1})
+		s.addEventLocked(ctx, "document.processing.requested", conversation, map[string]any{"resource_type": "attachment", "resource_id": attachment.ID, "content_version": 1})
 	}
 	result.Message = cloneMessage(message)
 	return result, nil
@@ -1177,11 +1253,6 @@ func (s *MemoryStore) cursorReceiptReadyLocked(collectorID, cursor string) bool 
 			continue
 		}
 		found = true
-		for _, attachment := range s.attachments {
-			if attachment.MessageID == source.MessageID && attachment.ContentStatus != "ready" {
-				return false
-			}
-		}
 	}
 	return found
 }
@@ -1198,7 +1269,7 @@ func (s *MemoryStore) GetAttachment(_ context.Context, id string) (*domain.Attac
 	return nil, apperror.New("attachment_not_found", "attachment not found", 404, false)
 }
 
-func (s *MemoryStore) CompleteAttachment(_ context.Context, id, objectRef, contentHash string, size int64, status string) (*domain.Attachment, error) {
+func (s *MemoryStore) CompleteAttachment(ctx context.Context, id, objectRef, contentHash string, size int64, status string) (*domain.Attachment, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for key, a := range s.attachments {
@@ -1208,12 +1279,284 @@ func (s *MemoryStore) CompleteAttachment(_ context.Context, id, objectRef, conte
 		if contentHash != "" && a.ContentHash != "" && a.ContentHash != contentHash {
 			return nil, apperror.New("attachment_hash_mismatch", "attachment hash does not match metadata", 400, false)
 		}
+		wasReady := a.ContentStatus == "ready"
 		a.ObjectRef, a.ContentHash, a.SizeBytes, a.ContentStatus, a.UpdatedAt = objectRef, contentHash, size, status, time.Now().UTC()
 		s.attachments[key] = a
+		if status == "ready" && !wasReady {
+			if conversation, ok := s.conversations[a.ConversationID]; ok && conversation.IngestionScope == "private" {
+				s.addReadyEventLocked(ctx, conversation, "attachment", a.ID, a.ContentVersion, a.Sensitive, a.ContentAccessRequired)
+			}
+		}
 		out := cloneAttachment(a)
 		return &out, nil
 	}
 	return nil, apperror.New("attachment_not_found", "attachment not found", 404, false)
+}
+
+func (s *MemoryStore) ListPendingMessages(_ context.Context, limit int) ([]PendingMessage, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]PendingMessage, 0)
+	for _, message := range s.messages {
+		if message.ClassificationStatus == "pending" {
+			out = append(out, PendingMessage{Message: cloneMessage(message), OriginalContent: s.privateContent[message.ID]})
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Message.CreatedAt.Before(out[j].Message.CreatedAt) })
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
+}
+
+func (s *MemoryStore) CompleteMessageClassification(ctx context.Context, id, displayContent string, sensitive bool) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for key, message := range s.messages {
+		if message.ID != id {
+			continue
+		}
+		if message.ClassificationStatus == "succeeded" {
+			return nil
+		}
+		message.Content, message.Sensitive, message.ClassificationStatus = displayContent, sensitive, "succeeded"
+		s.messages[key] = message
+		if conversation, ok := s.conversations[message.ConversationID]; ok && conversation.IngestionScope == "private" {
+			s.addReadyEventLocked(ctx, conversation, "message", message.ID, message.ContentVersion, sensitive, sensitive)
+		}
+		return nil
+	}
+	return apperror.New("message_not_found", "message not found", 404, false)
+}
+
+func (s *MemoryStore) SharePrivateResources(ctx context.Context, input PrivateShareInput) (*PrivateShareResult, error) {
+	requestID := strings.TrimSpace(input.RequestID)
+	if requestID == "" || strings.TrimSpace(input.RequesterUserID) == "" || strings.TrimSpace(input.PrivateConversationID) == "" || strings.TrimSpace(input.OrganizationID) == "" {
+		return nil, apperror.New("invalid_request", "request_id, conversation and organization are required", 400, false)
+	}
+	messageIDs, attachmentIDs := uniqueSorted(input.MessageIDs), uniqueSorted(input.AttachmentIDs)
+	if len(messageIDs) == 0 && len(attachmentIDs) == 0 {
+		return nil, apperror.New("invalid_request", "at least one message or attachment is required", 400, false)
+	}
+	fingerprint := shareFingerprint(input.PrivateConversationID, messageIDs, attachmentIDs)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	conversation, ok := s.conversations[input.PrivateConversationID]
+	if !ok {
+		return nil, apperror.New("conversation_not_found", "conversation not found", 404, false)
+	}
+	if conversation.ConversationType != "private" || conversation.OwnerUserID != input.RequesterUserID {
+		return nil, apperror.Clone(apperror.ErrForbidden)
+	}
+	key := input.RequesterUserID + "|" + requestID
+	if existing, exists := s.shareRequests[key]; exists {
+		if existing.RequestFingerprint != fingerprint {
+			return nil, apperror.New("idempotency_conflict", "request_id was already used with a different selection", 409, false)
+		}
+		status := "already_processed"
+		if existing.Status != "completed" {
+			status = "accepted"
+		}
+		return &PrivateShareResult{RequestID: requestID, ShareBatchID: existing.ShareBatchID, PrivateConversationID: existing.PrivateConversationID, OrganizationID: existing.OrganizationID, Status: status, SharedMessageCount: existing.SharedMessageCount, SharedAttachmentCount: existing.SharedAttachmentCount}, nil
+	}
+	now := input.Now.UTC()
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	request := domain.PrivateShareRequest{ID: uuid.NewString(), RequesterUserID: input.RequesterUserID, RequestID: requestID, RequestFingerprint: fingerprint, PrivateConversationID: input.PrivateConversationID, OrganizationID: input.OrganizationID, ShareBatchID: uuid.NewString(), Status: "processing", CreatedAt: now, UpdatedAt: now}
+	for _, id := range messageIDs {
+		message, found := s.messageByIDLocked(id)
+		if !found || message.ConversationID != conversation.ID {
+			return nil, apperror.New("resource_not_found", "selected message does not belong to the private conversation", 404, false)
+		}
+		if message.ClassificationStatus != "succeeded" {
+			return nil, apperror.New("resource_not_ready", "selected message privacy classification is not complete", 409, true)
+		}
+	}
+	for _, id := range attachmentIDs {
+		attachment, found := s.attachmentByIDLocked(id)
+		if !found || attachment.ConversationID != conversation.ID {
+			return nil, apperror.New("resource_not_found", "selected attachment does not belong to the private conversation", 404, false)
+		}
+		if attachment.ContentStatus != "ready" || attachment.ClassificationStatus != "succeeded" {
+			return nil, apperror.New("resource_not_ready", "selected attachment is not ready", 409, true)
+		}
+	}
+	for _, id := range messageIDs {
+		message, _ := s.messageByIDLocked(id)
+		refKey := input.OrganizationID + "|message|" + id + "|" + fmt.Sprint(message.ContentVersion)
+		if _, exists := s.shareRefs[refKey]; !exists {
+			ref := domain.PrivateShareReference{ID: uuid.NewString(), OrganizationID: input.OrganizationID, SourcePrivateResourceID: id, SourceResourceType: "message", SourceContentVersion: message.ContentVersion, ShareBatchID: request.ShareBatchID, ShareRequestID: requestID, CreatedByUserID: input.RequesterUserID, Status: "ready", Sensitive: message.Sensitive, ContentAccessRequired: message.Sensitive, CreatedAt: now}
+			s.shareRefs[refKey] = ref
+			s.addShareReadyEventLocked(ctx, conversation, ref)
+		}
+	}
+	for _, id := range attachmentIDs {
+		attachment, _ := s.attachmentByIDLocked(id)
+		refKey := input.OrganizationID + "|attachment|" + id + "|" + fmt.Sprint(attachment.ContentVersion)
+		if _, exists := s.shareRefs[refKey]; !exists {
+			ref := domain.PrivateShareReference{ID: uuid.NewString(), OrganizationID: input.OrganizationID, SourcePrivateResourceID: id, SourceResourceType: "attachment", SourceContentVersion: attachment.ContentVersion, ShareBatchID: request.ShareBatchID, ShareRequestID: requestID, CreatedByUserID: input.RequesterUserID, Status: "ready", Sensitive: attachment.Sensitive, ContentAccessRequired: attachment.ContentAccessRequired, CreatedAt: now}
+			s.shareRefs[refKey] = ref
+			s.addShareReadyEventLocked(ctx, conversation, ref)
+		}
+	}
+	request.Status, request.SharedMessageCount, request.SharedAttachmentCount, request.UpdatedAt = "completed", len(messageIDs), len(attachmentIDs), now
+	completed := now
+	request.CompletedAt = &completed
+	s.shareRequests[key] = request
+	return &PrivateShareResult{RequestID: requestID, ShareBatchID: request.ShareBatchID, PrivateConversationID: input.PrivateConversationID, OrganizationID: input.OrganizationID, Status: "accepted", SharedMessageCount: len(messageIDs), SharedAttachmentCount: len(attachmentIDs)}, nil
+}
+
+func uniqueSorted(values []string) []string {
+	seen := make(map[string]struct{}, len(values))
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value != "" {
+			if _, ok := seen[value]; !ok {
+				seen[value] = struct{}{}
+				out = append(out, value)
+			}
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+func shareFingerprint(conversationID string, messageIDs, attachmentIDs []string) string {
+	raw, _ := json.Marshal(struct {
+		ConversationID string   `json:"private_conversation_id"`
+		MessageIDs     []string `json:"message_ids"`
+		AttachmentIDs  []string `json:"attachment_ids"`
+	}{conversationID, messageIDs, attachmentIDs})
+	sum := sha256.Sum256(raw)
+	return hex.EncodeToString(sum[:])
+}
+
+func (s *MemoryStore) messageByIDLocked(id string) (domain.Message, bool) {
+	for _, message := range s.messages {
+		if message.ID == id {
+			return message, true
+		}
+	}
+	return domain.Message{}, false
+}
+func (s *MemoryStore) attachmentByIDLocked(id string) (domain.Attachment, bool) {
+	for _, attachment := range s.attachments {
+		if attachment.ID == id {
+			return attachment, true
+		}
+	}
+	return domain.Attachment{}, false
+}
+func (s *MemoryStore) shareRefByIDLocked(id string) (domain.PrivateShareReference, bool) {
+	for _, ref := range s.shareRefs {
+		if ref.ID == id {
+			return ref, true
+		}
+	}
+	return domain.PrivateShareReference{}, false
+}
+func (s *MemoryStore) conversationOwnerLocked(id string) string {
+	if conversation, ok := s.conversations[id]; ok {
+		return conversation.OwnerUserID
+	}
+	return ""
+}
+func (s *MemoryStore) addReadyEventLocked(ctx context.Context, conversation domain.ConversationIngestion, resourceType, resourceID string, version int, sensitive, contentAccessRequired bool) {
+	if conversation.IngestionScope != "private" {
+		return
+	}
+	s.addEventLocked(ctx, "private.resource.ready", conversation, map[string]any{"resource_type": resourceType, "resource_id": resourceID, "private_conversation_id": conversation.ID, "owner_user_id": conversation.OwnerUserID, "content_version": version, "sensitive": sensitive, "content_access_required": contentAccessRequired})
+}
+func (s *MemoryStore) addShareReadyEventLocked(ctx context.Context, conversation domain.ConversationIngestion, ref domain.PrivateShareReference) {
+	s.addEventLocked(ctx, "private.share.ready", conversation, map[string]any{"share_reference_id": ref.ID, "source_private_resource_id": ref.SourcePrivateResourceID, "source_resource_type": ref.SourceResourceType, "source_content_version": ref.SourceContentVersion, "organization_id": ref.OrganizationID, "share_batch_id": ref.ShareBatchID, "sensitive": ref.Sensitive, "content_access_required": ref.ContentAccessRequired})
+}
+
+func (s *MemoryStore) CreatePrivateAccessRequest(_ context.Context, input PrivateAccessRequestInput) (*domain.PrivateAccessRequest, error) {
+	if input.RequesterUserID == "" || input.ShareReferenceID == "" || input.ResourceID == "" {
+		return nil, apperror.New("invalid_request", "resource and share reference are required", 400, false)
+	}
+	if input.RequestedAction != "view" && input.RequestedAction != "download" {
+		return nil, apperror.New("invalid_request", "requested_action must be view or download", 400, false)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	ref, ok := s.shareRefByIDLocked(input.ShareReferenceID)
+	if !ok || ref.Status != "ready" {
+		return nil, apperror.New("resource_not_found", "share reference not found", 404, false)
+	}
+	if ref.SourcePrivateResourceID != input.ResourceID || ref.SourceResourceType != input.ResourceType {
+		return nil, apperror.New("resource_mismatch", "share reference does not match resource", 409, false)
+	}
+	if ref.SourceResourceType == "message" {
+		if _, ok := s.messageByIDLocked(input.ResourceID); !ok {
+			return nil, apperror.New("resource_not_found", "resource not found", 404, false)
+		}
+	} else if ref.SourceResourceType == "attachment" {
+		if _, ok := s.attachmentByIDLocked(input.ResourceID); !ok {
+			return nil, apperror.New("resource_not_found", "resource not found", 404, false)
+		}
+	} else {
+		return nil, apperror.New("resource_mismatch", "share reference has invalid resource type", 409, false)
+	}
+	if !ref.ContentAccessRequired {
+		return nil, apperror.New("approval_not_required", "resource does not require approval", 400, false)
+	}
+	for _, value := range s.accessRequests {
+		if value.RequesterUserID == input.RequesterUserID && value.ShareReferenceID == input.ShareReferenceID && value.Status == "pending" {
+			out := value
+			return &out, nil
+		}
+	}
+	now := input.Now.UTC()
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	request := domain.PrivateAccessRequest{ID: uuid.NewString(), RequesterUserID: input.RequesterUserID, ShareReferenceID: input.ShareReferenceID, ResourceID: input.ResourceID, ResourceType: input.ResourceType, RequestedAction: input.RequestedAction, Reason: input.Reason, Status: "pending", CreatedAt: now}
+	s.accessRequests[request.ID] = request
+	return &request, nil
+}
+
+func (s *MemoryStore) ReviewPrivateAccessRequest(_ context.Context, requestID, reviewerUserID, status, note string, now time.Time) (*domain.PrivateAccessRequest, error) {
+	if status != "approved" && status != "rejected" {
+		return nil, apperror.New("invalid_request", "review status must be approved or rejected", 400, false)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	request, ok := s.accessRequests[requestID]
+	if !ok {
+		return nil, apperror.New("request_not_found", "access request not found", 404, false)
+	}
+	ref, ok := s.shareRefByIDLocked(request.ShareReferenceID)
+	if !ok {
+		return nil, apperror.New("resource_not_found", "share reference not found", 404, false)
+	}
+	message, messageFound := s.messageByIDLocked(ref.SourcePrivateResourceID)
+	conversationOwner := ""
+	if ref.SourceResourceType == "attachment" {
+		attachment, found := s.attachmentByIDLocked(ref.SourcePrivateResourceID)
+		if !found {
+			return nil, apperror.New("resource_not_found", "resource not found", 404, false)
+		}
+		conversationOwner = s.conversationOwnerLocked(attachment.ConversationID)
+	} else if messageFound {
+		conversationOwner = s.conversationOwnerLocked(message.ConversationID)
+	}
+	if conversationOwner == "" || conversationOwner != reviewerUserID {
+		return nil, apperror.Clone(apperror.ErrForbidden)
+	}
+	if request.Status != "pending" {
+		out := request
+		return &out, nil
+	}
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	request.Status, request.ReviewedByUserID, request.ReviewNote, request.ReviewedAt = status, reviewerUserID, safeError(note), &now
+	s.accessRequests[requestID] = request
+	out := request
+	return &out, nil
 }
 
 func (s *MemoryStore) FailAttachment(_ context.Context, id, message string) error {
@@ -1499,8 +1842,9 @@ func cloneMessage(m domain.Message) domain.Message {
 func cloneAttachment(a domain.Attachment) domain.Attachment { return a }
 func cloneEvent(e domain.OutboxEvent) domain.OutboxEvent {
 	if e.Payload != nil {
-		e.Payload = map[string]any{}
-		for k, v := range e.Payload {
+		payload := e.Payload
+		e.Payload = make(map[string]any, len(payload))
+		for k, v := range payload {
 			e.Payload[k] = v
 		}
 	}

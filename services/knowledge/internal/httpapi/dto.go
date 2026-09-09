@@ -68,6 +68,8 @@ type publicAttachment struct {
 	ContentStatus         string    `json:"content_status"`
 	AccessScope           string    `json:"access_scope"`
 	ContentAccessRequired bool      `json:"content_access_required"`
+	Sensitive             bool      `json:"sensitive"`
+	ClassificationStatus  string    `json:"classification_status,omitempty"`
 	PreviewCapability     string    `json:"preview_capability,omitempty"`
 	LastError             string    `json:"last_error,omitempty"`
 	CreatedAt             time.Time `json:"created_at"`
@@ -75,19 +77,21 @@ type publicAttachment struct {
 }
 
 type publicMessage struct {
-	ID                string             `json:"id"`
-	ConversationID    string             `json:"conversation_id"`
-	ExternalMessageID string             `json:"external_message_id"`
-	SenderDisplayName string             `json:"sender_display_name,omitempty"`
-	MessageType       string             `json:"message_type"`
-	Content           string             `json:"content,omitempty"`
-	ContentHash       string             `json:"content_hash"`
-	ContentVersion    int                `json:"content_version"`
-	SentAt            time.Time          `json:"sent_at"`
-	LifecycleStatus   string             `json:"lifecycle_status"`
-	VectorStatus      string             `json:"vector_status,omitempty"`
-	Attachments       []publicAttachment `json:"attachments,omitempty"`
-	CreatedAt         time.Time          `json:"created_at"`
+	ID                   string             `json:"id"`
+	ConversationID       string             `json:"conversation_id"`
+	ExternalMessageID    string             `json:"external_message_id"`
+	SenderDisplayName    string             `json:"sender_display_name,omitempty"`
+	MessageType          string             `json:"message_type"`
+	Content              string             `json:"content,omitempty"`
+	Sensitive            bool               `json:"sensitive"`
+	ClassificationStatus string             `json:"classification_status,omitempty"`
+	ContentHash          string             `json:"content_hash"`
+	ContentVersion       int                `json:"content_version"`
+	SentAt               time.Time          `json:"sent_at"`
+	LifecycleStatus      string             `json:"lifecycle_status"`
+	VectorStatus         string             `json:"vector_status,omitempty"`
+	Attachments          []publicAttachment `json:"attachments,omitempty"`
+	CreatedAt            time.Time          `json:"created_at"`
 }
 
 type publicConversation struct {
@@ -142,6 +146,7 @@ type publicIngestResult struct {
 	Attachments   []publicAttachment `json:"attachments"`
 	Duplicate     bool               `json:"duplicate"`
 	CursorUpdated bool               `json:"cursor_updated"`
+	Discarded     bool               `json:"discarded"`
 }
 
 func publicConnectorFromView(value domain.ConnectorView) publicConnectorView {
@@ -191,6 +196,7 @@ func publicAttachmentFromDomain(value domain.Attachment) publicAttachment {
 		SizeBytes: value.SizeBytes, ContentHash: value.ContentHash, ContentVersion: value.ContentVersion,
 		ContentStatus: value.ContentStatus, AccessScope: value.AccessScope,
 		ContentAccessRequired: value.ContentAccessRequired, PreviewCapability: value.PreviewCapability,
+		Sensitive: value.Sensitive, ClassificationStatus: value.ClassificationStatus,
 		LastError: value.LastError, CreatedAt: value.CreatedAt, UpdatedAt: value.UpdatedAt,
 	}
 }
@@ -203,6 +209,7 @@ func publicMessageFromDomain(value domain.Message) publicMessage {
 	return publicMessage{
 		ID: value.ID, ConversationID: value.ConversationID, ExternalMessageID: value.ExternalMessageID,
 		SenderDisplayName: value.SenderDisplayName, MessageType: value.MessageType, Content: value.Content,
+		Sensitive: value.Sensitive, ClassificationStatus: value.ClassificationStatus,
 		ContentHash: value.ContentHash, ContentVersion: value.ContentVersion, SentAt: value.SentAt,
 		LifecycleStatus: value.LifecycleStatus, VectorStatus: value.VectorStatus, Attachments: attachments,
 		CreatedAt: value.CreatedAt,
@@ -256,6 +263,6 @@ func publicIngestResultFromDomain(value *repository.IngestResult) publicIngestRe
 	}
 	return publicIngestResult{
 		Message: publicMessageFromDomain(value.Message), Attachments: attachments,
-		Duplicate: value.Duplicate, CursorUpdated: value.CursorUpdated,
+		Duplicate: value.Duplicate, CursorUpdated: value.CursorUpdated, Discarded: value.Discarded,
 	}
 }

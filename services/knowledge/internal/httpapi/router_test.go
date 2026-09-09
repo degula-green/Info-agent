@@ -294,6 +294,62 @@ func TestPublicConversationResponseDoesNotExposeInternalReferences(t *testing.T)
 	}
 }
 
+func TestPrivateShareHTTPIsOwnerScopedAndIdempotent(t *testing.T) {
+	app := newApp(config.Config{AllowDevAuth: true, DevUserID: "owner", DevOrganizationID: "org-1", EncryptionKeys: "v1:01234567890123456789012345678901"})
+	ctx := context.Background()
+	now := time.Now().UTC()
+	account := domain.ConnectorAccount{ID: "share-account", OwnerUserID: "owner", Platform: domain.PlatformWechat, ExternalAccountID: "wxid-share", DefaultOrganizationID: "org-1", Status: domain.ConnectorActive}
+	if _, err := app.Service.Repo.SaveConnector(ctx, account); err != nil {
+		t.Fatal(err)
+	}
+	conversation, err := app.Service.Repo.AttachConversation(ctx, repository.AttachInput{UserID: "owner", Platform: domain.PlatformWechat, ExternalConversationID: "share-chat", ConversationType: "private", RequestedStartAt: &now, PrimaryConnectorID: account.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	collector := conversation.Collectors[0]
+	input := repository.IngestMessageInput{CollectorID: collector.ID, ExternalConversationID: "share-chat", ExternalMessageID: "share-message", MessageType: "text", Content: "hello", ContentHash: sha256Hex([]byte("hello")), SentAt: now, Cursor: "1"}
+	input.PayloadHash, err = repository.CalculatePayloadHash(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	saved, err := app.Service.IngestMessage(ctx, input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := app.Service.Repo.CompleteMessageClassification(ctx, saved.Message.ID, "hello", false); err != nil {
+		t.Fatal(err)
+	}
+	body := []byte(`{"request_id":"request-1","trace_id":"trace-1","private_conversation_id":"` + conversation.ID + `","message_ids":["` + saved.Message.ID + `"]}`)
+	request := httptest.NewRequest(http.MethodPost, "/api/knowledge/v1/private-share-requests", bytes.NewReader(body))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-User-ID", "owner")
+	recorder := httptest.NewRecorder()
+	NewRouterWithApp(app).ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("private share failed: status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	request = httptest.NewRequest(http.MethodPost, "/api/knowledge/v1/private-share-requests", bytes.NewReader(body))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-User-ID", "owner")
+	recorder = httptest.NewRecorder()
+	NewRouterWithApp(app).ServeHTTP(recorder, request)
+	var repeated repository.PrivateShareResult
+	if err := json.Unmarshal(recorder.Body.Bytes(), &repeated); err != nil {
+		t.Fatal(err)
+	}
+	if recorder.Code != http.StatusOK || repeated.Status != "already_processed" {
+		t.Fatalf("share was not idempotent: status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	request = httptest.NewRequest(http.MethodPost, "/api/knowledge/v1/private-share-requests", bytes.NewReader(body))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-User-ID", "intruder")
+	recorder = httptest.NewRecorder()
+	NewRouterWithApp(app).ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusForbidden {
+		t.Fatalf("private share accepted for another user: status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+}
+
 func sha256Hex(value []byte) string {
 	sum := sha256.Sum256(value)
 	return hex.EncodeToString(sum[:])

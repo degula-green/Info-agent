@@ -49,22 +49,22 @@ type ConnectorAccount struct {
 }
 
 type WechatCollectionConfig struct {
-	ConnectorID           string    `json:"connector_id"`
-	SelectedConversations []string  `json:"selected_conversations"`
+	ConnectorID           string     `json:"connector_id"`
+	SelectedConversations []string   `json:"selected_conversations"`
 	HistoryStartAt        *time.Time `json:"history_start_at,omitempty"`
-	Enabled               bool      `json:"enabled"`
-	ListenMode            string    `json:"listen_mode"`
-	UpdatedAt             time.Time `json:"updated_at"`
+	Enabled               bool       `json:"enabled"`
+	ListenMode            string     `json:"listen_mode"`
+	UpdatedAt             time.Time  `json:"updated_at"`
 }
 
 type WechatCollectorRuntime struct {
-	ConnectorID      string     `json:"connector_id"`
-	Status           string     `json:"status"`
-	LastHeartbeatAt  *time.Time `json:"last_heartbeat_at,omitempty"`
-	LastCollectedAt  *time.Time `json:"last_collected_at,omitempty"`
-	LastError        string     `json:"last_error,omitempty"`
-	StoppedAt        *time.Time `json:"stopped_at,omitempty"`
-	UpdatedAt        time.Time  `json:"updated_at"`
+	ConnectorID     string     `json:"connector_id"`
+	Status          string     `json:"status"`
+	LastHeartbeatAt *time.Time `json:"last_heartbeat_at,omitempty"`
+	LastCollectedAt *time.Time `json:"last_collected_at,omitempty"`
+	LastError       string     `json:"last_error,omitempty"`
+	StoppedAt       *time.Time `json:"stopped_at,omitempty"`
+	UpdatedAt       time.Time  `json:"updated_at"`
 }
 
 type ConnectorView struct {
@@ -216,6 +216,8 @@ type Message struct {
 	SenderDisplayName    string       `json:"sender_display_name,omitempty"`
 	MessageType          string       `json:"message_type"`
 	Content              string       `json:"content,omitempty"`
+	Sensitive            bool         `json:"sensitive"`
+	ClassificationStatus string       `json:"classification_status,omitempty"`
 	NormalizedContentRef string       `json:"normalized_content_ref,omitempty"`
 	ContentHash          string       `json:"content_hash"`
 	ContentVersion       int          `json:"content_version"`
@@ -250,10 +252,59 @@ type Attachment struct {
 	ContentStatus         string    `json:"content_status"`
 	AccessScope           string    `json:"access_scope"`
 	ContentAccessRequired bool      `json:"content_access_required"`
+	Sensitive             bool      `json:"sensitive"`
+	ClassificationStatus  string    `json:"classification_status,omitempty"`
 	PreviewCapability     string    `json:"preview_capability,omitempty"`
 	LastError             string    `json:"last_error,omitempty"`
 	CreatedAt             time.Time `json:"created_at"`
 	UpdatedAt             time.Time `json:"updated_at"`
+}
+
+type PrivateShareReference struct {
+	ID                      string    `json:"share_reference_id"`
+	OrganizationID          string    `json:"organization_id"`
+	SourcePrivateResourceID string    `json:"source_private_resource_id"`
+	SourceResourceType      string    `json:"source_resource_type"`
+	SourceContentVersion    int       `json:"source_content_version"`
+	ShareBatchID            string    `json:"share_batch_id"`
+	ShareRequestID          string    `json:"share_request_id"`
+	CreatedByUserID         string    `json:"created_by_user_id"`
+	Status                  string    `json:"status"`
+	Sensitive               bool      `json:"sensitive"`
+	ContentAccessRequired   bool      `json:"content_access_required"`
+	CreatedAt               time.Time `json:"created_at"`
+}
+
+type PrivateShareRequest struct {
+	ID                    string     `json:"id"`
+	RequesterUserID       string     `json:"requester_user_id"`
+	RequestID             string     `json:"request_id"`
+	RequestFingerprint    string     `json:"request_fingerprint"`
+	PrivateConversationID string     `json:"private_conversation_id"`
+	OrganizationID        string     `json:"organization_id"`
+	ShareBatchID          string     `json:"share_batch_id"`
+	Status                string     `json:"status"`
+	SharedMessageCount    int        `json:"shared_message_count"`
+	SharedAttachmentCount int        `json:"shared_attachment_count"`
+	LastError             string     `json:"last_error,omitempty"`
+	CreatedAt             time.Time  `json:"created_at"`
+	UpdatedAt             time.Time  `json:"updated_at"`
+	CompletedAt           *time.Time `json:"completed_at,omitempty"`
+}
+
+type PrivateAccessRequest struct {
+	ID               string     `json:"id"`
+	RequesterUserID  string     `json:"requester_user_id"`
+	ShareReferenceID string     `json:"share_reference_id"`
+	ResourceID       string     `json:"resource_id"`
+	ResourceType     string     `json:"resource_type"`
+	RequestedAction  string     `json:"requested_action"`
+	Reason           string     `json:"reason,omitempty"`
+	Status           string     `json:"status"`
+	ReviewedByUserID string     `json:"reviewed_by_user_id,omitempty"`
+	ReviewNote       string     `json:"review_note,omitempty"`
+	CreatedAt        time.Time  `json:"created_at"`
+	ReviewedAt       *time.Time `json:"reviewed_at,omitempty"`
 }
 
 type OutboxEvent struct {
