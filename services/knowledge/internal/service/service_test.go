@@ -23,6 +23,7 @@ import (
 	"info-agent/knowledge/internal/objectstore"
 	"info-agent/knowledge/internal/platform"
 	"info-agent/knowledge/internal/repository"
+	"info-agent/knowledge/internal/trace"
 	"info-agent/knowledge/internal/vault"
 )
 
@@ -121,7 +122,7 @@ func newServiceForTest(provider platform.OAuthProvider) (*Service, *repository.M
 		panic(err)
 	}
 	cfg := config.Config{OAuthStateTTL: 10 * time.Minute, PairingTTL: 10 * time.Minute, DeviceTTL: time.Hour, MaxAttachmentBytes: 1024 * 1024, JWTRequired: false}
-	return New(repo, store, vault.New(store, keyring), nil, provider, nil, cfg), repo, store
+	return NewWithKeyring(repo, store, vault.New(store, keyring), nil, provider, nil, cfg, keyring), repo, store
 }
 
 func vaultTestKeyring() (*crypto.Keyring, error) {
@@ -148,6 +149,44 @@ func TestCompleteFeishuOAuthDuplicateIsIdempotent(t *testing.T) {
 	provider.mu.Unlock()
 	if calls != 1 || first.ID != second.ID || first.OwnerUserID != "u1" {
 		t.Fatalf("duplicate callback was not idempotent: calls=%d first=%+v second=%+v", calls, first, second)
+	}
+}
+
+func TestPrivateMessageContentIsEncryptedBeforePersistence(t *testing.T) {
+	service, repo, _ := newServiceForTest(nil)
+	ctx := trace.WithIDs(context.Background(), "req-private-encryption", "trace-private-encryption")
+	now := time.Now().UTC()
+	if _, err := repo.SaveConnector(ctx, domain.ConnectorAccount{ID: "private-encryption-account", OwnerUserID: "u1", Platform: domain.PlatformWechat, ExternalAccountID: "wxid", Status: domain.ConnectorActive}); err != nil {
+		t.Fatal(err)
+	}
+	conversation, err := repo.AttachConversation(ctx, repository.AttachInput{UserID: "u1", Platform: domain.PlatformWechat, ExternalConversationID: "private-encryption-chat", ConversationType: "private", RequestedStartAt: &now, PrimaryConnectorID: "private-encryption-account"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := repository.IngestMessageInput{CollectorID: conversation.Collectors[0].ID, ExternalConversationID: conversation.ExternalConversationID, ExternalMessageID: "secret-message", MessageType: "text", Content: "password=secret-value", ContentHash: hashForTest("password=secret-value"), SentAt: now}
+	input.PayloadHash, err = repository.CalculatePayloadHash(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.IngestMessage(ctx, input); err != nil {
+		t.Fatal(err)
+	}
+	pending, err := repo.ListPendingMessages(ctx, 10)
+	if err != nil || len(pending) != 1 {
+		t.Fatalf("pending private message missing: %v %+v", err, pending)
+	}
+	if pending[0].OriginalContent == input.Content {
+		t.Fatal("private original content was persisted in plaintext")
+	}
+	if err := service.ProcessPrivacy(ctx); err != nil {
+		t.Fatal(err)
+	}
+	messages, err := repo.ListMessages(ctx, conversation.ID, 10, "")
+	if err != nil || len(messages) != 1 {
+		t.Fatalf("classified private message missing: %v %+v", err, messages)
+	}
+	if messages[0].Content != "password=[REDACTED]" || !messages[0].Sensitive {
+		t.Fatalf("private message was not decrypted and redacted: %+v", messages[0])
 	}
 }
 
