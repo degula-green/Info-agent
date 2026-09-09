@@ -32,6 +32,15 @@
         </div>
       </section>
 
+      <section class="profile-panel organization-panel" aria-labelledby="organization-title">
+        <div class="profile-panel__heading"><span class="profile-panel__icon"><t-icon name="usergroup" /></span><div><h2 id="organization-title">我的组织</h2><p>组织成员可以共同使用和管理组织知识</p></div></div>
+        <div class="organization-content" :class="{ 'organization-content--loading': organizationLoading }">
+          <t-skeleton v-if="organizationLoading" :row-col="[{ width: '42%' }, { width: '68%' }]" animation="gradient" />
+          <div v-else-if="organization" class="organization-summary"><span class="organization-mark"><t-icon name="usergroup" /></span><div class="organization-summary__body"><strong>{{ organization.organization.name }}</strong><small>{{ organization.membership.roles.some((role) => (role.role_code || role.RoleCode) === 'owner') ? 'Owner' : '组织成员' }} · 已加入</small></div><t-tag theme="success" variant="light">{{ organization.organization.status === 'active' ? '正常' : organization.organization.status }}</t-tag></div>
+          <div v-else class="organization-empty"><div><strong>暂未加入组织</strong><p>创建组织后即可使用组织知识能力</p></div><div class="organization-actions"><t-button theme="primary" size="medium" @click="createDialogVisible = true"><template #icon><t-icon name="add" /></template>创建组织</t-button><t-button variant="outline" size="medium" disabled>加入组织</t-button><small>加入组织即将开放</small></div></div>
+        </div>
+      </section>
+
       <section class="profile-panel" aria-labelledby="connector-title">
         <div class="profile-panel__heading">
           <span class="profile-panel__icon"><t-icon name="link-1" /></span>
@@ -88,6 +97,9 @@
     <t-dialog v-model:visible="restoreDialogVisible" header="恢复演示数据" :confirm-btn="{ content: '恢复数据', theme: 'danger' }" cancel-btn="取消" @confirm="restoreDemo">
       <p class="restore-dialog__copy">将恢复默认资料、连接器、会话和问答历史，当前本地修改会被覆盖。</p>
     </t-dialog>
+    <t-dialog v-model:visible="createDialogVisible" header="创建组织" :confirm-btn="{ content: '创建组织', loading: organizationSubmitting, disabled: !organizationName.trim() }" :cancel-btn="{ content: '取消', disabled: organizationSubmitting }" :close-btn="!organizationSubmitting" @confirm="submitCreateOrganization">
+      <div class="organization-dialog"><p>创建后你将成为该组织的 Owner。</p><t-input v-model="organizationName" maxlength="200" autofocus placeholder="请输入组织名称" @keydown.enter.prevent="submitCreateOrganization" /><span class="organization-dialog__count">{{ organizationName.length }}/200</span></div>
+    </t-dialog>
   </section>
 </template>
 
@@ -97,10 +109,15 @@ import { useRoute, useRouter } from 'vue-router'
 import { MessagePlugin } from 'tdesign-vue-next'
 import { sourceColor } from '@/mock'
 import { useInfoMockStore } from '@/stores/infoMock'
-import { bindWechat, connectorCatalog, getConnectors, getFeishuAuthorizeURL, getProfile, type Connector, type ConnectorPlatform, type Profile, unbindConnector, updateProfile, uploadAvatar } from '@/api/info-profile'
+import { useAuthStore } from '@/stores/auth'
+import { bindWechat, connectorCatalog, getConnectors, getFeishuAuthorizeURL, type Connector, type ConnectorPlatform, type Profile, unbindConnector } from '@/api/info-profile'
 import { oauthCallbackNotice } from '@/knowledge-mapping'
+import { downloadAvatar, getCurrentUser, updateCurrentUser, uploadAvatar as uploadCoreAvatar } from '@/api/core-auth'
+import { createOrganization, getCurrentOrganization, type CoreOrganizationResponse } from '@/api/core-organization'
+import { CoreAuthError } from '@/api/core-auth'
 
 const store = useInfoMockStore()
+const authStore = useAuthStore()
 const route = useRoute()
 const router = useRouter()
 const profile = ref<Profile>({ id: 0, username: '', nickname: store.profile.nickname, email: store.profile.email, avatar_url: null, updated_at: '' })
@@ -110,6 +127,11 @@ const avatarInput = ref<HTMLInputElement | null>(null)
 const feishuDialogVisible = ref(false)
 const wechatDialogVisible = ref(false)
 const restoreDialogVisible = ref(false)
+const createDialogVisible = ref(false)
+const organizationLoading = ref(false)
+const organizationSubmitting = ref(false)
+const organizationName = ref('')
+const organization = ref<CoreOrganizationResponse | null>(null)
 const wechatRebind = ref(false)
 const wechatForm = reactive({ wxid: '', db_dir: '' })
 const connectorPending = reactive<Record<ConnectorPlatform, boolean>>({ feishu: false, wecom: false, wechat: false })
@@ -124,8 +146,17 @@ function syncProfile(value: Profile) {
   store.updateProfile({ nickname: value.nickname, email: value.email, avatar: value.nickname.slice(0, 1) || '我' })
 }
 async function loadPage() {
-  const profileRequest = getProfile().then(syncProfile).catch((cause) => {
-    MessagePlugin.error(errorMessage(cause, '个人资料加载失败'))
+  // Refresh the short-lived access token before loading authenticated data.
+  // This also recovers sessions after a Core restart when the refresh cookie is valid.
+  try { await authStore.refresh() } catch { /* API calls below will report the auth state */ }
+  const coreProfileRequest = getCurrentUser().then(async (user) => {
+    const avatarURL = user.avatar_url ? await downloadAvatar().catch(() => null) : null
+    syncProfile({ id: Number(user.id) || 0, username: user.email.split('@')[0], nickname: user.nickname, email: user.email, avatar_url: avatarURL, updated_at: '' })
+  }).catch((cause) => {
+    if (cause instanceof CoreAuthError && cause.status === 401) {
+      authStore.logout().catch(() => undefined)
+      router.replace({ name: 'login', query: { redirect: route.fullPath } })
+    }
   })
   const connectorRequest = getConnectors().then((items) => {
     connectors.value = items.length ? items : connectorCatalog()
@@ -133,17 +164,44 @@ async function loadPage() {
     connectors.value = connectorCatalog()
     MessagePlugin.error(errorMessage(cause, '连接器服务未启动，请启动 Knowledge 服务后重试'))
   })
-  await Promise.all([profileRequest, connectorRequest])
+  organizationLoading.value = true
+  const organizationRequest = getCurrentOrganization().then((value) => { organization.value = value }).catch((cause) => {
+    if (cause instanceof CoreAuthError && cause.code === 'ORG_MEMBERSHIP_REQUIRED') { organization.value = null; return }
+    if (cause instanceof CoreAuthError && cause.status === 401) return
+    MessagePlugin.error(errorMessage(cause, '组织信息加载失败'))
+  })
+  await Promise.all([coreProfileRequest, connectorRequest, organizationRequest])
+  organizationLoading.value = false
+}
+async function submitCreateOrganization() {
+  const name = organizationName.value.trim()
+  if (!name || name.length > 200 || organizationSubmitting.value) return
+  organizationSubmitting.value = true
+  try { organization.value = await createOrganization(name); createDialogVisible.value = false; organizationName.value = ''; MessagePlugin.success('组织创建成功') }
+  catch (cause) {
+    if (cause instanceof CoreAuthError && cause.code === 'ORGANIZATION_ALREADY_JOINED') { await loadOrganization(); MessagePlugin.info('你已经加入组织') }
+    else MessagePlugin.error(errorMessage(cause, '组织创建失败，请稍后重试'))
+  } finally { organizationSubmitting.value = false }
+}
+async function loadOrganization() {
+  organizationLoading.value = true
+  try { organization.value = await getCurrentOrganization() }
+  catch (cause) { if (cause instanceof CoreAuthError && cause.code === 'ORG_MEMBERSHIP_REQUIRED') organization.value = null; else MessagePlugin.error(errorMessage(cause, '组织信息加载失败')) }
+  finally { organizationLoading.value = false }
 }
 async function saveProfile() {
-  try { syncProfile(await updateProfile(form.nickname)); MessagePlugin.success('个人资料已保存') }
+  try {
+    const user = await updateCurrentUser(form.nickname)
+    syncProfile({ id: Number(user.id) || 0, username: user.email.split('@')[0], nickname: user.nickname, email: user.email, avatar_url: null, updated_at: '' })
+    MessagePlugin.success('个人资料已保存')
+  }
   catch (cause) { MessagePlugin.error(errorMessage(cause, '保存失败')) }
 }
 async function onAvatarSelected(event: Event) {
   const file = (event.target as HTMLInputElement).files?.[0]
   if (!file) return
-  try { syncProfile(await uploadAvatar(file)); MessagePlugin.success('头像已更新') }
-  catch (cause) { MessagePlugin.error(errorMessage(cause, '头像上传失败')) }
+  try { const user = await uploadCoreAvatar(file, false, authStore.accessToken); const avatarURL = await downloadAvatar(); syncProfile({ id: Number(user.id) || 0, username: user.email.split('@')[0], nickname: user.nickname, email: user.email, avatar_url: avatarURL, updated_at: '' }); window.dispatchEvent(new CustomEvent('profile-avatar-updated', { detail: avatarURL })); MessagePlugin.success('头像已更新') }
+  catch (cause) { if (cause instanceof CoreAuthError && cause.status === 401) { await authStore.logout().catch(() => undefined); router.replace({ name: 'login', query: { redirect: route.fullPath } }) } else MessagePlugin.error(errorMessage(cause, '头像上传失败')) }
   finally { if (avatarInput.value) avatarInput.value.value = '' }
 }
 function connectorStatus(connector: Connector) {
@@ -360,6 +418,22 @@ onMounted(async () => { await loadPage(); await handleOAuthCallback() })
 .connector-list {
   display: grid;
 }
+
+.organization-content { min-height: 104px; padding: 22px 36px; }
+.organization-content--loading { display: flex; align-items: center; }
+.organization-summary, .organization-empty { display: flex; align-items: center; gap: 14px; }
+.organization-summary__body { display: grid; flex: 1; gap: 5px; min-width: 0; }
+.organization-summary__body strong, .organization-summary__body small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.organization-summary__body strong, .organization-empty strong { color: var(--td-text-color-primary); font-size: 14px; font-weight: 600; }
+.organization-summary__body small, .organization-empty p { margin: 0; color: var(--td-text-color-secondary); font-size: 12px; }
+.organization-mark { display: grid; place-items: center; flex: 0 0 42px; width: 42px; height: 42px; border-radius: 10px; color: var(--td-brand-color); background: var(--td-brand-color-1); font-size: 20px; }
+.organization-empty { justify-content: space-between; }
+.organization-empty > div:first-child { display: grid; gap: 6px; }
+.organization-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+.organization-actions small { width: 100%; color: var(--td-text-color-placeholder); font-size: 11px; text-align: right; }
+.organization-dialog { position: relative; padding-bottom: 18px; }
+.organization-dialog p { margin: 0 0 15px; color: var(--td-text-color-secondary); font-size: 13px; }
+.organization-dialog__count { position: absolute; right: 0; bottom: 0; color: var(--td-text-color-placeholder); font-size: 11px; }
 
 .profile-setting-row,
 .connector-row {
@@ -587,6 +661,11 @@ onMounted(async () => { await loadPage(); await handleOAuthCallback() })
   .connector-row {
     flex-wrap: wrap;
   }
+
+  .organization-content { padding-right: 18px; padding-left: 18px; }
+  .organization-empty { align-items: flex-start; flex-direction: column; }
+  .organization-actions { justify-content: flex-start; }
+  .organization-actions small { text-align: left; }
 
   .connector-row__body {
     min-width: calc(100% - 52px);

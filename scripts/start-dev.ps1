@@ -109,6 +109,9 @@ if (-not $env:COLLECTOR_INTERNAL_TOKEN) { $env:COLLECTOR_INTERNAL_TOKEN = 'local
 Start-ServiceWindow 'info-agent core :8080' $corePath "& '$go' run ./cmd/server"
 Start-ServiceWindow 'info-agent knowledge :8090' $knowledgePath "& '$go' run ./cmd/server"
 Start-ServiceWindow 'info-agent rag :8000' $ragPath "`$env:PYTHONPATH = '$ragRuntime'; & '$python' -m uvicorn app.main:app --host 0.0.0.0 --port 8000"
+if ($env:RAG_REDIS_URL) {
+    Start-ServiceWindow 'info-agent rag-worker' $ragPath "`$env:PYTHONPATH = '$ragRuntime'; & '$python' worker.py"
+}
 Start-ServiceWindow 'info-agent web :5173' $webPath "& '$npm' run dev -- --host 0.0.0.0"
 if ($python) {
     Start-ServiceWindow 'info-agent wechat collector :8091' $projectRoot "`$env:PYTHONPATH = '$wechatRuntime;$projectRoot'; & '$python' -m services.collectors.wechat.main"

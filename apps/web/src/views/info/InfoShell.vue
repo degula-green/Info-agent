@@ -75,12 +75,14 @@ import InfoCommandPalette from '@/components/InfoCommandPalette.vue'
 import InfoResultDrawer from '@/components/InfoResultDrawer.vue'
 import { type SearchResult } from '@/mock'
 import { useInfoMockStore } from '@/stores/infoMock'
+import { useAuthStore } from '@/stores/auth'
 import { normalizeSourceKey, useInfoKnowledgeStore } from '@/stores/infoKnowledge'
 import { getProfile } from '@/mock-api/info-profile'
+import { downloadAvatar, getCurrentUser } from '@/api/core-auth'
 import { listQaConversations, type QaConversation } from '@/mock-api/qa-history'
 import { renameQaConversation, deleteQaConversation } from '@/mock-api/qa-history'
 
-const store = useInfoMockStore(); const knowledgeStore = useInfoKnowledgeStore(); const router = useRouter(); const route = useRoute()
+const store = useInfoMockStore(); const auth = useAuthStore(); const knowledgeStore = useInfoKnowledgeStore(); const router = useRouter(); const route = useRoute()
 // Keep the mock profile out of the initial render; the profile API is authoritative.
 const sidebarNickname = ref('')
 const sidebarAvatar = ref('')
@@ -100,18 +102,29 @@ async function refreshQaConversations() {
 }
 onMounted(async () => {
   try {
-    const profile = await getProfile()
-    sidebarNickname.value = profile.nickname || profile.username || sidebarNickname.value
-    sidebarAvatarUrl.value = profile.avatar_url || null
+    const user = await getCurrentUser()
+    sidebarNickname.value = user.nickname || user.email.split('@')[0]
+    sidebarAvatarUrl.value = user.avatar_url ? await downloadAvatar().catch(() => null) : null
     sidebarAvatar.value = sidebarNickname.value.slice(0, 1) || sidebarAvatar.value
-    store.updateProfile({ nickname: sidebarNickname.value, email: profile.email, avatar: sidebarAvatar.value })
+    store.updateProfile({ nickname: sidebarNickname.value, email: user.email, avatar: sidebarAvatar.value })
   } catch {
-    sidebarNickname.value = store.profile.nickname
-    sidebarAvatar.value = store.profile.avatar
+    try {
+      const profile = await getProfile()
+      sidebarNickname.value = profile.nickname || profile.username || store.profile.nickname
+      sidebarAvatarUrl.value = profile.avatar_url || null
+      sidebarAvatar.value = sidebarNickname.value.slice(0, 1) || store.profile.avatar
+      store.updateProfile({ nickname: sidebarNickname.value, email: profile.email, avatar: sidebarAvatar.value })
+    } catch {
+      sidebarNickname.value = store.profile.nickname
+      sidebarAvatar.value = store.profile.avatar
+    }
   }
   await refreshQaConversations()
   await knowledgeStore.ensureSources()
 })
+function handleAvatarUpdated(event: Event) { sidebarAvatarUrl.value = (event as CustomEvent<string | null>).detail || null }
+onMounted(() => window.addEventListener('profile-avatar-updated', handleAvatarUpdated))
+onBeforeUnmount(() => window.removeEventListener('profile-avatar-updated', handleAvatarUpdated))
 watch(() => route.fullPath, () => { void refreshQaConversations() })
 watch(() => store.qaSessions, () => { void refreshQaConversations() }, { deep: true })
 const knowledgePollTimer = ref<number | null>(null)
@@ -149,7 +162,7 @@ const protocolText = computed(() => protocolType.value === 'terms'
 function handleUserMenuAction(action: 'profile' | 'terms' | 'privacy' | 'logout') {
   if (action === 'profile') { router.push('/profile'); return }
   if (action === 'terms' || action === 'privacy') { protocolType.value = action; protocolDialogVisible.value = true; return }
-  store.logout(); router.push('/login')
+  void auth.logout(); store.logout(); router.push('/login')
 }
 function openQaSession(id: string) { router.push({ path: '/chat', query: { session: id } }) }
 function renameQaSession(id: string) {

@@ -19,6 +19,7 @@ The current Core routes are:
 
 ```text
 POST /auth/login
+POST /auth/register
 POST /auth/refresh
 POST /auth/logout
 GET  /internal/auth/verify
@@ -28,6 +29,8 @@ Through the current gateway prefix, the public auth routes are under `/api/core/
 The verify route is reserved for a future Nginx `auth_request` integration. That gateway integration and protection of existing business routes are intentionally not enabled yet.
 
 Login returns an RS256 access token in the JSON body and writes the opaque refresh token to a Secure, HttpOnly cookie. Refresh rotates that cookie. Logout revokes the current refresh session but does not revoke an already issued access token.
+
+Registration accepts an email, username, password, and confirmation password. It creates an active user and password credential in one PostgreSQL transaction, returns the created user with HTTP 201, and does not create a login session.
 
 Successful verification returns the trusted `X-Actor-ID` and `X-Auth-Session-ID` response headers. A future gateway must remove client-supplied copies of these headers before forwarding the values returned by Core.
 

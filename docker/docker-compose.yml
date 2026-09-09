@@ -80,6 +80,14 @@ services:
       ELASTICSEARCH_URL: ${ELASTICSEARCH_URL:-http://elasticsearch:9200}
       ELASTICSEARCH_USERNAME: ${ELASTICSEARCH_USERNAME:-}
       ELASTICSEARCH_PASSWORD: ${ELASTICSEARCH_PASSWORD:-}
+      ELASTICSEARCH_DISPLAY_INDEX: ${ELASTICSEARCH_DISPLAY_INDEX:-knowledge_display_chunks_read}
+      ELASTICSEARCH_PROTECTED_INDEX: ${ELASTICSEARCH_PROTECTED_INDEX:-knowledge_protected_chunks_read}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-text-embedding-v4}
+      EMBEDDING_DIMS: ${EMBEDDING_DIMS:-1536}
+      RAG_DATABASE_URL: ${RAG_DATABASE_URL:-}
+      RAG_DATABASE_SCHEMA: ${RAG_DATABASE_SCHEMA:-rag}
+      RAG_REDIS_URL: ${RAG_REDIS_URL:-}
+      RAG_REDIS_DATABASE: ${RAG_REDIS_DATABASE:-3}
     expose:
       - "8000"
     depends_on:
@@ -150,7 +158,9 @@ services:
       - rag-service
 
   elasticsearch:
-    image: docker.elastic.co/elasticsearch/elasticsearch:8.17.0
+    build:
+      context: ./elasticsearch
+    image: info-agent-elasticsearch:9.5.2-ik
     environment:
       discovery.type: single-node
       xpack.security.enabled: "false"

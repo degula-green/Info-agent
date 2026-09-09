@@ -35,6 +35,8 @@ type Config struct {
 	OpenFGAURL            string
 	OpenFGAStoreID        string
 	OpenFGAModelID        string
+	OpenFGAAPIToken       string
+	RAGAuthorizationToken string
 }
 
 func Load() (Config, error) {
@@ -81,6 +83,8 @@ func Load() (Config, error) {
 		OpenFGAURL:            env("CORE_OPENFGA_URL", "http://127.0.0.1:8081"),
 		OpenFGAStoreID:        env("CORE_OPENFGA_STORE_ID", ""),
 		OpenFGAModelID:        env("CORE_OPENFGA_MODEL_ID", ""),
+		OpenFGAAPIToken:       env("CORE_OPENFGA_API_TOKEN", ""),
+		RAGAuthorizationToken: env("CORE_RAG_AUTHZ_TOKEN", ""),
 	}
 	if err := cfg.Validate(); err != nil {
 		return Config{}, err
