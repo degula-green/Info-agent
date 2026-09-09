@@ -39,6 +39,142 @@ func TestHealth(t *testing.T) {
 	}
 }
 
+func TestLocalUploadLifecycleAndIdempotency(t *testing.T) {
+	cfg := config.Config{AllowDevAuth: true, DevUserID: "u1", DevOrganizationID: "org-1", MaxAttachmentBytes: 1024}
+	app := newApp(cfg)
+	body := []byte("hello local upload")
+	digest := sha256Hex(body)
+	createBody := `{"request_id":"req-local-1","trace_id":"trace-local-1","upload_destination":"private_local_library","file_name":"note.txt","mime_type":"text/plain","size_bytes":18,"content_hash":"sha256:` + digest + `"}`
+	request := httptest.NewRequest(http.MethodPost, "/api/knowledge/v1/attachments/upload-tasks", strings.NewReader(createBody))
+	request.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+	NewRouterWithApp(app).ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusCreated {
+		t.Fatalf("create task failed: %d %s", recorder.Code, recorder.Body.String())
+	}
+	var task map[string]any
+	if err := json.Unmarshal(recorder.Body.Bytes(), &task); err != nil {
+		t.Fatal(err)
+	}
+	if task["upload_status"] != "pending" || task["processing_status"] != "pending" {
+		t.Fatalf("unexpected initial task: %s", recorder.Body.String())
+	}
+	request = httptest.NewRequest(http.MethodPut, "/api/knowledge/v1/attachments/upload-tasks/req-local-1/content", bytes.NewReader(body))
+	request.Header.Set("Content-Type", "application/octet-stream")
+	recorder = httptest.NewRecorder()
+	NewRouterWithApp(app).ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("content upload failed: %d %s", recorder.Code, recorder.Body.String())
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &task); err != nil {
+		t.Fatal(err)
+	}
+	if task["upload_status"] != "uploaded" || task["content_hash"] != "sha256:"+digest {
+		t.Fatalf("unexpected uploaded task: %s", recorder.Body.String())
+	}
+	resourceID, _ := task["resource_id"].(string)
+	attachmentID, _ := task["attachment_id"].(string)
+	if resourceID == "" || attachmentID == "" || task["object_ref"] == nil {
+		t.Fatalf("missing resource references: %s", recorder.Body.String())
+	}
+	contentReq := httptest.NewRequest(http.MethodGet, "/api/knowledge/v1/attachments/"+attachmentID+"/content", nil)
+	contentRec := httptest.NewRecorder()
+	NewRouterWithApp(app).ServeHTTP(contentRec, contentReq)
+	if contentRec.Code != http.StatusOK || contentRec.Body.String() != string(body) {
+		t.Fatalf("uploaded content could not be read: %d %s", contentRec.Code, contentRec.Body.String())
+	}
+	// Replaying creation is idempotent and returns the same attachment.
+	retry := httptest.NewRequest(http.MethodPost, "/api/knowledge/v1/attachments/upload-tasks", strings.NewReader(createBody))
+	retry.Header.Set("Content-Type", "application/json")
+	retryRecorder := httptest.NewRecorder()
+	NewRouterWithApp(app).ServeHTTP(retryRecorder, retry)
+	if retryRecorder.Code != http.StatusCreated {
+		t.Fatalf("idempotent create failed: %d %s", retryRecorder.Code, retryRecorder.Body.String())
+	}
+	var retryTask map[string]any
+	_ = json.Unmarshal(retryRecorder.Body.Bytes(), &retryTask)
+	if retryTask["attachment_id"] != attachmentID {
+		t.Fatalf("idempotent create changed attachment: first=%v retry=%v", attachmentID, retryTask["attachment_id"])
+	}
+	conflictBody := strings.Replace(createBody, `"file_name":"note.txt"`, `"file_name":"other.txt"`, 1)
+	conflictReq := httptest.NewRequest(http.MethodPost, "/api/knowledge/v1/attachments/upload-tasks", strings.NewReader(conflictBody))
+	conflictReq.Header.Set("Content-Type", "application/json")
+	conflictRec := httptest.NewRecorder()
+	NewRouterWithApp(app).ServeHTTP(conflictRec, conflictReq)
+	if conflictRec.Code != http.StatusConflict {
+		t.Fatalf("request id metadata conflict was accepted: %d %s", conflictRec.Code, conflictRec.Body.String())
+	}
+	duplicateCreate := strings.Replace(createBody, "req-local-1", "req-local-duplicate", 1)
+	dupReq := httptest.NewRequest(http.MethodPost, "/api/knowledge/v1/attachments/upload-tasks", strings.NewReader(duplicateCreate))
+	dupReq.Header.Set("Content-Type", "application/json")
+	dupRec := httptest.NewRecorder()
+	NewRouterWithApp(app).ServeHTTP(dupRec, dupReq)
+	if dupRec.Code != http.StatusCreated {
+		t.Fatalf("duplicate task creation failed: %d %s", dupRec.Code, dupRec.Body.String())
+	}
+	dupContent := httptest.NewRequest(http.MethodPut, "/api/knowledge/v1/attachments/upload-tasks/req-local-duplicate/content", bytes.NewReader(body))
+	dupContent.Header.Set("Content-Type", "application/octet-stream")
+	dupUpload := httptest.NewRecorder()
+	NewRouterWithApp(app).ServeHTTP(dupUpload, dupContent)
+	if dupUpload.Code != http.StatusOK || !strings.Contains(dupUpload.Body.String(), `"upload_status":"duplicate"`) {
+		t.Fatalf("duplicate content was not marked duplicate: %d %s", dupUpload.Code, dupUpload.Body.String())
+	}
+	events, err := app.Service.Repo.GetOutbox(context.Background(), 100)
+	if err != nil || len(events) != 1 {
+		t.Fatalf("duplicate upload published extra event: count=%d err=%v", len(events), err)
+	}
+	// A different user cannot inspect the private task.
+	other := httptest.NewRequest(http.MethodGet, "/api/knowledge/v1/attachments/upload-tasks/req-local-1", nil)
+	other.Header.Set("X-User-ID", "u2")
+	otherRecorder := httptest.NewRecorder()
+	NewRouterWithApp(app).ServeHTTP(otherRecorder, other)
+	if otherRecorder.Code != http.StatusForbidden {
+		t.Fatalf("private task leaked to another user: %d %s", otherRecorder.Code, otherRecorder.Body.String())
+	}
+}
+
+func TestLocalUploadRejectsHashAndClientOrganization(t *testing.T) {
+	app := newApp(config.Config{AllowDevAuth: true, DevUserID: "u1", DevOrganizationID: "org-1", MaxAttachmentBytes: 1024})
+	bad := `{"request_id":"req-bad","trace_id":"trace-bad","upload_destination":"private_local_library","organization_id":"attacker-org","file_name":"note.txt","mime_type":"text/plain","size_bytes":3,"content_hash":"sha256:0000000000000000000000000000000000000000000000000000000000000000"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/knowledge/v1/attachments/upload-tasks", strings.NewReader(bad))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	NewRouterWithApp(app).ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("client organization accepted for private upload: %d %s", rec.Code, rec.Body.String())
+	}
+	good := `{"request_id":"req-org","trace_id":"trace-org","upload_destination":"organization_file_library","organization_id":"attacker-org","file_name":"note.txt","mime_type":"text/plain","size_bytes":3,"content_hash":"sha256:ca978112ca1bbdcafac231b39a23dc4da786eff8147c4e72b9807785afee48bb"}`
+	req = httptest.NewRequest(http.MethodPost, "/api/knowledge/v1/attachments/upload-tasks", strings.NewReader(good))
+	req.Header.Set("Content-Type", "application/json")
+	rec = httptest.NewRecorder()
+	NewRouterWithApp(app).ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated || !strings.Contains(rec.Body.String(), `"organization_id":"org-1"`) {
+		t.Fatalf("resolved organization was not used: %d %s", rec.Code, rec.Body.String())
+	}
+	// Hash mismatch after task creation marks it failed and never writes an object.
+	valid := `{"request_id":"req-fail","trace_id":"trace-fail","upload_destination":"private_local_library","file_name":"note.txt","mime_type":"text/plain","size_bytes":3,"content_hash":"sha256:ca978112ca1bbdcafac231b39a23dc4da786eff8147c4e72b9807785afee48bb"}`
+	req = httptest.NewRequest(http.MethodPost, "/api/knowledge/v1/attachments/upload-tasks", strings.NewReader(valid))
+	req.Header.Set("Content-Type", "application/json")
+	rec = httptest.NewRecorder()
+	NewRouterWithApp(app).ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatal(rec.Body.String())
+	}
+	req = httptest.NewRequest(http.MethodPut, "/api/knowledge/v1/attachments/upload-tasks/req-fail/content", strings.NewReader("bad"))
+	req.Header.Set("Content-Type", "application/octet-stream")
+	rec = httptest.NewRecorder()
+	NewRouterWithApp(app).ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("hash mismatch was accepted: %d %s", rec.Code, rec.Body.String())
+	}
+	status := httptest.NewRecorder()
+	get := httptest.NewRequest(http.MethodGet, "/api/knowledge/v1/attachments/upload-tasks/req-fail", nil)
+	NewRouterWithApp(app).ServeHTTP(status, get)
+	if !strings.Contains(status.Body.String(), `"upload_status":"failed"`) {
+		t.Fatalf("failed task state not persisted: %s", status.Body.String())
+	}
+}
+
 func TestOAuthCallbackRedirectsWithSafeErrorCode(t *testing.T) {
 	app := newApp(config.Config{AllowDevAuth: true, FrontendURL: "http://localhost/profile"})
 	recorder := httptest.NewRecorder()

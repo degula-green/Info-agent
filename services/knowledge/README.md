@@ -10,11 +10,14 @@ GET /api/info
 GET/POST/DELETE /api/knowledge/v1/connectors...
 GET/POST /api/knowledge/v1/conversations...
 POST /api/knowledge/v1/internal/...
+POST/GET/PUT /api/knowledge/v1/attachments/upload-tasks...
 ```
 
 `/v1` 是保留的本地兼容别名；生产和前端联调使用 `/api/knowledge/v1`。
 
 本机 WeChat Collector 只能通过受控内部接口上报，不能直接访问 PostgreSQL、Redis、MinIO 或 OpenFGA。微信附件内容以流式 multipart 上传，由 Knowledge 校验后写入对象存储。
+
+本地附件上传先创建任务，再以 `application/octet-stream` 或 multipart 上传内容。任务状态接口返回受控对象引用、资源/附件 ID、上传和处理状态；私人目标按所有者隔离，公司目标由 Core 当前组织解析并按组织成员访问。
 
 ## 本地启动
 

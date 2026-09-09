@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"github.com/gin-gonic/gin"
 	"time"
 
 	"info-agent/knowledge/internal/domain"
@@ -142,6 +143,25 @@ type publicIngestResult struct {
 	Attachments   []publicAttachment `json:"attachments"`
 	Duplicate     bool               `json:"duplicate"`
 	CursorUpdated bool               `json:"cursor_updated"`
+}
+
+func publicLocalUploadTask(value domain.Attachment) gin.H {
+	return gin.H{
+		"request_id": value.RequestID, "upload_status": value.UploadStatus, "processing_status": value.ProcessingStatus,
+		"upload_url":  "/api/knowledge/v1/attachments/upload-tasks/" + value.RequestID + "/content",
+		"resource_id": value.ResourceID, "attachment_id": value.ID, "object_ref": value.ObjectRef,
+		"upload_destination": value.UploadDestination, "file_name": value.FileName, "mime_type": value.MIMEType,
+		"size_bytes": value.SizeBytes, "content_hash": "sha256:" + value.ContentHash,
+		"organization_id": nullableString(value.OrganizationID), "error": nullableString(value.UploadError),
+		"created_at": value.CreatedAt, "updated_at": value.UpdatedAt,
+	}
+}
+
+func nullableString(value string) any {
+	if value == "" {
+		return nil
+	}
+	return value
 }
 
 func publicConnectorFromView(value domain.ConnectorView) publicConnectorView {

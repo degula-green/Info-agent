@@ -56,19 +56,55 @@ func scanConnector(row rowScanner) (*domain.ConnectorAccount, error) {
 }
 
 func (s *PostgresStore) GetWechatConfig(ctx context.Context, connectorID string) (*domain.WechatCollectionConfig, error) {
-	var c domain.WechatCollectionConfig; var raw []byte
+	var c domain.WechatCollectionConfig
+	var raw []byte
 	err := s.pool.QueryRow(ctx, `SELECT connector_account_id::text,COALESCE(selected_conversations,'[]'::jsonb),history_start_at,enabled,listen_mode,updated_at FROM knowledge.wechat_collection_configs WHERE connector_account_id=$1`, connectorID).Scan(&c.ConnectorID, &raw, &c.HistoryStartAt, &c.Enabled, &c.ListenMode, &c.UpdatedAt)
-	if errors.Is(err, pgx.ErrNoRows) { c = domain.WechatCollectionConfig{ConnectorID: connectorID, SelectedConversations: []string{}, Enabled: true, ListenMode: "whitelist"}; return &c, nil }
-	if err != nil { return nil, dbError(err) }; if err := json.Unmarshal(raw, &c.SelectedConversations); err != nil { return nil, dbError(err) }; return &c, nil
+	if errors.Is(err, pgx.ErrNoRows) {
+		c = domain.WechatCollectionConfig{ConnectorID: connectorID, SelectedConversations: []string{}, Enabled: true, ListenMode: "whitelist"}
+		return &c, nil
+	}
+	if err != nil {
+		return nil, dbError(err)
+	}
+	if err := json.Unmarshal(raw, &c.SelectedConversations); err != nil {
+		return nil, dbError(err)
+	}
+	return &c, nil
 }
 func (s *PostgresStore) SaveWechatConfig(ctx context.Context, c domain.WechatCollectionConfig) (*domain.WechatCollectionConfig, error) {
-	if c.ListenMode == "" { c.ListenMode = "whitelist" }; raw, err := json.Marshal(c.SelectedConversations); if err != nil { return nil, err }
+	if c.ListenMode == "" {
+		c.ListenMode = "whitelist"
+	}
+	raw, err := json.Marshal(c.SelectedConversations)
+	if err != nil {
+		return nil, err
+	}
 	err = s.pool.QueryRow(ctx, `INSERT INTO knowledge.wechat_collection_configs (connector_account_id,selected_conversations,history_start_at,enabled,listen_mode) VALUES ($1,$2::jsonb,$3,$4,$5) ON CONFLICT (connector_account_id) DO UPDATE SET selected_conversations=EXCLUDED.selected_conversations,history_start_at=EXCLUDED.history_start_at,enabled=EXCLUDED.enabled,listen_mode=EXCLUDED.listen_mode,updated_at=now() RETURNING connector_account_id::text,selected_conversations,history_start_at,enabled,listen_mode,updated_at`, c.ConnectorID, raw, c.HistoryStartAt, c.Enabled, c.ListenMode).Scan(&c.ConnectorID, &raw, &c.HistoryStartAt, &c.Enabled, &c.ListenMode, &c.UpdatedAt)
-	if err != nil { return nil, dbError(err) }; _ = json.Unmarshal(raw, &c.SelectedConversations); return &c, nil
+	if err != nil {
+		return nil, dbError(err)
+	}
+	_ = json.Unmarshal(raw, &c.SelectedConversations)
+	return &c, nil
 }
-func (s *PostgresStore) GetWechatRuntime(ctx context.Context, id string) (*domain.WechatCollectorRuntime, error) { var r domain.WechatCollectorRuntime; err:=s.pool.QueryRow(ctx,`SELECT connector_account_id::text,status,last_heartbeat_at,last_collected_at,COALESCE(last_error,''),stopped_at,updated_at FROM knowledge.wechat_collector_runtime WHERE connector_account_id=$1`,id).Scan(&r.ConnectorID,&r.Status,&r.LastHeartbeatAt,&r.LastCollectedAt,&r.LastError,&r.StoppedAt,&r.UpdatedAt); if errors.Is(err,pgx.ErrNoRows){return &domain.WechatCollectorRuntime{ConnectorID:id,Status:"stopped"},nil}; if err!=nil{return nil,dbError(err)}; return &r,nil }
-func (s *PostgresStore) UpsertWechatRuntime(ctx context.Context, r domain.WechatCollectorRuntime) (*domain.WechatCollectorRuntime,error) { err:=s.pool.QueryRow(ctx,`INSERT INTO knowledge.wechat_collector_runtime (connector_account_id,status,last_heartbeat_at,last_collected_at,last_error,stopped_at) VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT (connector_account_id) DO UPDATE SET status=EXCLUDED.status,last_heartbeat_at=EXCLUDED.last_heartbeat_at,last_collected_at=EXCLUDED.last_collected_at,last_error=EXCLUDED.last_error,stopped_at=EXCLUDED.stopped_at,updated_at=now() RETURNING connector_account_id::text,status,last_heartbeat_at,last_collected_at,COALESCE(last_error,''),stopped_at,updated_at`,r.ConnectorID,r.Status,r.LastHeartbeatAt,r.LastCollectedAt,nilString(r.LastError),r.StoppedAt).Scan(&r.ConnectorID,&r.Status,&r.LastHeartbeatAt,&r.LastCollectedAt,&r.LastError,&r.StoppedAt,&r.UpdatedAt); return &r,dbError(err) }
-func (s *PostgresStore) UpdateWechatRuntime(ctx context.Context,id,status,lastError string,heartbeat,collectedAt *time.Time) error { _,err:=s.pool.Exec(ctx,`UPDATE knowledge.wechat_collector_runtime SET status=COALESCE(NULLIF($2,''),status),last_error=$3,last_heartbeat_at=COALESCE($4,last_heartbeat_at),last_collected_at=COALESCE($5,last_collected_at),updated_at=now() WHERE connector_account_id=$1`,id,status,nilString(lastError),heartbeat,collectedAt); return dbError(err) }
+func (s *PostgresStore) GetWechatRuntime(ctx context.Context, id string) (*domain.WechatCollectorRuntime, error) {
+	var r domain.WechatCollectorRuntime
+	err := s.pool.QueryRow(ctx, `SELECT connector_account_id::text,status,last_heartbeat_at,last_collected_at,COALESCE(last_error,''),stopped_at,updated_at FROM knowledge.wechat_collector_runtime WHERE connector_account_id=$1`, id).Scan(&r.ConnectorID, &r.Status, &r.LastHeartbeatAt, &r.LastCollectedAt, &r.LastError, &r.StoppedAt, &r.UpdatedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return &domain.WechatCollectorRuntime{ConnectorID: id, Status: "stopped"}, nil
+	}
+	if err != nil {
+		return nil, dbError(err)
+	}
+	return &r, nil
+}
+func (s *PostgresStore) UpsertWechatRuntime(ctx context.Context, r domain.WechatCollectorRuntime) (*domain.WechatCollectorRuntime, error) {
+	err := s.pool.QueryRow(ctx, `INSERT INTO knowledge.wechat_collector_runtime (connector_account_id,status,last_heartbeat_at,last_collected_at,last_error,stopped_at) VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT (connector_account_id) DO UPDATE SET status=EXCLUDED.status,last_heartbeat_at=EXCLUDED.last_heartbeat_at,last_collected_at=EXCLUDED.last_collected_at,last_error=EXCLUDED.last_error,stopped_at=EXCLUDED.stopped_at,updated_at=now() RETURNING connector_account_id::text,status,last_heartbeat_at,last_collected_at,COALESCE(last_error,''),stopped_at,updated_at`, r.ConnectorID, r.Status, r.LastHeartbeatAt, r.LastCollectedAt, nilString(r.LastError), r.StoppedAt).Scan(&r.ConnectorID, &r.Status, &r.LastHeartbeatAt, &r.LastCollectedAt, &r.LastError, &r.StoppedAt, &r.UpdatedAt)
+	return &r, dbError(err)
+}
+func (s *PostgresStore) UpdateWechatRuntime(ctx context.Context, id, status, lastError string, heartbeat, collectedAt *time.Time) error {
+	_, err := s.pool.Exec(ctx, `UPDATE knowledge.wechat_collector_runtime SET status=COALESCE(NULLIF($2,''),status),last_error=$3,last_heartbeat_at=COALESCE($4,last_heartbeat_at),last_collected_at=COALESCE($5,last_collected_at),updated_at=now() WHERE connector_account_id=$1`, id, status, nilString(lastError), heartbeat, collectedAt)
+	return dbError(err)
+}
 
 func (s *PostgresStore) ListConnectorViews(ctx context.Context, userID string) ([]domain.ConnectorView, error) {
 	rows, err := s.pool.Query(ctx, `SELECT `+connectorColumns+` FROM knowledge.connector_accounts WHERE owner_user_id=$1 AND status<>'revoked'`, userID)
@@ -1167,6 +1203,153 @@ func (s *PostgresStore) GetOutbox(ctx context.Context, limit int) ([]domain.Outb
 }
 func (s *PostgresStore) MarkOutboxPublished(ctx context.Context, id string, publishedAt time.Time) error {
 	_, err := s.pool.Exec(ctx, `UPDATE knowledge.outbox_events SET published_at=$2 WHERE id=$1`, id, publishedAt)
+	return dbError(err)
+}
+
+func localAttachmentQuery() string {
+	return `id::text,COALESCE(request_id,''),COALESCE(uploaded_by_user_id::text,''),COALESCE(upload_destination,''),COALESCE(organization_id::text,''),file_name,mime_type,size_bytes,COALESCE(object_ref,''),COALESCE(content_hash,''),content_version,metadata_access_scope,content_access_scope,content_access_required,upload_status,COALESCE(upload_error,''),processing_status,created_at,updated_at`
+}
+
+func scanLocalAttachment(row rowScanner) (*domain.Attachment, error) {
+	var a domain.Attachment
+	err := row.Scan(&a.ID, &a.RequestID, &a.UploadedByUserID, &a.UploadDestination, &a.OrganizationID, &a.FileName, &a.MIMEType, &a.SizeBytes, &a.ObjectRef, &a.ContentHash, &a.ContentVersion, &a.MetadataAccessScope, &a.ContentAccessScope, &a.ContentAccessRequired, &a.UploadStatus, &a.UploadError, &a.ProcessingStatus, &a.CreatedAt, &a.UpdatedAt)
+	a.AccessScope = a.ContentAccessScope
+	return &a, err
+}
+
+func (s *PostgresStore) CreateLocalUploadTask(ctx context.Context, input domain.LocalUploadTaskInput) (*domain.Attachment, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, dbError(err)
+	}
+	defer tx.Rollback(ctx)
+	var existing domain.Attachment
+	var scanned *domain.Attachment
+	scanned, err = scanLocalAttachment(tx.QueryRow(ctx, `SELECT `+localAttachmentQuery()+` FROM knowledge.attachments WHERE request_id=$1`, input.RequestID))
+	if err == nil {
+		existing = *scanned
+		_ = tx.QueryRow(ctx, `SELECT id::text FROM knowledge.knowledge_items WHERE source_attachment_id=$1 LIMIT 1`, existing.ID).Scan(&existing.ResourceID)
+		if existing.RequestID == input.RequestID && (existing.UploadedByUserID != input.UserID || existing.UploadDestination != input.UploadDestination || existing.FileName != input.FileName || existing.MIMEType != input.MIMEType || existing.SizeBytes != input.SizeBytes || !strings.EqualFold(strings.TrimSpace(existing.ContentHash), strings.TrimSpace(input.ContentHash))) {
+			return nil, apperror.New("idempotency_conflict", "request_id was used with different upload metadata", 409, false)
+		}
+		return &existing, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return nil, dbError(err)
+	}
+	id, resourceID, baseID := uuid.NewString(), uuid.NewString(), uuid.NewString()
+	scope, access, baseType, baseScope := "private", "owner_only", "private_local", "private"
+	var owner any = input.UserID
+	var org any
+	if input.UploadDestination == "organization_file_library" {
+		scope, access, baseType, baseScope, owner, org = "organization", "organization_members", "organization_files", "organization", nil, input.OrganizationID
+	}
+	if _, err = tx.Exec(ctx, `INSERT INTO knowledge.knowledge_bases (id,knowledge_scope,base_type,name,owner_user_id,organization_id) VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT DO NOTHING`, baseID, baseScope, baseType, baseType, owner, org); err != nil {
+		return nil, dbError(err)
+	}
+	if err = tx.QueryRow(ctx, `SELECT id::text FROM knowledge.knowledge_bases WHERE base_type=$1 AND ((owner_user_id=$2 AND $2 IS NOT NULL) OR (organization_id=$3 AND $3 IS NOT NULL)) LIMIT 1`, baseType, owner, org).Scan(&baseID); err != nil {
+		return nil, dbError(err)
+	}
+	placeholder := "pending/" + id
+	if err = tx.QueryRow(ctx, `INSERT INTO knowledge.attachments (id,request_id,uploaded_by_user_id,upload_destination,organization_id,file_name,mime_type,size_bytes,object_ref,content_hash,content_version,metadata_access_scope,content_access_scope,content_access_required,upload_status,processing_status) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,1,$11,$11,false,'pending','pending') RETURNING `+localAttachmentQuery(), id, input.RequestID, owner, input.UploadDestination, org, input.FileName, input.MIMEType, input.SizeBytes, placeholder, input.ContentHash, access).Scan(&existing.ID, &existing.RequestID, &existing.UploadedByUserID, &existing.UploadDestination, &existing.OrganizationID, &existing.FileName, &existing.MIMEType, &existing.SizeBytes, &existing.ObjectRef, &existing.ContentHash, &existing.ContentVersion, &existing.MetadataAccessScope, &existing.ContentAccessScope, &existing.ContentAccessRequired, &existing.UploadStatus, &existing.UploadError, &existing.ProcessingStatus, &existing.CreatedAt, &existing.UpdatedAt); err != nil {
+		return nil, dbError(err)
+	}
+	existing.AccessScope = existing.ContentAccessScope
+	existing.ResourceID = resourceID
+	if _, err = tx.Exec(ctx, `INSERT INTO knowledge.knowledge_items (id,knowledge_base_id,knowledge_scope,access_scope,owner_user_id,organization_id,source_type,source_attachment_id,content_type,content_ref,content_hash,content_version,content_visibility,security_status,content_saved,ownership_ready,security_ready,permission_ready,acl_sync_status,processing_status) VALUES ($1,$2,$3,$4,$5,$6,'local_upload',$7,'file',$8,$9,1,'original','not_required',false,true,true,true,'not_required','pending')`, resourceID, baseID, scope, access, owner, org, existing.ID, placeholder, input.ContentHash); err != nil {
+		return nil, dbError(err)
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return nil, dbError(err)
+	}
+	return &existing, nil
+}
+
+func (s *PostgresStore) GetLocalUploadTask(ctx context.Context, requestID string) (*domain.Attachment, error) {
+	a, err := scanLocalAttachment(s.pool.QueryRow(ctx, `SELECT `+localAttachmentQuery()+` FROM knowledge.attachments WHERE request_id=$1`, requestID))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, apperror.New("upload_task_not_found", "upload task not found", 404, false)
+	}
+	if err == nil {
+		_ = s.pool.QueryRow(ctx, `SELECT id::text FROM knowledge.knowledge_items WHERE source_attachment_id=$1 LIMIT 1`, a.ID).Scan(&a.ResourceID)
+	}
+	return a, dbError(err)
+}
+
+func (s *PostgresStore) FindLocalDuplicate(ctx context.Context, userID, organizationID, contentHash string) (*domain.Attachment, error) {
+	destination := "private_local_library"
+	if organizationID != "" {
+		destination = "organization_file_library"
+	}
+	query := `SELECT ` + localAttachmentQuery() + ` FROM knowledge.attachments WHERE upload_status IN ('uploaded','duplicate') AND content_hash=$1 AND upload_destination=$2 AND `
+	args := []any{contentHash, destination}
+	if organizationID != "" {
+		query += `organization_id=$3 ORDER BY created_at LIMIT 1`
+		args = append(args, organizationID)
+	} else {
+		query += `uploaded_by_user_id=$3 ORDER BY created_at LIMIT 1`
+		args = append(args, userID)
+	}
+	a, err := scanLocalAttachment(s.pool.QueryRow(ctx, query, args...))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, apperror.New("upload_duplicate_not_found", "no duplicate upload found", 404, false)
+	}
+	return a, dbError(err)
+}
+
+func (s *PostgresStore) FinalizeLocalUpload(ctx context.Context, requestID, objectRef, contentHash string, size int64) (*domain.Attachment, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, dbError(err)
+	}
+	defer tx.Rollback(ctx)
+	var a domain.Attachment
+	var scanned *domain.Attachment
+	scanned, err = scanLocalAttachment(tx.QueryRow(ctx, `UPDATE knowledge.attachments SET object_ref=$2,content_hash=$3,size_bytes=$4,upload_status='uploaded',processing_status='pending',upload_error=NULL,updated_at=now() WHERE request_id=$1 AND content_hash=$3 RETURNING `+localAttachmentQuery(), requestID, objectRef, contentHash, size))
+	if err != nil {
+		return nil, dbError(err)
+	}
+	a = *scanned
+	a.AccessScope = a.ContentAccessScope
+	if _, err = tx.Exec(ctx, `UPDATE knowledge.knowledge_items SET content_ref=$2,content_hash=$3,content_saved=true,updated_at=now() WHERE source_attachment_id=$1`, a.ID, objectRef, contentHash); err != nil {
+		return nil, dbError(err)
+	}
+	var resourceID string
+	_ = tx.QueryRow(ctx, `SELECT id::text FROM knowledge.knowledge_items WHERE source_attachment_id=$1`, a.ID).Scan(&resourceID)
+	a.ResourceID = resourceID
+	payload := map[string]any{"event_type": "document.processing.requested", "request_id": a.RequestID, "resource_id": resourceID, "attachment_id": a.ID, "upload_destination": a.UploadDestination, "owner_user_id": a.UploadedByUserID, "organization_id": nil, "object_ref": objectRef, "file_name": a.FileName, "mime_type": a.MIMEType, "size_bytes": size, "content_hash": "sha256:" + contentHash, "content_access_scope": a.ContentAccessScope, "sensitivity": nil, "content_version": a.ContentVersion}
+	if a.OrganizationID != "" {
+		payload["organization_id"] = a.OrganizationID
+	}
+	raw, _ := json.Marshal(payload)
+	traceID := trace.TraceID(ctx)
+	if traceID == "" {
+		traceID = uuid.NewString()
+	}
+	if _, err = tx.Exec(ctx, `INSERT INTO knowledge.outbox_events (id,aggregate_type,aggregate_id,event_type,event_version,trace_id,organization_id,payload) VALUES ($1,'attachment',$2,'document.processing.requested',1,$3,$4,$5) ON CONFLICT DO NOTHING`, uuid.NewString(), a.ID, traceID, nilString(a.OrganizationID), raw); err != nil {
+		return nil, dbError(err)
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return nil, dbError(err)
+	}
+	return &a, nil
+}
+
+func (s *PostgresStore) MarkLocalDuplicate(ctx context.Context, requestID string, existing *domain.Attachment) (*domain.Attachment, error) {
+	a, err := scanLocalAttachment(s.pool.QueryRow(ctx, `UPDATE knowledge.attachments SET object_ref=$2,upload_status='duplicate',processing_status='pending',updated_at=now() WHERE request_id=$1 RETURNING `+localAttachmentQuery(), requestID, existing.ObjectRef))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, apperror.New("upload_task_not_found", "upload task not found", 404, false)
+	}
+	if err != nil {
+		return nil, dbError(err)
+	}
+	a.AccessScope = a.ContentAccessScope
+	a.ResourceID = existing.ResourceID
+	return a, nil
+}
+
+func (s *PostgresStore) FailLocalUpload(ctx context.Context, requestID, message string) error {
+	_, err := s.pool.Exec(ctx, `UPDATE knowledge.attachments SET upload_status='failed',upload_error=$2,updated_at=now() WHERE request_id=$1`, requestID, message)
 	return dbError(err)
 }
 

@@ -282,6 +282,13 @@ type Repository interface {
 	ListAttachments(ctx context.Context, conversationID string) ([]domain.Attachment, error)
 	GetOutbox(ctx context.Context, limit int) ([]domain.OutboxEvent, error)
 	MarkOutboxPublished(ctx context.Context, id string, publishedAt time.Time) error
+
+	CreateLocalUploadTask(ctx context.Context, input domain.LocalUploadTaskInput) (*domain.Attachment, error)
+	GetLocalUploadTask(ctx context.Context, requestID string) (*domain.Attachment, error)
+	FindLocalDuplicate(ctx context.Context, userID, organizationID, contentHash string) (*domain.Attachment, error)
+	FinalizeLocalUpload(ctx context.Context, requestID, objectRef, contentHash string, size int64) (*domain.Attachment, error)
+	MarkLocalDuplicate(ctx context.Context, requestID string, existing *domain.Attachment) (*domain.Attachment, error)
+	FailLocalUpload(ctx context.Context, requestID, message string) error
 }
 
 type ExternalIdentityInput struct {

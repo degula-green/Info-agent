@@ -49,22 +49,22 @@ type ConnectorAccount struct {
 }
 
 type WechatCollectionConfig struct {
-	ConnectorID           string    `json:"connector_id"`
-	SelectedConversations []string  `json:"selected_conversations"`
+	ConnectorID           string     `json:"connector_id"`
+	SelectedConversations []string   `json:"selected_conversations"`
 	HistoryStartAt        *time.Time `json:"history_start_at,omitempty"`
-	Enabled               bool      `json:"enabled"`
-	ListenMode            string    `json:"listen_mode"`
-	UpdatedAt             time.Time `json:"updated_at"`
+	Enabled               bool       `json:"enabled"`
+	ListenMode            string     `json:"listen_mode"`
+	UpdatedAt             time.Time  `json:"updated_at"`
 }
 
 type WechatCollectorRuntime struct {
-	ConnectorID      string     `json:"connector_id"`
-	Status           string     `json:"status"`
-	LastHeartbeatAt  *time.Time `json:"last_heartbeat_at,omitempty"`
-	LastCollectedAt  *time.Time `json:"last_collected_at,omitempty"`
-	LastError        string     `json:"last_error,omitempty"`
-	StoppedAt        *time.Time `json:"stopped_at,omitempty"`
-	UpdatedAt        time.Time  `json:"updated_at"`
+	ConnectorID     string     `json:"connector_id"`
+	Status          string     `json:"status"`
+	LastHeartbeatAt *time.Time `json:"last_heartbeat_at,omitempty"`
+	LastCollectedAt *time.Time `json:"last_collected_at,omitempty"`
+	LastError       string     `json:"last_error,omitempty"`
+	StoppedAt       *time.Time `json:"stopped_at,omitempty"`
+	UpdatedAt       time.Time  `json:"updated_at"`
 }
 
 type ConnectorView struct {
@@ -238,8 +238,14 @@ type MessageSource struct {
 
 type Attachment struct {
 	ID                    string    `json:"id"`
+	RequestID             string    `json:"request_id,omitempty"`
+	TraceID               string    `json:"trace_id,omitempty"`
+	ResourceID            string    `json:"resource_id,omitempty"`
 	ConversationID        string    `json:"conversation_id"`
 	MessageID             string    `json:"message_id,omitempty"`
+	UploadedByUserID      string    `json:"uploaded_by_user_id,omitempty"`
+	UploadDestination     string    `json:"upload_destination,omitempty"`
+	OrganizationID        string    `json:"organization_id,omitempty"`
 	ExternalAttachmentID  string    `json:"external_attachment_id"`
 	FileName              string    `json:"file_name"`
 	MIMEType              string    `json:"mime_type"`
@@ -249,11 +255,51 @@ type Attachment struct {
 	ContentVersion        int       `json:"content_version"`
 	ContentStatus         string    `json:"content_status"`
 	AccessScope           string    `json:"access_scope"`
+	MetadataAccessScope   string    `json:"metadata_access_scope,omitempty"`
+	ContentAccessScope    string    `json:"content_access_scope,omitempty"`
 	ContentAccessRequired bool      `json:"content_access_required"`
+	UploadStatus          string    `json:"upload_status,omitempty"`
+	UploadError           string    `json:"upload_error,omitempty"`
+	ProcessingStatus      string    `json:"processing_status,omitempty"`
 	PreviewCapability     string    `json:"preview_capability,omitempty"`
 	LastError             string    `json:"last_error,omitempty"`
 	CreatedAt             time.Time `json:"created_at"`
 	UpdatedAt             time.Time `json:"updated_at"`
+}
+
+type LocalUploadTaskInput struct {
+	RequestID         string
+	TraceID           string
+	UserID            string
+	UploadDestination string
+	FileName          string
+	MIMEType          string
+	SizeBytes         int64
+	ContentHash       string
+	OrganizationID    string
+}
+
+type KnowledgeItem struct {
+	ID                 string    `json:"id"`
+	KnowledgeBaseID    string    `json:"knowledge_base_id"`
+	KnowledgeScope     string    `json:"knowledge_scope"`
+	AccessScope        string    `json:"access_scope"`
+	OwnerUserID        string    `json:"owner_user_id,omitempty"`
+	OrganizationID     string    `json:"organization_id,omitempty"`
+	SourceType         string    `json:"source_type"`
+	SourceAttachmentID string    `json:"source_attachment_id"`
+	ContentType        string    `json:"content_type"`
+	ContentRef         string    `json:"content_ref"`
+	ContentHash        string    `json:"content_hash"`
+	ContentVersion     int       `json:"content_version"`
+	SecurityStatus     string    `json:"security_status"`
+	ContentSaved       bool      `json:"content_saved"`
+	OwnershipReady     bool      `json:"ownership_ready"`
+	SecurityReady      bool      `json:"security_ready"`
+	PermissionReady    bool      `json:"permission_ready"`
+	ProcessingStatus   string    `json:"processing_status"`
+	CreatedAt          time.Time `json:"created_at"`
+	UpdatedAt          time.Time `json:"updated_at"`
 }
 
 type OutboxEvent struct {

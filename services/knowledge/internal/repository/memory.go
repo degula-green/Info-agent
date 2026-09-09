@@ -58,14 +58,61 @@ func NewMemoryStore() *MemoryStore {
 }
 
 func (s *MemoryStore) GetWechatConfig(_ context.Context, connectorID string) (*domain.WechatCollectionConfig, error) {
-	s.mu.RLock(); defer s.mu.RUnlock(); v, ok := s.wechatConfigs[connectorID]; if !ok { return &domain.WechatCollectionConfig{ConnectorID: connectorID, SelectedConversations: []string{}, Enabled: true, ListenMode: "whitelist"}, nil }; c := v; c.SelectedConversations = append([]string(nil), v.SelectedConversations...); return &c, nil
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	v, ok := s.wechatConfigs[connectorID]
+	if !ok {
+		return &domain.WechatCollectionConfig{ConnectorID: connectorID, SelectedConversations: []string{}, Enabled: true, ListenMode: "whitelist"}, nil
+	}
+	c := v
+	c.SelectedConversations = append([]string(nil), v.SelectedConversations...)
+	return &c, nil
 }
 func (s *MemoryStore) SaveWechatConfig(_ context.Context, c domain.WechatCollectionConfig) (*domain.WechatCollectionConfig, error) {
-	s.mu.Lock(); defer s.mu.Unlock(); if c.ListenMode == "" { c.ListenMode = "whitelist" }; c.SelectedConversations = append([]string(nil), c.SelectedConversations...); c.UpdatedAt = time.Now().UTC(); s.wechatConfigs[c.ConnectorID] = c; out := c; return &out, nil
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if c.ListenMode == "" {
+		c.ListenMode = "whitelist"
+	}
+	c.SelectedConversations = append([]string(nil), c.SelectedConversations...)
+	c.UpdatedAt = time.Now().UTC()
+	s.wechatConfigs[c.ConnectorID] = c
+	out := c
+	return &out, nil
 }
-func (s *MemoryStore) GetWechatRuntime(_ context.Context, connectorID string) (*domain.WechatCollectorRuntime, error) { s.mu.RLock(); defer s.mu.RUnlock(); v, ok := s.wechatRuntime[connectorID]; if !ok { return &domain.WechatCollectorRuntime{ConnectorID: connectorID, Status: "stopped"}, nil }; out := v; return &out, nil }
-func (s *MemoryStore) UpsertWechatRuntime(_ context.Context, v domain.WechatCollectorRuntime) (*domain.WechatCollectorRuntime, error) { s.mu.Lock(); defer s.mu.Unlock(); v.UpdatedAt = time.Now().UTC(); s.wechatRuntime[v.ConnectorID] = v; out := v; return &out, nil }
-func (s *MemoryStore) UpdateWechatRuntime(_ context.Context, id, status, lastError string, heartbeat, collectedAt *time.Time) error { s.mu.Lock(); defer s.mu.Unlock(); v := s.wechatRuntime[id]; v.ConnectorID=id; if status != "" { v.Status=status }; v.LastError=lastError; v.LastHeartbeatAt=heartbeat; v.LastCollectedAt=collectedAt; v.UpdatedAt=time.Now().UTC(); s.wechatRuntime[id]=v; return nil }
+func (s *MemoryStore) GetWechatRuntime(_ context.Context, connectorID string) (*domain.WechatCollectorRuntime, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	v, ok := s.wechatRuntime[connectorID]
+	if !ok {
+		return &domain.WechatCollectorRuntime{ConnectorID: connectorID, Status: "stopped"}, nil
+	}
+	out := v
+	return &out, nil
+}
+func (s *MemoryStore) UpsertWechatRuntime(_ context.Context, v domain.WechatCollectorRuntime) (*domain.WechatCollectorRuntime, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	v.UpdatedAt = time.Now().UTC()
+	s.wechatRuntime[v.ConnectorID] = v
+	out := v
+	return &out, nil
+}
+func (s *MemoryStore) UpdateWechatRuntime(_ context.Context, id, status, lastError string, heartbeat, collectedAt *time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	v := s.wechatRuntime[id]
+	v.ConnectorID = id
+	if status != "" {
+		v.Status = status
+	}
+	v.LastError = lastError
+	v.LastHeartbeatAt = heartbeat
+	v.LastCollectedAt = collectedAt
+	v.UpdatedAt = time.Now().UTC()
+	s.wechatRuntime[id] = v
+	return nil
+}
 
 func (s *MemoryStore) Close() error { return nil }
 
@@ -1318,6 +1365,128 @@ func (s *MemoryStore) MarkOutboxPublished(_ context.Context, id string, publishe
 	e.PublishedAt = &publishedAt
 	s.outbox[id] = e
 	return nil
+}
+
+func (s *MemoryStore) CreateLocalUploadTask(_ context.Context, input domain.LocalUploadTaskInput) (*domain.Attachment, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, existing := range s.attachments {
+		if existing.RequestID == input.RequestID {
+			if existing.UploadedByUserID != input.UserID || existing.UploadDestination != input.UploadDestination || existing.FileName != input.FileName || existing.MIMEType != input.MIMEType || existing.SizeBytes != input.SizeBytes || !strings.EqualFold(existing.ContentHash, input.ContentHash) {
+				return nil, apperror.New("idempotency_conflict", "request_id was used with different upload metadata", 409, false)
+			}
+			out := cloneAttachment(existing)
+			return &out, nil
+		}
+	}
+	now := time.Now().UTC()
+	a := domain.Attachment{
+		ID: uuid.NewString(), RequestID: input.RequestID, TraceID: input.TraceID, ResourceID: uuid.NewString(),
+		UploadedByUserID: input.UserID, UploadDestination: input.UploadDestination,
+		OrganizationID: input.OrganizationID, FileName: input.FileName, MIMEType: input.MIMEType,
+		SizeBytes: input.SizeBytes, ContentHash: input.ContentHash, ContentVersion: 1,
+		MetadataAccessScope: "owner_only", ContentAccessScope: "owner_only", AccessScope: "owner_only",
+		ContentStatus: "pending", UploadStatus: "pending", ProcessingStatus: "pending",
+		CreatedAt: now, UpdatedAt: now,
+	}
+	if input.UploadDestination == "organization_file_library" {
+		a.MetadataAccessScope, a.ContentAccessScope, a.AccessScope = "organization_members", "organization_members", "organization_members"
+	}
+	s.attachments[a.ID] = a
+	out := cloneAttachment(a)
+	return &out, nil
+}
+
+func (s *MemoryStore) GetLocalUploadTask(_ context.Context, requestID string) (*domain.Attachment, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, a := range s.attachments {
+		if a.RequestID == requestID {
+			out := cloneAttachment(a)
+			return &out, nil
+		}
+	}
+	return nil, apperror.New("upload_task_not_found", "upload task not found", 404, false)
+}
+
+func (s *MemoryStore) FindLocalDuplicate(_ context.Context, userID, organizationID, contentHash string) (*domain.Attachment, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, a := range s.attachments {
+		if a.UploadStatus != "uploaded" && a.UploadStatus != "duplicate" {
+			continue
+		}
+		if !strings.EqualFold(a.ContentHash, contentHash) {
+			continue
+		}
+		if organizationID != "" {
+			if a.OrganizationID != organizationID || a.UploadDestination != "organization_file_library" {
+				continue
+			}
+		} else if a.UploadedByUserID != userID || a.UploadDestination != "private_local_library" {
+			continue
+		}
+		out := cloneAttachment(a)
+		return &out, nil
+	}
+	return nil, apperror.New("upload_duplicate_not_found", "no duplicate upload found", 404, false)
+}
+
+func (s *MemoryStore) FinalizeLocalUpload(_ context.Context, requestID, objectRef, contentHash string, size int64) (*domain.Attachment, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for key, a := range s.attachments {
+		if a.RequestID != requestID {
+			continue
+		}
+		if a.ContentHash != "" && !strings.EqualFold(a.ContentHash, contentHash) {
+			return nil, apperror.New("attachment_hash_mismatch", "attachment hash does not match metadata", 400, false)
+		}
+		a.ObjectRef, a.ContentHash, a.SizeBytes = objectRef, contentHash, size
+		a.ContentStatus, a.UploadStatus, a.ProcessingStatus, a.UploadError = "ready", "uploaded", "pending", ""
+		a.UpdatedAt = time.Now().UTC()
+		eventID := uuid.NewString()
+		payload := map[string]any{"event_id": eventID, "event_type": "document.processing.requested", "request_id": a.RequestID, "trace_id": a.TraceID, "resource_id": a.ResourceID, "attachment_id": a.ID, "upload_destination": a.UploadDestination, "owner_user_id": a.UploadedByUserID, "organization_id": nil, "object_ref": a.ObjectRef, "file_name": a.FileName, "mime_type": a.MIMEType, "size_bytes": a.SizeBytes, "content_hash": "sha256:" + a.ContentHash, "content_access_scope": a.ContentAccessScope, "sensitivity": nil, "content_version": a.ContentVersion}
+		if a.OrganizationID != "" {
+			payload["organization_id"] = a.OrganizationID
+		}
+		s.outbox[eventID] = domain.OutboxEvent{ID: eventID, EventType: "document.processing.requested", SchemaVersion: 1, OccurredAt: time.Now().UTC(), TraceID: a.TraceID, OrganizationID: a.OrganizationID, Producer: "module-2", Payload: payload}
+		s.attachments[key] = a
+		out := cloneAttachment(a)
+		return &out, nil
+	}
+	return nil, apperror.New("upload_task_not_found", "upload task not found", 404, false)
+}
+
+func (s *MemoryStore) FailLocalUpload(_ context.Context, requestID, message string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for key, a := range s.attachments {
+		if a.RequestID == requestID {
+			a.UploadStatus, a.ContentStatus, a.UploadError, a.LastError = "failed", "failed", safeError(message), safeError(message)
+			a.UpdatedAt = time.Now().UTC()
+			s.attachments[key] = a
+			return nil
+		}
+	}
+	return apperror.New("upload_task_not_found", "upload task not found", 404, false)
+}
+
+func (s *MemoryStore) MarkLocalDuplicate(_ context.Context, requestID string, existing *domain.Attachment) (*domain.Attachment, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for key, a := range s.attachments {
+		if a.RequestID != requestID {
+			continue
+		}
+		a.UploadStatus, a.ContentStatus, a.ProcessingStatus = "duplicate", "ready", "pending"
+		a.ObjectRef, a.ResourceID = existing.ObjectRef, existing.ResourceID
+		a.UpdatedAt = time.Now().UTC()
+		s.attachments[key] = a
+		out := cloneAttachment(a)
+		return &out, nil
+	}
+	return nil, apperror.New("upload_task_not_found", "upload task not found", 404, false)
 }
 
 const domainConversationActive = "active"

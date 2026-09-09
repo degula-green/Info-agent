@@ -213,6 +213,49 @@ func registerUserRoutes(r *gin.Engine, app *App, prefix string) {
 		c.JSON(http.StatusOK, gin.H{"connector": publicConnectorFromAccount(out)})
 	})
 	g.Use(userMiddleware(app))
+	g.POST("/attachments/upload-tasks", func(c *gin.Context) {
+		p := principal(c)
+		var body service.LocalUploadTaskInput
+		if err := c.ShouldBindJSON(&body); err != nil {
+			writeError(c, apperror.New("invalid_request", "invalid upload task request", 400, false))
+			return
+		}
+		out, err := app.Service.CreateLocalUploadTask(c, p.UserID, p.OrganizationID, body)
+		if err != nil {
+			writeError(c, err)
+			return
+		}
+		c.JSON(http.StatusCreated, publicLocalUploadTask(*out))
+	})
+	g.GET("/attachments/upload-tasks/:request_id", func(c *gin.Context) {
+		out, err := app.Service.GetLocalUploadTask(c, principal(c).UserID, c.Param("request_id"))
+		if err != nil {
+			writeError(c, err)
+			return
+		}
+		c.JSON(http.StatusOK, publicLocalUploadTask(*out))
+	})
+	g.PUT("/attachments/upload-tasks/:request_id/content", func(c *gin.Context) {
+		p := principal(c)
+		var reader io.Reader = c.Request.Body
+		contentType := strings.ToLower(c.GetHeader("Content-Type"))
+		var cleanup func() = func() {}
+		if strings.HasPrefix(contentType, "multipart/") {
+			file, closeFn, parseErr := parseLocalContent(c, app.Config.MaxAttachmentBytes)
+			if parseErr != nil {
+				writeError(c, parseErr)
+				return
+			}
+			reader, cleanup = file, closeFn
+		}
+		defer cleanup()
+		out, err := app.Service.UploadLocalContent(c, p.UserID, c.Param("request_id"), reader)
+		if err != nil {
+			writeError(c, err)
+			return
+		}
+		c.JSON(http.StatusOK, publicLocalUploadTask(*out))
+	})
 	g.GET("/connectors", func(c *gin.Context) {
 		p := principal(c)
 		views, err := app.Service.ListConnectors(c, p.UserID)
@@ -889,6 +932,57 @@ func parseUpload(c *gin.Context, maxSize int64) (uploadMeta, string, int64, func
 		meta.MIMEType = parsed
 	}
 	return meta, tempName, size, cleanup, nil
+}
+
+func parseLocalContent(c *gin.Context, maxSize int64) (io.ReadCloser, func(), error) {
+	reader, err := c.Request.MultipartReader()
+	if err != nil {
+		return nil, func() {}, apperror.New("invalid_multipart", "multipart/form-data is required", 400, false)
+	}
+	var path string
+	cleanup := func() {
+		if path != "" {
+			_ = os.Remove(path)
+		}
+	}
+	for {
+		part, partErr := reader.NextPart()
+		if partErr == io.EOF {
+			break
+		}
+		if partErr != nil {
+			cleanup()
+			return nil, func() {}, apperror.New("invalid_multipart", "invalid multipart body", 400, false)
+		}
+		if part.FormName() != "file" && part.FileName() == "" {
+			continue
+		}
+		if path != "" {
+			cleanup()
+			return nil, func() {}, apperror.New("invalid_multipart", "only one file is supported", 400, false)
+		}
+		temp, createErr := os.CreateTemp("", "knowledge-local-content-*")
+		if createErr != nil {
+			cleanup()
+			return nil, func() {}, apperror.New("attachment_upload_failed", "cannot create upload buffer", 503, true)
+		}
+		path = temp.Name()
+		written, copyErr := io.Copy(temp, io.LimitReader(part, maxSize+1))
+		closeErr := temp.Close()
+		if copyErr != nil || closeErr != nil || written > maxSize {
+			cleanup()
+			return nil, func() {}, apperror.New("attachment_too_large", "attachment exceeds the configured size limit", 413, false)
+		}
+	}
+	if path == "" {
+		return nil, func() {}, apperror.New("invalid_multipart", "file is required", 400, false)
+	}
+	file, openErr := os.Open(path)
+	if openErr != nil {
+		cleanup()
+		return nil, func() {}, apperror.New("attachment_upload_failed", "cannot open upload buffer", 503, true)
+	}
+	return file, func() { _ = file.Close(); cleanup() }, nil
 }
 
 func validSHA256(value string) bool {
