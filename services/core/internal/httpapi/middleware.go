@@ -77,6 +77,33 @@ func OptionalAuthentication(authentication Authentication, logger *slog.Logger) 
 	}
 }
 
+func RequireAuthentication(authentication Authentication, logger *slog.Logger) gin.HandlerFunc {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	return func(c *gin.Context) {
+		raw, ok := bearerToken(c.GetHeader("Authorization"))
+		if !ok {
+			writeError(c, http.StatusUnauthorized, "AUTH_UNAUTHENTICATED", "authentication required", false)
+			c.Abort()
+			return
+		}
+		principal, err := authentication.VerifyAccessToken(c.Request.Context(), raw)
+		if err != nil {
+			if !errors.Is(err, application.ErrUnauthenticated) {
+				logger.ErrorContext(c.Request.Context(), "authentication failed", "error", err)
+				writeError(c, http.StatusServiceUnavailable, "AUTH_SERVICE_UNAVAILABLE", "authentication service unavailable", true)
+			} else {
+				writeError(c, http.StatusUnauthorized, "AUTH_UNAUTHENTICATED", "authentication required", false)
+			}
+			c.Abort()
+			return
+		}
+		c.Request = c.Request.WithContext(WithPrincipal(c.Request.Context(), principal))
+		c.Next()
+	}
+}
+
 func bearerToken(authorization string) (string, bool) {
 	parts := strings.Fields(authorization)
 	if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") || parts[1] == "" {

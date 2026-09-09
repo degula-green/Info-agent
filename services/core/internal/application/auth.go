@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 	"time"
 
@@ -12,8 +13,9 @@ import (
 )
 
 var (
-	ErrInvalidCredentials = errors.New("authentication: invalid credentials")
-	ErrUnauthenticated    = errors.New("authentication: unauthenticated")
+	ErrInvalidCredentials       = errors.New("authentication: invalid credentials")
+	ErrUnauthenticated          = errors.New("authentication: unauthenticated")
+	ErrProfileUpdateUnsupported = errors.New("authentication: profile update unsupported")
 )
 
 type PasswordVerifier interface {
@@ -56,6 +58,55 @@ type AuthService struct {
 	ids         IDGenerator
 	clock       Clock
 	refreshTTL  time.Duration
+	avatarStore AvatarObjectStore
+}
+
+type AvatarObjectStore interface {
+	Put(context.Context, string, io.Reader, int64, string) error
+	Open(context.Context, string) (io.ReadCloser, string, error)
+	Delete(context.Context, string) error
+}
+
+func (s *AuthService) SetAvatarStore(store AvatarObjectStore) { s.avatarStore = store }
+func (s *AuthService) SaveAvatar(ctx context.Context, userID, key string, r io.Reader, size int64, contentType string) (domain.User, error) {
+	if s.avatarStore == nil {
+		return domain.User{}, ErrProfileUpdateUnsupported
+	}
+	if err := s.avatarStore.Put(ctx, key, r, size, contentType); err != nil {
+		return domain.User{}, err
+	}
+	updater, ok := s.users.(repository.UserAvatarRepository)
+	if !ok {
+		return domain.User{}, ErrProfileUpdateUnsupported
+	}
+	return updater.UpdateAvatarObjectKey(ctx, userID, key)
+}
+func (s *AuthService) OpenAvatar(ctx context.Context, key string) (io.ReadCloser, string, error) {
+	if s.avatarStore == nil {
+		return nil, "", ErrProfileUpdateUnsupported
+	}
+	return s.avatarStore.Open(ctx, key)
+}
+func (s *AuthService) DeleteAvatar(ctx context.Context, key string) error {
+	if s.avatarStore == nil {
+		return ErrProfileUpdateUnsupported
+	}
+	return s.avatarStore.Delete(ctx, key)
+}
+
+// CurrentUser returns the latest user record for an authenticated principal.
+func (s *AuthService) CurrentUser(ctx context.Context, userID string) (domain.User, error) {
+	return s.users.FindByID(ctx, userID)
+}
+
+func (s *AuthService) UpdateCurrentUser(ctx context.Context, userID, nickname string) (domain.User, error) {
+	updater, ok := s.users.(interface {
+		UpdateNickname(context.Context, string, string) (domain.User, error)
+	})
+	if !ok {
+		return domain.User{}, ErrProfileUpdateUnsupported
+	}
+	return updater.UpdateNickname(ctx, userID, nickname)
 }
 
 func NewAuthService(

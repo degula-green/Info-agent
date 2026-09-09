@@ -14,6 +14,7 @@ type User struct {
 	ID        string
 	Email     string
 	Nickname  string
+	AvatarObjectKey string
 	Status    string
 	DeletedAt *time.Time
 }

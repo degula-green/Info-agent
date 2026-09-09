@@ -920,7 +920,7 @@ CREATE TABLE rag.index_records (
         UNIQUE (knowledge_item_id, content_version, content_variant),
     CONSTRAINT index_records_content_version_chk CHECK (content_version >= 1),
     CONSTRAINT index_records_acl_version_chk CHECK (acl_version >= 0),
-    CONSTRAINT index_records_variant_chk CHECK (content_variant = 'display'),
+    CONSTRAINT index_records_variant_chk CHECK (content_variant IN ('display', 'protected')),
     CONSTRAINT index_records_chunk_count_chk CHECK (chunk_count >= 0),
     CONSTRAINT index_records_status_chk
         CHECK (status IN ('pending', 'indexing', 'ready', 'failed', 'deleted')),

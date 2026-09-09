@@ -89,7 +89,7 @@ attachment + content + download   → attachment_content.download
   },
   "content_ref": "knowledge://ki_001",
   "content_type": "text",
-  "content_hash": "sha256:xxx",
+  "content_hash": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
   "content_version": 1,
   "lifecycle_status": "active",
   "security_status": "classified",
@@ -225,7 +225,7 @@ POST /knowledge/attachments
 
 共享接口为 `POST /knowledge/private/shares`，请求和响应分别使用 `private-conversation-share-request.schema.json` 与 `private-conversation-share-response.schema.json`。请求提交私聊会话 ID 和选中的消息 ID，组织 ID 由服务端从当前用户绑定关系确定。
 
-共享请求按 `request_id` 幂等；同一批次内按 `share_batch_id + source_private_item_id` 防止重复创建组织引用。未出现在 `message_ids` 中的文字、文件或图片消息均不创建组织引用；撤销共享不在第一期范围内。
+共享请求按 `(requester_user_id, request_id)` 幂等；服务端首次处理时生成 `share_batch_id`，同一请求内按 `share_request_id + source_private_item_id` 防止重复创建组织引用。相同 `request_id` 携带不同 `message_ids` 时返回 `IDEMPOTENCY_CONFLICT`。未出现在 `message_ids` 中的文字、文件或图片消息均不创建组织引用；撤销共享不在第一期范围内。
 
 ## 7. 隐私识别与权限状态
 

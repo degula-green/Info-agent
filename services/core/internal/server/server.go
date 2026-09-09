@@ -15,6 +15,8 @@ import (
 	"info-agent/core/internal/application"
 	"info-agent/core/internal/config"
 	"info-agent/core/internal/httpapi"
+	"info-agent/core/internal/infrastructure/objectstore"
+	"info-agent/core/internal/infrastructure/openfga"
 	"info-agent/core/internal/infrastructure/postgres"
 	redisstore "info-agent/core/internal/infrastructure/redis"
 	"info-agent/core/internal/infrastructure/security"
@@ -81,6 +83,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Server, 
 	}
 
 	authRepository := postgres.NewAuthRepository(pool)
+	organizationRepository := postgres.NewOrganizationRepository(pool)
 	sessionStore := redisstore.NewRefreshSessionStore(redisClient, cfg.RedisKeyPrefix)
 	authService, err := application.NewAuthService(
 		authRepository,
@@ -98,6 +101,15 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Server, 
 		pool.Close()
 		return nil, err
 	}
+	if cfg.MinioAccessKey != "" && cfg.MinioSecretKey != "" {
+		avatarStore, storeErr := objectstore.NewAvatarStore(cfg.MinioEndpoint, cfg.MinioAccessKey, cfg.MinioSecretKey, cfg.MinioBucket, false)
+		if storeErr != nil {
+			_ = redisClient.Close()
+			pool.Close()
+			return nil, fmt.Errorf("create avatar store: %w", storeErr)
+		}
+		authService.SetAvatarStore(avatarStore)
+	}
 	cookies, err := refreshCookieConfig(cfg)
 	if err != nil {
 		_ = redisClient.Close()
@@ -105,8 +117,16 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Server, 
 		return nil, err
 	}
 
+	organizationService := application.NewOrganizationService(organizationRepository, clock.Now)
+	registrationService, err := application.NewRegistrationService(authRepository, security.BcryptPasswordVerifier{})
+	if err != nil {
+		_ = redisClient.Close()
+		pool.Close()
+		return nil, err
+	}
+	authorizationClient := openfga.NewClient(cfg)
 	return &Server{
-		Engine: httpapi.NewRouter(authService, cookies, logger),
+		Engine: httpapi.NewRouterWithRegistration(authService, cookies, logger, registrationService, organizationService, &httpapi.AuthorizationConfig{Provider: authorizationClient, Token: cfg.RAGAuthorizationToken}),
 		pool:   pool,
 		redis:  redisClient,
 	}, nil

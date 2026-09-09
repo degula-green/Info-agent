@@ -9,9 +9,14 @@ import (
 
 var (
 	ErrNotFound           = errors.New("repository: not found")
+	ErrEmailAlreadyExists = errors.New("repository: email already exists")
 	ErrRefreshTokenReused = errors.New("repository: refresh token reused")
 	ErrSessionInactive    = errors.New("repository: refresh session inactive")
 )
+
+type UserRegistrationRepository interface {
+	CreateUserWithPassword(ctx context.Context, email, nickname, passwordHash string) (domain.User, error)
+}
 
 type CredentialRepository interface {
 	FindPasswordIdentityByEmail(ctx context.Context, normalizedEmail string) (domain.PasswordIdentity, error)
@@ -19,6 +24,10 @@ type CredentialRepository interface {
 
 type UserRepository interface {
 	FindByID(ctx context.Context, userID string) (domain.User, error)
+}
+
+type UserAvatarRepository interface {
+	UpdateAvatarObjectKey(ctx context.Context, userID, objectKey string) (domain.User, error)
 }
 
 type RefreshSessionStore interface {

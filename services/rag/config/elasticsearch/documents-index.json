@@ -4,19 +4,115 @@
     "number_of_replicas": 0
   },
   "mappings": {
+    "dynamic": "strict",
+    "_source": {
+      "excludes": ["embedding"]
+    },
     "properties": {
-      "content": { "type": "text" },
+      "chunk_id": {"type": "keyword"},
+      "chunk_index": {"type": "integer"},
+      "chunk_count": {"type": "integer"},
+      "chunking_version": {"type": "keyword"},
+
+      "knowledge_item_id": {"type": "keyword"},
+      "attachment_id": {"type": "keyword"},
+      "knowledge_base_id": {"type": "keyword"},
+      "content_version": {"type": "integer"},
+      "attachment_content_version": {"type": "integer"},
+      "auth_acl_version": {"type": "long"},
+      "mapping_version": {"type": "keyword"},
+
+      "auth_resource_type": {"type": "keyword"},
+      "auth_resource_part": {"type": "keyword"},
+      "auth_resource_id": {"type": "keyword"},
+      "auth_object_key": {"type": "keyword"},
+
+      "knowledge_scope": {"type": "keyword"},
+      "access_scope": {"type": "keyword"},
+      "organization_id": {"type": "keyword"},
+      "owner_user_id": {"type": "keyword"},
+      "conversation_group_id": {"type": "keyword"},
+
+      "part_kind": {"type": "keyword"},
+      "chunk_type": {"type": "keyword"},
+      "content_access_required": {"type": "boolean"},
+      "title": {
+        "type": "text",
+        "analyzer": "ik_max_word",
+        "search_analyzer": "ik_smart",
+        "fields": {
+          "keyword": {"type": "keyword", "ignore_above": 512}
+        }
+      },
+      "content": {
+        "type": "text",
+        "analyzer": "ik_max_word",
+        "search_analyzer": "ik_smart"
+      },
+      "content_hash": {"type": "keyword"},
+      "content_visibility": {"type": "keyword"},
+
       "embedding": {
         "type": "dense_vector",
+        "dims": 1536,
         "index": true,
-        "similarity": "cosine"
+        "similarity": "cosine",
+        "index_options": {
+          "type": "hnsw",
+          "m": 16,
+          "ef_construction": 100
+        }
       },
-      "file_id": { "type": "keyword" },
-      "project_id": { "type": "keyword" },
-      "organization_id": { "type": "keyword" },
-      "source_type": { "type": "keyword" },
-      "source_position": { "type": "keyword" },
-      "created_at": { "type": "date" }
+      "embedding_model": {"type": "keyword"},
+      "vectorized": {"type": "boolean"},
+      "rag_eligible": {"type": "boolean"},
+
+      "conversation_ingestion_id": {"type": "keyword"},
+      "external_conversation_id": {"type": "keyword"},
+      "message_id": {"type": "keyword"},
+      "external_message_id": {"type": "keyword"},
+      "sender_identity_id": {"type": "keyword"},
+      "sender_display_name": {
+        "type": "text",
+        "analyzer": "ik_max_word",
+        "search_analyzer": "ik_smart",
+        "fields": {
+          "keyword": {"type": "keyword", "ignore_above": 256}
+        }
+      },
+      "sent_at": {"type": "date"},
+
+      "file_name": {
+        "type": "text",
+        "analyzer": "ik_max_word",
+        "search_analyzer": "ik_smart",
+        "fields": {
+          "keyword": {"type": "keyword", "ignore_above": 1024}
+        }
+      },
+      "mime_type": {"type": "keyword"},
+      "size_bytes": {"type": "long"},
+      "source_locator": {
+        "type": "object",
+        "dynamic": "strict",
+        "properties": {
+          "page_number": {"type": "integer"},
+          "paragraph_index": {"type": "integer"},
+          "slide_number": {"type": "integer"},
+          "sheet_name": {"type": "keyword", "ignore_above": 512},
+          "row_start": {"type": "integer"},
+          "row_end": {"type": "integer"},
+          "column_start": {"type": "integer"},
+          "column_end": {"type": "integer"},
+          "char_start": {"type": "integer"},
+          "char_end": {"type": "integer"}
+        }
+      },
+
+      "sensitivity": {"type": "keyword"},
+      "lifecycle_status": {"type": "keyword"},
+      "indexed_at": {"type": "date"},
+      "created_at": {"type": "date"}
     }
   }
 }

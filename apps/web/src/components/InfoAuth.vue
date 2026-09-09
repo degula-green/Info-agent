@@ -8,20 +8,21 @@
 
 <script setup lang="ts">
 import { ref, watch } from 'vue'
+import { CoreAuthError } from '@/api/core-auth'
+import { useAuthStore } from '@/stores/auth'
 
 const props = defineProps<{ initialMode?: 'login' | 'register' }>()
 const emit = defineEmits<{ (event: 'success', nickname: string, email: string): void; (event: 'registered', nickname: string, email: string): void }>()
+const auth = useAuthStore()
 const mode = ref<'login' | 'register'>(props.initialMode ?? 'login'); const error = ref(''); const notice = ref(''); const submitting = ref(false); const loginForm = ref({ email: '', password: '' }); const registerForm = ref({ username: '', email: '', password: '', confirm: '' })
 watch(() => props.initialMode, (value) => { if (value) mode.value = value })
-function waitForFeedback() { return new Promise((resolve) => window.setTimeout(resolve, 320)) }
 async function submitLogin() {
   error.value = ''
   if (!loginForm.value.email || !loginForm.value.password) { error.value = '请输入邮箱和密码'; return }
   submitting.value = true
-  await waitForFeedback()
-  const email = loginForm.value.email.trim()
-  submitting.value = false
-  emit('success', email.split('@')[0], email)
+  try { const email = loginForm.value.email.trim(); await auth.login(email, loginForm.value.password); emit('success', '', email) }
+  catch (cause) { error.value = cause instanceof CoreAuthError && cause.status >= 500 ? '认证服务暂时不可用，请稍后重试' : '邮箱或密码错误' }
+  finally { submitting.value = false }
 }
 async function submitRegister() {
   error.value = ''; notice.value = ''
@@ -30,10 +31,9 @@ async function submitRegister() {
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(form.email)) { error.value = '请输入正确的邮箱格式'; return }
   if (form.password !== form.confirm) { error.value = '两次输入的密码不一致'; return }
   submitting.value = true
-  await waitForFeedback()
-  submitting.value = false
-  notice.value = '注册成功，请登录'
-  emit('registered', form.username, form.email)
+  try { await auth.register(form.email.trim(), form.username.trim(), form.password, form.confirm); notice.value = '注册成功，请登录'; emit('registered', form.username.trim(), form.email.trim()) }
+  catch (cause) { error.value = cause instanceof CoreAuthError && cause.code === 'AUTH_EMAIL_ALREADY_REGISTERED' ? '该邮箱已注册，请直接登录' : cause instanceof CoreAuthError && cause.status >= 500 ? '认证服务暂时不可用，请稍后重试' : '注册信息无效，请检查后重试' }
+  finally { submitting.value = false }
 }
 </script>
 

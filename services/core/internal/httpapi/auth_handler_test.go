@@ -29,6 +29,35 @@ type handlerAuthenticationStub struct {
 	logoutToken   string
 }
 
+type handlerRegistrationStub struct {
+	user  domain.User
+	err   error
+	email string
+	name  string
+	pass  string
+}
+
+func (s *handlerRegistrationStub) Register(_ context.Context, email, name, password string) (domain.User, error) {
+	s.email, s.name, s.pass = email, name, password
+	return s.user, s.err
+}
+
+func TestRegisterReturnsCreatedUserWithoutLoginCookie(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	registration := &handlerRegistrationStub{user: domain.User{ID: "user-1", Email: "user@example.com", Nickname: "User", Status: domain.UserStatusActive}}
+	router := NewRouterWithRegistration(&handlerAuthenticationStub{}, RefreshCookieConfig{Name: "refresh", Path: "/auth"}, slog.Default(), registration, nil, nil)
+	request := httptest.NewRequest(http.MethodPost, "/auth/register", strings.NewReader(`{"email":"user@example.com","username":"User","password":"secret1","confirm":"secret1"}`))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+	if response.Code != http.StatusCreated || len(response.Result().Cookies()) != 0 {
+		t.Fatalf("status=%d cookies=%v body=%s", response.Code, response.Result().Cookies(), response.Body.String())
+	}
+	if registration.email != "user@example.com" || registration.name != "User" || registration.pass != "secret1" {
+		t.Fatalf("registration input = %#v", registration)
+	}
+}
+
 func (s *handlerAuthenticationStub) Login(_ context.Context, email, password string) (application.AuthResult, error) {
 	s.loginEmail = email
 	s.loginPassword = password
