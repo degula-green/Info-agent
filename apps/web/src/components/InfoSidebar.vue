@@ -159,6 +159,7 @@ onUnmounted(() => document.removeEventListener('pointerdown', closeUserMenu))
 const navItems = [
   { key: 'new-chat', label: '新对话', icon: 'chat-add' },
   { key: 'knowledge', label: '知识库', icon: 'book-open' },
+  { key: 'organization', label: '我的组织', icon: 'usergroup' },
   { key: 'search', label: '搜索', icon: 'search' },
 ] as const
 </script>

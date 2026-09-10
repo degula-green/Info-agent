@@ -50,7 +50,7 @@ func (r *OrganizationRepository) CreateOrganization(ctx context.Context, userID,
 	if err = tx.Commit(ctx); err != nil {
 		return domain.Organization{}, domain.OrganizationMember{}, err
 	}
-	return o, domain.OrganizationMember{Membership: m, Email: "", Nickname: "", Roles: []domain.MembershipRole{{RoleCode: domain.RoleOwner}, {RoleCode: domain.RoleMember}}}, nil
+	return o, domain.OrganizationMember{Membership: m, Email: "", Nickname: "", Roles: []domain.MembershipRole{{RoleCode: domain.RoleOwner}}}, nil
 }
 
 func (r *OrganizationRepository) FindCurrentOrganization(ctx context.Context, userID string) (domain.Organization, domain.OrganizationMember, error) {
@@ -102,7 +102,7 @@ func (r *OrganizationRepository) roles(ctx context.Context, membershipID string)
 }
 
 func withImplicitMember(m domain.Membership, roles []domain.MembershipRole) []domain.MembershipRole {
-	if !m.IsActive() {
+	if !m.IsActive() || len(roles) > 0 {
 		return roles
 	}
 	return append(roles, domain.MembershipRole{RoleCode: domain.RoleMember})

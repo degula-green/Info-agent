@@ -8,3 +8,4 @@ __pycache__/
 .deps/
 .deps311/
 .runtime/
+.runtime.zip
