@@ -1209,10 +1209,10 @@ func (s *Service) GetLocalUploadTask(ctx context.Context, userID, requestID stri
 			return nil, apperror.Clone(apperror.ErrForbidden)
 		}
 	} else if task.UploadDestination == "organization_file_library" {
-		allowed := s.Config.AllowDevAuth && task.OrganizationID != ""
+		allowed := false
 		if s.Core != nil && task.OrganizationID != "" {
 			member, checkErr := s.Core.CheckOrganizationMember(ctx, userID, task.OrganizationID)
-			if checkErr != nil && !s.Config.AllowDevAuth {
+			if checkErr != nil {
 				return nil, apperror.Wrap("core_dependency_unavailable", "organization membership service is unavailable", 503, true, checkErr)
 			}
 			allowed = allowed || member
@@ -1397,12 +1397,9 @@ func (s *Service) OpenAttachment(ctx context.Context, userID, id string) (*domai
 			}
 		} else if attachment.UploadDestination == "organization_file_library" {
 			allowed := false
-			if s.Config.AllowDevAuth && strings.TrimSpace(attachment.OrganizationID) != "" {
-				allowed = true
-			}
 			if s.Core != nil && attachment.OrganizationID != "" {
 				member, checkErr := s.Core.CheckOrganizationMember(ctx, userID, attachment.OrganizationID)
-				if checkErr != nil && !s.Config.AllowDevAuth {
+				if checkErr != nil {
 					return nil, nil, apperror.Wrap("core_dependency_unavailable", "organization membership service is unavailable", 503, true, checkErr)
 				}
 				allowed = allowed || member

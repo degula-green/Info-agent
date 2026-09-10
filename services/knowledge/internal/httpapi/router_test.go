@@ -175,6 +175,62 @@ func TestLocalUploadRejectsHashAndClientOrganization(t *testing.T) {
 	}
 }
 
+func TestOrganizationUploadChecksCoreMembershipOnRead(t *testing.T) {
+	core := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/organizations/current" {
+			_, _ = w.Write([]byte(`{"organization":{"id":"org-1"}}`))
+			return
+		}
+		if strings.HasPrefix(r.URL.Path, "/internal/organizations/org-1/members/") {
+			if strings.HasSuffix(r.URL.Path, "/u-owner/check") || strings.HasSuffix(r.URL.Path, "/u-member/check") {
+				_, _ = w.Write([]byte(`{"allowed":true}`))
+				return
+			}
+			_, _ = w.Write([]byte(`{"allowed":false}`))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer core.Close()
+	app := newApp(config.Config{AllowDevAuth: true, DevUserID: "u-owner", CoreURL: core.URL, CoreServiceToken: "core-token", MaxAttachmentBytes: 1024})
+	content := []byte("hello")
+	digest := sha256Hex(content)
+	create := `{"request_id":"org-read","trace_id":"trace-org-read","upload_destination":"organization_file_library","organization_id":"attacker-org","file_name":"org.txt","mime_type":"text/plain","size_bytes":5,"content_hash":"sha256:` + digest + `"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/knowledge/v1/attachments/upload-tasks", strings.NewReader(create))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	NewRouterWithApp(app).ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated || !strings.Contains(rec.Body.String(), `"organization_id":"org-1"`) {
+		t.Fatalf("organization task creation failed: %d %s", rec.Code, rec.Body.String())
+	}
+	req = httptest.NewRequest(http.MethodPut, "/api/knowledge/v1/attachments/upload-tasks/org-read/content", bytes.NewReader(content))
+	req.Header.Set("Content-Type", "application/octet-stream")
+	rec = httptest.NewRecorder()
+	NewRouterWithApp(app).ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("organization upload failed: %d %s", rec.Code, rec.Body.String())
+	}
+	var uploaded map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &uploaded); err != nil {
+		t.Fatal(err)
+	}
+	attachmentID, _ := uploaded["attachment_id"].(string)
+	memberReq := httptest.NewRequest(http.MethodGet, "/api/knowledge/v1/attachments/"+attachmentID+"/content", nil)
+	memberReq.Header.Set("X-User-ID", "u-member")
+	memberRec := httptest.NewRecorder()
+	NewRouterWithApp(app).ServeHTTP(memberRec, memberReq)
+	if memberRec.Code != http.StatusOK || memberRec.Body.String() != string(content) {
+		t.Fatalf("organization member could not read: %d %s", memberRec.Code, memberRec.Body.String())
+	}
+	nonMemberReq := httptest.NewRequest(http.MethodGet, "/api/knowledge/v1/attachments/"+attachmentID+"/content", nil)
+	nonMemberReq.Header.Set("X-User-ID", "u-non-member")
+	nonMemberRec := httptest.NewRecorder()
+	NewRouterWithApp(app).ServeHTTP(nonMemberRec, nonMemberReq)
+	if nonMemberRec.Code != http.StatusForbidden {
+		t.Fatalf("non-member could read organization content: %d %s", nonMemberRec.Code, nonMemberRec.Body.String())
+	}
+}
+
 func TestOAuthCallbackRedirectsWithSafeErrorCode(t *testing.T) {
 	app := newApp(config.Config{AllowDevAuth: true, FrontendURL: "http://localhost/profile"})
 	recorder := httptest.NewRecorder()
