@@ -22,26 +22,32 @@ import (
 // deterministic tests. The production constructor can replace it with the SQL
 // implementation without changing handlers or business rules.
 type MemoryStore struct {
-	mu             sync.RWMutex
-	connectors     map[string]domain.ConnectorAccount
-	pairings       map[string]domain.Pairing
-	devices        map[string]domain.AgentDevice
-	discoveries    map[string]domain.Discovery
-	conversations  map[string]domain.ConversationIngestion
-	collectors     map[string]domain.Collector
-	messages       map[string]domain.Message
-	privateContent map[string]string
-	sources        map[string]domain.MessageSource
-	attachments    map[string]domain.Attachment
-	cursorReceipts map[string]time.Time
-	identities     map[string]ExternalIdentity
-	memberships    map[string]domain.ConversationMembership
-	outbox         map[string]domain.OutboxEvent
-	shareRequests  map[string]domain.PrivateShareRequest
-	shareRefs      map[string]domain.PrivateShareReference
-	accessRequests map[string]domain.PrivateAccessRequest
-	wechatConfigs  map[string]domain.WechatCollectionConfig
-	wechatRuntime  map[string]domain.WechatCollectorRuntime
+	mu                 sync.RWMutex
+	connectors         map[string]domain.ConnectorAccount
+	pairings           map[string]domain.Pairing
+	devices            map[string]domain.AgentDevice
+	discoveries        map[string]domain.Discovery
+	conversations      map[string]domain.ConversationIngestion
+	collectors         map[string]domain.Collector
+	messages           map[string]domain.Message
+	privateContent     map[string]string
+	sources            map[string]domain.MessageSource
+	attachments        map[string]domain.Attachment
+	cursorReceipts     map[string]time.Time
+	attachmentReceipts map[string]attachmentCursorReceipt
+	identities         map[string]ExternalIdentity
+	memberships        map[string]domain.ConversationMembership
+	outbox             map[string]domain.OutboxEvent
+	shareRequests      map[string]domain.PrivateShareRequest
+	shareRefs          map[string]domain.PrivateShareReference
+	accessRequests     map[string]domain.PrivateAccessRequest
+	wechatConfigs      map[string]domain.WechatCollectionConfig
+	wechatRuntime      map[string]domain.WechatCollectorRuntime
+}
+
+type attachmentCursorReceipt struct {
+	CollectorID string
+	Cursor      string
 }
 
 // ExternalIdentity is kept here to avoid leaking persistence details into the
@@ -57,9 +63,10 @@ func NewMemoryStore() *MemoryStore {
 		conversations: map[string]domain.ConversationIngestion{}, collectors: map[string]domain.Collector{},
 		messages: map[string]domain.Message{}, privateContent: map[string]string{}, sources: map[string]domain.MessageSource{},
 		attachments: map[string]domain.Attachment{}, identities: map[string]ExternalIdentity{},
-		cursorReceipts: map[string]time.Time{},
-		memberships:    map[string]domain.ConversationMembership{},
-		outbox:         map[string]domain.OutboxEvent{}, shareRequests: map[string]domain.PrivateShareRequest{}, shareRefs: map[string]domain.PrivateShareReference{}, accessRequests: map[string]domain.PrivateAccessRequest{},
+		cursorReceipts:     map[string]time.Time{},
+		attachmentReceipts: map[string]attachmentCursorReceipt{},
+		memberships:        map[string]domain.ConversationMembership{},
+		outbox:             map[string]domain.OutboxEvent{}, shareRequests: map[string]domain.PrivateShareRequest{}, shareRefs: map[string]domain.PrivateShareReference{}, accessRequests: map[string]domain.PrivateAccessRequest{},
 		wechatConfigs: map[string]domain.WechatCollectionConfig{}, wechatRuntime: map[string]domain.WechatCollectorRuntime{},
 	}
 }
@@ -1149,6 +1156,9 @@ func (s *MemoryStore) IngestMessage(ctx context.Context, input IngestMessageInpu
 				return nil, apperror.New("external_id_conflict", "external attachment id has conflicting metadata", 409, false)
 			}
 			result.Attachments = append(result.Attachments, cloneAttachment(existing))
+			if conversation.IngestionScope == "private" && input.Cursor != "" {
+				s.attachmentReceipts[existing.ID] = attachmentCursorReceipt{CollectorID: input.CollectorID, Cursor: input.Cursor}
+			}
 			continue
 		}
 		name := sanitizeName(a.FileName)
@@ -1163,6 +1173,9 @@ func (s *MemoryStore) IngestMessage(ctx context.Context, input IngestMessageInpu
 		}
 		attachment := domain.Attachment{ID: uuid.NewString(), ConversationID: conversation.ID, MessageID: messageID, ExternalAttachmentID: a.ExternalAttachmentID, FileName: name, MIMEType: a.MIMEType, SizeBytes: a.SizeBytes, ContentHash: a.ContentHash, ContentVersion: 1, ContentStatus: "pending", AccessScope: scope, ContentAccessRequired: sensitive || conversation.IngestionScope == "organization", Sensitive: sensitive, ClassificationStatus: "succeeded", PreviewCapability: previewCapability(a.MIMEType), CreatedAt: now, UpdatedAt: now}
 		s.attachments[attachmentKey] = attachment
+		if conversation.IngestionScope == "private" && input.Cursor != "" {
+			s.attachmentReceipts[attachment.ID] = attachmentCursorReceipt{CollectorID: input.CollectorID, Cursor: input.Cursor}
+		}
 		result.Attachments = append(result.Attachments, cloneAttachment(attachment))
 		s.addEventLocked(ctx, "document.processing.requested", conversation, map[string]any{"resource_type": "attachment", "resource_id": attachment.ID, "content_version": 1})
 	}
@@ -1253,6 +1266,19 @@ func (s *MemoryStore) cursorReceiptReadyLocked(collectorID, cursor string) bool 
 			continue
 		}
 		found = true
+	}
+	if !found {
+		return false
+	}
+	for attachmentID, receipt := range s.attachmentReceipts {
+		if receipt.CollectorID != collectorID || receipt.Cursor != cursor {
+			continue
+		}
+		for _, attachment := range s.attachments {
+			if attachment.ID == attachmentID && attachment.ContentStatus != "ready" {
+				return false
+			}
+		}
 	}
 	return found
 }

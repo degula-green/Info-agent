@@ -981,6 +981,11 @@ func (s *PostgresStore) IngestMessage(ctx context.Context, input IngestMessageIn
 		}
 		attachments = append(attachments, saved)
 		if inserted {
+			if scope == "private" && strings.TrimSpace(input.Cursor) != "" {
+				if _, err = tx.Exec(ctx, `INSERT INTO knowledge.private_attachment_cursor_receipts (attachment_id,collector_id,ingest_cursor) VALUES ($1,$2,$3) ON CONFLICT (attachment_id) DO UPDATE SET collector_id=EXCLUDED.collector_id,ingest_cursor=EXCLUDED.ingest_cursor`, saved.ID, input.CollectorID, input.Cursor); err != nil {
+					return nil, dbError(err)
+				}
+			}
 			payload, _ := json.Marshal(map[string]any{"resource_type": "attachment", "resource_id": saved.ID, "content_version": 1})
 			_, err = tx.Exec(ctx, `INSERT INTO knowledge.outbox_events (id,event_type,trace_id,organization_id,payload) VALUES ($1,'document.processing.requested',$2,$3,$4)`, uuid.NewString(), traceID, nilString(org), payload)
 			if err != nil {
@@ -1293,7 +1298,12 @@ func (s *PostgresStore) AdvanceCursor(ctx context.Context, collectorID, cursor s
 		FROM knowledge.message_sources ms
 		JOIN knowledge.attachments a ON a.message_id=ms.message_id
 		WHERE ms.collector_id=$1 AND ms.ingest_cursor=$2 AND a.content_status <> 'ready'
-	))`, collectorID, cursor).Scan(&receipt)
+		) AND NOT EXISTS (
+		SELECT 1
+		FROM knowledge.private_attachment_cursor_receipts pr
+		JOIN knowledge.attachments a ON a.id=pr.attachment_id
+		WHERE pr.collector_id=$1 AND pr.ingest_cursor=$2 AND a.content_status <> 'ready'
+		))`, collectorID, cursor).Scan(&receipt)
 	if err != nil {
 		return dbError(err)
 	}

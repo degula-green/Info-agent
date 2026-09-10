@@ -33,6 +33,19 @@ CREATE TABLE IF NOT EXISTS knowledge.private_share_references (
 CREATE INDEX IF NOT EXISTS private_share_references_source_idx
     ON knowledge.private_share_references (source_private_resource_id, source_resource_type);
 
+-- Private attachments intentionally have no message_id relationship. This
+-- internal receipt links an attachment to its collector batch solely so a
+-- cursor cannot advance before every binary upload in that batch is ready.
+CREATE TABLE IF NOT EXISTS knowledge.private_attachment_cursor_receipts (
+    attachment_id UUID PRIMARY KEY REFERENCES knowledge.attachments(id) ON DELETE CASCADE,
+    collector_id UUID NOT NULL REFERENCES knowledge.conversation_collectors(id) ON DELETE CASCADE,
+    ingest_cursor TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS private_attachment_cursor_receipts_batch_idx
+    ON knowledge.private_attachment_cursor_receipts (collector_id, ingest_cursor);
+
 CREATE TABLE IF NOT EXISTS knowledge.private_access_requests (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     requester_user_id UUID NOT NULL,
