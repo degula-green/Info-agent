@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"mime"
@@ -1047,26 +1048,252 @@ func (s *Service) ListConversations(ctx context.Context, userID, platformName st
 	return s.Repo.ListConversations(ctx, userID, platformName)
 }
 
+func contactViewFromRelation(relation repository.ContactRelation) domain.ContactView {
+	i := relation.ExternalIdentity
+	return domain.ContactView{ID: relation.ID, Kind: "external", DisplayName: i.DisplayName, Identities: []domain.ContactIdentity{{ID: i.ID, Platform: i.Platform, WorkspaceKey: i.WorkspaceKey, ExternalUserID: i.ExternalUserID, DisplayName: i.DisplayName, AvatarURL: i.AvatarURL, MappingStatus: i.MappingStatus}}, ConversationIDs: []string{}}
+}
+
 func (s *Service) ListContacts(ctx context.Context, userID, platform string) ([]domain.ContactView, error) {
-	if platform != "" && !supportedPlatform(platform) { return nil, apperror.New("unsupported_platform", "platform is not supported in this release", 400, false) }
-	identities, err := s.Repo.ListContactIdentities(ctx, userID, platform); if err != nil { return nil, err }
-	memberships, err := s.Repo.ListContactMemberships(ctx, userID); if err != nil { return nil, err }
-	byKey := map[string]*domain.ContactView{}
-	add := func(identity repository.ExternalIdentity, conversationID string) {
-		key := "external:" + identity.Platform + ":" + identity.WorkspaceKey + ":" + identity.ExternalUserID
-		kind := "external"; if identity.MappedUserID != "" { key = "internal:" + identity.MappedUserID; kind = "internal" }
-		view := byKey[key]; if view == nil { view = &domain.ContactView{ID: key, Kind: kind, InternalUserID: identity.MappedUserID, DisplayName: identity.DisplayName, Identities: []domain.ContactIdentity{}, ConversationIDs: []string{}}; byKey[key] = view }
-		for _, existing := range view.Identities { if existing.ID == identity.ID { goto conversation } }
-		view.Identities = append(view.Identities, domain.ContactIdentity{ID: identity.ID, Platform: identity.Platform, WorkspaceKey: identity.WorkspaceKey, ExternalUserID: identity.ExternalUserID, DisplayName: identity.DisplayName, AvatarURL: identity.AvatarURL, MappedUserID: identity.MappedUserID, MappingStatus: identity.MappingStatus})
-	conversation:
-		if conversationID != "" { for _, id := range view.ConversationIDs { if id == conversationID { return } }; view.ConversationIDs = append(view.ConversationIDs, conversationID) }
+	if platform != "" && !supportedPlatform(platform) {
+		return nil, apperror.New("unsupported_platform", "platform is not supported in this release", 400, false)
 	}
-	for _, identity := range identities { add(identity, "") }
-	for _, membership := range memberships { if platform == "" || membership.Identity.Platform == platform { add(membership.Identity, membership.ConversationID) } }
-	out := make([]domain.ContactView, 0, len(byKey)); for _, value := range byKey { out = append(out, *value) }
-	sort.Slice(out, func(i,j int) bool { return out[i].DisplayName < out[j].DisplayName })
+	relations, err := s.Repo.ListContactRelations(ctx, userID, platform)
+	if err != nil {
+		return nil, err
+	}
+	views := make([]domain.ContactView, 0, len(relations))
+	memberships, membershipErr := s.Repo.ListContactMemberships(ctx, userID)
+	if membershipErr != nil {
+		return nil, membershipErr
+	}
+	for _, relation := range relations {
+		view := contactViewFromRelation(relation)
+		for _, membership := range memberships {
+			if membership.Identity.ID != relation.ExternalIdentity.ID {
+				continue
+			}
+			if !containsString(view.ConversationIDs, membership.ConversationID) {
+				view.ConversationIDs = append(view.ConversationIDs, membership.ConversationID)
+			}
+		}
+		for _, conversationID := range view.ConversationIDs {
+			messages, messageErr := s.Repo.ListMessages(ctx, conversationID, 200, "")
+			if messageErr != nil {
+				return nil, messageErr
+			}
+			for _, message := range messages {
+				if message.SenderIdentityID == relation.ExternalIdentity.ID {
+					view.MessageCount++
+					view.AttachmentCount += len(message.Attachments)
+				}
+			}
+		}
+		if relation.ExternalIdentity.MappedUserID != "" {
+			view.Kind = "internal"
+			view.InternalUserID = relation.ExternalIdentity.MappedUserID
+		}
+		views = append(views, view)
+	}
+	// Merge one view per internal user, as required by the identity contract.
+	merged := map[string]*domain.ContactView{}
+	for _, view := range views {
+		key := view.ID
+		if view.Kind == "internal" {
+			key = "internal:" + view.InternalUserID
+		}
+		current := merged[key]
+		if current == nil {
+			copy := view
+			merged[key] = &copy
+			continue
+		}
+		current.Identities = append(current.Identities, view.Identities...)
+		for _, id := range view.ConversationIDs {
+			if !containsString(current.ConversationIDs, id) {
+				current.ConversationIDs = append(current.ConversationIDs, id)
+			}
+		}
+		current.MessageCount += view.MessageCount
+		current.AttachmentCount += view.AttachmentCount
+	}
+	out := make([]domain.ContactView, 0, len(merged))
+	for _, view := range merged {
+		out = append(out, *view)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].DisplayName < out[j].DisplayName })
 	return out, nil
 }
+
+func (s *Service) DiscoverContacts(ctx context.Context, userID, platformName, keyword string) ([]domain.AvailableContact, error) {
+	account, err := s.GetConnector(ctx, userID, platformName)
+	if err != nil {
+		return nil, err
+	}
+	keyword = strings.TrimSpace(keyword)
+	if platformName == domain.PlatformWechat {
+		out, err := s.WechatCollector().Contacts(ctx, keyword)
+		if err != nil {
+			return nil, apperror.Wrap("wechat_collector_unavailable", "wechat contacts unavailable", 503, true, err)
+		}
+		items, _ := out["contacts"].([]any)
+		contacts := make([]domain.AvailableContact, 0, len(items))
+		for _, raw := range items {
+			value, ok := raw.(map[string]any)
+			if !ok {
+				continue
+			}
+			contacts = append(contacts, domain.AvailableContact{ExternalUserID: fmt.Sprint(value["username"]), DisplayName: firstNonEmptyString(fmt.Sprint(value["remark"]), fmt.Sprint(value["nick_name"]))})
+		}
+		relations, _ := s.Repo.ListContactRelations(ctx, userID, platformName)
+		selected := map[string]bool{}
+		for _, relation := range relations {
+			selected[relation.ExternalIdentity.ExternalUserID] = true
+		}
+		for index := range contacts {
+			contacts[index].Selected = selected[contacts[index].ExternalUserID]
+		}
+		return contacts, nil
+	}
+	if platformName != domain.PlatformFeishu {
+		return nil, apperror.New("unsupported_platform", "platform is not supported in this release", 400, false)
+	}
+	provider, ok := s.Feishu.(interface {
+		DiscoverContacts(context.Context, vault.TokenSet, string) ([]domain.AvailableContact, error)
+	})
+	if !ok {
+		return nil, apperror.New("contacts_not_supported", "contact discovery is not supported by this connector", 501, false)
+	}
+	token, err := s.GetToken(ctx, account)
+	if err != nil {
+		return nil, err
+	}
+	contacts, err := provider.DiscoverContacts(ctx, token, keyword)
+	if err != nil {
+		return nil, err
+	}
+	relations, _ := s.Repo.ListContactRelations(ctx, userID, platformName)
+	selected := map[string]bool{}
+	for _, relation := range relations {
+		selected[relation.ExternalIdentity.ExternalUserID] = true
+	}
+	for index := range contacts {
+		contacts[index].Selected = selected[contacts[index].ExternalUserID]
+	}
+	return contacts, nil
+}
+
+func firstNonEmptyString(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" && value != "<nil>" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
+}
+
+func (s *Service) AttachContact(ctx context.Context, userID, platformName, externalUserID, displayName, avatarURL string) (*domain.ContactView, error) {
+	account, err := s.GetConnector(ctx, userID, platformName)
+	if err != nil {
+		return nil, err
+	}
+	externalUserID = strings.TrimSpace(externalUserID)
+	if externalUserID == "" {
+		return nil, apperror.New("invalid_contact", "external_user_id is required", 400, false)
+	}
+	identity, err := s.Repo.GetExternalIdentity(ctx, platformName, account.WorkspaceKey, externalUserID)
+	if err != nil && apperror.From(err).Code == "external_identity_not_found" {
+		_, err = s.Repo.UpsertExternalIdentity(ctx, repository.ExternalIdentityInput{Platform: platformName, WorkspaceKey: account.WorkspaceKey, ExternalUserID: externalUserID, DisplayName: strings.TrimSpace(displayName), AvatarURL: strings.TrimSpace(avatarURL)})
+		if err == nil {
+			identity, err = s.Repo.GetExternalIdentity(ctx, platformName, account.WorkspaceKey, externalUserID)
+		}
+	}
+	if err != nil {
+		return nil, err
+	}
+	relation, err := s.Repo.UpsertContactRelation(ctx, repository.ContactRelationInput{OwnerUserID: userID, ConnectorID: account.ID, ExternalIdentityID: identity.ID})
+	if err != nil {
+		return nil, err
+	}
+	view := contactViewFromRelation(*relation)
+	if identity.MappedUserID != "" {
+		view.Kind = "internal"
+		view.InternalUserID = identity.MappedUserID
+	}
+	return &view, nil
+}
+
+func (s *Service) RemoveContact(ctx context.Context, userID, relationID string) error {
+	return s.Repo.DeleteContactRelation(ctx, userID, relationID)
+}
+
+func containsString(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Service) GetContact(ctx context.Context, userID, relationID string) (*domain.ContactDetail, error) {
+	relations, err := s.Repo.ListContactRelations(ctx, userID, "")
+	if err != nil {
+		return nil, err
+	}
+	var relation *repository.ContactRelation
+	for index := range relations {
+		if relations[index].ID == relationID {
+			relation = &relations[index]
+			break
+		}
+	}
+	if relation == nil {
+		return nil, apperror.New("contact_not_found", "contact relation was not found", 404, false)
+	}
+	view, err := s.ListContacts(ctx, userID, relation.ExternalIdentity.Platform)
+	if err != nil {
+		return nil, err
+	}
+	var matched *domain.ContactView
+	for index := range view {
+		if containsIdentity(view[index].Identities, relation.ExternalIdentity.ID) {
+			matched = &view[index]
+			break
+		}
+	}
+	if matched == nil {
+		return nil, apperror.New("contact_not_found", "contact relation was not found", 404, false)
+	}
+	detail := &domain.ContactDetail{ContactView: *matched, Messages: []domain.Message{}, Attachments: []domain.Attachment{}}
+	for _, conversationID := range matched.ConversationIDs {
+		// Reuse the existing conversation authorization boundary before reading
+		// any messages or attachment references through the contact view.
+		if _, accessErr := s.GetConversation(ctx, userID, conversationID); accessErr != nil {
+			return nil, accessErr
+		}
+		messages, messageErr := s.Repo.ListMessages(ctx, conversationID, 200, "")
+		if messageErr != nil {
+			return nil, messageErr
+		}
+		for _, message := range messages {
+			if message.SenderIdentityID == relation.ExternalIdentity.ID {
+				detail.Messages = append(detail.Messages, message)
+				detail.Attachments = append(detail.Attachments, message.Attachments...)
+			}
+		}
+	}
+	return detail, nil
+}
+
+func containsIdentity(values []domain.ContactIdentity, id string) bool {
+	for _, value := range values {
+		if value.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *Service) GetConversation(ctx context.Context, userID, id string) (*domain.ConversationIngestion, error) {
 	conversation, err := s.Repo.GetConversation(ctx, id)
 	if err != nil {
@@ -1276,10 +1503,14 @@ func (s *Service) PublishOutbox(ctx context.Context) error {
 // the message.ready gate. Failures leave the resource pending for retry.
 func (s *Service) ProcessPrivacy(ctx context.Context) error {
 	pending, err := s.Repo.ListPendingMessages(ctx, 100)
-	if err != nil { return err }
+	if err != nil {
+		return err
+	}
 	for _, item := range pending {
 		sensitive, display := privacy.Scan(item.OriginalContent)
-		if err := s.Repo.CompleteMessageClassification(ctx, item.Message.ID, display, sensitive); err != nil { return err }
+		if err := s.Repo.CompleteMessageClassification(ctx, item.Message.ID, display, sensitive); err != nil {
+			return err
+		}
 	}
 	return nil
 }

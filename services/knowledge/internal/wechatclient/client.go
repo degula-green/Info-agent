@@ -88,6 +88,15 @@ func (c *Client) Conversations(ctx context.Context) (map[string]any, error) {
 	err := c.do(ctx, http.MethodGet, "/conversations", nil, &out)
 	return out, err
 }
+func (c *Client) Contacts(ctx context.Context, keyword string) (map[string]any, error) {
+	var out map[string]any
+	path := "/contacts"
+	if strings.TrimSpace(keyword) != "" {
+		path += "?keyword=" + url.QueryEscape(keyword)
+	}
+	err := c.do(ctx, http.MethodGet, path, nil, &out)
+	return out, err
+}
 func (c *Client) Config(ctx context.Context) (map[string]any, error) {
 	var out map[string]any
 	err := c.do(ctx, http.MethodGet, "/config", nil, &out)
@@ -99,4 +108,8 @@ func (c *Client) SaveConfig(ctx context.Context, value any) (map[string]any, err
 	return out, err
 }
 
-func (c *Client) Bootstrap(ctx context.Context, connectorID string) (map[string]any, error) { var out map[string]any; err := c.do(ctx, http.MethodGet, "/internal/wechat/bootstrap?connector_id="+url.QueryEscape(connectorID), nil, &out); return out, err }
+func (c *Client) Bootstrap(ctx context.Context, connectorID string) (map[string]any, error) {
+	var out map[string]any
+	err := c.do(ctx, http.MethodGet, "/internal/wechat/bootstrap?connector_id="+url.QueryEscape(connectorID), nil, &out)
+	return out, err
+}

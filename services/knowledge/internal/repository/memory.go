@@ -20,27 +20,26 @@ import (
 // deterministic tests. The production constructor can replace it with the SQL
 // implementation without changing handlers or business rules.
 type MemoryStore struct {
-	mu             sync.RWMutex
-	connectors     map[string]domain.ConnectorAccount
-	pairings       map[string]domain.Pairing
-	devices        map[string]domain.AgentDevice
-	discoveries    map[string]domain.Discovery
-	conversations  map[string]domain.ConversationIngestion
-	collectors     map[string]domain.Collector
-	messages       map[string]domain.Message
-	privateContent map[string]string
-	sources        map[string]domain.MessageSource
-	attachments    map[string]domain.Attachment
-	cursorReceipts map[string]time.Time
-	identities     map[string]ExternalIdentity
-	memberships    map[string]domain.ConversationMembership
-	outbox         map[string]domain.OutboxEvent
-	wechatConfigs  map[string]domain.WechatCollectionConfig
-	wechatRuntime  map[string]domain.WechatCollectorRuntime
+	mu               sync.RWMutex
+	connectors       map[string]domain.ConnectorAccount
+	pairings         map[string]domain.Pairing
+	devices          map[string]domain.AgentDevice
+	discoveries      map[string]domain.Discovery
+	conversations    map[string]domain.ConversationIngestion
+	collectors       map[string]domain.Collector
+	messages         map[string]domain.Message
+	privateContent   map[string]string
+	sources          map[string]domain.MessageSource
+	attachments      map[string]domain.Attachment
+	cursorReceipts   map[string]time.Time
+	identities       map[string]ExternalIdentity
+	contactRelations map[string]ContactRelation
+	memberships      map[string]domain.ConversationMembership
+	outbox           map[string]domain.OutboxEvent
+	wechatConfigs    map[string]domain.WechatCollectionConfig
+	wechatRuntime    map[string]domain.WechatCollectorRuntime
 }
 
-// ExternalIdentity is kept here to avoid leaking persistence details into the
-// public API model; its fields mirror knowledge.external_identities.
 func NewMemoryStore() *MemoryStore {
 	return &MemoryStore{
 		connectors: map[string]domain.ConnectorAccount{}, pairings: map[string]domain.Pairing{},
@@ -48,7 +47,7 @@ func NewMemoryStore() *MemoryStore {
 		conversations: map[string]domain.ConversationIngestion{}, collectors: map[string]domain.Collector{},
 		messages: map[string]domain.Message{}, sources: map[string]domain.MessageSource{},
 		privateContent: map[string]string{},
-		attachments: map[string]domain.Attachment{}, identities: map[string]ExternalIdentity{},
+		attachments:    map[string]domain.Attachment{}, identities: map[string]ExternalIdentity{}, contactRelations: map[string]ContactRelation{},
 		cursorReceipts: map[string]time.Time{},
 		memberships:    map[string]domain.ConversationMembership{},
 		outbox:         map[string]domain.OutboxEvent{},
@@ -57,14 +56,61 @@ func NewMemoryStore() *MemoryStore {
 }
 
 func (s *MemoryStore) GetWechatConfig(_ context.Context, connectorID string) (*domain.WechatCollectionConfig, error) {
-	s.mu.RLock(); defer s.mu.RUnlock(); v, ok := s.wechatConfigs[connectorID]; if !ok { return &domain.WechatCollectionConfig{ConnectorID: connectorID, SelectedConversations: []string{}, Enabled: true, ListenMode: "whitelist"}, nil }; c := v; c.SelectedConversations = append([]string(nil), v.SelectedConversations...); return &c, nil
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	v, ok := s.wechatConfigs[connectorID]
+	if !ok {
+		return &domain.WechatCollectionConfig{ConnectorID: connectorID, SelectedConversations: []string{}, Enabled: true, ListenMode: "whitelist"}, nil
+	}
+	c := v
+	c.SelectedConversations = append([]string(nil), v.SelectedConversations...)
+	return &c, nil
 }
 func (s *MemoryStore) SaveWechatConfig(_ context.Context, c domain.WechatCollectionConfig) (*domain.WechatCollectionConfig, error) {
-	s.mu.Lock(); defer s.mu.Unlock(); if c.ListenMode == "" { c.ListenMode = "whitelist" }; c.SelectedConversations = append([]string(nil), c.SelectedConversations...); c.UpdatedAt = time.Now().UTC(); s.wechatConfigs[c.ConnectorID] = c; out := c; return &out, nil
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if c.ListenMode == "" {
+		c.ListenMode = "whitelist"
+	}
+	c.SelectedConversations = append([]string(nil), c.SelectedConversations...)
+	c.UpdatedAt = time.Now().UTC()
+	s.wechatConfigs[c.ConnectorID] = c
+	out := c
+	return &out, nil
 }
-func (s *MemoryStore) GetWechatRuntime(_ context.Context, connectorID string) (*domain.WechatCollectorRuntime, error) { s.mu.RLock(); defer s.mu.RUnlock(); v, ok := s.wechatRuntime[connectorID]; if !ok { return &domain.WechatCollectorRuntime{ConnectorID: connectorID, Status: "stopped"}, nil }; out := v; return &out, nil }
-func (s *MemoryStore) UpsertWechatRuntime(_ context.Context, v domain.WechatCollectorRuntime) (*domain.WechatCollectorRuntime, error) { s.mu.Lock(); defer s.mu.Unlock(); v.UpdatedAt = time.Now().UTC(); s.wechatRuntime[v.ConnectorID] = v; out := v; return &out, nil }
-func (s *MemoryStore) UpdateWechatRuntime(_ context.Context, id, status, lastError string, heartbeat, collectedAt *time.Time) error { s.mu.Lock(); defer s.mu.Unlock(); v := s.wechatRuntime[id]; v.ConnectorID=id; if status != "" { v.Status=status }; v.LastError=lastError; v.LastHeartbeatAt=heartbeat; v.LastCollectedAt=collectedAt; v.UpdatedAt=time.Now().UTC(); s.wechatRuntime[id]=v; return nil }
+func (s *MemoryStore) GetWechatRuntime(_ context.Context, connectorID string) (*domain.WechatCollectorRuntime, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	v, ok := s.wechatRuntime[connectorID]
+	if !ok {
+		return &domain.WechatCollectorRuntime{ConnectorID: connectorID, Status: "stopped"}, nil
+	}
+	out := v
+	return &out, nil
+}
+func (s *MemoryStore) UpsertWechatRuntime(_ context.Context, v domain.WechatCollectorRuntime) (*domain.WechatCollectorRuntime, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	v.UpdatedAt = time.Now().UTC()
+	s.wechatRuntime[v.ConnectorID] = v
+	out := v
+	return &out, nil
+}
+func (s *MemoryStore) UpdateWechatRuntime(_ context.Context, id, status, lastError string, heartbeat, collectedAt *time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	v := s.wechatRuntime[id]
+	v.ConnectorID = id
+	if status != "" {
+		v.Status = status
+	}
+	v.LastError = lastError
+	v.LastHeartbeatAt = heartbeat
+	v.LastCollectedAt = collectedAt
+	v.UpdatedAt = time.Now().UTC()
+	s.wechatRuntime[id] = v
+	return nil
+}
 
 func (s *MemoryStore) Close() error { return nil }
 
@@ -628,6 +674,9 @@ func (s *MemoryStore) UpsertExternalIdentity(_ context.Context, input ExternalId
 	if input.DisplayName != "" {
 		identity.DisplayName = input.DisplayName
 	}
+	if input.AvatarURL != "" {
+		identity.AvatarURL = input.AvatarURL
+	}
 	if input.MappedUserID != "" {
 		if identity.MappedUserID != "" && identity.MappedUserID != input.MappedUserID {
 			identity.MappingStatus = "conflict"
@@ -641,27 +690,123 @@ func (s *MemoryStore) UpsertExternalIdentity(_ context.Context, input ExternalId
 	return identity.ID, nil
 }
 
+func (s *MemoryStore) GetExternalIdentity(_ context.Context, platform, workspaceKey, externalUserID string) (*ExternalIdentity, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	identity, ok := s.identities[platform+"|"+workspaceKey+"|"+externalUserID]
+	if !ok {
+		return nil, apperror.New("external_identity_not_found", "external identity was not found", 404, false)
+	}
+	copy := identity
+	return &copy, nil
+}
+
+func (s *MemoryStore) ListContactRelations(_ context.Context, userID, platform string) ([]ContactRelation, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := []ContactRelation{}
+	for _, relation := range s.contactRelations {
+		if relation.OwnerUserID != userID || relation.Status != "active" || (platform != "" && relation.ExternalIdentity.Platform != platform) {
+			continue
+		}
+		copy := relation
+		if identity := s.identityByIDLocked(relation.ExternalIdentity.ID); identity.ID != "" {
+			copy.ExternalIdentity = identity
+		}
+		out = append(out, copy)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.Before(out[j].CreatedAt) })
+	return out, nil
+}
+
+func (s *MemoryStore) UpsertContactRelation(_ context.Context, input ContactRelationInput) (*ContactRelation, error) {
+	if strings.TrimSpace(input.OwnerUserID) == "" || strings.TrimSpace(input.ConnectorID) == "" || strings.TrimSpace(input.ExternalIdentityID) == "" {
+		return nil, apperror.New("invalid_contact", "owner, connector, and external identity are required", 400, false)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	connector, ok := s.connectors[input.ConnectorID]
+	if !ok || connector.Status == domain.ConnectorRevoked || connector.OwnerUserID != input.OwnerUserID {
+		return nil, apperror.Clone(apperror.ErrForbidden)
+	}
+	identity := s.identityByIDLocked(input.ExternalIdentityID)
+	if identity.ID == "" {
+		return nil, apperror.New("external_identity_not_found", "external identity was not found", 404, false)
+	}
+	if identity.Platform != connector.Platform || identity.WorkspaceKey != connector.WorkspaceKey {
+		return nil, apperror.Clone(apperror.ErrForbidden)
+	}
+	for id, existing := range s.contactRelations {
+		if existing.OwnerUserID == input.OwnerUserID && existing.ExternalIdentity.ID == input.ExternalIdentityID {
+			existing.ConnectorID = input.ConnectorID
+			existing.Status = "active"
+			existing.ExternalIdentity = identity
+			existing.UpdatedAt = time.Now().UTC()
+			s.contactRelations[id] = existing
+			copy := existing
+			return &copy, nil
+		}
+	}
+	now := time.Now().UTC()
+	relation := ContactRelation{ID: uuid.NewString(), OwnerUserID: input.OwnerUserID, ConnectorID: input.ConnectorID, ExternalIdentity: identity, Status: "active", CreatedAt: now, UpdatedAt: now}
+	s.contactRelations[relation.ID] = relation
+	copy := relation
+	return &copy, nil
+}
+
+func (s *MemoryStore) DeleteContactRelation(_ context.Context, userID, relationID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	relation, ok := s.contactRelations[relationID]
+	if !ok || relation.OwnerUserID != userID || relation.Status != "active" {
+		return apperror.New("contact_not_found", "contact relation was not found", 404, false)
+	}
+	relation.Status = "removed"
+	relation.UpdatedAt = time.Now().UTC()
+	s.contactRelations[relationID] = relation
+	return nil
+}
+
 func (s *MemoryStore) ListContactIdentities(_ context.Context, userID, platform string) ([]ExternalIdentity, error) {
-	s.mu.RLock(); defer s.mu.RUnlock()
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	out := []ExternalIdentity{}
 	for _, identity := range s.identities {
-		if platform != "" && identity.Platform != platform { continue }
-		if identity.MappedUserID != userID { continue }
+		if platform != "" && identity.Platform != platform {
+			continue
+		}
+		if identity.MappedUserID != userID {
+			continue
+		}
 		out = append(out, identity)
 	}
 	return out, nil
 }
 
 func (s *MemoryStore) ListContactMemberships(_ context.Context, userID string) ([]ContactMembership, error) {
-	s.mu.RLock(); defer s.mu.RUnlock()
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	out := []ContactMembership{}
 	for _, membership := range s.memberships {
-		conversation, ok := s.conversations[membership.ConversationID]; if !ok { continue }
+		conversation, ok := s.conversations[membership.ConversationID]
+		if !ok {
+			continue
+		}
 		if conversation.OwnerUserID != userID {
-			allowed := false; for _, collector := range s.collectors { if collector.ConversationID == conversation.ID && collector.CollectorUserID == userID && collector.Status != domain.CollectorRemoved { allowed = true } }; if !allowed { continue }
+			allowed := false
+			for _, collector := range s.collectors {
+				if collector.ConversationID == conversation.ID && collector.CollectorUserID == userID && collector.Status != domain.CollectorRemoved {
+					allowed = true
+				}
+			}
+			if !allowed {
+				continue
+			}
 		}
 		identity := s.identityByIDLocked(membership.ExternalIdentityID)
-		if identity.ID != "" { out = append(out, ContactMembership{Identity: identity, ConversationID: conversation.ID}) }
+		if identity.ID != "" {
+			out = append(out, ContactMembership{Identity: identity, ConversationID: conversation.ID})
+		}
 	}
 	return out, nil
 }
@@ -1090,7 +1235,9 @@ func (s *MemoryStore) IngestMessage(ctx context.Context, input IngestMessageInpu
 		message = domain.Message{ID: uuid.NewString(), ConversationID: conversation.ID, ExternalMessageID: input.ExternalMessageID, SenderIdentityID: s.ensureIdentityLocked(conversation.Platform, conversation.WorkspaceKey, input.SenderExternalID, input.SenderDisplayName), SenderDisplayName: input.SenderDisplayName, MessageType: input.MessageType, Content: "", Sensitive: false, ClassificationStatus: "pending", ContentHash: input.ContentHash, ContentVersion: 1, SentAt: input.SentAt.UTC(), LifecycleStatus: "active", VectorStatus: "pending", CreatedAt: now}
 		s.messages[key] = message
 		s.privateContent[message.ID] = input.Content
-		if input.MessageType == "text" { s.addEventLocked(ctx, "privacy.scan.requested", conversation, map[string]any{"message_id": message.ID, "content_version": 1}) }
+		if input.MessageType == "text" {
+			s.addEventLocked(ctx, "privacy.scan.requested", conversation, map[string]any{"message_id": message.ID, "content_version": 1})
+		}
 	}
 	sourceKey := message.ID + "|" + input.CollectorID
 	if source, sourceExists := s.sources[sourceKey]; !sourceExists {
@@ -1123,14 +1270,33 @@ func (s *MemoryStore) IngestMessage(ctx context.Context, input IngestMessageInpu
 }
 
 func (s *MemoryStore) ListPendingMessages(_ context.Context, limit int) ([]PendingMessage, error) {
-	s.mu.RLock(); defer s.mu.RUnlock(); out := []PendingMessage{}
-	for _, m := range s.messages { if m.ClassificationStatus == "pending" { out = append(out, PendingMessage{Message: cloneMessage(m), OriginalContent: s.privateContent[m.ID]}) } }
-	if limit > 0 && len(out) > limit { out = out[:limit] }; return out, nil
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := []PendingMessage{}
+	for _, m := range s.messages {
+		if m.ClassificationStatus == "pending" {
+			out = append(out, PendingMessage{Message: cloneMessage(m), OriginalContent: s.privateContent[m.ID]})
+		}
+	}
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
 }
 
 func (s *MemoryStore) CompleteMessageClassification(ctx context.Context, id, displayContent string, sensitive bool) error {
-	s.mu.Lock(); defer s.mu.Unlock();
-	for key, m := range s.messages { if m.ID == id { m.Content, m.Sensitive, m.ClassificationStatus = displayContent, sensitive, "succeeded"; s.messages[key] = m; if c, ok := s.conversations[m.ConversationID]; ok { s.addEventLocked(ctx, "message.ready", c, map[string]any{"resource_type":"message", "resource_id":id, "content_version":m.ContentVersion, "sensitive":sensitive, "content_access_required":sensitive}) }; return nil } }
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for key, m := range s.messages {
+		if m.ID == id {
+			m.Content, m.Sensitive, m.ClassificationStatus = displayContent, sensitive, "succeeded"
+			s.messages[key] = m
+			if c, ok := s.conversations[m.ConversationID]; ok {
+				s.addEventLocked(ctx, "message.ready", c, map[string]any{"resource_type": "message", "resource_id": id, "content_version": m.ContentVersion, "sensitive": sensitive, "content_access_required": sensitive})
+			}
+			return nil
+		}
+	}
 	return apperror.New("message_not_found", "message not found", 404, false)
 }
 

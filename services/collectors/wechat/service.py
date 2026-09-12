@@ -202,6 +202,13 @@ def conversations(x_collector_token: str | None = Header(default=None)) -> dict[
         cid = str(row.get("username") or row.get("chat_id") or "")
         if cid: items.append({"external_id": cid, "name": str(row.get("display_name") or row.get("name") or cid), "conversation_type": "group" if cid.endswith("@chatroom") else "private", "selected": cid in selected})
     return {"conversations": items, "total": len(items)}
+@app.get("/contacts")
+def contacts(keyword: str = "", x_collector_token: str | None = Header(default=None)) -> dict[str, Any]:
+    auth(x_collector_token)
+    if db is None: return {"contacts": [], "total": 0}
+    rows = db.search_contact(keyword.strip()) if keyword.strip() else db.search_contact("")
+    items = [{"username": str(row.get("username") or ""), "nick_name": str(row.get("nick_name") or ""), "remark": str(row.get("remark") or "")} for row in rows if str(row.get("username") or "").strip()]
+    return {"contacts": items, "total": len(items)}
 @app.get("/config")
 def get_config(x_collector_token: str | None = Header(default=None)) -> dict[str, Any]: auth(x_collector_token); return config
 @app.put("/config")

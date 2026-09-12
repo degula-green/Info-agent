@@ -56,12 +56,24 @@ type publicMembership struct {
 }
 
 type publicContact struct {
-	ID string `json:"id"`
-	Kind string `json:"kind"`
-	InternalUserID string `json:"internal_user_id,omitempty"`
-	DisplayName string `json:"display_name,omitempty"`
-	Identities []domain.ContactIdentity `json:"identities"`
-	ConversationIDs []string `json:"conversation_ids,omitempty"`
+	ID              string                   `json:"id"`
+	Kind            string                   `json:"kind"`
+	InternalUserID  string                   `json:"internal_user_id,omitempty"`
+	DisplayName     string                   `json:"display_name,omitempty"`
+	Identities      []domain.ContactIdentity `json:"identities"`
+	ConversationIDs []string                 `json:"conversation_ids,omitempty"`
+	MessageCount    int                      `json:"message_count"`
+	AttachmentCount int                      `json:"attachment_count"`
+}
+
+type publicAvailableContact struct {
+	ExternalUserID string `json:"external_user_id"`
+	DisplayName    string `json:"display_name,omitempty"`
+	AvatarURL      string `json:"avatar_url,omitempty"`
+	Email          string `json:"email,omitempty"`
+	Department     string `json:"department,omitempty"`
+	JobTitle       string `json:"job_title,omitempty"`
+	Selected       bool   `json:"selected"`
 }
 
 type publicAttachment struct {
@@ -86,21 +98,21 @@ type publicAttachment struct {
 }
 
 type publicMessage struct {
-	ID                string             `json:"id"`
-	ConversationID    string             `json:"conversation_id"`
-	ExternalMessageID string             `json:"external_message_id"`
-	SenderDisplayName string             `json:"sender_display_name,omitempty"`
-	MessageType       string             `json:"message_type"`
-	Content           string             `json:"content,omitempty"`
-	Sensitive         bool               `json:"sensitive"`
-	ClassificationStatus string           `json:"classification_status,omitempty"`
-	ContentHash       string             `json:"content_hash"`
-	ContentVersion    int                `json:"content_version"`
-	SentAt            time.Time          `json:"sent_at"`
-	LifecycleStatus   string             `json:"lifecycle_status"`
-	VectorStatus      string             `json:"vector_status,omitempty"`
-	Attachments       []publicAttachment `json:"attachments,omitempty"`
-	CreatedAt         time.Time          `json:"created_at"`
+	ID                   string             `json:"id"`
+	ConversationID       string             `json:"conversation_id"`
+	ExternalMessageID    string             `json:"external_message_id"`
+	SenderDisplayName    string             `json:"sender_display_name,omitempty"`
+	MessageType          string             `json:"message_type"`
+	Content              string             `json:"content,omitempty"`
+	Sensitive            bool               `json:"sensitive"`
+	ClassificationStatus string             `json:"classification_status,omitempty"`
+	ContentHash          string             `json:"content_hash"`
+	ContentVersion       int                `json:"content_version"`
+	SentAt               time.Time          `json:"sent_at"`
+	LifecycleStatus      string             `json:"lifecycle_status"`
+	VectorStatus         string             `json:"vector_status,omitempty"`
+	Attachments          []publicAttachment `json:"attachments,omitempty"`
+	CreatedAt            time.Time          `json:"created_at"`
 }
 
 type publicConversation struct {

@@ -113,7 +113,7 @@ func discardMessage(input IngestMessageInput) bool {
 		return true
 	}
 	content := strings.TrimSpace(input.Content)
-	if len(input.Attachments) == 0 && (content == "[无法解析]" || content == "[表情]" || content == "[动画表情]" || content == "<msg>" ) {
+	if len(input.Attachments) == 0 && (content == "[无法解析]" || content == "[表情]" || content == "[动画表情]" || content == "<msg>") {
 		return true
 	}
 	return false
@@ -121,7 +121,10 @@ func discardMessage(input IngestMessageInput) bool {
 
 func classifyMessage(input IngestMessageInput) (bool, string) { return privacy.Scan(input.Content) }
 
-type PendingMessage struct { Message domain.Message; OriginalContent string }
+type PendingMessage struct {
+	Message         domain.Message
+	OriginalContent string
+}
 
 // CalculatePayloadHash defines the cross-language business payload contract.
 // It excludes payload_hash itself, includes every other message field (including
@@ -273,6 +276,10 @@ type Repository interface {
 	RevokeDevice(ctx context.Context, connectorID, deviceID string) error
 	TouchDevice(ctx context.Context, deviceID, agentVersion string, now time.Time) error
 	UpsertExternalIdentity(ctx context.Context, identity ExternalIdentityInput) (string, error)
+	GetExternalIdentity(ctx context.Context, platform, workspaceKey, externalUserID string) (*ExternalIdentity, error)
+	ListContactRelations(ctx context.Context, userID, platform string) ([]ContactRelation, error)
+	UpsertContactRelation(ctx context.Context, relation ContactRelationInput) (*ContactRelation, error)
+	DeleteContactRelation(ctx context.Context, userID, relationID string) error
 	ListContactIdentities(ctx context.Context, userID, platform string) ([]ExternalIdentity, error)
 	ListContactMemberships(ctx context.Context, userID string) ([]ContactMembership, error)
 	UpsertConversationMemberships(ctx context.Context, conversationID string, members []domain.AvailableMember) error
@@ -315,6 +322,7 @@ type ExternalIdentityInput struct {
 	WorkspaceKey   string
 	ExternalUserID string
 	DisplayName    string
+	AvatarURL      string
 	MappedUserID   string
 }
 
@@ -323,6 +331,22 @@ type ExternalIdentity struct {
 }
 
 type ContactMembership struct {
-	Identity ExternalIdentity
+	Identity       ExternalIdentity
 	ConversationID string
+}
+
+type ContactRelationInput struct {
+	OwnerUserID        string
+	ConnectorID        string
+	ExternalIdentityID string
+}
+
+type ContactRelation struct {
+	ID               string
+	OwnerUserID      string
+	ConnectorID      string
+	ExternalIdentity ExternalIdentity
+	Status           string
+	CreatedAt        time.Time
+	UpdatedAt        time.Time
 }

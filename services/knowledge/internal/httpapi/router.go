@@ -229,9 +229,62 @@ func registerUserRoutes(r *gin.Engine, app *App, prefix string) {
 	g.GET("/contacts", func(c *gin.Context) {
 		p := principal(c)
 		out, err := app.Service.ListContacts(c, p.UserID, strings.TrimSpace(c.Query("platform")))
-		if err != nil { writeError(c, err); return }
-		items := make([]publicContact, 0, len(out)); for _, value := range out { items = append(items, publicContact{ID:value.ID, Kind:value.Kind, InternalUserID:value.InternalUserID, DisplayName:value.DisplayName, Identities:value.Identities, ConversationIDs:value.ConversationIDs}) }
+		if err != nil {
+			writeError(c, err)
+			return
+		}
+		items := make([]publicContact, 0, len(out))
+		for _, value := range out {
+			items = append(items, publicContact{ID: value.ID, Kind: value.Kind, InternalUserID: value.InternalUserID, DisplayName: value.DisplayName, Identities: value.Identities, ConversationIDs: value.ConversationIDs, MessageCount: value.MessageCount, AttachmentCount: value.AttachmentCount})
+		}
 		c.JSON(http.StatusOK, gin.H{"items": items})
+	})
+	g.GET("/contacts/discover", func(c *gin.Context) {
+		p := principal(c)
+		out, err := app.Service.DiscoverContacts(c, p.UserID, strings.TrimSpace(c.Query("platform")), strings.TrimSpace(c.Query("q")))
+		if err != nil {
+			writeError(c, err)
+			return
+		}
+		items := make([]publicAvailableContact, 0, len(out))
+		for _, value := range out {
+			items = append(items, publicAvailableContact{ExternalUserID: value.ExternalUserID, DisplayName: value.DisplayName, AvatarURL: value.AvatarURL, Email: value.Email, Department: value.Department, JobTitle: value.JobTitle, Selected: value.Selected})
+		}
+		c.JSON(http.StatusOK, gin.H{"items": items})
+	})
+	g.POST("/contacts", func(c *gin.Context) {
+		p := principal(c)
+		var body struct {
+			Platform       string `json:"platform"`
+			ExternalUserID string `json:"external_user_id"`
+			DisplayName    string `json:"display_name"`
+			AvatarURL      string `json:"avatar_url"`
+		}
+		if err := c.ShouldBindJSON(&body); err != nil {
+			writeError(c, apperror.New("invalid_request", "invalid contact request", 400, false))
+			return
+		}
+		out, err := app.Service.AttachContact(c, p.UserID, body.Platform, body.ExternalUserID, body.DisplayName, body.AvatarURL)
+		if err != nil {
+			writeError(c, err)
+			return
+		}
+		c.JSON(http.StatusCreated, publicContact{ID: out.ID, Kind: out.Kind, InternalUserID: out.InternalUserID, DisplayName: out.DisplayName, Identities: out.Identities, ConversationIDs: out.ConversationIDs})
+	})
+	g.DELETE("/contacts/:contact_id", func(c *gin.Context) {
+		if err := app.Service.RemoveContact(c, principal(c).UserID, c.Param("contact_id")); err != nil {
+			writeError(c, err)
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"status": "removed"})
+	})
+	g.GET("/contacts/:contact_id", func(c *gin.Context) {
+		out, err := app.Service.GetContact(c, principal(c).UserID, c.Param("contact_id"))
+		if err != nil {
+			writeError(c, err)
+			return
+		}
+		c.JSON(http.StatusOK, out)
 	})
 	g.POST("/connectors/feishu/authorize", func(c *gin.Context) {
 		var body struct {

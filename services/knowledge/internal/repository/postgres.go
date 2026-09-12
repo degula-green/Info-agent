@@ -57,19 +57,55 @@ func scanConnector(row rowScanner) (*domain.ConnectorAccount, error) {
 }
 
 func (s *PostgresStore) GetWechatConfig(ctx context.Context, connectorID string) (*domain.WechatCollectionConfig, error) {
-	var c domain.WechatCollectionConfig; var raw []byte
+	var c domain.WechatCollectionConfig
+	var raw []byte
 	err := s.pool.QueryRow(ctx, `SELECT connector_account_id::text,COALESCE(selected_conversations,'[]'::jsonb),history_start_at,enabled,listen_mode,updated_at FROM knowledge.wechat_collection_configs WHERE connector_account_id=$1`, connectorID).Scan(&c.ConnectorID, &raw, &c.HistoryStartAt, &c.Enabled, &c.ListenMode, &c.UpdatedAt)
-	if errors.Is(err, pgx.ErrNoRows) { c = domain.WechatCollectionConfig{ConnectorID: connectorID, SelectedConversations: []string{}, Enabled: true, ListenMode: "whitelist"}; return &c, nil }
-	if err != nil { return nil, dbError(err) }; if err := json.Unmarshal(raw, &c.SelectedConversations); err != nil { return nil, dbError(err) }; return &c, nil
+	if errors.Is(err, pgx.ErrNoRows) {
+		c = domain.WechatCollectionConfig{ConnectorID: connectorID, SelectedConversations: []string{}, Enabled: true, ListenMode: "whitelist"}
+		return &c, nil
+	}
+	if err != nil {
+		return nil, dbError(err)
+	}
+	if err := json.Unmarshal(raw, &c.SelectedConversations); err != nil {
+		return nil, dbError(err)
+	}
+	return &c, nil
 }
 func (s *PostgresStore) SaveWechatConfig(ctx context.Context, c domain.WechatCollectionConfig) (*domain.WechatCollectionConfig, error) {
-	if c.ListenMode == "" { c.ListenMode = "whitelist" }; raw, err := json.Marshal(c.SelectedConversations); if err != nil { return nil, err }
+	if c.ListenMode == "" {
+		c.ListenMode = "whitelist"
+	}
+	raw, err := json.Marshal(c.SelectedConversations)
+	if err != nil {
+		return nil, err
+	}
 	err = s.pool.QueryRow(ctx, `INSERT INTO knowledge.wechat_collection_configs (connector_account_id,selected_conversations,history_start_at,enabled,listen_mode) VALUES ($1,$2::jsonb,$3,$4,$5) ON CONFLICT (connector_account_id) DO UPDATE SET selected_conversations=EXCLUDED.selected_conversations,history_start_at=EXCLUDED.history_start_at,enabled=EXCLUDED.enabled,listen_mode=EXCLUDED.listen_mode,updated_at=now() RETURNING connector_account_id::text,selected_conversations,history_start_at,enabled,listen_mode,updated_at`, c.ConnectorID, raw, c.HistoryStartAt, c.Enabled, c.ListenMode).Scan(&c.ConnectorID, &raw, &c.HistoryStartAt, &c.Enabled, &c.ListenMode, &c.UpdatedAt)
-	if err != nil { return nil, dbError(err) }; _ = json.Unmarshal(raw, &c.SelectedConversations); return &c, nil
+	if err != nil {
+		return nil, dbError(err)
+	}
+	_ = json.Unmarshal(raw, &c.SelectedConversations)
+	return &c, nil
 }
-func (s *PostgresStore) GetWechatRuntime(ctx context.Context, id string) (*domain.WechatCollectorRuntime, error) { var r domain.WechatCollectorRuntime; err:=s.pool.QueryRow(ctx,`SELECT connector_account_id::text,status,last_heartbeat_at,last_collected_at,COALESCE(last_error,''),stopped_at,updated_at FROM knowledge.wechat_collector_runtime WHERE connector_account_id=$1`,id).Scan(&r.ConnectorID,&r.Status,&r.LastHeartbeatAt,&r.LastCollectedAt,&r.LastError,&r.StoppedAt,&r.UpdatedAt); if errors.Is(err,pgx.ErrNoRows){return &domain.WechatCollectorRuntime{ConnectorID:id,Status:"stopped"},nil}; if err!=nil{return nil,dbError(err)}; return &r,nil }
-func (s *PostgresStore) UpsertWechatRuntime(ctx context.Context, r domain.WechatCollectorRuntime) (*domain.WechatCollectorRuntime,error) { err:=s.pool.QueryRow(ctx,`INSERT INTO knowledge.wechat_collector_runtime (connector_account_id,status,last_heartbeat_at,last_collected_at,last_error,stopped_at) VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT (connector_account_id) DO UPDATE SET status=EXCLUDED.status,last_heartbeat_at=EXCLUDED.last_heartbeat_at,last_collected_at=EXCLUDED.last_collected_at,last_error=EXCLUDED.last_error,stopped_at=EXCLUDED.stopped_at,updated_at=now() RETURNING connector_account_id::text,status,last_heartbeat_at,last_collected_at,COALESCE(last_error,''),stopped_at,updated_at`,r.ConnectorID,r.Status,r.LastHeartbeatAt,r.LastCollectedAt,nilString(r.LastError),r.StoppedAt).Scan(&r.ConnectorID,&r.Status,&r.LastHeartbeatAt,&r.LastCollectedAt,&r.LastError,&r.StoppedAt,&r.UpdatedAt); return &r,dbError(err) }
-func (s *PostgresStore) UpdateWechatRuntime(ctx context.Context,id,status,lastError string,heartbeat,collectedAt *time.Time) error { _,err:=s.pool.Exec(ctx,`UPDATE knowledge.wechat_collector_runtime SET status=COALESCE(NULLIF($2,''),status),last_error=$3,last_heartbeat_at=COALESCE($4,last_heartbeat_at),last_collected_at=COALESCE($5,last_collected_at),updated_at=now() WHERE connector_account_id=$1`,id,status,nilString(lastError),heartbeat,collectedAt); return dbError(err) }
+func (s *PostgresStore) GetWechatRuntime(ctx context.Context, id string) (*domain.WechatCollectorRuntime, error) {
+	var r domain.WechatCollectorRuntime
+	err := s.pool.QueryRow(ctx, `SELECT connector_account_id::text,status,last_heartbeat_at,last_collected_at,COALESCE(last_error,''),stopped_at,updated_at FROM knowledge.wechat_collector_runtime WHERE connector_account_id=$1`, id).Scan(&r.ConnectorID, &r.Status, &r.LastHeartbeatAt, &r.LastCollectedAt, &r.LastError, &r.StoppedAt, &r.UpdatedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return &domain.WechatCollectorRuntime{ConnectorID: id, Status: "stopped"}, nil
+	}
+	if err != nil {
+		return nil, dbError(err)
+	}
+	return &r, nil
+}
+func (s *PostgresStore) UpsertWechatRuntime(ctx context.Context, r domain.WechatCollectorRuntime) (*domain.WechatCollectorRuntime, error) {
+	err := s.pool.QueryRow(ctx, `INSERT INTO knowledge.wechat_collector_runtime (connector_account_id,status,last_heartbeat_at,last_collected_at,last_error,stopped_at) VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT (connector_account_id) DO UPDATE SET status=EXCLUDED.status,last_heartbeat_at=EXCLUDED.last_heartbeat_at,last_collected_at=EXCLUDED.last_collected_at,last_error=EXCLUDED.last_error,stopped_at=EXCLUDED.stopped_at,updated_at=now() RETURNING connector_account_id::text,status,last_heartbeat_at,last_collected_at,COALESCE(last_error,''),stopped_at,updated_at`, r.ConnectorID, r.Status, r.LastHeartbeatAt, r.LastCollectedAt, nilString(r.LastError), r.StoppedAt).Scan(&r.ConnectorID, &r.Status, &r.LastHeartbeatAt, &r.LastCollectedAt, &r.LastError, &r.StoppedAt, &r.UpdatedAt)
+	return &r, dbError(err)
+}
+func (s *PostgresStore) UpdateWechatRuntime(ctx context.Context, id, status, lastError string, heartbeat, collectedAt *time.Time) error {
+	_, err := s.pool.Exec(ctx, `UPDATE knowledge.wechat_collector_runtime SET status=COALESCE(NULLIF($2,''),status),last_error=$3,last_heartbeat_at=COALESCE($4,last_heartbeat_at),last_collected_at=COALESCE($5,last_collected_at),updated_at=now() WHERE connector_account_id=$1`, id, status, nilString(lastError), heartbeat, collectedAt)
+	return dbError(err)
+}
 
 func (s *PostgresStore) ListConnectorViews(ctx context.Context, userID string) ([]domain.ConnectorView, error) {
 	rows, err := s.pool.Query(ctx, `SELECT `+connectorColumns+` FROM knowledge.connector_accounts WHERE owner_user_id=$1 AND status<>'revoked'`, userID)
@@ -477,7 +513,7 @@ func (s *PostgresStore) UpsertExternalIdentity(ctx context.Context, input Extern
 		return "", apperror.New("invalid_external_identity", "platform and external user id are required", 400, false)
 	}
 	var id, status string
-	err := s.pool.QueryRow(ctx, `INSERT INTO knowledge.external_identities (platform,platform_workspace_key,external_user_id,display_name,mapped_user_id,mapping_status,mapped_at) VALUES ($1,$2,$3,$4,$5,CASE WHEN $5 IS NULL THEN 'unmapped' ELSE 'mapped' END,CASE WHEN $5 IS NULL THEN NULL ELSE now() END) ON CONFLICT (platform,platform_workspace_key,external_user_id) DO UPDATE SET display_name=COALESCE(NULLIF(EXCLUDED.display_name,''),knowledge.external_identities.display_name),mapped_user_id=CASE WHEN knowledge.external_identities.mapped_user_id IS NULL THEN EXCLUDED.mapped_user_id WHEN EXCLUDED.mapped_user_id IS NULL OR knowledge.external_identities.mapped_user_id=EXCLUDED.mapped_user_id THEN knowledge.external_identities.mapped_user_id ELSE NULL END,mapping_status=CASE WHEN EXCLUDED.mapped_user_id IS NULL OR knowledge.external_identities.mapped_user_id IS NULL OR knowledge.external_identities.mapped_user_id=EXCLUDED.mapped_user_id THEN CASE WHEN COALESCE(knowledge.external_identities.mapped_user_id,EXCLUDED.mapped_user_id) IS NULL THEN 'unmapped' ELSE 'mapped' END ELSE 'conflict' END,mapped_at=CASE WHEN EXCLUDED.mapped_user_id IS NULL THEN knowledge.external_identities.mapped_at ELSE now() END,updated_at=now() RETURNING id::text,mapping_status`, input.Platform, input.WorkspaceKey, input.ExternalUserID, nilString(input.DisplayName), nilString(input.MappedUserID)).Scan(&id, &status)
+	err := s.pool.QueryRow(ctx, `INSERT INTO knowledge.external_identities (platform,platform_workspace_key,external_user_id,display_name,avatar_url,mapped_user_id,mapping_status,mapped_at) VALUES ($1,$2,$3,$4,$5,$6,CASE WHEN $6 IS NULL THEN 'unmapped' ELSE 'mapped' END,CASE WHEN $6 IS NULL THEN NULL ELSE now() END) ON CONFLICT (platform,platform_workspace_key,external_user_id) DO UPDATE SET display_name=COALESCE(NULLIF(EXCLUDED.display_name,''),knowledge.external_identities.display_name),avatar_url=COALESCE(NULLIF(EXCLUDED.avatar_url,''),knowledge.external_identities.avatar_url),mapped_user_id=CASE WHEN knowledge.external_identities.mapped_user_id IS NULL THEN EXCLUDED.mapped_user_id WHEN EXCLUDED.mapped_user_id IS NULL OR knowledge.external_identities.mapped_user_id=EXCLUDED.mapped_user_id THEN knowledge.external_identities.mapped_user_id ELSE NULL END,mapping_status=CASE WHEN EXCLUDED.mapped_user_id IS NULL OR knowledge.external_identities.mapped_user_id IS NULL OR knowledge.external_identities.mapped_user_id=EXCLUDED.mapped_user_id THEN CASE WHEN COALESCE(knowledge.external_identities.mapped_user_id,EXCLUDED.mapped_user_id) IS NULL THEN 'unmapped' ELSE 'mapped' END ELSE 'conflict' END,mapped_at=CASE WHEN EXCLUDED.mapped_user_id IS NULL THEN knowledge.external_identities.mapped_at ELSE now() END,updated_at=now() RETURNING id::text,mapping_status`, input.Platform, input.WorkspaceKey, input.ExternalUserID, nilString(input.DisplayName), nilString(input.AvatarURL), nilString(input.MappedUserID)).Scan(&id, &status)
 	if err != nil {
 		return id, dbError(err)
 	}
@@ -485,6 +521,81 @@ func (s *PostgresStore) UpsertExternalIdentity(ctx context.Context, input Extern
 		return id, apperror.New("external_id_conflict", "external identity is mapped to another user", 409, false)
 	}
 	return id, nil
+}
+
+func (s *PostgresStore) GetExternalIdentity(ctx context.Context, platform, workspaceKey, externalUserID string) (*ExternalIdentity, error) {
+	var identity ExternalIdentity
+	err := s.pool.QueryRow(ctx, `SELECT id::text,platform,platform_workspace_key,external_user_id,COALESCE(display_name,''),COALESCE(avatar_url,''),COALESCE(mapped_user_id::text,''),mapping_status FROM knowledge.external_identities WHERE platform=$1 AND platform_workspace_key=$2 AND external_user_id=$3`, platform, workspaceKey, externalUserID).Scan(&identity.ID, &identity.Platform, &identity.WorkspaceKey, &identity.ExternalUserID, &identity.DisplayName, &identity.AvatarURL, &identity.MappedUserID, &identity.MappingStatus)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, apperror.New("external_identity_not_found", "external identity was not found", 404, false)
+	}
+	if err != nil {
+		return nil, dbError(err)
+	}
+	return &identity, nil
+}
+
+const contactRelationColumns = `cr.id::text,cr.owner_user_id::text,cr.connector_account_id::text,cr.status,cr.created_at,cr.updated_at,ei.id::text,ei.platform,ei.platform_workspace_key,ei.external_user_id,COALESCE(ei.display_name,''),COALESCE(ei.avatar_url,''),COALESCE(ei.mapped_user_id::text,''),ei.mapping_status`
+
+func scanContactRelation(row rowScanner) (*ContactRelation, error) {
+	var relation ContactRelation
+	err := row.Scan(&relation.ID, &relation.OwnerUserID, &relation.ConnectorID, &relation.Status, &relation.CreatedAt, &relation.UpdatedAt, &relation.ExternalIdentity.ID, &relation.ExternalIdentity.Platform, &relation.ExternalIdentity.WorkspaceKey, &relation.ExternalIdentity.ExternalUserID, &relation.ExternalIdentity.DisplayName, &relation.ExternalIdentity.AvatarURL, &relation.ExternalIdentity.MappedUserID, &relation.ExternalIdentity.MappingStatus)
+	return &relation, err
+}
+
+func (s *PostgresStore) ListContactRelations(ctx context.Context, userID, platform string) ([]ContactRelation, error) {
+	query := `SELECT ` + contactRelationColumns + ` FROM knowledge.contact_relations cr JOIN knowledge.external_identities ei ON ei.id=cr.external_identity_id JOIN knowledge.connector_accounts ca ON ca.id=cr.connector_account_id WHERE cr.owner_user_id=$1 AND cr.status='active' AND ca.status<>'revoked'`
+	args := []any{userID}
+	if platform != "" {
+		query += ` AND ei.platform=$2`
+		args = append(args, platform)
+	}
+	query += ` ORDER BY cr.created_at,cr.id`
+	rows, err := s.pool.Query(ctx, query, args...)
+	if err != nil {
+		return nil, dbError(err)
+	}
+	defer rows.Close()
+	out := []ContactRelation{}
+	for rows.Next() {
+		relation, scanErr := scanContactRelation(rows)
+		if scanErr != nil {
+			return nil, dbError(scanErr)
+		}
+		out = append(out, *relation)
+	}
+	return out, dbError(rows.Err())
+}
+
+func (s *PostgresStore) UpsertContactRelation(ctx context.Context, input ContactRelationInput) (*ContactRelation, error) {
+	if strings.TrimSpace(input.OwnerUserID) == "" || strings.TrimSpace(input.ConnectorID) == "" || strings.TrimSpace(input.ExternalIdentityID) == "" {
+		return nil, apperror.New("invalid_contact", "owner, connector, and external identity are required", 400, false)
+	}
+	var relation *ContactRelation
+	err := func() error {
+		row := s.pool.QueryRow(ctx, `WITH upserted AS (INSERT INTO knowledge.contact_relations (owner_user_id,connector_account_id,external_identity_id,status) SELECT $1,ca.id,$3,'active' FROM knowledge.connector_accounts ca JOIN knowledge.external_identities ei ON ei.id=$3 WHERE ca.id=$2 AND ca.owner_user_id=$1 AND ca.status<>'revoked' AND ca.platform=ei.platform AND ca.platform_workspace_key=ei.platform_workspace_key ON CONFLICT (owner_user_id,external_identity_id) DO UPDATE SET connector_account_id=EXCLUDED.connector_account_id,status='active',updated_at=now() RETURNING id) SELECT `+contactRelationColumns+` FROM knowledge.contact_relations cr JOIN knowledge.external_identities ei ON ei.id=cr.external_identity_id WHERE cr.id=(SELECT id FROM upserted)`, input.OwnerUserID, input.ConnectorID, input.ExternalIdentityID)
+		var scanErr error
+		relation, scanErr = scanContactRelation(row)
+		return scanErr
+	}()
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, apperror.New("contact_not_allowed", "contact identity does not belong to this connector", 403, false)
+	}
+	if err != nil {
+		return nil, dbError(err)
+	}
+	return relation, nil
+}
+
+func (s *PostgresStore) DeleteContactRelation(ctx context.Context, userID, relationID string) error {
+	tag, err := s.pool.Exec(ctx, `UPDATE knowledge.contact_relations SET status='removed',updated_at=now() WHERE id=$1 AND owner_user_id=$2 AND status='active'`, relationID, userID)
+	if err != nil {
+		return dbError(err)
+	}
+	if tag.RowsAffected() == 0 {
+		return apperror.New("contact_not_found", "contact relation was not found", 404, false)
+	}
+	return nil
 }
 
 func bindExternalIdentityTx(ctx context.Context, tx pgx.Tx, input ExternalIdentityInput) error {
@@ -499,14 +610,15 @@ func bindExternalIdentityTx(ctx context.Context, tx pgx.Tx, input ExternalIdenti
 	if err == nil && input.MappedUserID != "" && currentMappedUserID != "" && currentMappedUserID != input.MappedUserID {
 		return apperror.New("external_id_conflict", "external identity is mapped to another user", 409, false)
 	}
-	_, err = tx.Exec(ctx, `INSERT INTO knowledge.external_identities (platform,platform_workspace_key,external_user_id,display_name,mapped_user_id,mapping_status,mapped_at)
-		VALUES ($1,$2,$3,$4,$5,CASE WHEN $5 IS NULL THEN 'unmapped' ELSE 'mapped' END,CASE WHEN $5 IS NULL THEN NULL ELSE now() END)
+	_, err = tx.Exec(ctx, `INSERT INTO knowledge.external_identities (platform,platform_workspace_key,external_user_id,display_name,avatar_url,mapped_user_id,mapping_status,mapped_at)
+		VALUES ($1,$2,$3,$4,$5,$6,CASE WHEN $6 IS NULL THEN 'unmapped' ELSE 'mapped' END,CASE WHEN $6 IS NULL THEN NULL ELSE now() END)
 		ON CONFLICT (platform,platform_workspace_key,external_user_id) DO UPDATE SET
 			display_name=COALESCE(NULLIF(EXCLUDED.display_name,''),knowledge.external_identities.display_name),
+			avatar_url=COALESCE(NULLIF(EXCLUDED.avatar_url,''),knowledge.external_identities.avatar_url),
 			mapped_user_id=COALESCE(knowledge.external_identities.mapped_user_id,EXCLUDED.mapped_user_id),
 			mapping_status=CASE WHEN COALESCE(knowledge.external_identities.mapped_user_id,EXCLUDED.mapped_user_id) IS NULL THEN 'unmapped' ELSE 'mapped' END,
 			mapped_at=CASE WHEN knowledge.external_identities.mapped_user_id IS NULL AND EXCLUDED.mapped_user_id IS NOT NULL THEN now() ELSE knowledge.external_identities.mapped_at END,
-			updated_at=now()`, input.Platform, input.WorkspaceKey, input.ExternalUserID, nilString(input.DisplayName), nilString(input.MappedUserID))
+			updated_at=now()`, input.Platform, input.WorkspaceKey, input.ExternalUserID, nilString(input.DisplayName), nilString(input.AvatarURL), nilString(input.MappedUserID))
 	return dbError(err)
 }
 
@@ -929,7 +1041,9 @@ func (s *PostgresStore) IngestMessage(ctx context.Context, input IngestMessageIn
 		}
 	}
 	if !duplicate {
-		if _, err = tx.Exec(ctx, `INSERT INTO knowledge.message_private_content (message_id,content) VALUES ($1,$2)`, messageID, input.Content); err != nil { return nil, dbError(err) }
+		if _, err = tx.Exec(ctx, `INSERT INTO knowledge.message_private_content (message_id,content) VALUES ($1,$2)`, messageID, input.Content); err != nil {
+			return nil, dbError(err)
+		}
 		payload, _ := json.Marshal(map[string]any{"message_id": messageID, "content_version": 1})
 		_, err = tx.Exec(ctx, `INSERT INTO knowledge.outbox_events (id,event_type,trace_id,organization_id,payload) VALUES ($1,'privacy.scan.requested',$2,$3,$4)`, uuid.NewString(), traceID, nilString(org), payload)
 		if err != nil {
@@ -1052,40 +1166,78 @@ func (s *PostgresStore) GetAttachment(ctx context.Context, id string) (*domain.A
 }
 func (s *PostgresStore) CompleteAttachment(ctx context.Context, id, objectRef, contentHash string, size int64, status string) (*domain.Attachment, error) {
 	tx, err := s.pool.Begin(ctx)
-	if err != nil { return nil, dbError(err) }
+	if err != nil {
+		return nil, dbError(err)
+	}
 	defer tx.Rollback(ctx)
 	a, err := scanAttachment(tx.QueryRow(ctx, `UPDATE knowledge.attachments SET object_ref=$2,content_hash=$3,size_bytes=$4,content_status=$5,last_error=NULL,updated_at=now() WHERE id=$1 AND content_status<>'ready' AND (content_hash IS NULL OR content_hash=$3) RETURNING `+attachmentColumns, id, objectRef, contentHash, size, status))
 	if errors.Is(err, pgx.ErrNoRows) {
 		existing, lookupErr := scanAttachment(tx.QueryRow(ctx, `SELECT `+attachmentColumns+` FROM knowledge.attachments WHERE id=$1`, id))
-		if lookupErr == nil && existing.ContentStatus == "ready" && strings.EqualFold(existing.ContentHash, contentHash) { return existing, nil }
+		if lookupErr == nil && existing.ContentStatus == "ready" && strings.EqualFold(existing.ContentHash, contentHash) {
+			return existing, nil
+		}
 		return nil, apperror.New("attachment_hash_mismatch", "attachment hash does not match metadata", 400, false)
 	}
-	if err != nil { return nil, dbError(err) }
+	if err != nil {
+		return nil, dbError(err)
+	}
 	if status == "ready" {
 		var org string
-		if lookupErr := tx.QueryRow(ctx, `SELECT COALESCE(organization_id::text,'') FROM knowledge.conversation_ingestions WHERE id=$1`, a.ConversationID).Scan(&org); lookupErr != nil { return nil, dbError(lookupErr) }
+		if lookupErr := tx.QueryRow(ctx, `SELECT COALESCE(organization_id::text,'') FROM knowledge.conversation_ingestions WHERE id=$1`, a.ConversationID).Scan(&org); lookupErr != nil {
+			return nil, dbError(lookupErr)
+		}
 		payload, _ := json.Marshal(map[string]any{"resource_type": "attachment", "resource_id": a.ID, "content_version": a.ContentVersion, "sensitive": a.Sensitive, "content_access_required": a.ContentAccessRequired})
-		if _, outboxErr := tx.Exec(ctx, `INSERT INTO knowledge.outbox_events (id,event_type,trace_id,organization_id,payload) VALUES ($1,'attachment.ready',$2,$3,$4)`, uuid.NewString(), uuid.NewString(), nilString(org), payload); outboxErr != nil { return nil, dbError(outboxErr) }
+		if _, outboxErr := tx.Exec(ctx, `INSERT INTO knowledge.outbox_events (id,event_type,trace_id,organization_id,payload) VALUES ($1,'attachment.ready',$2,$3,$4)`, uuid.NewString(), uuid.NewString(), nilString(org), payload); outboxErr != nil {
+			return nil, dbError(outboxErr)
+		}
 	}
-	if err := tx.Commit(ctx); err != nil { return nil, dbError(err) }
+	if err := tx.Commit(ctx); err != nil {
+		return nil, dbError(err)
+	}
 	return a, nil
 }
 
 func (s *PostgresStore) ListPendingMessages(ctx context.Context, limit int) ([]PendingMessage, error) {
-	if limit <= 0 || limit > 200 { limit = 200 }
+	if limit <= 0 || limit > 200 {
+		limit = 200
+	}
 	rows, err := s.pool.Query(ctx, `SELECT m.id::text,m.conversation_ingestion_id::text,m.external_message_id,COALESCE(m.sender_identity_id::text,''),COALESCE(m.sender_display_name,''),m.message_type,COALESCE(m.normalized_content_ref,''),COALESCE(m.normalized_content,''),m.content_hash,m.content_version,m.sent_at,m.lifecycle_status,m.vector_status,m.created_at,m.sensitive,m.classification_status,p.content FROM knowledge.messages m JOIN knowledge.message_private_content p ON p.message_id=m.id WHERE m.classification_status='pending' ORDER BY m.created_at LIMIT $1`, limit)
-	if err != nil { return nil, dbError(err) }; defer rows.Close(); out := []PendingMessage{}
-	for rows.Next() { var m domain.Message; var raw string; if err := rows.Scan(&m.ID,&m.ConversationID,&m.ExternalMessageID,&m.SenderIdentityID,&m.SenderDisplayName,&m.MessageType,&m.NormalizedContentRef,&m.Content,&m.ContentHash,&m.ContentVersion,&m.SentAt,&m.LifecycleStatus,&m.VectorStatus,&m.CreatedAt,&m.Sensitive,&m.ClassificationStatus,&raw); err != nil { return nil, dbError(err) }; out = append(out, PendingMessage{Message:m, OriginalContent:raw}) }
+	if err != nil {
+		return nil, dbError(err)
+	}
+	defer rows.Close()
+	out := []PendingMessage{}
+	for rows.Next() {
+		var m domain.Message
+		var raw string
+		if err := rows.Scan(&m.ID, &m.ConversationID, &m.ExternalMessageID, &m.SenderIdentityID, &m.SenderDisplayName, &m.MessageType, &m.NormalizedContentRef, &m.Content, &m.ContentHash, &m.ContentVersion, &m.SentAt, &m.LifecycleStatus, &m.VectorStatus, &m.CreatedAt, &m.Sensitive, &m.ClassificationStatus, &raw); err != nil {
+			return nil, dbError(err)
+		}
+		out = append(out, PendingMessage{Message: m, OriginalContent: raw})
+	}
 	return out, dbError(rows.Err())
 }
 
 func (s *PostgresStore) CompleteMessageClassification(ctx context.Context, messageID, displayContent string, sensitive bool) error {
-	tx, err := s.pool.Begin(ctx); if err != nil { return dbError(err) }; defer tx.Rollback(ctx)
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return dbError(err)
+	}
+	defer tx.Rollback(ctx)
 	var conversationID, org string
-	if err = tx.QueryRow(ctx, `UPDATE knowledge.messages SET normalized_content=$2,sensitive=$3,classification_status='succeeded' WHERE id=$1 AND classification_status='pending' RETURNING conversation_ingestion_id::text`, messageID, displayContent, sensitive).Scan(&conversationID); err != nil { if errors.Is(err, pgx.ErrNoRows) { return apperror.New("message_not_found", "message is not pending", 404, false) }; return dbError(err) }
-	if err = tx.QueryRow(ctx, `SELECT COALESCE(organization_id::text,'') FROM knowledge.conversation_ingestions WHERE id=$1`, conversationID).Scan(&org); err != nil { return dbError(err) }
-	payload, _ := json.Marshal(map[string]any{"resource_type":"message", "resource_id":messageID, "content_version":1, "sensitive":sensitive, "content_access_required":sensitive})
-	if _, err = tx.Exec(ctx, `INSERT INTO knowledge.outbox_events (id,event_type,trace_id,organization_id,payload) VALUES ($1,'message.ready',$2,$3,$4)`, uuid.NewString(), uuid.NewString(), nilString(org), payload); err != nil { return dbError(err) }
+	if err = tx.QueryRow(ctx, `UPDATE knowledge.messages SET normalized_content=$2,sensitive=$3,classification_status='succeeded' WHERE id=$1 AND classification_status='pending' RETURNING conversation_ingestion_id::text`, messageID, displayContent, sensitive).Scan(&conversationID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return apperror.New("message_not_found", "message is not pending", 404, false)
+		}
+		return dbError(err)
+	}
+	if err = tx.QueryRow(ctx, `SELECT COALESCE(organization_id::text,'') FROM knowledge.conversation_ingestions WHERE id=$1`, conversationID).Scan(&org); err != nil {
+		return dbError(err)
+	}
+	payload, _ := json.Marshal(map[string]any{"resource_type": "message", "resource_id": messageID, "content_version": 1, "sensitive": sensitive, "content_access_required": sensitive})
+	if _, err = tx.Exec(ctx, `INSERT INTO knowledge.outbox_events (id,event_type,trace_id,organization_id,payload) VALUES ($1,'message.ready',$2,$3,$4)`, uuid.NewString(), uuid.NewString(), nilString(org), payload); err != nil {
+		return dbError(err)
+	}
 	return dbError(tx.Commit(ctx))
 }
 func (s *PostgresStore) FailAttachment(ctx context.Context, id, message string) error {
@@ -1184,17 +1336,41 @@ func (s *PostgresStore) ListAttachments(ctx context.Context, conversationID stri
 
 func (s *PostgresStore) ListContactIdentities(ctx context.Context, userID, platform string) ([]ExternalIdentity, error) {
 	query := `SELECT id::text,platform,platform_workspace_key,external_user_id,COALESCE(display_name,''),COALESCE(avatar_url,''),COALESCE(mapped_user_id::text,''),mapping_status FROM knowledge.external_identities WHERE mapped_user_id=$1`
-	args := []any{userID}; if platform != "" { query += ` AND platform=$2`; args = append(args, platform) }
-	rows, err := s.pool.Query(ctx, query, args...); if err != nil { return nil, dbError(err) }; defer rows.Close()
+	args := []any{userID}
+	if platform != "" {
+		query += ` AND platform=$2`
+		args = append(args, platform)
+	}
+	rows, err := s.pool.Query(ctx, query, args...)
+	if err != nil {
+		return nil, dbError(err)
+	}
+	defer rows.Close()
 	out := []ExternalIdentity{}
-	for rows.Next() { var v ExternalIdentity; if err := rows.Scan(&v.ID,&v.Platform,&v.WorkspaceKey,&v.ExternalUserID,&v.DisplayName,&v.AvatarURL,&v.MappedUserID,&v.MappingStatus); err != nil { return nil, dbError(err) }; out = append(out,v) }
+	for rows.Next() {
+		var v ExternalIdentity
+		if err := rows.Scan(&v.ID, &v.Platform, &v.WorkspaceKey, &v.ExternalUserID, &v.DisplayName, &v.AvatarURL, &v.MappedUserID, &v.MappingStatus); err != nil {
+			return nil, dbError(err)
+		}
+		out = append(out, v)
+	}
 	return out, dbError(rows.Err())
 }
 
 func (s *PostgresStore) ListContactMemberships(ctx context.Context, userID string) ([]ContactMembership, error) {
 	rows, err := s.pool.Query(ctx, `SELECT ei.id::text,ei.platform,ei.platform_workspace_key,ei.external_user_id,COALESCE(ei.display_name,''),COALESCE(ei.avatar_url,''),COALESCE(ei.mapped_user_id::text,''),ei.mapping_status,ci.id::text FROM knowledge.conversation_memberships cm JOIN knowledge.external_identities ei ON ei.id=cm.external_identity_id JOIN knowledge.conversation_ingestions ci ON ci.id=cm.conversation_ingestion_id LEFT JOIN knowledge.conversation_collectors cc ON cc.conversation_ingestion_id=ci.id AND cc.collector_user_id=$1 AND cc.status <> 'removed' WHERE cm.status='active' AND (ci.owner_user_id=$1 OR cc.id IS NOT NULL)`, userID)
-	if err != nil { return nil, dbError(err) }; defer rows.Close(); out := []ContactMembership{}
-	for rows.Next() { var v ContactMembership; if err := rows.Scan(&v.Identity.ID,&v.Identity.Platform,&v.Identity.WorkspaceKey,&v.Identity.ExternalUserID,&v.Identity.DisplayName,&v.Identity.AvatarURL,&v.Identity.MappedUserID,&v.Identity.MappingStatus,&v.ConversationID); err != nil { return nil, dbError(err) }; out = append(out,v) }
+	if err != nil {
+		return nil, dbError(err)
+	}
+	defer rows.Close()
+	out := []ContactMembership{}
+	for rows.Next() {
+		var v ContactMembership
+		if err := rows.Scan(&v.Identity.ID, &v.Identity.Platform, &v.Identity.WorkspaceKey, &v.Identity.ExternalUserID, &v.Identity.DisplayName, &v.Identity.AvatarURL, &v.Identity.MappedUserID, &v.Identity.MappingStatus, &v.ConversationID); err != nil {
+			return nil, dbError(err)
+		}
+		out = append(out, v)
+	}
 	return out, dbError(rows.Err())
 }
 func (s *PostgresStore) GetOutbox(ctx context.Context, limit int) ([]domain.OutboxEvent, error) {

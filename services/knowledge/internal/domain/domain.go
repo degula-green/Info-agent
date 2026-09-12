@@ -49,22 +49,22 @@ type ConnectorAccount struct {
 }
 
 type WechatCollectionConfig struct {
-	ConnectorID           string    `json:"connector_id"`
-	SelectedConversations []string  `json:"selected_conversations"`
+	ConnectorID           string     `json:"connector_id"`
+	SelectedConversations []string   `json:"selected_conversations"`
 	HistoryStartAt        *time.Time `json:"history_start_at,omitempty"`
-	Enabled               bool      `json:"enabled"`
-	ListenMode            string    `json:"listen_mode"`
-	UpdatedAt             time.Time `json:"updated_at"`
+	Enabled               bool       `json:"enabled"`
+	ListenMode            string     `json:"listen_mode"`
+	UpdatedAt             time.Time  `json:"updated_at"`
 }
 
 type WechatCollectorRuntime struct {
-	ConnectorID      string     `json:"connector_id"`
-	Status           string     `json:"status"`
-	LastHeartbeatAt  *time.Time `json:"last_heartbeat_at,omitempty"`
-	LastCollectedAt  *time.Time `json:"last_collected_at,omitempty"`
-	LastError        string     `json:"last_error,omitempty"`
-	StoppedAt        *time.Time `json:"stopped_at,omitempty"`
-	UpdatedAt        time.Time  `json:"updated_at"`
+	ConnectorID     string     `json:"connector_id"`
+	Status          string     `json:"status"`
+	LastHeartbeatAt *time.Time `json:"last_heartbeat_at,omitempty"`
+	LastCollectedAt *time.Time `json:"last_collected_at,omitempty"`
+	LastError       string     `json:"last_error,omitempty"`
+	StoppedAt       *time.Time `json:"stopped_at,omitempty"`
+	UpdatedAt       time.Time  `json:"updated_at"`
 }
 
 type ConnectorView struct {
@@ -142,24 +142,46 @@ type AvailableMember struct {
 	MemberRole     string `json:"member_role,omitempty"`
 }
 
-type ContactIdentity struct {
-	ID string `json:"id"`
-	Platform string `json:"platform"`
-	WorkspaceKey string `json:"platform_workspace_key,omitempty"`
+// AvailableContact is a provider-owned contact record returned during an
+// explicit contact discovery. It is not persisted until the user selects it.
+// The fields intentionally contain platform identifiers and basic profile
+// data only; identity mapping is resolved by the knowledge service.
+type AvailableContact struct {
 	ExternalUserID string `json:"external_user_id"`
-	DisplayName string `json:"display_name,omitempty"`
-	AvatarURL string `json:"avatar_url,omitempty"`
-	MappedUserID string `json:"mapped_user_id,omitempty"`
-	MappingStatus string `json:"mapping_status"`
+	DisplayName    string `json:"display_name,omitempty"`
+	AvatarURL      string `json:"avatar_url,omitempty"`
+	Email          string `json:"email,omitempty"`
+	Department     string `json:"department,omitempty"`
+	JobTitle       string `json:"job_title,omitempty"`
+	Selected       bool   `json:"selected"`
+}
+
+type ContactIdentity struct {
+	ID             string `json:"id"`
+	Platform       string `json:"platform"`
+	WorkspaceKey   string `json:"platform_workspace_key,omitempty"`
+	ExternalUserID string `json:"external_user_id"`
+	DisplayName    string `json:"display_name,omitempty"`
+	AvatarURL      string `json:"avatar_url,omitempty"`
+	MappedUserID   string `json:"mapped_user_id,omitempty"`
+	MappingStatus  string `json:"mapping_status"`
 }
 
 type ContactView struct {
-	ID string `json:"id"`
-	Kind string `json:"kind"` // internal or external
-	InternalUserID string `json:"internal_user_id,omitempty"`
-	DisplayName string `json:"display_name,omitempty"`
-	Identities []ContactIdentity `json:"identities"`
-	ConversationIDs []string `json:"conversation_ids,omitempty"`
+	ID              string            `json:"id"`
+	Kind            string            `json:"kind"` // internal or external
+	InternalUserID  string            `json:"internal_user_id,omitempty"`
+	DisplayName     string            `json:"display_name,omitempty"`
+	Identities      []ContactIdentity `json:"identities"`
+	ConversationIDs []string          `json:"conversation_ids,omitempty"`
+	MessageCount    int               `json:"message_count"`
+	AttachmentCount int               `json:"attachment_count"`
+}
+
+type ContactDetail struct {
+	ContactView
+	Messages    []Message    `json:"messages"`
+	Attachments []Attachment `json:"attachments"`
 }
 
 type Discovery struct {
