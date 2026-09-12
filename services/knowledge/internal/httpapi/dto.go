@@ -55,6 +55,15 @@ type publicMembership struct {
 	LastSeenAt     time.Time  `json:"last_seen_at"`
 }
 
+type publicContact struct {
+	ID string `json:"id"`
+	Kind string `json:"kind"`
+	InternalUserID string `json:"internal_user_id,omitempty"`
+	DisplayName string `json:"display_name,omitempty"`
+	Identities []domain.ContactIdentity `json:"identities"`
+	ConversationIDs []string `json:"conversation_ids,omitempty"`
+}
+
 type publicAttachment struct {
 	ID                    string    `json:"id"`
 	ConversationID        string    `json:"conversation_id"`

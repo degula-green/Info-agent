@@ -226,6 +226,13 @@ func registerUserRoutes(r *gin.Engine, app *App, prefix string) {
 		}
 		c.JSON(http.StatusOK, gin.H{"items": items})
 	})
+	g.GET("/contacts", func(c *gin.Context) {
+		p := principal(c)
+		out, err := app.Service.ListContacts(c, p.UserID, strings.TrimSpace(c.Query("platform")))
+		if err != nil { writeError(c, err); return }
+		items := make([]publicContact, 0, len(out)); for _, value := range out { items = append(items, publicContact{ID:value.ID, Kind:value.Kind, InternalUserID:value.InternalUserID, DisplayName:value.DisplayName, Identities:value.Identities, ConversationIDs:value.ConversationIDs}) }
+		c.JSON(http.StatusOK, gin.H{"items": items})
+	})
 	g.POST("/connectors/feishu/authorize", func(c *gin.Context) {
 		var body struct {
 			Intent string `json:"intent"`

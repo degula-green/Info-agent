@@ -142,6 +142,26 @@ type AvailableMember struct {
 	MemberRole     string `json:"member_role,omitempty"`
 }
 
+type ContactIdentity struct {
+	ID string `json:"id"`
+	Platform string `json:"platform"`
+	WorkspaceKey string `json:"platform_workspace_key,omitempty"`
+	ExternalUserID string `json:"external_user_id"`
+	DisplayName string `json:"display_name,omitempty"`
+	AvatarURL string `json:"avatar_url,omitempty"`
+	MappedUserID string `json:"mapped_user_id,omitempty"`
+	MappingStatus string `json:"mapping_status"`
+}
+
+type ContactView struct {
+	ID string `json:"id"`
+	Kind string `json:"kind"` // internal or external
+	InternalUserID string `json:"internal_user_id,omitempty"`
+	DisplayName string `json:"display_name,omitempty"`
+	Identities []ContactIdentity `json:"identities"`
+	ConversationIDs []string `json:"conversation_ids,omitempty"`
+}
+
 type Discovery struct {
 	ID            string                  `json:"discovery_id"`
 	OwnerUserID   string                  `json:"owner_user_id"`

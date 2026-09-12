@@ -41,10 +41,6 @@ type MemoryStore struct {
 
 // ExternalIdentity is kept here to avoid leaking persistence details into the
 // public API model; its fields mirror knowledge.external_identities.
-type ExternalIdentity struct {
-	ID, Platform, WorkspaceKey, ExternalUserID, DisplayName, MappedUserID, MappingStatus string
-}
-
 func NewMemoryStore() *MemoryStore {
 	return &MemoryStore{
 		connectors: map[string]domain.ConnectorAccount{}, pairings: map[string]domain.Pairing{},
@@ -643,6 +639,31 @@ func (s *MemoryStore) UpsertExternalIdentity(_ context.Context, input ExternalId
 	}
 	s.identities[key] = identity
 	return identity.ID, nil
+}
+
+func (s *MemoryStore) ListContactIdentities(_ context.Context, userID, platform string) ([]ExternalIdentity, error) {
+	s.mu.RLock(); defer s.mu.RUnlock()
+	out := []ExternalIdentity{}
+	for _, identity := range s.identities {
+		if platform != "" && identity.Platform != platform { continue }
+		if identity.MappedUserID != userID { continue }
+		out = append(out, identity)
+	}
+	return out, nil
+}
+
+func (s *MemoryStore) ListContactMemberships(_ context.Context, userID string) ([]ContactMembership, error) {
+	s.mu.RLock(); defer s.mu.RUnlock()
+	out := []ContactMembership{}
+	for _, membership := range s.memberships {
+		conversation, ok := s.conversations[membership.ConversationID]; if !ok { continue }
+		if conversation.OwnerUserID != userID {
+			allowed := false; for _, collector := range s.collectors { if collector.ConversationID == conversation.ID && collector.CollectorUserID == userID && collector.Status != domain.CollectorRemoved { allowed = true } }; if !allowed { continue }
+		}
+		identity := s.identityByIDLocked(membership.ExternalIdentityID)
+		if identity.ID != "" { out = append(out, ContactMembership{Identity: identity, ConversationID: conversation.ID}) }
+	}
+	return out, nil
 }
 
 func (s *MemoryStore) UpsertConversationMemberships(_ context.Context, conversationID string, members []domain.AvailableMember) error {

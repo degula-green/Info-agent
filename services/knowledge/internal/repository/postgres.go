@@ -1181,6 +1181,22 @@ func (s *PostgresStore) ListAttachments(ctx context.Context, conversationID stri
 	}
 	return out, dbError(rows.Err())
 }
+
+func (s *PostgresStore) ListContactIdentities(ctx context.Context, userID, platform string) ([]ExternalIdentity, error) {
+	query := `SELECT id::text,platform,platform_workspace_key,external_user_id,COALESCE(display_name,''),COALESCE(avatar_url,''),COALESCE(mapped_user_id::text,''),mapping_status FROM knowledge.external_identities WHERE mapped_user_id=$1`
+	args := []any{userID}; if platform != "" { query += ` AND platform=$2`; args = append(args, platform) }
+	rows, err := s.pool.Query(ctx, query, args...); if err != nil { return nil, dbError(err) }; defer rows.Close()
+	out := []ExternalIdentity{}
+	for rows.Next() { var v ExternalIdentity; if err := rows.Scan(&v.ID,&v.Platform,&v.WorkspaceKey,&v.ExternalUserID,&v.DisplayName,&v.AvatarURL,&v.MappedUserID,&v.MappingStatus); err != nil { return nil, dbError(err) }; out = append(out,v) }
+	return out, dbError(rows.Err())
+}
+
+func (s *PostgresStore) ListContactMemberships(ctx context.Context, userID string) ([]ContactMembership, error) {
+	rows, err := s.pool.Query(ctx, `SELECT ei.id::text,ei.platform,ei.platform_workspace_key,ei.external_user_id,COALESCE(ei.display_name,''),COALESCE(ei.avatar_url,''),COALESCE(ei.mapped_user_id::text,''),ei.mapping_status,ci.id::text FROM knowledge.conversation_memberships cm JOIN knowledge.external_identities ei ON ei.id=cm.external_identity_id JOIN knowledge.conversation_ingestions ci ON ci.id=cm.conversation_ingestion_id LEFT JOIN knowledge.conversation_collectors cc ON cc.conversation_ingestion_id=ci.id AND cc.collector_user_id=$1 AND cc.status <> 'removed' WHERE cm.status='active' AND (ci.owner_user_id=$1 OR cc.id IS NOT NULL)`, userID)
+	if err != nil { return nil, dbError(err) }; defer rows.Close(); out := []ContactMembership{}
+	for rows.Next() { var v ContactMembership; if err := rows.Scan(&v.Identity.ID,&v.Identity.Platform,&v.Identity.WorkspaceKey,&v.Identity.ExternalUserID,&v.Identity.DisplayName,&v.Identity.AvatarURL,&v.Identity.MappedUserID,&v.Identity.MappingStatus,&v.ConversationID); err != nil { return nil, dbError(err) }; out = append(out,v) }
+	return out, dbError(rows.Err())
+}
 func (s *PostgresStore) GetOutbox(ctx context.Context, limit int) ([]domain.OutboxEvent, error) {
 	if limit <= 0 || limit > 100 {
 		limit = 100

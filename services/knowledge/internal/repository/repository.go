@@ -273,6 +273,8 @@ type Repository interface {
 	RevokeDevice(ctx context.Context, connectorID, deviceID string) error
 	TouchDevice(ctx context.Context, deviceID, agentVersion string, now time.Time) error
 	UpsertExternalIdentity(ctx context.Context, identity ExternalIdentityInput) (string, error)
+	ListContactIdentities(ctx context.Context, userID, platform string) ([]ExternalIdentity, error)
+	ListContactMemberships(ctx context.Context, userID string) ([]ContactMembership, error)
 	UpsertConversationMemberships(ctx context.Context, conversationID string, members []domain.AvailableMember) error
 	ListConversationMemberships(ctx context.Context, conversationID string) ([]domain.ConversationMembership, error)
 	CheckConversationMembership(ctx context.Context, conversationID, platform, workspaceKey, userID string) (known bool, member bool, err error)
@@ -314,4 +316,13 @@ type ExternalIdentityInput struct {
 	ExternalUserID string
 	DisplayName    string
 	MappedUserID   string
+}
+
+type ExternalIdentity struct {
+	ID, Platform, WorkspaceKey, ExternalUserID, DisplayName, AvatarURL, MappedUserID, MappingStatus string
+}
+
+type ContactMembership struct {
+	Identity ExternalIdentity
+	ConversationID string
 }

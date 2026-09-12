@@ -11,6 +11,7 @@ import (
 	"mime"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -1044,6 +1045,27 @@ func (s *Service) ListConversations(ctx context.Context, userID, platformName st
 		return nil, apperror.New("unsupported_platform", "platform is not supported in this release", 400, false)
 	}
 	return s.Repo.ListConversations(ctx, userID, platformName)
+}
+
+func (s *Service) ListContacts(ctx context.Context, userID, platform string) ([]domain.ContactView, error) {
+	if platform != "" && !supportedPlatform(platform) { return nil, apperror.New("unsupported_platform", "platform is not supported in this release", 400, false) }
+	identities, err := s.Repo.ListContactIdentities(ctx, userID, platform); if err != nil { return nil, err }
+	memberships, err := s.Repo.ListContactMemberships(ctx, userID); if err != nil { return nil, err }
+	byKey := map[string]*domain.ContactView{}
+	add := func(identity repository.ExternalIdentity, conversationID string) {
+		key := "external:" + identity.Platform + ":" + identity.WorkspaceKey + ":" + identity.ExternalUserID
+		kind := "external"; if identity.MappedUserID != "" { key = "internal:" + identity.MappedUserID; kind = "internal" }
+		view := byKey[key]; if view == nil { view = &domain.ContactView{ID: key, Kind: kind, InternalUserID: identity.MappedUserID, DisplayName: identity.DisplayName, Identities: []domain.ContactIdentity{}, ConversationIDs: []string{}}; byKey[key] = view }
+		for _, existing := range view.Identities { if existing.ID == identity.ID { goto conversation } }
+		view.Identities = append(view.Identities, domain.ContactIdentity{ID: identity.ID, Platform: identity.Platform, WorkspaceKey: identity.WorkspaceKey, ExternalUserID: identity.ExternalUserID, DisplayName: identity.DisplayName, AvatarURL: identity.AvatarURL, MappedUserID: identity.MappedUserID, MappingStatus: identity.MappingStatus})
+	conversation:
+		if conversationID != "" { for _, id := range view.ConversationIDs { if id == conversationID { return } }; view.ConversationIDs = append(view.ConversationIDs, conversationID) }
+	}
+	for _, identity := range identities { add(identity, "") }
+	for _, membership := range memberships { if platform == "" || membership.Identity.Platform == platform { add(membership.Identity, membership.ConversationID) } }
+	out := make([]domain.ContactView, 0, len(byKey)); for _, value := range byKey { out = append(out, *value) }
+	sort.Slice(out, func(i,j int) bool { return out[i].DisplayName < out[j].DisplayName })
+	return out, nil
 }
 func (s *Service) GetConversation(ctx context.Context, userID, id string) (*domain.ConversationIngestion, error) {
 	conversation, err := s.Repo.GetConversation(ctx, id)

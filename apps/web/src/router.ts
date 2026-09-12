@@ -14,6 +14,7 @@ const router = createRouter({
       { path: 'knowledge/:platform', name: 'knowledgePlatform', component: () => import('./views/info/InfoKnowledgePage.vue') },
       { path: 'knowledge/:platform/conversations/:conversationId', name: 'conversation', component: () => import('./views/info/InfoConversationPage.vue') },
       { path: 'organization', name: 'organization', component: () => import('./views/info/InfoOrganizationPage.vue') },
+      { path: 'contacts', name: 'contacts', component: () => import('./views/info/InfoContactsPage.vue') },
       { path: 'chat', name: 'chat', component: () => import('./views/info/InfoQuickQAPage.vue') },
       { path: 'profile', name: 'profile', component: () => import('./views/info/InfoProfilePage.vue') },
     ] },
