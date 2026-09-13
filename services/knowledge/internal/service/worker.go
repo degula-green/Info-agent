@@ -4,6 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
+	"mime"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -86,6 +89,7 @@ func (w *Worker) Tick(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	slog.InfoContext(ctx, "knowledge feishu worker tick", "accounts", len(accounts))
 	var firstErr error
 	for _, account := range accounts {
 		lockKey := "knowledge:worker:connector:" + account.ID
@@ -96,6 +100,7 @@ func (w *Worker) Tick(ctx context.Context) error {
 		}
 		acquired, lockErr := w.service.KV.Acquire(ctx, lockKey, owner, lockTTL)
 		if lockErr != nil || !acquired {
+			slog.WarnContext(ctx, "knowledge feishu worker account skipped", "account_id", account.ID, "lock_acquired", acquired, "lock_error", lockErr != nil)
 			if lockErr != nil && firstErr == nil {
 				firstErr = lockErr
 			}
@@ -136,10 +141,12 @@ func (w *Worker) pollAccount(ctx context.Context, account domain.ConnectorAccoun
 	if err != nil {
 		return err
 	}
+	slog.InfoContext(ctx, "knowledge feishu account polling", "account_id", account.ID, "account_status", account.Status, "collectors", len(collectors))
 	var firstErr error
 	for _, collector := range collectors {
 		now := time.Now().UTC()
 		if collector.NextPollAt != nil && collector.NextPollAt.After(now) {
+			slog.DebugContext(ctx, "knowledge feishu collector delayed", "collector_id", collector.ID, "next_poll_at", collector.NextPollAt)
 			continue
 		}
 		conversation, convErr := w.service.Repo.GetConversation(ctx, collector.ConversationID)
@@ -153,10 +160,13 @@ func (w *Worker) pollAccount(ctx context.Context, account domain.ConnectorAccoun
 		// A paused or detached conversation is intentionally not polled even
 		// though its collector may remain active for a later resume.
 		if conversation.Status != domain.ConversationActive {
+			slog.InfoContext(ctx, "knowledge feishu collector skipped", "collector_id", collector.ID, "conversation_status", conversation.Status)
 			continue
 		}
+		slog.InfoContext(ctx, "knowledge feishu messages polling", "collector_id", collector.ID, "conversation_id", conversation.ExternalConversationID, "has_cursor", strings.TrimSpace(collector.LastCursor) != "")
 		messages, nextCursor, refreshedToken, pollErr := w.pollMessagesWithRetry(ctx, account, token, *conversation, collector.LastCursor)
 		if pollErr != nil {
+			slog.ErrorContext(ctx, "knowledge feishu messages polling failed", "collector_id", collector.ID, "error", pollErr)
 			if isAuthorizationError(pollErr) {
 				return pollErr
 			}
@@ -166,6 +176,7 @@ func (w *Worker) pollAccount(ctx context.Context, account domain.ConnectorAccoun
 			}
 			continue
 		}
+		slog.InfoContext(ctx, "knowledge feishu messages polled", "collector_id", collector.ID, "messages", len(messages), "cursor_changed", nextCursor != collector.LastCursor)
 		token = refreshedToken
 		failed := false
 		for _, message := range messages {
@@ -297,7 +308,8 @@ func (w *Worker) downloadAttachments(ctx context.Context, account *domain.Connec
 			_ = w.service.Repo.FailAttachment(ctx, savedAttachment.ID, "external_download_failed")
 			return token, fmt.Errorf("empty attachment response")
 		}
-		_, uploadErr := w.service.UploadAttachment(ctx, "", savedAttachment.ID, platformAttachment.FileName, platformAttachment.MIMEType, platformAttachment.ContentHash, download.Reader, download.SizeBytes)
+		fileName, mimeType := attachmentMetadata(platformAttachment.FileName, platformAttachment.MIMEType, download.ContentType, message.MessageType)
+		_, uploadErr := w.service.UploadAttachment(ctx, "", savedAttachment.ID, fileName, mimeType, platformAttachment.ContentHash, download.Reader, download.SizeBytes)
 		closeErr := error(nil)
 		if download.Close != nil {
 			closeErr = download.Close()
@@ -312,6 +324,32 @@ func (w *Worker) downloadAttachments(ctx context.Context, account *domain.Connec
 		}
 	}
 	return token, nil
+}
+
+// Feishu resource responses contain the authoritative media type. Use it when
+// message content omitted a filename, otherwise images are persisted as .bin.
+func attachmentMetadata(fileName, declaredType, responseType, messageType string) (string, string) {
+	mimeType := strings.TrimSpace(declaredType)
+	if parsed, _, err := mime.ParseMediaType(strings.TrimSpace(responseType)); err == nil && parsed != "" && (mimeType == "" || mimeType == "image/*" || mimeType == "application/octet-stream") {
+		mimeType = parsed
+	}
+	name := strings.TrimSpace(fileName)
+	ext := strings.ToLower(filepath.Ext(name))
+	if (name == "" || ext == ".bin" || ext == ".image") && mimeType != "" && mimeType != "image/*" {
+		if guessed, _ := mime.ExtensionsByType(mimeType); len(guessed) > 0 {
+			name = strings.TrimSuffix(name, filepath.Ext(name)) + guessed[0]
+			if strings.TrimSpace(strings.TrimSuffix(name, filepath.Ext(name))) == "" {
+				name = "attachment" + guessed[0]
+			}
+		}
+	}
+	if name == "" {
+		name = "attachment"
+		if strings.EqualFold(messageType, "image") {
+			name = "image"
+		}
+	}
+	return name, mimeType
 }
 
 func (w *Worker) recordFailure(ctx context.Context, collector domain.Collector, err error) {

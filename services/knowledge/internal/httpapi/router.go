@@ -13,6 +13,7 @@ import (
 	"mime"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -235,7 +236,12 @@ func registerUserRoutes(r *gin.Engine, app *App, prefix string) {
 			return
 		}
 		p := principal(c)
-		out, err := app.Service.StartFeishuOAuth(c, p.UserID, body.Intent, p.OrganizationID)
+		organizationID, err := app.Service.ResolveCurrentOrganization(c, p.UserID, p.OrganizationID, c.GetHeader("Authorization"))
+		if err != nil {
+			writeError(c, err)
+			return
+		}
+		out, err := app.Service.StartFeishuOAuth(c, p.UserID, body.Intent, organizationID)
 		if err != nil {
 			writeError(c, err)
 			return
@@ -269,7 +275,12 @@ func registerUserRoutes(r *gin.Engine, app *App, prefix string) {
 			writeError(c, apperror.New("invalid_request", "invalid wechat bind request", 400, false))
 			return
 		}
-		out, err := app.Service.BindWechat(c, p.UserID, body.WXID, body.DBDir, false)
+		organizationID, err := app.Service.ResolveCurrentOrganization(c, p.UserID, p.OrganizationID, c.GetHeader("Authorization"))
+		if err != nil {
+			writeError(c, err)
+			return
+		}
+		out, err := app.Service.BindWechat(c, p.UserID, body.WXID, body.DBDir, organizationID, false)
 		if err != nil {
 			writeError(c, err)
 			return
@@ -286,7 +297,12 @@ func registerUserRoutes(r *gin.Engine, app *App, prefix string) {
 			writeError(c, apperror.New("invalid_request", "invalid wechat bind request", 400, false))
 			return
 		}
-		out, err := app.Service.BindWechat(c, p.UserID, body.WXID, body.DBDir, true)
+		organizationID, err := app.Service.ResolveCurrentOrganization(c, p.UserID, p.OrganizationID, c.GetHeader("Authorization"))
+		if err != nil {
+			writeError(c, err)
+			return
+		}
+		out, err := app.Service.BindWechat(c, p.UserID, body.WXID, body.DBDir, organizationID, true)
 		if err != nil {
 			writeError(c, err)
 			return
@@ -308,7 +324,7 @@ func registerUserRoutes(r *gin.Engine, app *App, prefix string) {
 		}
 		c.JSON(http.StatusOK, gin.H{"status": "stopped"})
 	})
-	g.GET("/connectors/wechat/conversations", func(c *gin.Context) {
+	g.GET("/connectors/wechat/local-conversations", func(c *gin.Context) {
 		out, err := app.Service.WechatConversations(c)
 		if err != nil {
 			writeError(c, err)
@@ -346,7 +362,12 @@ func registerUserRoutes(r *gin.Engine, app *App, prefix string) {
 			writeError(c, apperror.New("invalid_request", "invalid pairing request", 400, false))
 			return
 		}
-		out, err := app.Service.CreatePairingForWXID(c, p.UserID, body.WXID, p.OrganizationID)
+		organizationID, err := app.Service.ResolveCurrentOrganization(c, p.UserID, p.OrganizationID, c.GetHeader("Authorization"))
+		if err != nil {
+			writeError(c, err)
+			return
+		}
+		out, err := app.Service.CreatePairingForWXID(c, p.UserID, body.WXID, organizationID)
 		if err != nil {
 			writeError(c, err)
 			return
@@ -424,7 +445,7 @@ func registerUserRoutes(r *gin.Engine, app *App, prefix string) {
 			writeError(c, apperror.New("invalid_request", "invalid requested_start_at", 400, false))
 			return
 		}
-		out, err := app.Service.Attach(c, repository.AttachInput{UserID: p.UserID, Platform: body.Platform, WorkspaceKey: body.WorkspaceKey, ExternalConversationID: body.ExternalConversationID, ConversationType: body.ConversationType, Name: body.Name, AvatarURL: body.AvatarURL, DiscoveryID: body.DiscoveryID, OrganizationID: body.OrganizationID, RequestedStartAt: start})
+		out, err := app.Service.Attach(c, repository.AttachInput{UserID: p.UserID, Platform: body.Platform, WorkspaceKey: body.WorkspaceKey, ExternalConversationID: body.ExternalConversationID, ConversationType: body.ConversationType, Name: body.Name, AvatarURL: body.AvatarURL, DiscoveryID: body.DiscoveryID, OrganizationID: body.OrganizationID, RequestedStartAt: start}, c.GetHeader("Authorization"))
 		if err != nil {
 			writeError(c, err)
 			return
@@ -442,7 +463,7 @@ func registerUserRoutes(r *gin.Engine, app *App, prefix string) {
 	})
 	g.POST("/conversations/:conversation_id/collectors", func(c *gin.Context) {
 		p := principal(c)
-		out, err := app.Service.AddCollector(c, p.UserID, c.Param("conversation_id"))
+		out, err := app.Service.AddCollector(c, p.UserID, c.Param("conversation_id"), c.GetHeader("Authorization"))
 		if err != nil {
 			writeError(c, err)
 			return
@@ -516,7 +537,14 @@ func registerUserRoutes(r *gin.Engine, app *App, prefix string) {
 			return
 		}
 		defer reader.Close()
-		c.Header("Content-Type", attachment.MIMEType)
+		contentType := strings.TrimSpace(attachment.MIMEType)
+		if contentType == "" {
+			contentType = mime.TypeByExtension(filepath.Ext(attachment.FileName))
+		}
+		if contentType == "" {
+			contentType = "application/octet-stream"
+		}
+		c.Header("Content-Type", contentType)
 		c.Header("Content-Disposition", `inline; filename="`+safeHeaderName(attachment.FileName)+`"`)
 		if attachment.SizeBytes > 0 {
 			c.Header("Content-Length", strconv.FormatInt(attachment.SizeBytes, 10))
@@ -590,6 +618,57 @@ func registerInternalRoutes(r *gin.Engine, app *App, prefix string) {
 			return
 		}
 		c.JSON(http.StatusOK, out)
+	})
+	g.POST("/wechat/discovery", func(c *gin.Context) {
+		if !serviceAuthorized(c) {
+			writeError(c, apperror.Clone(apperror.ErrUnauthorized))
+			return
+		}
+		var body struct {
+			ConnectorID   string                         `json:"connector_id"`
+			Conversations []domain.AvailableConversation `json:"conversations"`
+			Items         []domain.AvailableConversation `json:"items"`
+		}
+		if err := c.ShouldBindJSON(&body); err != nil || strings.TrimSpace(body.ConnectorID) == "" {
+			writeError(c, apperror.New("invalid_request", "invalid discovery payload", 400, false))
+			return
+		}
+		items := body.Conversations
+		if len(items) == 0 {
+			items = body.Items
+		}
+		out, err := app.Service.ReportManagedWechatDiscovery(c, body.ConnectorID, items)
+		if err != nil {
+			writeError(c, err)
+			return
+		}
+		c.JSON(http.StatusOK, publicDiscoveryFromDomain(out))
+	})
+	g.POST("/:platform/discovery", func(c *gin.Context) {
+		if !serviceAuthorized(c) {
+			writeError(c, apperror.Clone(apperror.ErrUnauthorized))
+			return
+		}
+		platformName := strings.TrimSpace(c.Param("platform"))
+		var body struct {
+			ConnectorID   string                         `json:"connector_id"`
+			Conversations []domain.AvailableConversation `json:"conversations"`
+			Items         []domain.AvailableConversation `json:"items"`
+		}
+		if err := c.ShouldBindJSON(&body); err != nil || strings.TrimSpace(body.ConnectorID) == "" {
+			writeError(c, apperror.New("invalid_request", "invalid discovery payload", 400, false))
+			return
+		}
+		items := body.Conversations
+		if len(items) == 0 {
+			items = body.Items
+		}
+		out, err := app.Service.ReportManagedDiscovery(c, body.ConnectorID, platformName, items)
+		if err != nil {
+			writeError(c, err)
+			return
+		}
+		c.JSON(http.StatusOK, publicDiscoveryFromDomain(out))
 	})
 	g.GET("/devices/:device_id/collectors", func(c *gin.Context) {
 		device := agentDevice(c)
@@ -800,6 +879,27 @@ func registerInternalRoutes(r *gin.Engine, app *App, prefix string) {
 		}
 		c.JSON(http.StatusOK, gin.H{"status": "published"})
 	})
+	g.POST("/fixtures/replay", func(c *gin.Context) {
+		if !serviceAuthorized(c) {
+			writeError(c, apperror.Clone(apperror.ErrUnauthorized))
+			return
+		}
+		if !app.Config.FixtureReplayEnabled {
+			writeError(c, apperror.New("fixture_replay_disabled", "fixture replay is disabled", 404, false))
+			return
+		}
+		var input service.FixtureReplayInput
+		if err := c.ShouldBindJSON(&input); err != nil {
+			writeError(c, apperror.New("invalid_fixture", "invalid fixture replay payload", 400, false))
+			return
+		}
+		result, err := app.Service.ReplayFixture(c, input)
+		if err != nil {
+			writeError(c, err)
+			return
+		}
+		c.JSON(http.StatusOK, result)
+	})
 }
 
 type uploadMeta struct {
@@ -1006,7 +1106,7 @@ func internalMiddleware(app *App) gin.HandlerFunc {
 }
 
 func serviceTokenPathAllowed(path string) bool {
-	if strings.HasSuffix(path, "/internal/worker/publish") || strings.HasSuffix(path, "/internal/wechat/assignments") || strings.HasSuffix(path, "/internal/wechat/bootstrap") {
+	if strings.HasSuffix(path, "/internal/worker/publish") || strings.HasSuffix(path, "/internal/fixtures/replay") || strings.HasSuffix(path, "/internal/wechat/assignments") || strings.HasSuffix(path, "/internal/wechat/bootstrap") || strings.HasSuffix(path, "/internal/wechat/discovery") || strings.HasSuffix(path, "/internal/feishu/discovery") {
 		return true
 	}
 	if !strings.Contains(path, "/internal/collectors/") {
