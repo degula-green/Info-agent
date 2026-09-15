@@ -11,10 +11,37 @@ from app.application.worker import RAGEventHandler
 from app.application.ports import ProcessingOutput
 from app.domain.models import AttachmentContext, CanonicalBlock, ParsedDocument
 from app.infrastructure.embedding.client import HashEmbeddingProvider
-from app.infrastructure.storage.artifacts import LocalArtifactStore
+from app.infrastructure.storage.artifacts import LocalArtifactStore, MinioArtifactStore, derived_key
 
 
 class ProcessingTests(unittest.TestCase):
+    def test_derived_artifact_key_stays_short_for_windows_paths(self) -> None:
+        context = AttachmentContext(
+            attachment_id="message-0ed8e84a-3993-4c54-b2b3-796e27fa82e5",
+            file_name="message.txt",
+            mime_type="text/plain",
+            source_content_hash="sha256:" + "f" * 64,
+        )
+        key = derived_key(context, "436da7f9-3577-4f3b-bf1a-00233696aa4c", "manifest.json")
+        self.assertLessEqual(len(key), 128)
+        self.assertEqual(key, derived_key(context, "436da7f9-3577-4f3b-bf1a-00233696aa4c", "manifest.json"))
+
+    def test_minio_store_accepts_inline_message_file(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "message.txt"
+            destination = root / "copy" / "message.txt"
+            source.write_text("message body", encoding="utf-8")
+            context = AttachmentContext(
+                attachment_id="message-1",
+                file_name="message.txt",
+                mime_type="text/plain",
+                file_path=str(source),
+            )
+            store = MinioArtifactStore.__new__(MinioArtifactStore)
+            self.assertEqual(store.download_source(context, destination), len("message body"))
+            self.assertEqual(destination.read_text(encoding="utf-8"), "message body")
+
     def test_local_markdown_is_chunked_and_vectorized(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

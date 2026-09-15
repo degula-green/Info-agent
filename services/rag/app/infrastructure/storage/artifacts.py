@@ -98,6 +98,10 @@ class MinioArtifactStore(ArtifactStore):
         return f"minio://{bucket}/{key}"
 
     def download_source(self, context: AttachmentContext, destination: Path) -> int:
+        if context.file_path:
+            local_path = Path(context.file_path)
+            if local_path.exists() and local_path.is_file():
+                return _copy_limited(local_path, destination, settings.preprocess_max_file_bytes)
         source = context.object_ref
         if not source:
             raise StorageError("attachment has no object_ref")
@@ -124,9 +128,9 @@ def build_artifact_store() -> ArtifactStore:
 
 def derived_key(context: AttachmentContext, run_id: str, suffix: str) -> str:
     digest = context.source_content_hash or "unknown"
-    safe_hash = re.sub(r"[^0-9A-Fa-f]", "", digest.removeprefix("sha256:"))[:64] or "unknown"
-    safe_attachment = re.sub(r"[^A-Za-z0-9_.-]", "_", context.attachment_id)[:128] or "unknown-attachment"
-    safe_run = re.sub(r"[^A-Za-z0-9_.-]", "_", str(run_id))[:128] or "unknown-run"
+    safe_hash = re.sub(r"[^0-9A-Fa-f]", "", digest.removeprefix("sha256:"))[:40] or "unknown"
+    safe_attachment = hashlib.sha256(context.attachment_id.encode("utf-8")).hexdigest()[:24]
+    safe_run = hashlib.sha256(str(run_id).encode("utf-8")).hexdigest()[:20]
     return (
         f"{settings.minio_derived_prefix}/{safe_attachment}/"
         f"{context.content_version}/{safe_run}/{safe_hash}/{suffix.lstrip('/')}"

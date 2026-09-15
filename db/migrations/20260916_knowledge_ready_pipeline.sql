@@ -199,6 +199,22 @@ CREATE INDEX IF NOT EXISTS outbox_knowledge_ready_pending_idx
     ON knowledge.outbox_events(available_at, created_at)
     WHERE event_type = 'knowledge.ready' AND published_at IS NULL;
 
+-- Older publishers treated every Outbox row as externally publishable. Reset
+-- internal permission requests so the permission worker owns their lifecycle.
+UPDATE knowledge.outbox_events oe
+SET status='pending',published_at=NULL,last_error=NULL,available_at=CURRENT_TIMESTAMP
+FROM knowledge.knowledge_items ki
+WHERE oe.aggregate_id=ki.id
+  AND oe.event_type='permission.sync.requested'
+  AND ki.permission_ready=FALSE;
+
+UPDATE knowledge.outbox_events oe
+SET status='published',published_at=COALESCE(oe.published_at,CURRENT_TIMESTAMP),last_error=NULL
+FROM knowledge.knowledge_items ki
+WHERE oe.aggregate_id=ki.id
+  AND oe.event_type='permission.sync.requested'
+  AND ki.permission_ready=TRUE;
+
 INSERT INTO knowledge.outbox_events (
     id,aggregate_type,aggregate_id,event_type,event_version,schema_version,
     organization_id,trace_id,payload,status,retry_count,available_at

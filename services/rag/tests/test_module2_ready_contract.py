@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import json
+import sys
 import unittest
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 from app.application.ports import ProcessingOutput
 from app.application.worker import RAGEventHandler
 from app.domain.models import ParsedDocument
 from app.infrastructure.events.redis_streams import RedisStreamPublisher, RedisStreamWorker
+from app.infrastructure.events import redis_streams
 from app.infrastructure.module2.knowledge_client import Module2KnowledgeClient
 from app.infrastructure.persistence.repository import InMemoryRagRepository
 
@@ -128,6 +132,33 @@ class _Redis:
 
 
 class Module2ReadyContractTests(unittest.TestCase):
+    def test_redis_connection_uses_url_scheme_for_tls(self):
+        factory = Mock(return_value=object())
+        redis_module = SimpleNamespace(Redis=SimpleNamespace(from_url=factory))
+        base_settings = {
+            "redis_database": 1,
+            "redis_username": "",
+            "redis_password": "",
+            "authz_connect_timeout_seconds": 0.2,
+            "authz_timeout_seconds": 0.8,
+        }
+
+        for tls, expected_url in (
+            (False, "redis://cache.example:6379/1"),
+            (True, "rediss://cache.example:6379/1"),
+        ):
+            factory.reset_mock()
+            runtime_settings = SimpleNamespace(
+                **base_settings,
+                redis_url="redis://cache.example:6379/1",
+                redis_tls=tls,
+            )
+            with patch.object(redis_streams, "settings", runtime_settings), patch.dict(sys.modules, {"redis": redis_module}):
+                redis_streams._build_redis()
+            args, kwargs = factory.call_args
+            self.assertEqual(args[0], expected_url)
+            self.assertNotIn("ssl", kwargs)
+
     def test_client_sends_content_and_acl_versions_on_every_source_call(self):
         http = _Http()
         client = Module2KnowledgeClient(base_url="http://knowledge", token="service-token", http=http)

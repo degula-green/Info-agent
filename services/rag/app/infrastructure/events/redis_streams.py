@@ -104,12 +104,14 @@ def _build_redis() -> Any:
         import redis
     except ImportError as exc:
         raise StreamUnavailable("redis package is required for Streams") from exc
+    connection_url = settings.redis_url
+    if settings.redis_tls and connection_url.startswith("redis://"):
+        connection_url = "rediss://" + connection_url[len("redis://"):]
     return redis.Redis.from_url(
-        settings.redis_url,
+        connection_url,
         db=settings.redis_database,
         username=settings.redis_username or None,
         password=settings.redis_password or None,
-        ssl=settings.redis_tls,
         decode_responses=False,
         socket_connect_timeout=max(0.1, settings.authz_connect_timeout_seconds),
         socket_timeout=max(0.1, settings.authz_timeout_seconds),

@@ -159,7 +159,7 @@ class PostgresRagRepository:
                     f"""INSERT INTO {self.schema}.outbox_events
                     (id,aggregate_type,aggregate_id,event_type,event_version,schema_version,organization_id,trace_id,payload)
                     VALUES (%s::uuid,%s,%s::uuid,%s,%s,%s,%s::uuid,%s,%s::jsonb)
-                    ON CONFLICT (id) DO NOTHING""",
+                    ON CONFLICT DO NOTHING""",
                     (event_id, aggregate_type, aggregate_id, event_type, event_version, int(envelope.get("schema_version") or 1), envelope.get("organization_id"), str(envelope.get("trace_id") or ""), json.dumps(envelope.get("payload") or {}, ensure_ascii=False)),
                 )
         return event_id

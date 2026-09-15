@@ -1721,7 +1721,7 @@ func (s *PostgresStore) MarkKnowledgePermissionSynced(ctx context.Context, id st
 	if tag.RowsAffected() == 0 {
 		return apperror.New("knowledge_not_found", "knowledge item not found", 404, false)
 	}
-	if _, err = tx.Exec(ctx, `UPDATE knowledge.outbox_events SET status='published',published_at=COALESCE(published_at,now()),last_error=NULL WHERE aggregate_id=$1 AND event_type='permission.sync.requested' AND published_at IS NULL`, id); err != nil {
+	if _, err = tx.Exec(ctx, `UPDATE knowledge.outbox_events SET status='published',published_at=COALESCE(published_at,now()),last_error=NULL WHERE aggregate_id=$1 AND event_type='permission.sync.requested'`, id); err != nil {
 		return dbError(err)
 	}
 	return dbError(tx.Commit(ctx))
@@ -1740,7 +1740,7 @@ func (s *PostgresStore) MarkKnowledgePermissionFailed(ctx context.Context, id, f
 	if tag.RowsAffected() == 0 {
 		return apperror.New("knowledge_not_found", "knowledge item not found", 404, false)
 	}
-	if _, err = tx.Exec(ctx, `UPDATE knowledge.outbox_events SET status='failed',retry_count=retry_count+1,last_error=$2,available_at=now()+interval '30 seconds' WHERE aggregate_id=$1 AND event_type='permission.sync.requested' AND published_at IS NULL`, id, safeError(failure)); err != nil {
+	if _, err = tx.Exec(ctx, `UPDATE knowledge.outbox_events SET status='failed',retry_count=retry_count+1,last_error=$2,available_at=now()+interval '30 seconds',published_at=NULL WHERE aggregate_id=$1 AND event_type='permission.sync.requested'`, id, safeError(failure)); err != nil {
 		return dbError(err)
 	}
 	return dbError(tx.Commit(ctx))
