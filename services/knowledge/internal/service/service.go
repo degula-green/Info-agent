@@ -284,6 +284,11 @@ type CollectorAssignment struct {
 }
 type MessageInput struct{ repository.IngestMessageInput }
 
+type messageDedupeRecord struct {
+	PayloadHash string                  `json:"payload_hash"`
+	Result      repository.IngestResult `json:"result"`
+}
+
 type StateData struct {
 	UserID         string    `json:"user_id"`
 	Platform       string    `json:"platform"`
@@ -1426,10 +1431,83 @@ func (s *Service) IngestMessage(ctx context.Context, input repository.IngestMess
 	if input.MessageType == "" {
 		input.MessageType = "text"
 	}
+	// The transport candidate is deliberately filtered before Redis lookup and
+	// before construction of the normalized domain input.
+	filtered, discard := repository.FilterMessageCandidate(input)
+	if discard {
+		return &repository.IngestResult{Discarded: true}, nil
+	}
 	if len(input.Content) > 2*1024*1024 {
 		return nil, apperror.New("message_too_large", "message content is too large", 413, false)
 	}
-	return s.Repo.IngestMessage(ctx, input)
+	if err := repository.ValidateMessageCandidate(input); err != nil {
+		return nil, err
+	}
+	collector, err := s.Repo.GetCollector(ctx, input.CollectorID)
+	if err != nil {
+		return nil, err
+	}
+	conversation, err := s.Repo.GetConversation(ctx, collector.ConversationID)
+	if err != nil {
+		return nil, err
+	}
+	if conversation.ExternalConversationID != input.ExternalConversationID {
+		return nil, apperror.New("conversation_mismatch", "external conversation does not match collector", 409, false)
+	}
+	account, err := s.Repo.GetConnectorByID(ctx, collector.ConnectorAccountID)
+	if err != nil {
+		return nil, err
+	}
+	dedupeKey := messageDedupeKey(account.Platform, account.ID, input.ExternalConversationID, input.ExternalMessageID)
+	if s.KV != nil {
+		var cached messageDedupeRecord
+		if found, cacheErr := s.KV.Get(ctx, dedupeKey, &cached); cacheErr != nil {
+			slog.WarnContext(ctx, "knowledge message dedupe cache unavailable", "error", cacheErr)
+		} else if found {
+			if !strings.EqualFold(cached.PayloadHash, input.PayloadHash) {
+				return nil, apperror.New("external_id_conflict", "external message id has conflicting payload", 409, false)
+			}
+			result := cached.Result
+			result.Duplicate = true
+			return &result, nil
+		}
+	}
+	normalized, err := normalizeMessageCandidate(filtered, input.PayloadHash)
+	if err != nil {
+		return nil, apperror.Wrap("invalid_message", "message candidate cannot be normalized", 400, false, err)
+	}
+	result, err := s.Repo.IngestMessage(ctx, normalized)
+	if err != nil {
+		return nil, err
+	}
+	if s.KV != nil {
+		if cacheErr := s.KV.Set(ctx, dedupeKey, messageDedupeRecord{PayloadHash: input.PayloadHash, Result: *result}, 7*24*time.Hour); cacheErr != nil {
+			slog.WarnContext(ctx, "knowledge message dedupe cache write failed", "error", cacheErr)
+		}
+	}
+	return result, nil
+}
+
+func normalizeMessageCandidate(input repository.IngestMessageInput, sourcePayloadHash string) (repository.IngestMessageInput, error) {
+	// Platform adapters already extracted source identities and attachment
+	// metadata. This is the first point at which they become the shared domain
+	// contract; provider-specific types never pass this boundary.
+	input.MessageType = strings.ToLower(input.MessageType)
+	input.SentAt = input.SentAt.UTC()
+	input.SourcePayloadHash = sourcePayloadHash
+	contentSum := sha256.Sum256([]byte(input.Content))
+	input.ContentHash = hex.EncodeToString(contentSum[:])
+	payloadHash, err := repository.CalculatePayloadHash(input)
+	if err != nil {
+		return input, err
+	}
+	input.PayloadHash = payloadHash
+	return input, nil
+}
+
+func messageDedupeKey(platformName, accountID, conversationID, messageID string) string {
+	sum := sha256.Sum256([]byte(strings.Join([]string{platformName, accountID, conversationID, messageID}, "\x00")))
+	return "knowledge:dedupe:" + hex.EncodeToString(sum[:])
 }
 func (s *Service) Heartbeat(ctx context.Context, collectorID, version string) (*domain.Collector, error) {
 	now := s.Now()
@@ -1563,6 +1641,11 @@ func (s *Service) UploadAttachment(ctx context.Context, collectorID, attachmentI
 	}
 	saved.FileName = safeFileName(fileName)
 	saved.MIMEType = mimeType
+	if item, lookupErr := s.Repo.GetKnowledgeItemByAttachment(ctx, saved.ID); lookupErr == nil {
+		if _, readyErr := s.Repo.TryMarkKnowledgeReady(ctx, item.ID, trace.TraceID(ctx)); readyErr != nil {
+			return UploadResult{}, readyErr
+		}
+	}
 	return UploadResult{Attachment: *saved}, nil
 }
 
@@ -1596,16 +1679,28 @@ func (s *Service) PublishOutbox(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	var firstErr error
 	for _, event := range events {
 		if err := s.KV.Publish(ctx, "knowledge:ready", event); err != nil {
-			return err
+			shift := event.RetryCount
+			if shift > 6 {
+				shift = 6
+			}
+			delay := time.Second * time.Duration(1<<shift)
+			if markErr := s.Repo.MarkOutboxFailed(ctx, event.ID, "redis_publish_failed", s.Now().Add(delay)); markErr != nil {
+				return markErr
+			}
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
 		}
 		now := s.Now()
 		if err := s.Repo.MarkOutboxPublished(ctx, event.ID, now); err != nil {
 			return err
 		}
 	}
-	return nil
+	return firstErr
 }
 
 // ReportManagedWechatDiscovery accepts discovery data from the server-managed
@@ -1659,8 +1754,107 @@ func (s *Service) ProcessPrivacy(ctx context.Context) error {
 		if err := s.Repo.CompleteMessageClassification(ctx, item.Message.ID, display, sensitive); err != nil {
 			return err
 		}
+		if knowledgeItem, lookupErr := s.Repo.GetKnowledgeItemByMessage(ctx, item.Message.ID); lookupErr == nil {
+			if _, readyErr := s.Repo.TryMarkKnowledgeReady(ctx, knowledgeItem.ID, trace.TraceID(ctx)); readyErr != nil {
+				return readyErr
+			}
+		}
 	}
 	return nil
+}
+
+func (s *Service) ProcessPermissions(ctx context.Context) error {
+	pending, err := s.Repo.ListPendingKnowledgePermissions(ctx, 100)
+	if err != nil {
+		return err
+	}
+	var firstErr error
+	for _, item := range pending {
+		subjects, subjectErr := s.Repo.ListKnowledgePermissionSubjects(ctx, item.ID)
+		if subjectErr != nil {
+			if firstErr == nil {
+				firstErr = subjectErr
+			}
+			continue
+		}
+		if s.Core == nil {
+			_ = s.Repo.MarkKnowledgePermissionFailed(ctx, item.ID, "core_permission_unavailable")
+			slog.WarnContext(ctx, "knowledge permission sync skipped", "knowledge_item_id", item.ID, "reason", "core_permission_unavailable")
+			continue
+		}
+		result, syncErr := s.Core.SyncKnowledgePermissions(ctx, item, subjects)
+		if syncErr != nil {
+			_ = s.Repo.MarkKnowledgePermissionFailed(ctx, item.ID, "core_permission_sync_failed")
+			if firstErr == nil {
+				firstErr = syncErr
+			}
+			continue
+		}
+		if err := s.Repo.MarkKnowledgePermissionSynced(ctx, item.ID, result.ACLVersion); err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		if _, err := s.Repo.TryMarkKnowledgeReady(ctx, item.ID, trace.TraceID(ctx)); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
+}
+
+func (s *Service) GetKnowledgeForRAG(ctx context.Context, id string, contentVersion int, aclVersion int64) (*domain.KnowledgeItem, error) {
+	item, err := s.Repo.GetKnowledgeItem(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if item.ProcessingStatus != "published" && item.ProcessingStatus != "processing" && item.ProcessingStatus != "ready" {
+		return nil, apperror.New("knowledge_not_ready", "knowledge item is not ready", 409, true)
+	}
+	if contentVersion < 1 || item.ContentVersion != contentVersion {
+		return nil, apperror.New("knowledge_version_mismatch", "content version does not match", 409, false)
+	}
+	if aclVersion > 0 && item.ACLVersion != aclVersion {
+		return nil, apperror.New("knowledge_acl_version_mismatch", "ACL version does not match", 409, false)
+	}
+	return item, nil
+}
+
+func (s *Service) GetKnowledgeContentForRAG(ctx context.Context, id string, contentVersion int, aclVersion int64, variant string) (*domain.KnowledgeContent, error) {
+	item, err := s.GetKnowledgeForRAG(ctx, id, contentVersion, aclVersion)
+	if err != nil {
+		return nil, err
+	}
+	if variant == "original" && item.OriginalAccessRequired {
+		return nil, apperror.New("knowledge_content_restricted", "original content requires approval", 403, false)
+	}
+	content, err := s.Repo.GetKnowledgeContent(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	content.ContentVariant = "display"
+	return content, nil
+}
+
+func (s *Service) GetAttachmentForRAG(ctx context.Context, id string, contentVersion int, aclVersion int64) (*domain.Attachment, error) {
+	item, err := s.Repo.GetKnowledgeItemByAttachment(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if _, err = s.GetKnowledgeForRAG(ctx, item.ID, contentVersion, aclVersion); err != nil {
+		return nil, err
+	}
+	if item.ContentAccessRequired {
+		return nil, apperror.New("attachment_content_restricted", "attachment content requires approval", 403, false)
+	}
+	attachment, err := s.Repo.GetAttachment(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if attachment.ContentStatus != "ready" || attachment.ObjectRef == "" {
+		return nil, apperror.New("attachment_not_ready", "attachment content is not ready", 409, true)
+	}
+	return attachment, nil
 }
 
 func supportedPlatform(value string) bool {

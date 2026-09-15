@@ -1,6 +1,7 @@
 package coreclient
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -9,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"info-agent/knowledge/internal/domain"
 	"info-agent/knowledge/internal/trace"
 )
 
@@ -112,6 +114,62 @@ func (c *Client) CheckOrganizationMember(ctx context.Context, userID, organizati
 		return false, err
 	}
 	return body.Allowed || body.IsMember, nil
+}
+
+type PermissionSyncResult struct {
+	KnowledgeItemID string `json:"knowledge_item_id"`
+	ACLVersion      int64  `json:"acl_version"`
+	RelationCount   int    `json:"relation_count"`
+	Status          string `json:"status"`
+}
+
+func (c *Client) SyncKnowledgePermissions(ctx context.Context, item domain.KnowledgeItem, participantUserIDs []string) (PermissionSyncResult, error) {
+	if c == nil || c.BaseURL == "" || c.ServiceToken == "" {
+		return PermissionSyncResult{}, errors.New("core permission service is not configured")
+	}
+	body, err := json.Marshal(map[string]any{
+		"knowledge_item_id":       item.ID,
+		"attachment_id":           item.SourceAttachmentID,
+		"knowledge_scope":         item.KnowledgeScope,
+		"owner_user_id":           item.OwnerUserID,
+		"organization_id":         item.OrganizationID,
+		"conversation_id":         item.ConversationID,
+		"participant_user_ids":    participantUserIDs,
+		"content_access_required": item.ContentAccessRequired,
+	})
+	if err != nil {
+		return PermissionSyncResult{}, err
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, c.BaseURL+"/internal/v1/authorization/resource-relations/sync", bytes.NewReader(body))
+	if err != nil {
+		return PermissionSyncResult{}, err
+	}
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Authorization", "Bearer "+c.ServiceToken)
+	request.Header.Set("X-Caller-Service", "knowledge")
+	propagateTraceHeaders(ctx, request)
+	response, err := c.HTTP.Do(request)
+	if err != nil {
+		return PermissionSyncResult{}, err
+	}
+	defer response.Body.Close()
+	if response.StatusCode == http.StatusUnauthorized || response.StatusCode == http.StatusForbidden {
+		return PermissionSyncResult{}, errors.New("core rejected knowledge permission synchronization")
+	}
+	if response.StatusCode >= 500 {
+		return PermissionSyncResult{}, errors.New("core permission service is unavailable")
+	}
+	if response.StatusCode >= 400 {
+		return PermissionSyncResult{}, fmt.Errorf("core permission synchronization failed: status %d", response.StatusCode)
+	}
+	var result PermissionSyncResult
+	if err := json.NewDecoder(response.Body).Decode(&result); err != nil {
+		return PermissionSyncResult{}, err
+	}
+	if result.KnowledgeItemID != item.ID || result.ACLVersion < 1 || result.Status != "synced" {
+		return PermissionSyncResult{}, errors.New("core permission synchronization response is incomplete")
+	}
+	return result, nil
 }
 
 func propagateTraceHeaders(ctx context.Context, request *http.Request) {

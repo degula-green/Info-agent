@@ -71,7 +71,104 @@ func NewRouterWithApp(app *App) *gin.Engine {
 	registerUserRoutes(r, app, "/api/knowledge/v1")
 	registerInternalRoutes(r, app, "/v1")
 	registerInternalRoutes(r, app, "/api/knowledge/v1")
+	registerRAGSourceRoutes(r, app)
 	return r
+}
+
+func registerRAGSourceRoutes(r *gin.Engine, app *App) {
+	g := r.Group("/internal", ragServiceMiddleware(app))
+	g.GET("/knowledge/:knowledge_item_id", func(c *gin.Context) {
+		contentVersion, aclVersion, ok := sourceVersions(c)
+		if !ok {
+			return
+		}
+		item, err := app.Service.GetKnowledgeForRAG(c, c.Param("knowledge_item_id"), contentVersion, aclVersion)
+		if err != nil {
+			writeError(c, err)
+			return
+		}
+		response := gin.H{
+			"knowledge_item_id": item.ID, "resource_type": "knowledge_item",
+			"knowledge_base_id": item.KnowledgeBaseID, "knowledge_scope": item.KnowledgeScope,
+			"access_scope": item.AccessScope, "owner_user_id": item.OwnerUserID,
+			"organization_id": item.OrganizationID, "conversation_ingestion_id": item.ConversationID,
+			"external_conversation_id": item.ExternalConversationID,
+			"source_message_id":        item.SourceMessageID, "source_attachment_id": item.SourceAttachmentID,
+			"content_type": item.ContentType, "content_hash": item.ContentHash,
+			"content_version": item.ContentVersion, "acl_version": item.ACLVersion,
+			"content_variant": "display", "content_access_required": item.ContentAccessRequired,
+			"lifecycle_status": item.LifecycleStatus,
+		}
+		if item.Message != nil {
+			response["message_id"] = item.Message.ID
+			response["external_message_id"] = item.Message.ExternalMessageID
+			response["sender_identity_id"] = item.Message.SenderIdentityID
+			response["sender_display_name"] = item.Message.SenderDisplayName
+			response["sent_at"] = item.Message.SentAt
+			response["collected_at"] = item.Message.CollectedAt
+		}
+		if item.Attachment != nil {
+			attachment := *item.Attachment
+			if item.ContentAccessRequired {
+				attachment.ObjectRef = ""
+			}
+			response["attachments"] = []domain.Attachment{attachment}
+		}
+		c.JSON(http.StatusOK, response)
+	})
+	g.GET("/knowledge/:knowledge_item_id/content", func(c *gin.Context) {
+		contentVersion, aclVersion, ok := sourceVersions(c)
+		if !ok {
+			return
+		}
+		content, err := app.Service.GetKnowledgeContentForRAG(c, c.Param("knowledge_item_id"), contentVersion, aclVersion, strings.TrimSpace(c.Query("content_variant")))
+		if err != nil {
+			writeError(c, err)
+			return
+		}
+		c.JSON(http.StatusOK, content)
+	})
+	g.GET("/attachments/:attachment_id", func(c *gin.Context) {
+		contentVersion, aclVersion, ok := sourceVersions(c)
+		if !ok {
+			return
+		}
+		attachment, err := app.Service.GetAttachmentForRAG(c, c.Param("attachment_id"), contentVersion, aclVersion)
+		if err != nil {
+			writeError(c, err)
+			return
+		}
+		c.JSON(http.StatusOK, attachment)
+	})
+}
+
+func ragServiceMiddleware(app *App) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		parts := strings.Fields(c.GetHeader("Authorization"))
+		if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") || app.Config.InternalServiceToken == "" || !hmac.Equal([]byte(parts[1]), []byte(app.Config.InternalServiceToken)) {
+			writeError(c, apperror.Clone(apperror.ErrUnauthorized))
+			c.Abort()
+			return
+		}
+		c.Next()
+	}
+}
+
+func sourceVersions(c *gin.Context) (int, int64, bool) {
+	contentVersion, err := strconv.Atoi(strings.TrimSpace(c.Query("content_version")))
+	if err != nil || contentVersion < 1 {
+		writeError(c, apperror.New("invalid_content_version", "content_version is required and must be positive", 400, false))
+		return 0, 0, false
+	}
+	aclVersion := int64(0)
+	if raw := strings.TrimSpace(c.Query("acl_version")); raw != "" {
+		aclVersion, err = strconv.ParseInt(raw, 10, 64)
+		if err != nil || aclVersion < 1 {
+			writeError(c, apperror.New("invalid_acl_version", "acl_version must be positive", 400, false))
+			return 0, 0, false
+		}
+	}
+	return contentVersion, aclVersion, true
 }
 
 func requestLogger() gin.HandlerFunc {

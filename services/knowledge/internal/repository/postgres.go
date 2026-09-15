@@ -1063,12 +1063,14 @@ func (s *PostgresStore) SetConversationStatus(ctx context.Context, id, status, r
 }
 
 func (s *PostgresStore) IngestMessage(ctx context.Context, input IngestMessageInput) (*IngestResult, error) {
-	if err := validateIngestInput(input); err != nil {
+	prepared, discard, err := PrepareRepositoryInput(input)
+	if err != nil {
 		return nil, err
 	}
-	if discardMessage(input) {
+	if discard {
 		return &IngestResult{Discarded: true}, nil
 	}
+	input = prepared
 	traceID := trace.TraceID(ctx)
 	if traceID == "" {
 		traceID = uuid.NewString()
@@ -1078,8 +1080,8 @@ func (s *PostgresStore) IngestMessage(ctx context.Context, input IngestMessageIn
 		return nil, dbError(err)
 	}
 	defer tx.Rollback(ctx)
-	var conversationID, externalConversationID, platformName, workspace, scope, org string
-	err = tx.QueryRow(ctx, `SELECT cc.conversation_ingestion_id::text,ci.external_conversation_id,ci.platform,ci.platform_workspace_key,ci.ingestion_scope,COALESCE(ci.organization_id::text,'') FROM knowledge.conversation_collectors cc JOIN knowledge.conversation_ingestions ci ON ci.id=cc.conversation_ingestion_id WHERE cc.id=$1 AND cc.status='active' AND ci.status='active' FOR UPDATE`, input.CollectorID).Scan(&conversationID, &externalConversationID, &platformName, &workspace, &scope, &org)
+	var conversationID, externalConversationID, platformName, workspace, scope, org, owner, knowledgeBaseID string
+	err = tx.QueryRow(ctx, `SELECT cc.conversation_ingestion_id::text,ci.external_conversation_id,ci.platform,ci.platform_workspace_key,ci.ingestion_scope,COALESCE(ci.organization_id::text,''),COALESCE(ci.owner_user_id::text,''),COALESCE(ci.knowledge_base_id::text,'') FROM knowledge.conversation_collectors cc JOIN knowledge.conversation_ingestions ci ON ci.id=cc.conversation_ingestion_id WHERE cc.id=$1 AND cc.status='active' AND ci.status='active' FOR UPDATE`, input.CollectorID).Scan(&conversationID, &externalConversationID, &platformName, &workspace, &scope, &org, &owner, &knowledgeBaseID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, apperror.New("collector_revoked", "collector is not active", 403, false)
 	}
@@ -1088,6 +1090,14 @@ func (s *PostgresStore) IngestMessage(ctx context.Context, input IngestMessageIn
 	}
 	if input.ExternalConversationID != externalConversationID {
 		return nil, apperror.New("conversation_mismatch", "external conversation does not match collector", 409, false)
+	}
+	var existingSourceHash, existingSourceContentHash, existingSourceType string
+	sourceErr := tx.QueryRow(ctx, `SELECT ms.payload_hash,m.content_hash,m.message_type FROM knowledge.message_sources ms JOIN knowledge.messages m ON m.id=ms.message_id WHERE ms.collector_id=$1 AND ms.external_message_id=$2`, input.CollectorID, input.ExternalMessageID).Scan(&existingSourceHash, &existingSourceContentHash, &existingSourceType)
+	if sourceErr == nil && !strings.EqualFold(existingSourceHash, SourcePayloadHash(input)) && !strings.EqualFold(existingSourceContentHash, input.ContentHash) && input.SenderExternalID == "" && !canReclassifyLegacyFile(existingSourceType, input.MessageType, input.Attachments) {
+		return nil, apperror.New("external_id_conflict", "external message id has conflicting payload", 409, false)
+	}
+	if sourceErr != nil && !errors.Is(sourceErr, pgx.ErrNoRows) {
+		return nil, dbError(sourceErr)
 	}
 	var identity any
 	senderDisplayName := strings.TrimSpace(input.SenderDisplayName)
@@ -1144,9 +1154,17 @@ func (s *PostgresStore) IngestMessage(ctx context.Context, input IngestMessageIn
 		}
 	}
 	sourceID := uuid.NewString()
-	_, err = tx.Exec(ctx, `INSERT INTO knowledge.message_sources (id,message_id,collector_id,external_message_id,payload_hash,ingest_cursor,collected_at) VALUES ($1,$2,$3,$4,$5,$6,now()) ON CONFLICT (collector_id,external_message_id) DO UPDATE SET payload_hash=EXCLUDED.payload_hash,ingest_cursor=COALESCE(NULLIF(EXCLUDED.ingest_cursor,''),knowledge.message_sources.ingest_cursor)`, sourceID, messageID, input.CollectorID, input.ExternalMessageID, input.PayloadHash, nilString(input.Cursor))
+	_, err = tx.Exec(ctx, `INSERT INTO knowledge.message_sources (id,message_id,collector_id,external_message_id,payload_hash,ingest_cursor,collected_at) VALUES ($1,$2,$3,$4,$5,$6,now()) ON CONFLICT (collector_id,external_message_id) DO UPDATE SET payload_hash=EXCLUDED.payload_hash,ingest_cursor=COALESCE(NULLIF(EXCLUDED.ingest_cursor,''),knowledge.message_sources.ingest_cursor)`, sourceID, messageID, input.CollectorID, input.ExternalMessageID, SourcePayloadHash(input), nilString(input.Cursor))
 	if err != nil {
 		return nil, dbError(err)
+	}
+	if strings.TrimSpace(input.Content) != "" {
+		if _, err = ensureMessageKnowledgeItem(ctx, tx, knowledgeItemSource{
+			ConversationID: conversationID, ExternalConversationID: externalConversationID,
+			KnowledgeBaseID: knowledgeBaseID, Scope: scope, OrganizationID: org, OwnerUserID: owner,
+		}, messageID, input, traceID); err != nil {
+			return nil, err
+		}
 	}
 	attachments := []domain.Attachment{}
 	for _, a := range input.Attachments {
@@ -1174,6 +1192,12 @@ func (s *PostgresStore) IngestMessage(ctx context.Context, input IngestMessageIn
 			return nil, apperror.New("external_id_conflict", "external attachment id has conflicting metadata", 409, false)
 		}
 		attachments = append(attachments, saved)
+		if _, err = ensureAttachmentKnowledgeItem(ctx, tx, knowledgeItemSource{
+			ConversationID: conversationID, ExternalConversationID: externalConversationID,
+			KnowledgeBaseID: knowledgeBaseID, Scope: scope, OrganizationID: org, OwnerUserID: owner,
+		}, messageID, saved, traceID); err != nil {
+			return nil, err
+		}
 		if inserted {
 			payload, _ := json.Marshal(map[string]any{"message_id": messageID, "attachment_id": saved.ID, "content_version": 1})
 			_, err = tx.Exec(ctx, `INSERT INTO knowledge.outbox_events (id,aggregate_type,aggregate_id,event_type,trace_id,organization_id,payload) VALUES ($1,'attachment',$2,'document.processing.requested',$3,$4,$5)`, uuid.NewString(), saved.ID, traceID, nilString(org), payload)
@@ -1196,8 +1220,114 @@ func (s *PostgresStore) IngestMessage(ctx context.Context, input IngestMessageIn
 		return nil, dbError(err)
 	}
 	now := time.Now().UTC()
-	message := domain.Message{ID: messageID, ConversationID: conversationID, ExternalMessageID: input.ExternalMessageID, SenderDisplayName: input.SenderDisplayName, MessageType: input.MessageType, Content: "", Sensitive: false, ClassificationStatus: "pending", ContentHash: input.ContentHash, ContentVersion: 1, SentAt: input.SentAt, LifecycleStatus: "active", VectorStatus: "pending", Attachments: attachments, CreatedAt: now}
+	message := domain.Message{ID: messageID, ConversationID: conversationID, ExternalMessageID: input.ExternalMessageID, SenderDisplayName: input.SenderDisplayName, MessageType: input.MessageType, Content: "", Sensitive: false, ClassificationStatus: "pending", ContentHash: input.ContentHash, ContentVersion: 1, SentAt: input.SentAt, CollectedAt: now, LifecycleStatus: "active", VectorStatus: "pending", Attachments: attachments, CreatedAt: now}
 	return &IngestResult{Message: message, Attachments: attachments, Duplicate: duplicate, CursorUpdated: false}, nil
+}
+
+type knowledgeItemSource struct {
+	ConversationID         string
+	ExternalConversationID string
+	KnowledgeBaseID        string
+	Scope                  string
+	OrganizationID         string
+	OwnerUserID            string
+}
+
+func knowledgeItemOwnership(source knowledgeItemSource) (scope, access, sourceType string, owner, organization any) {
+	if source.Scope == "private" {
+		return "private", "owner_only", "private_conversation", nilString(source.OwnerUserID), nil
+	}
+	return "organization", "conversation_members", "platform_conversation", nil, nilString(source.OrganizationID)
+}
+
+func ensureMessageKnowledgeItem(ctx context.Context, tx pgx.Tx, source knowledgeItemSource, messageID string, input IngestMessageInput, traceID string) (string, error) {
+	var existing string
+	err := tx.QueryRow(ctx, `SELECT id::text FROM knowledge.knowledge_items WHERE source_message_id=$1 AND source_attachment_id IS NULL`, messageID).Scan(&existing)
+	if err == nil {
+		return existing, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return "", dbError(err)
+	}
+	scope, access, sourceType, owner, organization := knowledgeItemOwnership(source)
+	itemID := uuid.NewString()
+	var classified bool
+	var sensitive bool
+	if err = tx.QueryRow(ctx, `SELECT classification_status='succeeded',sensitive FROM knowledge.messages WHERE id=$1`, messageID).Scan(&classified, &sensitive); err != nil {
+		return "", dbError(err)
+	}
+	securityStatus, sensitivity, visibility := "pending", any(nil), "original"
+	if classified {
+		securityStatus, sensitivity = "classified", "internal"
+		if sensitive {
+			sensitivity, visibility = "restricted", "masked"
+		}
+	}
+	err = tx.QueryRow(ctx, `INSERT INTO knowledge.knowledge_items
+		(id,knowledge_base_id,knowledge_scope,access_scope,owner_user_id,organization_id,conversation_ingestion_id,source_type,source_message_id,content_type,content_ref,original_content_ref,content_hash,content_version,content_visibility,original_access_required,security_status,sensitivity,content_saved,ownership_ready,security_ready,permission_ready,acl_version,acl_sync_status,processing_status,lifecycle_status)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'text',$10,$11,$12,1,$13,$14,$15,$16,TRUE,TRUE,$17,FALSE,0,'pending','pending','active')
+		ON CONFLICT DO NOTHING RETURNING id::text`, itemID, nilString(source.KnowledgeBaseID), scope, access, owner, organization, source.ConversationID, sourceType, messageID, "message:"+messageID+":display", "message:"+messageID+":original", input.ContentHash, visibility, sensitive, securityStatus, sensitivity, classified).Scan(&itemID)
+	inserted := err == nil
+	if errors.Is(err, pgx.ErrNoRows) {
+		err = tx.QueryRow(ctx, `SELECT id::text FROM knowledge.knowledge_items WHERE source_message_id=$1 AND source_attachment_id IS NULL`, messageID).Scan(&itemID)
+	}
+	if err != nil {
+		return "", dbError(err)
+	}
+	if inserted {
+		payload, _ := json.Marshal(map[string]any{"knowledge_item_id": itemID, "content_version": 1})
+		if _, err = tx.Exec(ctx, `INSERT INTO knowledge.outbox_events (id,aggregate_type,aggregate_id,event_type,event_version,trace_id,organization_id,payload) VALUES ($1,'knowledge_item',$2,'permission.sync.requested',1,$3,$4,$5) ON CONFLICT DO NOTHING`, uuid.NewString(), itemID, traceID, nilString(source.OrganizationID), payload); err != nil {
+			return "", dbError(err)
+		}
+	}
+	return itemID, nil
+}
+
+func ensureAttachmentKnowledgeItem(ctx context.Context, tx pgx.Tx, source knowledgeItemSource, messageID string, attachment domain.Attachment, traceID string) (string, error) {
+	var existing string
+	err := tx.QueryRow(ctx, `SELECT id::text FROM knowledge.knowledge_items WHERE source_attachment_id=$1`, attachment.ID).Scan(&existing)
+	if err == nil {
+		return existing, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return "", dbError(err)
+	}
+	scope, access, sourceType, owner, organization := knowledgeItemOwnership(source)
+	itemID := uuid.NewString()
+	contentType := "file"
+	if strings.HasPrefix(strings.ToLower(attachment.MIMEType), "image/") {
+		contentType = "image"
+	}
+	contentHash := attachment.ContentHash
+	if contentHash == "" {
+		contentHash = hashText(attachment.FileName)
+	}
+	visibility, sensitivity := "original", "internal"
+	if attachment.Sensitive {
+		visibility, sensitivity = "metadata_only", "restricted"
+	}
+	contentRef := "attachment:" + attachment.ID
+	if attachment.ObjectRef != "" {
+		contentRef = attachment.ObjectRef
+	}
+	err = tx.QueryRow(ctx, `INSERT INTO knowledge.knowledge_items
+		(id,knowledge_base_id,knowledge_scope,access_scope,owner_user_id,organization_id,conversation_ingestion_id,source_type,source_message_id,source_attachment_id,content_type,content_ref,original_content_ref,content_hash,content_version,content_visibility,original_access_required,security_status,sensitivity,content_saved,ownership_ready,security_ready,permission_ready,acl_version,acl_sync_status,processing_status,lifecycle_status)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$12,$13,$14,$15,$16,'classified',$17,$18,TRUE,TRUE,FALSE,0,'pending','pending','active')
+		ON CONFLICT DO NOTHING RETURNING id::text`, itemID, nilString(source.KnowledgeBaseID), scope, access, owner, organization, source.ConversationID, sourceType, messageID, attachment.ID, contentType, contentRef, contentHash, attachment.ContentVersion, visibility, attachment.Sensitive, sensitivity, attachment.ContentStatus == "ready").Scan(&itemID)
+	inserted := err == nil
+	if errors.Is(err, pgx.ErrNoRows) {
+		err = tx.QueryRow(ctx, `SELECT id::text FROM knowledge.knowledge_items WHERE source_attachment_id=$1`, attachment.ID).Scan(&itemID)
+	}
+	if err != nil {
+		return "", dbError(err)
+	}
+	if inserted {
+		payload, _ := json.Marshal(map[string]any{"knowledge_item_id": itemID, "content_version": attachment.ContentVersion})
+		if _, err = tx.Exec(ctx, `INSERT INTO knowledge.outbox_events (id,aggregate_type,aggregate_id,event_type,event_version,trace_id,organization_id,payload) VALUES ($1,'knowledge_item',$2,'permission.sync.requested',$3,$4,$5,$6) ON CONFLICT DO NOTHING`, uuid.NewString(), itemID, attachment.ContentVersion, traceID, nilString(source.OrganizationID), payload); err != nil {
+			return "", dbError(err)
+		}
+	}
+	return itemID, nil
 }
 
 func (s *PostgresStore) Heartbeat(ctx context.Context, collectorID string, _ time.Time) (*domain.Collector, error) {
@@ -1324,13 +1454,8 @@ func (s *PostgresStore) CompleteAttachment(ctx context.Context, id, objectRef, c
 		return nil, dbError(err)
 	}
 	if status == "ready" {
-		var org string
-		if lookupErr := tx.QueryRow(ctx, `SELECT COALESCE(organization_id::text,'') FROM knowledge.conversation_ingestions WHERE id=$1`, a.ConversationID).Scan(&org); lookupErr != nil {
-			return nil, dbError(lookupErr)
-		}
-		payload, _ := json.Marshal(map[string]any{"resource_type": "attachment", "resource_id": a.ID, "content_version": a.ContentVersion, "sensitive": a.Sensitive, "content_access_required": a.ContentAccessRequired})
-		if _, outboxErr := tx.Exec(ctx, `INSERT INTO knowledge.outbox_events (id,aggregate_type,aggregate_id,event_type,trace_id,organization_id,payload) VALUES ($1,'attachment',$2,'attachment.ready',$3,$4,$5)`, uuid.NewString(), a.ID, uuid.NewString(), nilString(org), payload); outboxErr != nil {
-			return nil, dbError(outboxErr)
+		if _, updateErr := tx.Exec(ctx, `UPDATE knowledge.knowledge_items SET content_saved=TRUE,content_ref=$2,original_content_ref=$2,content_hash=$3,last_error=NULL,updated_at=now() WHERE source_attachment_id=$1`, a.ID, objectRef, contentHash); updateErr != nil {
+			return nil, dbError(updateErr)
 		}
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -1343,7 +1468,7 @@ func (s *PostgresStore) ListPendingMessages(ctx context.Context, limit int) ([]P
 	if limit <= 0 || limit > 200 {
 		limit = 200
 	}
-	rows, err := s.pool.Query(ctx, `SELECT m.id::text,m.conversation_ingestion_id::text,m.external_message_id,COALESCE(m.sender_identity_id::text,''),COALESCE(m.sender_display_name,''),m.message_type,COALESCE(m.normalized_content_ref,''),COALESCE(m.normalized_content,''),m.content_hash,m.content_version,m.sent_at,m.lifecycle_status,m.vector_status,m.created_at,m.sensitive,m.classification_status,p.content FROM knowledge.messages m JOIN knowledge.message_private_content p ON p.message_id=m.id WHERE m.classification_status='pending' ORDER BY m.created_at LIMIT $1`, limit)
+	rows, err := s.pool.Query(ctx, `SELECT m.id::text,m.conversation_ingestion_id::text,m.external_message_id,COALESCE(m.sender_identity_id::text,''),COALESCE(m.sender_display_name,''),m.message_type,COALESCE(m.normalized_content_ref,''),COALESCE(m.normalized_content,''),m.content_hash,m.content_version,m.sent_at,COALESCE((SELECT MIN(ms.collected_at) FROM knowledge.message_sources ms WHERE ms.message_id=m.id),m.created_at),m.lifecycle_status,m.vector_status,m.created_at,m.sensitive,m.classification_status,p.content FROM knowledge.messages m JOIN knowledge.message_private_content p ON p.message_id=m.id WHERE m.classification_status='pending' ORDER BY m.created_at LIMIT $1`, limit)
 	if err != nil {
 		return nil, dbError(err)
 	}
@@ -1352,7 +1477,7 @@ func (s *PostgresStore) ListPendingMessages(ctx context.Context, limit int) ([]P
 	for rows.Next() {
 		var m domain.Message
 		var raw string
-		if err := rows.Scan(&m.ID, &m.ConversationID, &m.ExternalMessageID, &m.SenderIdentityID, &m.SenderDisplayName, &m.MessageType, &m.NormalizedContentRef, &m.Content, &m.ContentHash, &m.ContentVersion, &m.SentAt, &m.LifecycleStatus, &m.VectorStatus, &m.CreatedAt, &m.Sensitive, &m.ClassificationStatus, &raw); err != nil {
+		if err := rows.Scan(&m.ID, &m.ConversationID, &m.ExternalMessageID, &m.SenderIdentityID, &m.SenderDisplayName, &m.MessageType, &m.NormalizedContentRef, &m.Content, &m.ContentHash, &m.ContentVersion, &m.SentAt, &m.CollectedAt, &m.LifecycleStatus, &m.VectorStatus, &m.CreatedAt, &m.Sensitive, &m.ClassificationStatus, &raw); err != nil {
 			return nil, dbError(err)
 		}
 		out = append(out, PendingMessage{Message: m, OriginalContent: raw})
@@ -1366,18 +1491,18 @@ func (s *PostgresStore) CompleteMessageClassification(ctx context.Context, messa
 		return dbError(err)
 	}
 	defer tx.Rollback(ctx)
-	var conversationID, org string
+	var conversationID string
 	if err = tx.QueryRow(ctx, `UPDATE knowledge.messages SET normalized_content=$2,sensitive=$3,classification_status='succeeded' WHERE id=$1 AND classification_status='pending' RETURNING conversation_ingestion_id::text`, messageID, displayContent, sensitive).Scan(&conversationID); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return apperror.New("message_not_found", "message is not pending", 404, false)
 		}
 		return dbError(err)
 	}
-	if err = tx.QueryRow(ctx, `SELECT COALESCE(organization_id::text,'') FROM knowledge.conversation_ingestions WHERE id=$1`, conversationID).Scan(&org); err != nil {
-		return dbError(err)
+	visibility, sensitivity := "original", "internal"
+	if sensitive {
+		visibility, sensitivity = "masked", "restricted"
 	}
-	payload, _ := json.Marshal(map[string]any{"resource_type": "message", "resource_id": messageID, "content_version": 1, "sensitive": sensitive, "content_access_required": sensitive})
-	if _, err = tx.Exec(ctx, `INSERT INTO knowledge.outbox_events (id,aggregate_type,aggregate_id,event_type,trace_id,organization_id,payload) VALUES ($1,'message',$2,'message.ready',$3,$4,$5)`, uuid.NewString(), messageID, uuid.NewString(), nilString(org), payload); err != nil {
+	if _, err = tx.Exec(ctx, `UPDATE knowledge.knowledge_items SET security_status='classified',security_ready=TRUE,sensitivity=$2,content_visibility=$3,original_access_required=$4,last_error=NULL,updated_at=now() WHERE source_message_id=$1 AND source_attachment_id IS NULL`, messageID, sensitivity, visibility, sensitive); err != nil {
 		return dbError(err)
 	}
 	return dbError(tx.Commit(ctx))
@@ -1402,7 +1527,7 @@ func (s *PostgresStore) ListMessages(ctx context.Context, conversationID string,
 			return nil, dbError(lookupErr)
 		}
 	}
-	query := `SELECT m.id::text,m.conversation_ingestion_id::text,m.external_message_id,COALESCE(m.sender_identity_id::text,''),COALESCE(NULLIF(ei.display_name,''),NULLIF(m.sender_display_name,''),''),m.message_type,COALESCE(m.normalized_content_ref,''),COALESCE(m.normalized_content,''),m.content_hash,m.content_version,m.sent_at,m.lifecycle_status,m.vector_status,m.created_at,m.sensitive,m.classification_status FROM knowledge.messages m LEFT JOIN knowledge.external_identities ei ON ei.id=m.sender_identity_id WHERE m.conversation_ingestion_id=$1`
+	query := `SELECT m.id::text,m.conversation_ingestion_id::text,m.external_message_id,COALESCE(m.sender_identity_id::text,''),COALESCE(NULLIF(ei.display_name,''),NULLIF(m.sender_display_name,''),''),m.message_type,COALESCE(m.normalized_content_ref,''),COALESCE(m.normalized_content,''),m.content_hash,m.content_version,m.sent_at,COALESCE((SELECT MIN(ms.collected_at) FROM knowledge.message_sources ms WHERE ms.message_id=m.id),m.created_at),m.lifecycle_status,m.vector_status,m.created_at,m.sensitive,m.classification_status FROM knowledge.messages m LEFT JOIN knowledge.external_identities ei ON ei.id=m.sender_identity_id WHERE m.conversation_ingestion_id=$1`
 	args := []any{conversationID}
 	if !cutoff.IsZero() {
 		if cutoffID != "" {
@@ -1423,7 +1548,7 @@ func (s *PostgresStore) ListMessages(ctx context.Context, conversationID string,
 	out := []domain.Message{}
 	for rows.Next() {
 		var m domain.Message
-		if err := rows.Scan(&m.ID, &m.ConversationID, &m.ExternalMessageID, &m.SenderIdentityID, &m.SenderDisplayName, &m.MessageType, &m.NormalizedContentRef, &m.Content, &m.ContentHash, &m.ContentVersion, &m.SentAt, &m.LifecycleStatus, &m.VectorStatus, &m.CreatedAt, &m.Sensitive, &m.ClassificationStatus); err != nil {
+		if err := rows.Scan(&m.ID, &m.ConversationID, &m.ExternalMessageID, &m.SenderIdentityID, &m.SenderDisplayName, &m.MessageType, &m.NormalizedContentRef, &m.Content, &m.ContentHash, &m.ContentVersion, &m.SentAt, &m.CollectedAt, &m.LifecycleStatus, &m.VectorStatus, &m.CreatedAt, &m.Sensitive, &m.ClassificationStatus); err != nil {
 			return nil, dbError(err)
 		}
 		attachments, attachmentErr := s.ListAttachmentsForMessage(ctx, m.ID)
@@ -1515,11 +1640,203 @@ func (s *PostgresStore) ListContactMemberships(ctx context.Context, userID strin
 	}
 	return out, dbError(rows.Err())
 }
+
+const knowledgeItemColumns = `ki.id::text,COALESCE(ki.knowledge_base_id::text,''),ki.knowledge_scope,ki.access_scope,COALESCE(ki.owner_user_id::text,''),COALESCE(ki.organization_id::text,''),COALESCE(ki.conversation_ingestion_id::text,''),COALESCE(ci.external_conversation_id,''),ki.source_type,COALESCE(ki.source_message_id::text,''),COALESCE(ki.source_attachment_id::text,''),ki.content_type,ki.content_ref,COALESCE(ki.original_content_ref,''),ki.content_hash,ki.content_version,ki.content_visibility,ki.original_access_required,ki.security_status,COALESCE(ki.sensitivity,''),ki.content_saved,ki.ownership_ready,ki.security_ready,ki.permission_ready,ki.acl_version,ki.acl_sync_status,ki.processing_status,ki.lifecycle_status,ki.original_access_required,COALESCE(ki.last_error,''),ki.created_at,ki.updated_at`
+
+func scanKnowledgeItem(row rowScanner) (*domain.KnowledgeItem, error) {
+	var item domain.KnowledgeItem
+	err := row.Scan(&item.ID, &item.KnowledgeBaseID, &item.KnowledgeScope, &item.AccessScope, &item.OwnerUserID, &item.OrganizationID, &item.ConversationID, &item.ExternalConversationID, &item.SourceType, &item.SourceMessageID, &item.SourceAttachmentID, &item.ContentType, &item.ContentRef, &item.OriginalContentRef, &item.ContentHash, &item.ContentVersion, &item.ContentVisibility, &item.OriginalAccessRequired, &item.SecurityStatus, &item.Sensitivity, &item.ContentSaved, &item.OwnershipReady, &item.SecurityReady, &item.PermissionReady, &item.ACLVersion, &item.ACLSyncStatus, &item.ProcessingStatus, &item.LifecycleStatus, &item.ContentAccessRequired, &item.LastError, &item.CreatedAt, &item.UpdatedAt)
+	return &item, err
+}
+
+func (s *PostgresStore) ListPendingKnowledgePermissions(ctx context.Context, limit int) ([]domain.KnowledgeItem, error) {
+	if limit <= 0 || limit > 200 {
+		limit = 200
+	}
+	rows, err := s.pool.Query(ctx, `SELECT `+knowledgeItemColumns+` FROM knowledge.knowledge_items ki LEFT JOIN knowledge.conversation_ingestions ci ON ci.id=ki.conversation_ingestion_id WHERE ki.lifecycle_status='active' AND ki.permission_ready=FALSE AND ki.acl_sync_status IN ('pending','failed') ORDER BY ki.updated_at LIMIT $1`, limit)
+	if err != nil {
+		return nil, dbError(err)
+	}
+	defer rows.Close()
+	out := make([]domain.KnowledgeItem, 0)
+	for rows.Next() {
+		item, scanErr := scanKnowledgeItem(rows)
+		if scanErr != nil {
+			return nil, dbError(scanErr)
+		}
+		out = append(out, *item)
+	}
+	return out, dbError(rows.Err())
+}
+
+func (s *PostgresStore) ListKnowledgePermissionSubjects(ctx context.Context, id string) ([]string, error) {
+	rows, err := s.pool.Query(ctx, `SELECT DISTINCT ei.mapped_user_id::text FROM knowledge.knowledge_items ki JOIN knowledge.conversation_memberships cm ON cm.conversation_ingestion_id=ki.conversation_ingestion_id AND cm.status='active' JOIN knowledge.external_identities ei ON ei.id=cm.external_identity_id AND ei.mapping_status='mapped' AND ei.mapped_user_id IS NOT NULL WHERE ki.id=$1 ORDER BY ei.mapped_user_id::text`, id)
+	if err != nil {
+		return nil, dbError(err)
+	}
+	defer rows.Close()
+	out := make([]string, 0)
+	for rows.Next() {
+		var userID string
+		if err := rows.Scan(&userID); err != nil {
+			return nil, dbError(err)
+		}
+		out = append(out, userID)
+	}
+	return out, dbError(rows.Err())
+}
+
+func (s *PostgresStore) MarkKnowledgePermissionSynced(ctx context.Context, id string, aclVersion int64) error {
+	if aclVersion < 1 {
+		return apperror.New("invalid_acl_version", "acl_version must be positive", 400, false)
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return dbError(err)
+	}
+	defer tx.Rollback(ctx)
+	tag, err := tx.Exec(ctx, `UPDATE knowledge.knowledge_items SET permission_ready=TRUE,acl_version=$2,acl_sync_status='synced',last_error=NULL,updated_at=now() WHERE id=$1`, id, aclVersion)
+	if err != nil {
+		return dbError(err)
+	}
+	if tag.RowsAffected() == 0 {
+		return apperror.New("knowledge_not_found", "knowledge item not found", 404, false)
+	}
+	if _, err = tx.Exec(ctx, `UPDATE knowledge.outbox_events SET status='published',published_at=COALESCE(published_at,now()),last_error=NULL WHERE aggregate_id=$1 AND event_type='permission.sync.requested' AND published_at IS NULL`, id); err != nil {
+		return dbError(err)
+	}
+	return dbError(tx.Commit(ctx))
+}
+
+func (s *PostgresStore) MarkKnowledgePermissionFailed(ctx context.Context, id, failure string) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return dbError(err)
+	}
+	defer tx.Rollback(ctx)
+	tag, err := tx.Exec(ctx, `UPDATE knowledge.knowledge_items SET permission_ready=FALSE,acl_sync_status='failed',last_error=$2,updated_at=now() WHERE id=$1`, id, safeError(failure))
+	if err != nil {
+		return dbError(err)
+	}
+	if tag.RowsAffected() == 0 {
+		return apperror.New("knowledge_not_found", "knowledge item not found", 404, false)
+	}
+	if _, err = tx.Exec(ctx, `UPDATE knowledge.outbox_events SET status='failed',retry_count=retry_count+1,last_error=$2,available_at=now()+interval '30 seconds' WHERE aggregate_id=$1 AND event_type='permission.sync.requested' AND published_at IS NULL`, id, safeError(failure)); err != nil {
+		return dbError(err)
+	}
+	return dbError(tx.Commit(ctx))
+}
+
+func (s *PostgresStore) TryMarkKnowledgeReady(ctx context.Context, id, traceID string) (bool, error) {
+	if strings.TrimSpace(traceID) == "" {
+		traceID = trace.TraceID(ctx)
+	}
+	if strings.TrimSpace(traceID) == "" {
+		traceID = uuid.NewString()
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return false, dbError(err)
+	}
+	defer tx.Rollback(ctx)
+	item, err := scanKnowledgeItem(tx.QueryRow(ctx, `SELECT `+knowledgeItemColumns+` FROM knowledge.knowledge_items ki LEFT JOIN knowledge.conversation_ingestions ci ON ci.id=ki.conversation_ingestion_id WHERE ki.id=$1 FOR UPDATE OF ki`, id))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, apperror.New("knowledge_not_found", "knowledge item not found", 404, false)
+	}
+	if err != nil {
+		return false, dbError(err)
+	}
+	if item.ProcessingStatus == "published" || item.ProcessingStatus == "processing" || item.ProcessingStatus == "ready" {
+		return false, nil
+	}
+	if !item.ContentSaved || !item.OwnershipReady || !item.SecurityReady || !item.PermissionReady || item.ACLSyncStatus != "synced" {
+		return false, nil
+	}
+	payload, _ := json.Marshal(map[string]any{
+		"resource_type": "knowledge_item", "resource_id": item.ID, "knowledge_item_id": item.ID,
+		"source_message_id": item.SourceMessageID, "source_attachment_id": item.SourceAttachmentID,
+		"content_version": item.ContentVersion, "acl_version": item.ACLVersion,
+		"content_variant": "display", "content_access_required": item.ContentAccessRequired,
+	})
+	if _, err = tx.Exec(ctx, `UPDATE knowledge.knowledge_items SET processing_status='published',last_error=NULL,updated_at=now() WHERE id=$1`, id); err != nil {
+		return false, dbError(err)
+	}
+	tag, err := tx.Exec(ctx, `INSERT INTO knowledge.outbox_events (id,aggregate_type,aggregate_id,event_type,event_version,schema_version,organization_id,trace_id,payload,status,retry_count,available_at) VALUES ($1,'knowledge_item',$2,'knowledge.ready',$3,1,$4,$5,$6,'pending',0,now()) ON CONFLICT DO NOTHING`, uuid.NewString(), id, item.ContentVersion, nilString(item.OrganizationID), traceID, payload)
+	if err != nil {
+		return false, dbError(err)
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return false, dbError(err)
+	}
+	return tag.RowsAffected() == 1, nil
+}
+
+func (s *PostgresStore) GetKnowledgeItem(ctx context.Context, id string) (*domain.KnowledgeItem, error) {
+	item, err := scanKnowledgeItem(s.pool.QueryRow(ctx, `SELECT `+knowledgeItemColumns+` FROM knowledge.knowledge_items ki LEFT JOIN knowledge.conversation_ingestions ci ON ci.id=ki.conversation_ingestion_id WHERE ki.id=$1`, id))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, apperror.New("knowledge_not_found", "knowledge item not found", 404, false)
+	}
+	if err != nil {
+		return nil, dbError(err)
+	}
+	if item.SourceMessageID != "" {
+		var message domain.Message
+		err = s.pool.QueryRow(ctx, `SELECT m.id::text,m.conversation_ingestion_id::text,m.external_message_id,COALESCE(m.sender_identity_id::text,''),COALESCE(NULLIF(ei.display_name,''),NULLIF(m.sender_display_name,''),''),m.message_type,COALESCE(m.normalized_content_ref,''),COALESCE(m.normalized_content,''),m.content_hash,m.content_version,m.sent_at,COALESCE(MIN(ms.collected_at),m.created_at),m.lifecycle_status,m.vector_status,m.created_at,m.sensitive,m.classification_status FROM knowledge.messages m LEFT JOIN knowledge.external_identities ei ON ei.id=m.sender_identity_id LEFT JOIN knowledge.message_sources ms ON ms.message_id=m.id WHERE m.id=$1 GROUP BY m.id,ei.display_name`, item.SourceMessageID).Scan(&message.ID, &message.ConversationID, &message.ExternalMessageID, &message.SenderIdentityID, &message.SenderDisplayName, &message.MessageType, &message.NormalizedContentRef, &message.Content, &message.ContentHash, &message.ContentVersion, &message.SentAt, &message.CollectedAt, &message.LifecycleStatus, &message.VectorStatus, &message.CreatedAt, &message.Sensitive, &message.ClassificationStatus)
+		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			return nil, dbError(err)
+		}
+		if err == nil {
+			item.Message = &message
+		}
+	}
+	if item.SourceAttachmentID != "" {
+		attachment, attachmentErr := s.GetAttachment(ctx, item.SourceAttachmentID)
+		if attachmentErr != nil {
+			return nil, attachmentErr
+		}
+		item.Attachment = attachment
+	}
+	return item, nil
+}
+
+func (s *PostgresStore) GetKnowledgeItemByMessage(ctx context.Context, messageID string) (*domain.KnowledgeItem, error) {
+	var id string
+	err := s.pool.QueryRow(ctx, `SELECT id::text FROM knowledge.knowledge_items WHERE source_message_id=$1 AND source_attachment_id IS NULL`, messageID).Scan(&id)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, apperror.New("knowledge_not_found", "knowledge item not found", 404, false)
+	}
+	if err != nil {
+		return nil, dbError(err)
+	}
+	return s.GetKnowledgeItem(ctx, id)
+}
+
+func (s *PostgresStore) GetKnowledgeItemByAttachment(ctx context.Context, attachmentID string) (*domain.KnowledgeItem, error) {
+	var id string
+	err := s.pool.QueryRow(ctx, `SELECT id::text FROM knowledge.knowledge_items WHERE source_attachment_id=$1`, attachmentID).Scan(&id)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, apperror.New("knowledge_not_found", "knowledge item not found", 404, false)
+	}
+	if err != nil {
+		return nil, dbError(err)
+	}
+	return s.GetKnowledgeItem(ctx, id)
+}
+
+func (s *PostgresStore) GetKnowledgeContent(ctx context.Context, id string) (*domain.KnowledgeContent, error) {
+	var content domain.KnowledgeContent
+	err := s.pool.QueryRow(ctx, `SELECT ki.id::text,ki.content_version,'display',ki.content_hash,COALESCE(m.normalized_content,'') FROM knowledge.knowledge_items ki JOIN knowledge.messages m ON m.id=ki.source_message_id WHERE ki.id=$1 AND ki.source_attachment_id IS NULL`, id).Scan(&content.KnowledgeItemID, &content.ContentVersion, &content.ContentVariant, &content.ContentHash, &content.Text)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, apperror.New("knowledge_content_not_found", "knowledge content not found", 404, false)
+	}
+	return &content, dbError(err)
+}
+
 func (s *PostgresStore) GetOutbox(ctx context.Context, limit int) ([]domain.OutboxEvent, error) {
 	if limit <= 0 || limit > 100 {
 		limit = 100
 	}
-	rows, err := s.pool.Query(ctx, `SELECT id::text,event_type,schema_version,created_at,COALESCE(trace_id,''),COALESCE(organization_id::text,''),'module-2',payload,published_at FROM knowledge.outbox_events WHERE published_at IS NULL ORDER BY created_at LIMIT $1`, limit)
+	rows, err := s.pool.Query(ctx, `SELECT id::text,event_type,schema_version,created_at,COALESCE(trace_id,''),COALESCE(organization_id::text,''),'module-2',payload,retry_count,COALESCE(last_error,''),available_at,published_at FROM knowledge.outbox_events WHERE event_type='knowledge.ready' AND published_at IS NULL AND status IN ('pending','failed') AND available_at<=now() ORDER BY created_at LIMIT $1`, limit)
 	if err != nil {
 		return nil, dbError(err)
 	}
@@ -1528,7 +1845,7 @@ func (s *PostgresStore) GetOutbox(ctx context.Context, limit int) ([]domain.Outb
 	for rows.Next() {
 		var e domain.OutboxEvent
 		var raw []byte
-		if err := rows.Scan(&e.ID, &e.EventType, &e.SchemaVersion, &e.OccurredAt, &e.TraceID, &e.OrganizationID, &e.Producer, &raw, &e.PublishedAt); err != nil {
+		if err := rows.Scan(&e.ID, &e.EventType, &e.SchemaVersion, &e.OccurredAt, &e.TraceID, &e.OrganizationID, &e.Producer, &raw, &e.RetryCount, &e.LastError, &e.AvailableAt, &e.PublishedAt); err != nil {
 			return nil, dbError(err)
 		}
 		_ = json.Unmarshal(raw, &e.Payload)
@@ -1538,7 +1855,12 @@ func (s *PostgresStore) GetOutbox(ctx context.Context, limit int) ([]domain.Outb
 	return out, dbError(rows.Err())
 }
 func (s *PostgresStore) MarkOutboxPublished(ctx context.Context, id string, publishedAt time.Time) error {
-	_, err := s.pool.Exec(ctx, `UPDATE knowledge.outbox_events SET published_at=$2 WHERE id=$1`, id, publishedAt)
+	_, err := s.pool.Exec(ctx, `UPDATE knowledge.outbox_events SET status='published',published_at=$2,last_error=NULL WHERE id=$1 AND event_type='knowledge.ready'`, id, publishedAt)
+	return dbError(err)
+}
+
+func (s *PostgresStore) MarkOutboxFailed(ctx context.Context, id, failure string, availableAt time.Time) error {
+	_, err := s.pool.Exec(ctx, `UPDATE knowledge.outbox_events SET status='failed',retry_count=retry_count+1,publish_attempts=COALESCE(publish_attempts,0)+1,last_error=$2,available_at=$3 WHERE id=$1 AND event_type='knowledge.ready' AND published_at IS NULL`, id, safeError(failure), availableAt.UTC())
 	return dbError(err)
 }
 

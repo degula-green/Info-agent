@@ -113,6 +113,7 @@ type publicMessage struct {
 	ContentHash          string             `json:"content_hash"`
 	ContentVersion       int                `json:"content_version"`
 	SentAt               time.Time          `json:"sent_at"`
+	CollectedAt          time.Time          `json:"collected_at"`
 	LifecycleStatus      string             `json:"lifecycle_status"`
 	VectorStatus         string             `json:"vector_status,omitempty"`
 	Attachments          []publicAttachment `json:"attachments,omitempty"`
@@ -270,6 +271,7 @@ func publicMessageFromDomain(value domain.Message) publicMessage {
 		SenderDisplayName: value.SenderDisplayName, MessageType: value.MessageType, Content: value.Content,
 		Sensitive: value.Sensitive, ClassificationStatus: value.ClassificationStatus,
 		ContentHash: value.ContentHash, ContentVersion: value.ContentVersion, SentAt: value.SentAt,
+		CollectedAt:     value.CollectedAt,
 		LifecycleStatus: value.LifecycleStatus, VectorStatus: value.VectorStatus, Attachments: attachments,
 		CreatedAt: value.CreatedAt,
 	}

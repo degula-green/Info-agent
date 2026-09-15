@@ -69,6 +69,39 @@ func (c *Client) ListObjects(ctx context.Context, subjectID, organizationID, obj
 	return result, nil
 }
 
+func (c *Client) WriteRelations(ctx context.Context, tuples []application.RelationTuple) error {
+	missing := make([]map[string]string, 0, len(tuples))
+	for _, tuple := range tuples {
+		exists, err := c.relationExists(ctx, tuple)
+		if err != nil {
+			return err
+		}
+		if !exists {
+			missing = append(missing, map[string]string{"user": tuple.User, "relation": tuple.Relation, "object": tuple.Object})
+		}
+	}
+	if len(missing) == 0 {
+		return nil
+	}
+	body := map[string]any{"writes": map[string]any{"tuple_keys": missing}}
+	if c.modelID != "" {
+		body["authorization_model_id"] = c.modelID
+	}
+	var response map[string]any
+	return c.post(ctx, "/write", body, &response)
+}
+
+func (c *Client) relationExists(ctx context.Context, tuple application.RelationTuple) (bool, error) {
+	body := map[string]any{"tuple_key": map[string]string{"user": tuple.User, "relation": tuple.Relation, "object": tuple.Object}, "page_size": 1}
+	var response struct {
+		Tuples []json.RawMessage `json:"tuples"`
+	}
+	if err := c.post(ctx, "/read", body, &response); err != nil {
+		return false, err
+	}
+	return len(response.Tuples) > 0, nil
+}
+
 func (c *Client) post(ctx context.Context, endpoint string, body any, output any) error {
 	if c.storeID == "" {
 		return fmt.Errorf("OpenFGA store is not configured")
@@ -92,6 +125,10 @@ func (c *Client) post(ctx context.Context, endpoint string, body any, output any
 		return err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusConflict && endpoint == "/write" {
+		io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+		return nil
+	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
 		return fmt.Errorf("OpenFGA request failed: %s", resp.Status)

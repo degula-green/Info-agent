@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"net/http"
 	"strings"
 	"time"
@@ -13,6 +14,19 @@ import (
 type AuthorizationHandler struct {
 	provider application.AuthorizationProvider
 	token    string
+}
+
+type PermissionSyncApplication interface {
+	Sync(ctx context.Context, input application.ResourcePermission) (application.PermissionSyncResult, error)
+}
+
+type PermissionSyncHandler struct {
+	service PermissionSyncApplication
+	token   string
+}
+
+func NewPermissionSyncHandler(service PermissionSyncApplication, token string) *PermissionSyncHandler {
+	return &PermissionSyncHandler{service: service, token: token}
 }
 
 func NewAuthorizationHandler(provider application.AuthorizationProvider, token string) *AuthorizationHandler {
@@ -111,4 +125,47 @@ func (h *AuthorizationHandler) CheckBatch(c *gin.Context) {
 		decisions = append(decisions, gin.H{"check_id": item.CheckID, "allowed": allowed})
 	}
 	c.JSON(http.StatusOK, gin.H{"snapshot_id": req.SnapshotID, "decisions": decisions})
+}
+
+type permissionSyncRequest struct {
+	KnowledgeItemID       string   `json:"knowledge_item_id" binding:"required"`
+	AttachmentID          string   `json:"attachment_id"`
+	KnowledgeScope        string   `json:"knowledge_scope" binding:"required"`
+	OwnerUserID           string   `json:"owner_user_id"`
+	OrganizationID        string   `json:"organization_id"`
+	ConversationID        string   `json:"conversation_id"`
+	ParticipantUserIDs    []string `json:"participant_user_ids"`
+	ContentAccessRequired bool     `json:"content_access_required"`
+}
+
+func (h *PermissionSyncHandler) Sync(c *gin.Context) {
+	parts := strings.Fields(c.GetHeader("Authorization"))
+	if h == nil || h.service == nil || h.token == "" {
+		writeError(c, http.StatusServiceUnavailable, "AUTHZ_NOT_CONFIGURED", "authorization service is not configured", true)
+		return
+	}
+	if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") || parts[1] != h.token || c.GetHeader("X-Caller-Service") != "knowledge" {
+		writeError(c, http.StatusForbidden, "AUTHZ_CALLER_FORBIDDEN", "caller is not authorized", false)
+		return
+	}
+	var req permissionSyncRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		writeError(c, http.StatusBadRequest, "AUTHZ_INVALID_REQUEST", "invalid permission sync request", false)
+		return
+	}
+	if _, err := uuid.Parse(req.KnowledgeItemID); err != nil {
+		writeError(c, http.StatusBadRequest, "AUTHZ_INVALID_REQUEST", "knowledge_item_id must be a UUID", false)
+		return
+	}
+	result, err := h.service.Sync(c.Request.Context(), application.ResourcePermission{
+		KnowledgeItemID: req.KnowledgeItemID, AttachmentID: req.AttachmentID,
+		KnowledgeScope: req.KnowledgeScope, OwnerUserID: req.OwnerUserID,
+		OrganizationID: req.OrganizationID, ConversationID: req.ConversationID,
+		ParticipantUserIDs: req.ParticipantUserIDs, ContentAccessRequired: req.ContentAccessRequired,
+	})
+	if err != nil {
+		writeError(c, http.StatusServiceUnavailable, "AUTHZ_SYNC_FAILED", "permission synchronization failed", true)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"knowledge_item_id": req.KnowledgeItemID, "acl_version": result.ACLVersion, "relation_count": result.RelationCount, "status": "synced"})
 }

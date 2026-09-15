@@ -3,14 +3,16 @@ from __future__ import annotations
 import tempfile
 import shutil
 import uuid
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from app.application.ports import ProcessingInput
+from app.application.ports import ProcessingInput, ProcessingOutput
+from app.application.processing.chunking import build_chunks
 from app.application.processing.preprocessor import DocumentPreprocessor
 from app.config import settings
-from app.domain.models import AttachmentContext
+from app.domain.models import AttachmentContext, ParsedDocument
 from app.infrastructure.embedding.client import EmbeddingClient
 from app.infrastructure.elasticsearch import ElasticsearchChunkStore
 from app.infrastructure.events.redis_streams import RedisStreamPublisher
@@ -33,10 +35,10 @@ class RAGEventHandler:
 
     def handle(self, envelope: dict[str, Any]) -> None:
         event_type = str(envelope.get("event_type") or "")
-        if event_type not in {"document.processing.requested", "knowledge.ready"}:
+        if event_type != "knowledge.ready":
             return
         payload = envelope.get("payload") if isinstance(envelope.get("payload"), dict) else {}
-        job_type = "preparse" if event_type == "document.processing.requested" else "full_process"
+        job_type = "full_process"
         get_job = getattr(self.repository, "get_processing_job", None)
         existing = get_job(str(envelope.get("event_id") or "")) if callable(get_job) else None
         if existing and existing.get("status") in {"succeeded", "processing"}:
@@ -53,10 +55,16 @@ class RAGEventHandler:
             total = 0
             for context in contexts:
                 self.repository.update_processing_job(job_id, current_stage="parse")
-                output = self.preprocessor.process(
-                    ProcessingInput(attachment=context, processing_job_id=job_id, trace_id=envelope.get("trace_id")),
-                    vectorize=event_type == "knowledge.ready",
-                )
+                if context.content_access_required and not context.file_path and not context.object_ref:
+                    metadata_context = replace(context, part_kind="attachment_metadata", content_access_required=False)
+                    parsed = ParsedDocument("", [], "metadata", "v1", manifest={"metadata_only": True})
+                    output = ProcessingOutput(metadata_context, parsed, build_chunks(parsed, metadata_context))
+                    context = metadata_context
+                else:
+                    output = self.preprocessor.process(
+                        ProcessingInput(attachment=context, processing_job_id=job_id, trace_id=envelope.get("trace_id")),
+                        vectorize=True,
+                    )
                 manifest = output.parsed.manifest or {}
                 self.repository.update_processing_job(
                     job_id,
@@ -69,30 +77,27 @@ class RAGEventHandler:
                     embedding_model=getattr(getattr(self.preprocessor, "embedding_provider", None), "model", None) if event_type == "knowledge.ready" else None,
                 )
                 self.repository.update_processing_job(job_id, current_stage="index")
-                if event_type == "knowledge.ready":
-                    delete_older = getattr(self.indexer, "delete_older_versions", None)
-                    if callable(delete_older):
-                        delete_older(
-                            knowledge_item_id=context.knowledge_item_id or context.attachment_id,
-                            content_version=context.content_version,
-                        )
-                    total += self.indexer.index_chunks(output.chunks)
-                if event_type == "knowledge.ready":
-                    self.repository.upsert_index_record(
+                delete_older = getattr(self.indexer, "delete_older_versions", None)
+                if callable(delete_older):
+                    delete_older(
                         knowledge_item_id=context.knowledge_item_id or context.attachment_id,
-                        organization_id=context.organization_id,
                         content_version=context.content_version,
-                        acl_version=context.acl_version,
-                        content_variant="protected" if any(chunk.protected for chunk in output.chunks) else "display",
-                        es_index_alias=settings.elasticsearch_protected_index if any(chunk.protected for chunk in output.chunks) else settings.elasticsearch_display_index,
-                        es_document_prefix=output.chunks[0].chunk_id[:16] if output.chunks else context.attachment_id,
-                        chunk_count=len(output.chunks),
-                        mapping_version="v1",
-                        status="ready",
                     )
+                total += self.indexer.index_chunks(output.chunks)
+                self.repository.upsert_index_record(
+                    knowledge_item_id=context.knowledge_item_id or context.attachment_id,
+                    organization_id=context.organization_id,
+                    content_version=context.content_version,
+                    acl_version=context.acl_version,
+                    content_variant="protected" if any(chunk.protected for chunk in output.chunks) else "display",
+                    es_index_alias=settings.elasticsearch_protected_index if any(chunk.protected for chunk in output.chunks) else settings.elasticsearch_display_index,
+                    es_document_prefix=output.chunks[0].chunk_id[:16] if output.chunks else context.attachment_id,
+                    chunk_count=len(output.chunks),
+                    mapping_version="v1",
+                    status="ready",
+                )
             self.repository.update_processing_job(job_id, status="succeeded", current_stage="index", finished_at=_now())
-            result_type = "document.extracted" if event_type == "document.processing.requested" else "processing.completed"
-            self._publish_result(envelope, result_type, payload, {"processing_job_id": job_id, "chunk_count": total, "parsed_artifact_ref": output.parsed.artifact_ref if 'output' in locals() else None})
+            self._publish_result(envelope, "processing.completed", payload, {"processing_job_id": job_id, "chunk_count": total, "parsed_artifact_ref": output.parsed.artifact_ref if 'output' in locals() else None})
         except Exception as exc:
             self.repository.update_processing_job(job_id, status="failed", last_error=type(exc).__name__, finished_at=_now())
             try:
@@ -130,13 +135,13 @@ class RAGEventHandler:
         knowledge_item_id = str(payload.get("knowledge_item_id") or "")
         if not knowledge_item_id:
             return []
-        knowledge = self.knowledge.get_knowledge(knowledge_item_id, content_version=payload.get("content_version"))
+        knowledge = self.knowledge.get_knowledge(knowledge_item_id, content_version=payload.get("content_version"), acl_version=payload.get("acl_version"))
         attachments = knowledge.get("attachments") if isinstance(knowledge, dict) else None
         if isinstance(attachments, list) and attachments:
             base = {key: value for key, value in knowledge.items() if key != "attachments"}
             base.setdefault("organization_id", organization_id)
             return [AttachmentContext.from_mapping({**base, **item, "knowledge_item_id": knowledge_item_id, "content_version": payload.get("content_version", knowledge.get("content_version", 1)), "acl_version": payload.get("acl_version", knowledge.get("acl_version", 0))}) for item in attachments if isinstance(item, dict)]
-        content = self.knowledge.get_content(knowledge_item_id, content_version=payload.get("content_version"))
+        content = self.knowledge.get_content(knowledge_item_id, content_version=payload.get("content_version"), acl_version=payload.get("acl_version"), content_variant=payload.get("content_variant") or "display")
         text = content.get("text") or content.get("content") or content.get("body") if isinstance(content, dict) else None
         if not isinstance(text, str) or not text.strip():
             return []

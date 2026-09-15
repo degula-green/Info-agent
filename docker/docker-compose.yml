@@ -15,10 +15,16 @@ services:
       CORE_MINIO_ACCESS_KEY: ${CORE_MINIO_ACCESS_KEY:-minioadmin}
       CORE_MINIO_SECRET_KEY: ${CORE_MINIO_SECRET_KEY:-minioadmin}
       CORE_MINIO_BUCKET: ${CORE_MINIO_BUCKET:-info-agent}
+      CORE_OPENFGA_URL: ${CORE_OPENFGA_URL:-http://openfga:8080}
+      CORE_OPENFGA_STORE_ID: ${CORE_OPENFGA_STORE_ID:-}
+      CORE_OPENFGA_MODEL_ID: ${CORE_OPENFGA_MODEL_ID:-}
+      CORE_RAG_AUTHZ_TOKEN: ${CORE_RAG_AUTHZ_TOKEN:-local-development-only}
+      CORE_KNOWLEDGE_AUTHZ_TOKEN: ${KNOWLEDGE_CORE_SERVICE_TOKEN:-local-development-only}
     depends_on:
       - postgres
       - redis
       - minio
+      - openfga
     expose:
       - "8080"
 
@@ -35,8 +41,8 @@ services:
       KNOWLEDGE_MINIO_SECRET_KEY: ${KNOWLEDGE_MINIO_SECRET_KEY:-minioadmin}
       KNOWLEDGE_MINIO_BUCKET: ${KNOWLEDGE_MINIO_BUCKET:-info-agent}
       KNOWLEDGE_CORE_URL: ${KNOWLEDGE_CORE_URL:-http://core-service:8080}
-      KNOWLEDGE_CORE_SERVICE_TOKEN: ${KNOWLEDGE_CORE_SERVICE_TOKEN:-}
-      KNOWLEDGE_INTERNAL_SERVICE_TOKEN: ${KNOWLEDGE_INTERNAL_SERVICE_TOKEN:-}
+      KNOWLEDGE_CORE_SERVICE_TOKEN: ${KNOWLEDGE_CORE_SERVICE_TOKEN:-local-development-only}
+      KNOWLEDGE_INTERNAL_SERVICE_TOKEN: ${KNOWLEDGE_INTERNAL_SERVICE_TOKEN:-local-development-only}
       KNOWLEDGE_JWT_SECRET: ${KNOWLEDGE_JWT_SECRET:-}
       KNOWLEDGE_JWT_PUBLIC_KEY: ${KNOWLEDGE_JWT_PUBLIC_KEY:-}
       KNOWLEDGE_JWT_ISSUER: ${KNOWLEDGE_JWT_ISSUER:-info-agent-core}
@@ -68,8 +74,8 @@ services:
     build: ../services/collectors/wechat
     environment:
       COLLECTOR_INTERNAL_TOKEN: ${COLLECTOR_INTERNAL_TOKEN:-local-development-only}
-      KNOWLEDGE_BASE_URL: ${KNOWLEDGE_BASE_URL:-http://knowledge:8090}
-      KNOWLEDGE_INTERNAL_SERVICE_TOKEN: ${KNOWLEDGE_INTERNAL_SERVICE_TOKEN:-}
+      KNOWLEDGE_BASE_URL: ${KNOWLEDGE_BASE_URL:-http://knowledge-service:8090}
+      KNOWLEDGE_INTERNAL_SERVICE_TOKEN: ${KNOWLEDGE_INTERNAL_SERVICE_TOKEN:-local-development-only}
       WECHAT_COLLECTOR_PORT: 8091
     expose:
       - "8091"
@@ -86,12 +92,56 @@ services:
       EMBEDDING_DIMS: ${EMBEDDING_DIMS:-1536}
       RAG_DATABASE_URL: ${RAG_DATABASE_URL:-}
       RAG_DATABASE_SCHEMA: ${RAG_DATABASE_SCHEMA:-rag}
-      RAG_REDIS_URL: ${RAG_REDIS_URL:-}
-      RAG_REDIS_DATABASE: ${RAG_REDIS_DATABASE:-3}
+      RAG_REDIS_URL: ${RAG_REDIS_URL:-redis://redis:6379/1}
+      RAG_REDIS_DATABASE: ${RAG_REDIS_DATABASE:-1}
+      RAG_REDIS_INBOUND_STREAM: ${RAG_REDIS_INBOUND_STREAM:-knowledge:ready}
+      RAG_REDIS_CONSUMER_GROUP: ${RAG_REDIS_CONSUMER_GROUP:-rag-workers}
+      RAG_KNOWLEDGE_BASE_URL: ${RAG_KNOWLEDGE_BASE_URL:-http://knowledge-service:8090}
+      RAG_KNOWLEDGE_API_TOKEN: ${RAG_KNOWLEDGE_API_TOKEN:-local-development-only}
+      RAG_AUTHZ_BASE_URL: ${RAG_AUTHZ_BASE_URL:-http://core-service:8080}
+      RAG_AUTHZ_API_TOKEN: ${RAG_AUTHZ_API_TOKEN:-local-development-only}
+      RAG_MINIO_ENDPOINT: ${RAG_MINIO_ENDPOINT:-minio:9000}
+      RAG_MINIO_ACCESS_KEY: ${RAG_MINIO_ACCESS_KEY:-minioadmin}
+      RAG_MINIO_SECRET_KEY: ${RAG_MINIO_SECRET_KEY:-minioadmin}
     expose:
       - "8000"
     depends_on:
       - elasticsearch
+      - redis
+      - knowledge-service
+      - core-service
+      - minio
+
+  rag-worker:
+    build: ../services/rag
+    command: ["python", "worker.py"]
+    environment:
+      ELASTICSEARCH_URL: ${ELASTICSEARCH_URL:-http://elasticsearch:9200}
+      ELASTICSEARCH_USERNAME: ${ELASTICSEARCH_USERNAME:-}
+      ELASTICSEARCH_PASSWORD: ${ELASTICSEARCH_PASSWORD:-}
+      ELASTICSEARCH_DISPLAY_INDEX: ${ELASTICSEARCH_DISPLAY_INDEX:-knowledge_display_chunks_read}
+      ELASTICSEARCH_PROTECTED_INDEX: ${ELASTICSEARCH_PROTECTED_INDEX:-knowledge_protected_chunks_read}
+      EMBEDDING_API_BASE_URL: ${EMBEDDING_API_BASE_URL:-}
+      EMBEDDING_API_KEY: ${EMBEDDING_API_KEY:-}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-text-embedding-v4}
+      EMBEDDING_DIMS: ${EMBEDDING_DIMS:-1536}
+      RAG_DATABASE_URL: ${RAG_DATABASE_URL:-postgresql://postgres:postgres@postgres:5432/info_agent}
+      RAG_DATABASE_SCHEMA: ${RAG_DATABASE_SCHEMA:-rag}
+      RAG_REDIS_URL: ${RAG_REDIS_URL:-redis://redis:6379/1}
+      RAG_REDIS_DATABASE: ${RAG_REDIS_DATABASE:-1}
+      RAG_REDIS_INBOUND_STREAM: ${RAG_REDIS_INBOUND_STREAM:-knowledge:ready}
+      RAG_REDIS_CONSUMER_GROUP: ${RAG_REDIS_CONSUMER_GROUP:-rag-workers}
+      RAG_KNOWLEDGE_BASE_URL: ${RAG_KNOWLEDGE_BASE_URL:-http://knowledge-service:8090}
+      RAG_KNOWLEDGE_API_TOKEN: ${RAG_KNOWLEDGE_API_TOKEN:-local-development-only}
+      RAG_MINIO_ENDPOINT: ${RAG_MINIO_ENDPOINT:-minio:9000}
+      RAG_MINIO_ACCESS_KEY: ${RAG_MINIO_ACCESS_KEY:-minioadmin}
+      RAG_MINIO_SECRET_KEY: ${RAG_MINIO_SECRET_KEY:-minioadmin}
+      RAG_MINIO_SOURCE_BUCKET: ${RAG_MINIO_SOURCE_BUCKET:-info-agent}
+    depends_on:
+      - elasticsearch
+      - redis
+      - knowledge-service
+      - minio
 
   postgres:
     image: postgres:16-alpine
@@ -117,12 +167,21 @@ services:
     command:
       - sh
       - -ec
-      - psql --dbname="$${KNOWLEDGE_DATABASE_URL}" --set=ON_ERROR_STOP=1 --file=/migrations/20260905_knowledge_connectors.sql
+      - >-
+        psql --dbname="$${KNOWLEDGE_DATABASE_URL}" --set=ON_ERROR_STOP=1 --file=/migrations/20260905_knowledge_connectors.sql &&
+        psql --dbname="$${KNOWLEDGE_DATABASE_URL}" --set=ON_ERROR_STOP=1 --file=/migrations/20260911_knowledge_runtime_compatibility.sql &&
+        psql --dbname="$${KNOWLEDGE_DATABASE_URL}" --set=ON_ERROR_STOP=1 --file=/migrations/20260912_attachment_content_access.sql &&
+        psql --dbname="$${KNOWLEDGE_DATABASE_URL}" --set=ON_ERROR_STOP=1 --file=/migrations/20260913_contacts.sql &&
+        psql --dbname="$${KNOWLEDGE_DATABASE_URL}" --set=ON_ERROR_STOP=1 --file=/migrations/20260916_knowledge_ready_pipeline.sql
     depends_on:
       postgres:
         condition: service_healthy
     volumes:
       - ../db/migrations/20260905_knowledge_connectors.sql:/migrations/20260905_knowledge_connectors.sql:ro
+      - ../db/migrations/20260911_knowledge_runtime_compatibility.sql:/migrations/20260911_knowledge_runtime_compatibility.sql:ro
+      - ../db/migrations/20260912_attachment_content_access.sql:/migrations/20260912_attachment_content_access.sql:ro
+      - ../db/migrations/20260913_contacts.sql:/migrations/20260913_contacts.sql:ro
+      - ../db/migrations/20260916_knowledge_ready_pipeline.sql:/migrations/20260916_knowledge_ready_pipeline.sql:ro
     restart: "no"
 
   redis:

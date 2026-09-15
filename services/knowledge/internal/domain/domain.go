@@ -266,10 +266,59 @@ type Message struct {
 	ContentHash          string       `json:"content_hash"`
 	ContentVersion       int          `json:"content_version"`
 	SentAt               time.Time    `json:"sent_at"`
+	CollectedAt          time.Time    `json:"collected_at"`
 	LifecycleStatus      string       `json:"lifecycle_status"`
 	VectorStatus         string       `json:"vector_status,omitempty"`
 	Attachments          []Attachment `json:"attachments,omitempty"`
 	CreatedAt            time.Time    `json:"created_at"`
+}
+
+// KnowledgeItem is the service boundary consumed by RAG. Platform-specific
+// message and attachment identifiers remain source metadata and are never
+// used as the public processing identity.
+type KnowledgeItem struct {
+	ID                     string      `json:"id"`
+	KnowledgeBaseID        string      `json:"knowledge_base_id,omitempty"`
+	KnowledgeScope         string      `json:"knowledge_scope"`
+	AccessScope            string      `json:"access_scope"`
+	OwnerUserID            string      `json:"owner_user_id,omitempty"`
+	OrganizationID         string      `json:"organization_id,omitempty"`
+	ConversationID         string      `json:"conversation_ingestion_id"`
+	ExternalConversationID string      `json:"external_conversation_id,omitempty"`
+	SourceType             string      `json:"source_type"`
+	SourceMessageID        string      `json:"source_message_id,omitempty"`
+	SourceAttachmentID     string      `json:"source_attachment_id,omitempty"`
+	ContentType            string      `json:"content_type"`
+	ContentRef             string      `json:"content_ref"`
+	OriginalContentRef     string      `json:"original_content_ref,omitempty"`
+	ContentHash            string      `json:"content_hash"`
+	ContentVersion         int         `json:"content_version"`
+	ContentVisibility      string      `json:"content_visibility"`
+	OriginalAccessRequired bool        `json:"original_access_required"`
+	SecurityStatus         string      `json:"security_status"`
+	Sensitivity            string      `json:"sensitivity,omitempty"`
+	ContentSaved           bool        `json:"content_saved"`
+	OwnershipReady         bool        `json:"ownership_ready"`
+	SecurityReady          bool        `json:"security_ready"`
+	PermissionReady        bool        `json:"permission_ready"`
+	ACLVersion             int64       `json:"acl_version"`
+	ACLSyncStatus          string      `json:"acl_sync_status"`
+	ProcessingStatus       string      `json:"processing_status"`
+	LifecycleStatus        string      `json:"lifecycle_status"`
+	ContentAccessRequired  bool        `json:"content_access_required"`
+	LastError              string      `json:"last_error,omitempty"`
+	Message                *Message    `json:"message,omitempty"`
+	Attachment             *Attachment `json:"attachment,omitempty"`
+	CreatedAt              time.Time   `json:"created_at"`
+	UpdatedAt              time.Time   `json:"updated_at"`
+}
+
+type KnowledgeContent struct {
+	KnowledgeItemID string `json:"knowledge_item_id"`
+	ContentVersion  int    `json:"content_version"`
+	ContentVariant  string `json:"content_variant"`
+	ContentHash     string `json:"content_hash"`
+	Text            string `json:"text"`
 }
 
 type MessageSource struct {
@@ -309,10 +358,13 @@ type OutboxEvent struct {
 	EventType      string         `json:"event_type"`
 	SchemaVersion  int            `json:"schema_version"`
 	OccurredAt     time.Time      `json:"occurred_at"`
-	TraceID        string         `json:"trace_id,omitempty"`
-	OrganizationID string         `json:"organization_id,omitempty"`
+	TraceID        string         `json:"trace_id"`
+	OrganizationID string         `json:"organization_id"`
 	Producer       string         `json:"producer"`
 	Payload        map[string]any `json:"payload"`
+	RetryCount     int            `json:"retry_count,omitempty"`
+	LastError      string         `json:"last_error,omitempty"`
+	AvailableAt    time.Time      `json:"available_at,omitempty"`
 	PublishedAt    *time.Time     `json:"published_at,omitempty"`
 }
 

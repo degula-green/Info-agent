@@ -84,7 +84,6 @@ func (w *Worker) scheduleDelay(ctx context.Context) time.Duration {
 
 func (w *Worker) Tick(ctx context.Context) error {
 	ctx = trace.Ensure(ctx)
-	if err := w.service.ProcessPrivacy(ctx); err != nil { return err }
 	accounts, err := w.service.Repo.ListConnectorAccounts(ctx, domain.PlatformFeishu)
 	if err != nil {
 		return err
@@ -122,6 +121,12 @@ func (w *Worker) Tick(ctx context.Context) error {
 			_ = w.service.Repo.UpdateConnectorStatus(ctx, account.ID, domain.ConnectorActive, "")
 		}
 		_ = w.service.KV.Release(ctx, lockKey, owner)
+	}
+	if privacyErr := w.service.ProcessPrivacy(ctx); privacyErr != nil && firstErr == nil {
+		firstErr = privacyErr
+	}
+	if permissionErr := w.service.ProcessPermissions(ctx); permissionErr != nil && firstErr == nil {
+		firstErr = permissionErr
 	}
 	if publishErr := w.service.PublishOutbox(ctx); publishErr != nil && firstErr == nil {
 		firstErr = publishErr

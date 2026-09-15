@@ -42,6 +42,7 @@ type IngestMessageInput struct {
 	ExternalConversationID string            `json:"external_conversation_id"`
 	ExternalMessageID      string            `json:"external_message_id"`
 	PayloadHash            string            `json:"payload_hash"`
+	SourcePayloadHash      string            `json:"-"`
 	SenderExternalID       string            `json:"sender_external_id"`
 	SenderDisplayName      string            `json:"sender_display_name"`
 	MessageType            string            `json:"message_type"`
@@ -85,7 +86,7 @@ func validateIngestInput(input IngestMessageInput) error {
 		return apperror.New("payload_hash_mismatch", "payload hash does not match the canonical message payload", 400, false)
 	}
 	switch input.MessageType {
-	case "text", "image", "file", "mixed", "system":
+	case "text", "image", "file", "video", "mixed", "system":
 	default:
 		return apperror.New("invalid_message_type", "message type is not supported", 400, false)
 	}
@@ -103,27 +104,89 @@ func validateIngestInput(input IngestMessageInput) error {
 	return nil
 }
 
+func ValidateMessageCandidate(input IngestMessageInput) error {
+	return validateIngestInput(input)
+}
+
 // discardMessage is deliberately deterministic: platform notifications,
 // empty messages and unresolved placeholders never become business records.
-func discardMessage(input IngestMessageInput) bool {
+func FilterMessageCandidate(input IngestMessageInput) (IngestMessageInput, bool) {
 	if input.MessageType == "system" {
-		return true
+		return input, true
 	}
 	if strings.TrimSpace(input.Content) == "" && len(input.Attachments) == 0 {
-		return true
+		return input, true
 	}
 	content := strings.TrimSpace(input.Content)
 	// Provider-generated attachment/forwarding labels are not user messages.
 	// Keep the actual attachment row, but never persist these labels as text.
 	switch strings.ToLower(content) {
 	case "merged and forwarded message", "forwarded message", "file name", "filename":
-		return true
+		if len(input.Attachments) == 0 {
+			return input, true
+		}
+		input.Content = ""
 	}
-	if len(input.Attachments) == 0 && isAttachmentMetadataJSON(content) {
-		return true
+	if isAttachmentMetadataJSON(content) {
+		if len(input.Attachments) == 0 {
+			return input, true
+		}
+		input.Content = ""
 	}
 	if len(input.Attachments) == 0 && (content == "[无法解析]" || content == "[表情]" || content == "[动画表情]" || content == "<msg>") {
+		return input, true
+	}
+	if isCallRecord(content) {
+		if len(input.Attachments) == 0 {
+			return input, true
+		}
+		input.Content = ""
+	}
+	return input, false
+}
+
+func ShouldDiscardMessage(input IngestMessageInput) bool {
+	_, discard := FilterMessageCandidate(input)
+	return discard
+}
+
+func PrepareRepositoryInput(input IngestMessageInput) (IngestMessageInput, bool, error) {
+	if err := validateIngestInput(input); err != nil {
+		return input, false, err
+	}
+	filtered, discard := FilterMessageCandidate(input)
+	if discard {
+		return filtered, true, nil
+	}
+	if filtered.Content != input.Content {
+		filtered.SourcePayloadHash = input.PayloadHash
+		contentSum := sha256.Sum256([]byte(filtered.Content))
+		filtered.ContentHash = hex.EncodeToString(contentSum[:])
+		payloadHash, err := CalculatePayloadHash(filtered)
+		if err != nil {
+			return input, false, err
+		}
+		filtered.PayloadHash = payloadHash
+	}
+	return filtered, false, nil
+}
+
+func SourcePayloadHash(input IngestMessageInput) string {
+	if strings.TrimSpace(input.SourcePayloadHash) != "" {
+		return input.SourcePayloadHash
+	}
+	return input.PayloadHash
+}
+
+func isCallRecord(content string) bool {
+	value := strings.ToLower(strings.TrimSpace(content))
+	if strings.Contains(value, "<voipmsg") || strings.Contains(value, "voipinvitemsg") {
 		return true
+	}
+	for _, marker := range []string{"[语音通话]", "[视频通话]", "通话时长", "语音通话已结束", "视频通话已结束", "voice call duration", "video call duration"} {
+		if strings.Contains(value, strings.ToLower(marker)) {
+			return true
+		}
 	}
 	return false
 }
@@ -345,6 +408,15 @@ type Repository interface {
 	IngestMessage(ctx context.Context, input IngestMessageInput) (*IngestResult, error)
 	ListPendingMessages(ctx context.Context, limit int) ([]PendingMessage, error)
 	CompleteMessageClassification(ctx context.Context, messageID, displayContent string, sensitive bool) error
+	ListPendingKnowledgePermissions(ctx context.Context, limit int) ([]domain.KnowledgeItem, error)
+	ListKnowledgePermissionSubjects(ctx context.Context, knowledgeItemID string) ([]string, error)
+	MarkKnowledgePermissionSynced(ctx context.Context, knowledgeItemID string, aclVersion int64) error
+	MarkKnowledgePermissionFailed(ctx context.Context, knowledgeItemID, failure string) error
+	TryMarkKnowledgeReady(ctx context.Context, knowledgeItemID, traceID string) (bool, error)
+	GetKnowledgeItem(ctx context.Context, knowledgeItemID string) (*domain.KnowledgeItem, error)
+	GetKnowledgeItemByMessage(ctx context.Context, messageID string) (*domain.KnowledgeItem, error)
+	GetKnowledgeItemByAttachment(ctx context.Context, attachmentID string) (*domain.KnowledgeItem, error)
+	GetKnowledgeContent(ctx context.Context, knowledgeItemID string) (*domain.KnowledgeContent, error)
 	Heartbeat(ctx context.Context, collectorID string, now time.Time) (*domain.Collector, error)
 	RecordCollectorFailure(ctx context.Context, collectorID, lastError string, nextPollAt, now time.Time) error
 	RecordCursorReceipt(ctx context.Context, collectorID, cursor string, now time.Time) error
@@ -356,6 +428,7 @@ type Repository interface {
 	ListAttachments(ctx context.Context, conversationID string) ([]domain.Attachment, error)
 	GetOutbox(ctx context.Context, limit int) ([]domain.OutboxEvent, error)
 	MarkOutboxPublished(ctx context.Context, id string, publishedAt time.Time) error
+	MarkOutboxFailed(ctx context.Context, id, failure string, availableAt time.Time) error
 }
 
 type ExternalIdentityInput struct {

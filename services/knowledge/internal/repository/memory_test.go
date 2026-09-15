@@ -181,9 +181,14 @@ func TestMemoryMessageAttachmentIdempotenceAndCursorMonotonicity(t *testing.T) {
 	if err != nil || !corrected.Duplicate || corrected.Message.SenderDisplayName != "Correct sender" {
 		t.Fatalf("sender correction with a legacy content hash failed: result=%+v err=%v", corrected, err)
 	}
-	events, err := repo.GetOutbox(ctx, 10)
-	if err != nil || len(events) == 0 || events[0].TraceID != "trace-ingest" {
-		t.Fatalf("outbox event did not preserve trace id: events=%+v err=%v", events, err)
+	tracePreserved := false
+	for _, event := range repo.outbox {
+		if event.EventType == "permission.sync.requested" && event.TraceID == "trace-ingest" {
+			tracePreserved = true
+		}
+	}
+	if !tracePreserved {
+		t.Fatal("internal permission event did not preserve trace id")
 	}
 	if _, err := repo.CompleteAttachment(ctx, first.Attachments[0].ID, "object", attachmentHash, 10, "ready"); err != nil {
 		t.Fatal(err)
@@ -537,15 +542,26 @@ func TestMemoryFiltersSystemAndRedactsSensitiveContent(t *testing.T) {
 	if len(updated) != 1 || !updated[0].Sensitive || updated[0].Content == "password=abc123" {
 		t.Fatalf("secret was exposed after scan: %+v", updated)
 	}
-	events, _ := repo.GetOutbox(ctx, 10)
-	found := false
-	for _, event := range events {
-		if event.EventType == "message.ready" {
-			found = true
-		}
+	if events, _ := repo.GetOutbox(ctx, 10); len(events) != 0 {
+		t.Fatalf("privacy completion published before permission gate: %+v", events)
 	}
-	if !found {
-		t.Fatal("message.ready event missing")
+	item, err := repo.GetKnowledgeItemByMessage(ctx, saved.Message.ID)
+	if err != nil || !item.SecurityReady || item.PermissionReady {
+		t.Fatalf("unexpected privacy gate state: item=%+v err=%v", item, err)
+	}
+	if err := repo.MarkKnowledgePermissionSynced(ctx, item.ID, 3); err != nil {
+		t.Fatal(err)
+	}
+	created, err := repo.TryMarkKnowledgeReady(ctx, item.ID, "trace-ready")
+	if err != nil || !created {
+		t.Fatalf("ready gate did not create event: created=%v err=%v", created, err)
+	}
+	if again, err := repo.TryMarkKnowledgeReady(ctx, item.ID, "trace-ready-2"); err != nil || again {
+		t.Fatalf("ready gate was not idempotent: created=%v err=%v", again, err)
+	}
+	events, _ := repo.GetOutbox(ctx, 10)
+	if len(events) != 1 || events[0].EventType != "knowledge.ready" || events[0].Payload["knowledge_item_id"] != item.ID {
+		t.Fatalf("unexpected ready events: %+v", events)
 	}
 }
 

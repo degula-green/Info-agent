@@ -39,13 +39,13 @@ class AuthorizationGateway(Protocol):
 
 
 class KnowledgeSource(Protocol):
-    def get_knowledge(self, knowledge_item_id: str, *, content_version: int | None = None) -> dict[str, Any]:
+    def get_knowledge(self, knowledge_item_id: str, *, content_version: int | None = None, acl_version: int | None = None) -> dict[str, Any]:
         ...
 
-    def get_content(self, knowledge_item_id: str, *, content_version: int | None = None) -> dict[str, Any]:
+    def get_content(self, knowledge_item_id: str, *, content_version: int | None = None, acl_version: int | None = None, content_variant: str | None = None) -> dict[str, Any]:
         ...
 
-    def get_attachment(self, attachment_id: str, *, content_version: int | None = None) -> dict[str, Any]:
+    def get_attachment(self, attachment_id: str, *, content_version: int | None = None, acl_version: int | None = None) -> dict[str, Any]:
         ...
 
 

@@ -125,8 +125,9 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Server, 
 		return nil, err
 	}
 	authorizationClient := openfga.NewClient(cfg)
+	permissionSync := application.NewPermissionSyncService(authorizationClient, postgres.NewAuthorizationVersionRepository(pool))
 	return &Server{
-		Engine: httpapi.NewRouterWithRegistration(authService, cookies, logger, registrationService, organizationService, &httpapi.AuthorizationConfig{Provider: authorizationClient, Token: cfg.RAGAuthorizationToken}),
+		Engine: httpapi.NewRouterWithRegistration(authService, cookies, logger, registrationService, organizationService, &httpapi.AuthorizationConfig{Provider: authorizationClient, Token: cfg.RAGAuthorizationToken, KnowledgeToken: cfg.KnowledgeAuthorizationToken, PermissionSync: permissionSync}),
 		pool:   pool,
 		redis:  redisClient,
 	}, nil

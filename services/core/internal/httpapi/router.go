@@ -60,13 +60,19 @@ func newRouter(authentication Authentication, cookies RefreshCookieConfig, logge
 		authz := router.Group("/internal/v1/authorization")
 		authz.POST("/search-scope", authzHandler.Scope)
 		authz.POST("/check-batch", authzHandler.CheckBatch)
+		if authorization.PermissionSync != nil {
+			permissionHandler := NewPermissionSyncHandler(authorization.PermissionSync, authorization.KnowledgeToken)
+			authz.POST("/resource-relations/sync", permissionHandler.Sync)
+		}
 	}
 	return router
 }
 
 type AuthorizationConfig struct {
-	Provider application.AuthorizationProvider
-	Token    string
+	Provider       application.AuthorizationProvider
+	Token          string
+	KnowledgeToken string
+	PermissionSync PermissionSyncApplication
 }
 
 func firstOrganization(values []OrganizationApplication) OrganizationApplication {

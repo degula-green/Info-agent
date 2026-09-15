@@ -116,6 +116,13 @@ Import-EnvFile (Join-Path $knowledgePath '.env')
 Import-EnvFile (Join-Path $ragPath '.env')
 if (-not $env:KNOWLEDGE_INTERNAL_SERVICE_TOKEN) { $env:KNOWLEDGE_INTERNAL_SERVICE_TOKEN = 'local-development-only' }
 if (-not $env:COLLECTOR_INTERNAL_TOKEN) { $env:COLLECTOR_INTERNAL_TOKEN = 'local-development-only' }
+if (-not $env:KNOWLEDGE_CORE_SERVICE_TOKEN) { $env:KNOWLEDGE_CORE_SERVICE_TOKEN = 'local-development-only' }
+if (-not $env:CORE_KNOWLEDGE_AUTHZ_TOKEN) { $env:CORE_KNOWLEDGE_AUTHZ_TOKEN = $env:KNOWLEDGE_CORE_SERVICE_TOKEN }
+if (-not $env:RAG_KNOWLEDGE_API_TOKEN) { $env:RAG_KNOWLEDGE_API_TOKEN = $env:KNOWLEDGE_INTERNAL_SERVICE_TOKEN }
+if (-not $env:RAG_KNOWLEDGE_BASE_URL) { $env:RAG_KNOWLEDGE_BASE_URL = 'http://127.0.0.1:8090' }
+if (-not $env:RAG_REDIS_URL) { $env:RAG_REDIS_URL = $env:KNOWLEDGE_REDIS_URL }
+if (-not $env:RAG_REDIS_DATABASE) { $env:RAG_REDIS_DATABASE = '1' }
+if (-not $env:RAG_REDIS_INBOUND_STREAM) { $env:RAG_REDIS_INBOUND_STREAM = 'knowledge:ready' }
 
 Start-ServiceWindow 'info-agent core :8080' $corePath "& '$go' run ./cmd/server"
 Start-ServiceWindow 'info-agent knowledge :8090' $knowledgePath "& '$go' run ./cmd/server"

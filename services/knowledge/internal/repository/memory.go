@@ -31,6 +31,7 @@ type MemoryStore struct {
 	privateContent   map[string]string
 	sources          map[string]domain.MessageSource
 	attachments      map[string]domain.Attachment
+	knowledgeItems   map[string]domain.KnowledgeItem
 	cursorReceipts   map[string]time.Time
 	identities       map[string]ExternalIdentity
 	contactRelations map[string]ContactRelation
@@ -48,6 +49,7 @@ func NewMemoryStore() *MemoryStore {
 		messages: map[string]domain.Message{}, sources: map[string]domain.MessageSource{},
 		privateContent: map[string]string{},
 		attachments:    map[string]domain.Attachment{}, identities: map[string]ExternalIdentity{}, contactRelations: map[string]ContactRelation{},
+		knowledgeItems: map[string]domain.KnowledgeItem{},
 		cursorReceipts: map[string]time.Time{},
 		memberships:    map[string]domain.ConversationMembership{},
 		outbox:         map[string]domain.OutboxEvent{},
@@ -1241,12 +1243,14 @@ func (s *MemoryStore) SetConversationStatus(_ context.Context, conversationID, s
 }
 
 func (s *MemoryStore) IngestMessage(ctx context.Context, input IngestMessageInput) (*IngestResult, error) {
-	if err := validateIngestInput(input); err != nil {
+	prepared, discard, err := PrepareRepositoryInput(input)
+	if err != nil {
 		return nil, err
 	}
-	if discardMessage(input) {
+	if discard {
 		return &IngestResult{Discarded: true, CursorUpdated: false}, nil
 	}
+	input = prepared
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	collector, ok := s.collectors[input.CollectorID]
@@ -1269,6 +1273,16 @@ func (s *MemoryStore) IngestMessage(ctx context.Context, input IngestMessageInpu
 	}
 	key := conversation.ID + "|" + input.ExternalMessageID
 	message, exists := s.messages[key]
+	sourceCorrection := false
+	for _, source := range s.sources {
+		if source.CollectorID != input.CollectorID || source.ExternalMessageID != input.ExternalMessageID || strings.EqualFold(source.PayloadHash, SourcePayloadHash(input)) {
+			continue
+		}
+		if !exists || (!strings.EqualFold(message.ContentHash, input.ContentHash) && input.SenderExternalID == "" && !canReclassifyLegacyFile(message.MessageType, input.MessageType, input.Attachments)) {
+			return nil, apperror.New("external_id_conflict", "external message id has conflicting payload", 409, false)
+		}
+		sourceCorrection = true
+	}
 	// Cursor advancement is deliberately a separate commit. Attachments are
 	// uploaded after this metadata transaction, so advancing here could skip a
 	// message when its content upload fails.
@@ -1304,12 +1318,15 @@ func (s *MemoryStore) IngestMessage(ctx context.Context, input IngestMessageInpu
 		if senderName == "" {
 			senderName = s.identityByIDLocked(identityID).DisplayName
 		}
-		message = domain.Message{ID: uuid.NewString(), ConversationID: conversation.ID, ExternalMessageID: input.ExternalMessageID, SenderIdentityID: identityID, SenderDisplayName: senderName, MessageType: input.MessageType, Content: "", Sensitive: false, ClassificationStatus: "pending", ContentHash: input.ContentHash, ContentVersion: 1, SentAt: input.SentAt.UTC(), LifecycleStatus: "active", VectorStatus: "pending", CreatedAt: now}
+		message = domain.Message{ID: uuid.NewString(), ConversationID: conversation.ID, ExternalMessageID: input.ExternalMessageID, SenderIdentityID: identityID, SenderDisplayName: senderName, MessageType: input.MessageType, Content: "", Sensitive: false, ClassificationStatus: "pending", ContentHash: input.ContentHash, ContentVersion: 1, SentAt: input.SentAt.UTC(), CollectedAt: now, LifecycleStatus: "active", VectorStatus: "pending", CreatedAt: now}
 		s.messages[key] = message
 		s.privateContent[message.ID] = input.Content
 		if input.MessageType == "text" {
 			s.addEventLocked(ctx, "privacy.scan.requested", conversation, map[string]any{"message_id": message.ID, "content_version": 1})
 		}
+	}
+	if strings.TrimSpace(input.Content) != "" {
+		s.ensureMessageKnowledgeItemLocked(ctx, conversation, message)
 	}
 	if message.SenderDisplayName == "" && message.SenderIdentityID != "" {
 		if identityName := s.identityByIDLocked(message.SenderIdentityID).DisplayName; identityName != "" {
@@ -1319,11 +1336,16 @@ func (s *MemoryStore) IngestMessage(ctx context.Context, input IngestMessageInpu
 	}
 	sourceKey := message.ID + "|" + input.CollectorID
 	if source, sourceExists := s.sources[sourceKey]; !sourceExists {
-		source := domain.MessageSource{ID: uuid.NewString(), MessageID: message.ID, CollectorID: input.CollectorID, ExternalMessageID: input.ExternalMessageID, PayloadHash: input.PayloadHash, IngestCursor: input.Cursor, ObservedAt: now}
+		source := domain.MessageSource{ID: uuid.NewString(), MessageID: message.ID, CollectorID: input.CollectorID, ExternalMessageID: input.ExternalMessageID, PayloadHash: SourcePayloadHash(input), IngestCursor: input.Cursor, ObservedAt: now}
 		s.sources[sourceKey] = source
 		result.Sources = append(result.Sources, source)
 	} else if source.IngestCursor == "" && input.Cursor != "" {
 		source.IngestCursor = input.Cursor
+		s.sources[sourceKey] = source
+	}
+	if sourceCorrection {
+		source := s.sources[sourceKey]
+		source.PayloadHash = SourcePayloadHash(input)
 		s.sources[sourceKey] = source
 	}
 	for _, a := range input.Attachments {
@@ -1344,6 +1366,7 @@ func (s *MemoryStore) IngestMessage(ctx context.Context, input IngestMessageInpu
 		sensitive := privacy.SensitiveAttachmentName(name)
 		attachment := domain.Attachment{ID: uuid.NewString(), ConversationID: conversation.ID, MessageID: message.ID, ExternalAttachmentID: a.ExternalAttachmentID, FileName: name, MIMEType: a.MIMEType, SizeBytes: a.SizeBytes, ContentHash: a.ContentHash, ContentVersion: 1, ContentStatus: "pending", AccessScope: "conversation_members", ContentAccessRequired: sensitive, Sensitive: sensitive, ClassificationStatus: "succeeded", PreviewCapability: previewCapability(a.MIMEType), CreatedAt: now, UpdatedAt: now}
 		s.attachments[attachmentKey] = attachment
+		s.ensureAttachmentKnowledgeItemLocked(ctx, conversation, message, attachment)
 		result.Attachments = append(result.Attachments, cloneAttachment(attachment))
 		s.addEventLocked(ctx, "attachment.processing.requested", conversation, map[string]any{"resource_id": attachment.ID, "content_version": 1})
 	}
@@ -1386,13 +1409,218 @@ func (s *MemoryStore) CompleteMessageClassification(ctx context.Context, id, dis
 		if m.ID == id {
 			m.Content, m.Sensitive, m.ClassificationStatus = displayContent, sensitive, "succeeded"
 			s.messages[key] = m
-			if c, ok := s.conversations[m.ConversationID]; ok {
-				s.addEventLocked(ctx, "message.ready", c, map[string]any{"resource_type": "message", "resource_id": id, "content_version": m.ContentVersion, "sensitive": sensitive, "content_access_required": sensitive})
+			for itemID, item := range s.knowledgeItems {
+				if item.SourceMessageID != id || item.SourceAttachmentID != "" {
+					continue
+				}
+				item.SecurityReady = true
+				item.SecurityStatus = "classified"
+				item.OriginalAccessRequired = sensitive
+				item.ContentAccessRequired = sensitive
+				item.ContentVisibility = "original"
+				item.Sensitivity = "internal"
+				if sensitive {
+					item.ContentVisibility = "masked"
+					item.Sensitivity = "restricted"
+				}
+				item.UpdatedAt = time.Now().UTC()
+				s.knowledgeItems[itemID] = item
 			}
 			return nil
 		}
 	}
 	return apperror.New("message_not_found", "message not found", 404, false)
+}
+
+func (s *MemoryStore) ListPendingKnowledgePermissions(_ context.Context, limit int) ([]domain.KnowledgeItem, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]domain.KnowledgeItem, 0)
+	for _, item := range s.knowledgeItems {
+		if item.LifecycleStatus == "active" && !item.PermissionReady && (item.ACLSyncStatus == "pending" || item.ACLSyncStatus == "failed") {
+			out = append(out, cloneKnowledgeItem(item))
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].UpdatedAt.Before(out[j].UpdatedAt) })
+	if limit <= 0 || limit > 200 {
+		limit = 200
+	}
+	if len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
+}
+
+func (s *MemoryStore) ListKnowledgePermissionSubjects(_ context.Context, id string) ([]string, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	item, ok := s.knowledgeItems[id]
+	if !ok {
+		return nil, apperror.New("knowledge_not_found", "knowledge item not found", 404, false)
+	}
+	seen := map[string]struct{}{}
+	for _, membership := range s.memberships {
+		if membership.ConversationID != item.ConversationID || membership.Status != "active" {
+			continue
+		}
+		identity := s.identityByIDLocked(membership.ExternalIdentityID)
+		if identity.MappingStatus == "mapped" && identity.MappedUserID != "" {
+			seen[identity.MappedUserID] = struct{}{}
+		}
+	}
+	out := make([]string, 0, len(seen))
+	for userID := range seen {
+		out = append(out, userID)
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
+func (s *MemoryStore) MarkKnowledgePermissionSynced(_ context.Context, id string, aclVersion int64) error {
+	if aclVersion < 1 {
+		return apperror.New("invalid_acl_version", "acl_version must be positive", 400, false)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	item, ok := s.knowledgeItems[id]
+	if !ok {
+		return apperror.New("knowledge_not_found", "knowledge item not found", 404, false)
+	}
+	item.PermissionReady, item.ACLSyncStatus, item.ACLVersion = true, "synced", aclVersion
+	item.LastError, item.UpdatedAt = "", time.Now().UTC()
+	s.knowledgeItems[id] = item
+	return nil
+}
+
+func (s *MemoryStore) MarkKnowledgePermissionFailed(_ context.Context, id, failure string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	item, ok := s.knowledgeItems[id]
+	if !ok {
+		return apperror.New("knowledge_not_found", "knowledge item not found", 404, false)
+	}
+	item.PermissionReady, item.ACLSyncStatus = false, "failed"
+	item.LastError, item.UpdatedAt = safeError(failure), time.Now().UTC()
+	s.knowledgeItems[id] = item
+	return nil
+}
+
+func (s *MemoryStore) TryMarkKnowledgeReady(ctx context.Context, id, traceID string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	item, ok := s.knowledgeItems[id]
+	if !ok {
+		return false, apperror.New("knowledge_not_found", "knowledge item not found", 404, false)
+	}
+	if item.ProcessingStatus == "published" || item.ProcessingStatus == "processing" || item.ProcessingStatus == "ready" {
+		return false, nil
+	}
+	if !item.ContentSaved || !item.OwnershipReady || !item.SecurityReady || !item.PermissionReady || item.ACLSyncStatus != "synced" {
+		return false, nil
+	}
+	for _, event := range s.outbox {
+		if event.EventType == "knowledge.ready" && event.Payload["knowledge_item_id"] == id && event.Payload["content_version"] == item.ContentVersion {
+			item.ProcessingStatus = "published"
+			s.knowledgeItems[id] = item
+			return false, nil
+		}
+	}
+	item.ProcessingStatus, item.LastError, item.UpdatedAt = "published", "", time.Now().UTC()
+	s.knowledgeItems[id] = item
+	if traceID == "" {
+		traceID = trace.TraceID(ctx)
+	}
+	if traceID == "" {
+		traceID = uuid.NewString()
+	}
+	event := domain.OutboxEvent{
+		ID: uuid.NewString(), EventType: "knowledge.ready", SchemaVersion: 1,
+		OccurredAt: time.Now().UTC(), TraceID: traceID, OrganizationID: item.OrganizationID,
+		Producer: "module-2", AvailableAt: time.Now().UTC(),
+		Payload: map[string]any{
+			"resource_type": "knowledge_item", "resource_id": item.ID, "knowledge_item_id": item.ID,
+			"source_message_id": item.SourceMessageID, "source_attachment_id": item.SourceAttachmentID,
+			"content_version": item.ContentVersion, "acl_version": item.ACLVersion,
+			"content_variant": "display", "content_access_required": item.ContentAccessRequired,
+		},
+	}
+	s.outbox[event.ID] = event
+	return true, nil
+}
+
+func (s *MemoryStore) GetKnowledgeItem(_ context.Context, id string) (*domain.KnowledgeItem, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	item, ok := s.knowledgeItems[id]
+	if !ok {
+		return nil, apperror.New("knowledge_not_found", "knowledge item not found", 404, false)
+	}
+	item = cloneKnowledgeItem(item)
+	for _, message := range s.messages {
+		if message.ID == item.SourceMessageID {
+			copy := cloneMessage(message)
+			item.Message = &copy
+			break
+		}
+	}
+	for _, attachment := range s.attachments {
+		if attachment.ID == item.SourceAttachmentID {
+			copy := cloneAttachment(attachment)
+			item.Attachment = &copy
+			break
+		}
+	}
+	return &item, nil
+}
+
+func (s *MemoryStore) GetKnowledgeItemByMessage(ctx context.Context, messageID string) (*domain.KnowledgeItem, error) {
+	s.mu.RLock()
+	var id string
+	for itemID, item := range s.knowledgeItems {
+		if item.SourceMessageID == messageID && item.SourceAttachmentID == "" {
+			id = itemID
+			break
+		}
+	}
+	s.mu.RUnlock()
+	if id == "" {
+		return nil, apperror.New("knowledge_not_found", "knowledge item not found", 404, false)
+	}
+	return s.GetKnowledgeItem(ctx, id)
+}
+
+func (s *MemoryStore) GetKnowledgeItemByAttachment(ctx context.Context, attachmentID string) (*domain.KnowledgeItem, error) {
+	s.mu.RLock()
+	var id string
+	for itemID, item := range s.knowledgeItems {
+		if item.SourceAttachmentID == attachmentID {
+			id = itemID
+			break
+		}
+	}
+	s.mu.RUnlock()
+	if id == "" {
+		return nil, apperror.New("knowledge_not_found", "knowledge item not found", 404, false)
+	}
+	return s.GetKnowledgeItem(ctx, id)
+}
+
+func (s *MemoryStore) GetKnowledgeContent(_ context.Context, id string) (*domain.KnowledgeContent, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	item, ok := s.knowledgeItems[id]
+	if !ok {
+		return nil, apperror.New("knowledge_not_found", "knowledge item not found", 404, false)
+	}
+	if item.SourceAttachmentID != "" {
+		return nil, apperror.New("knowledge_content_is_attachment", "knowledge content is an attachment", 409, false)
+	}
+	for _, message := range s.messages {
+		if message.ID == item.SourceMessageID {
+			return &domain.KnowledgeContent{KnowledgeItemID: id, ContentVersion: item.ContentVersion, ContentVariant: "display", ContentHash: item.ContentHash, Text: message.Content}, nil
+		}
+	}
+	return nil, apperror.New("knowledge_content_not_found", "knowledge content not found", 404, false)
 }
 
 func (s *MemoryStore) Heartbeat(_ context.Context, collectorID string, _ time.Time) (*domain.Collector, error) {
@@ -1516,8 +1744,16 @@ func (s *MemoryStore) CompleteAttachment(ctx context.Context, id, objectRef, con
 		a.ObjectRef, a.ContentHash, a.SizeBytes, a.ContentStatus, a.UpdatedAt = objectRef, contentHash, size, status, time.Now().UTC()
 		s.attachments[key] = a
 		if status == "ready" {
-			if conversation, ok := s.conversations[a.ConversationID]; ok {
-				s.addEventLocked(ctx, "attachment.ready", conversation, map[string]any{"resource_type": "attachment", "resource_id": a.ID, "content_version": a.ContentVersion, "sensitive": a.Sensitive, "content_access_required": a.ContentAccessRequired})
+			for itemID, item := range s.knowledgeItems {
+				if item.SourceAttachmentID != a.ID {
+					continue
+				}
+				item.ContentSaved = true
+				item.ContentHash = contentHash
+				item.ContentRef = objectRef
+				item.OriginalContentRef = objectRef
+				item.UpdatedAt = time.Now().UTC()
+				s.knowledgeItems[itemID] = item
 			}
 		}
 		out := cloneAttachment(a)
@@ -1604,7 +1840,7 @@ func (s *MemoryStore) GetOutbox(_ context.Context, limit int) ([]domain.OutboxEv
 	defer s.mu.RUnlock()
 	out := []domain.OutboxEvent{}
 	for _, e := range s.outbox {
-		if e.PublishedAt == nil {
+		if e.EventType == "knowledge.ready" && e.PublishedAt == nil && (e.AvailableAt.IsZero() || !e.AvailableAt.After(time.Now().UTC())) {
 			out = append(out, cloneEvent(e))
 		}
 	}
@@ -1626,6 +1862,21 @@ func (s *MemoryStore) MarkOutboxPublished(_ context.Context, id string, publishe
 		return apperror.New("event_not_found", "event not found", 404, false)
 	}
 	e.PublishedAt = &publishedAt
+	e.LastError = ""
+	s.outbox[id] = e
+	return nil
+}
+
+func (s *MemoryStore) MarkOutboxFailed(_ context.Context, id, failure string, availableAt time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	e, ok := s.outbox[id]
+	if !ok {
+		return apperror.New("event_not_found", "event not found", 404, false)
+	}
+	e.RetryCount++
+	e.LastError = safeError(failure)
+	e.AvailableAt = availableAt.UTC()
 	s.outbox[id] = e
 	return nil
 }
@@ -1739,6 +1990,77 @@ func (s *MemoryStore) addEventLocked(ctx context.Context, eventType string, c do
 	}
 	s.outbox[event.ID] = event
 }
+
+func (s *MemoryStore) ensureMessageKnowledgeItemLocked(ctx context.Context, conversation domain.ConversationIngestion, message domain.Message) string {
+	for id, item := range s.knowledgeItems {
+		if item.SourceMessageID == message.ID && item.SourceAttachmentID == "" {
+			return id
+		}
+	}
+	now := time.Now().UTC()
+	scope, access, sourceType, owner := "organization", "conversation_members", "platform_conversation", ""
+	if conversation.IngestionScope == "private" {
+		scope, access, sourceType, owner = "private", "owner_only", "private_conversation", conversation.OwnerUserID
+	}
+	item := domain.KnowledgeItem{
+		ID: uuid.NewString(), KnowledgeBaseID: conversation.KnowledgeBaseID, KnowledgeScope: scope, AccessScope: access,
+		OwnerUserID: owner, OrganizationID: conversation.OrganizationID, ConversationID: conversation.ID,
+		ExternalConversationID: conversation.ExternalConversationID, SourceType: sourceType, SourceMessageID: message.ID,
+		ContentType: "text", ContentRef: "message:" + message.ID + ":display", OriginalContentRef: "message:" + message.ID + ":original",
+		ContentHash: message.ContentHash, ContentVersion: message.ContentVersion, ContentVisibility: "original",
+		SecurityStatus: "pending", ContentSaved: true, OwnershipReady: true, ACLSyncStatus: "pending",
+		ProcessingStatus: "pending", LifecycleStatus: "active", CreatedAt: now, UpdatedAt: now,
+	}
+	if message.ClassificationStatus == "succeeded" {
+		item.SecurityReady, item.SecurityStatus, item.Sensitivity = true, "classified", "internal"
+		item.ContentAccessRequired, item.OriginalAccessRequired = message.Sensitive, message.Sensitive
+		if message.Sensitive {
+			item.ContentVisibility, item.Sensitivity = "masked", "restricted"
+		}
+	}
+	s.knowledgeItems[item.ID] = item
+	s.addEventLocked(ctx, "permission.sync.requested", conversation, map[string]any{"knowledge_item_id": item.ID, "content_version": item.ContentVersion})
+	return item.ID
+}
+
+func (s *MemoryStore) ensureAttachmentKnowledgeItemLocked(ctx context.Context, conversation domain.ConversationIngestion, message domain.Message, attachment domain.Attachment) string {
+	for id, item := range s.knowledgeItems {
+		if item.SourceAttachmentID == attachment.ID {
+			return id
+		}
+	}
+	now := time.Now().UTC()
+	scope, access, sourceType, owner := "organization", "conversation_members", "platform_conversation", ""
+	if conversation.IngestionScope == "private" {
+		scope, access, sourceType, owner = "private", "owner_only", "private_conversation", conversation.OwnerUserID
+	}
+	contentType := "file"
+	if strings.HasPrefix(strings.ToLower(attachment.MIMEType), "image/") {
+		contentType = "image"
+	}
+	hash := attachment.ContentHash
+	if hash == "" {
+		hash = hashText(attachment.FileName)
+	}
+	item := domain.KnowledgeItem{
+		ID: uuid.NewString(), KnowledgeBaseID: conversation.KnowledgeBaseID, KnowledgeScope: scope, AccessScope: access,
+		OwnerUserID: owner, OrganizationID: conversation.OrganizationID, ConversationID: conversation.ID,
+		ExternalConversationID: conversation.ExternalConversationID, SourceType: sourceType,
+		SourceMessageID: message.ID, SourceAttachmentID: attachment.ID, ContentType: contentType,
+		ContentRef: "attachment:" + attachment.ID, OriginalContentRef: "attachment:" + attachment.ID,
+		ContentHash: hash, ContentVersion: attachment.ContentVersion, ContentVisibility: "original",
+		OriginalAccessRequired: attachment.Sensitive, SecurityStatus: "classified", Sensitivity: "internal",
+		ContentSaved: attachment.ContentStatus == "ready", OwnershipReady: true, SecurityReady: true,
+		ACLSyncStatus: "pending", ProcessingStatus: "pending", LifecycleStatus: "active",
+		ContentAccessRequired: attachment.ContentAccessRequired, CreatedAt: now, UpdatedAt: now,
+	}
+	if attachment.Sensitive {
+		item.ContentVisibility, item.Sensitivity = "metadata_only", "restricted"
+	}
+	s.knowledgeItems[item.ID] = item
+	s.addEventLocked(ctx, "permission.sync.requested", conversation, map[string]any{"knowledge_item_id": item.ID, "content_version": item.ContentVersion})
+	return item.ID
+}
 func constantTimeEqual(a, b string) bool {
 	if len(a) != len(b) {
 		return false
@@ -1807,12 +2129,18 @@ func cloneMessage(m domain.Message) domain.Message {
 	return m
 }
 func cloneAttachment(a domain.Attachment) domain.Attachment { return a }
+func cloneKnowledgeItem(item domain.KnowledgeItem) domain.KnowledgeItem {
+	item.Message = nil
+	item.Attachment = nil
+	return item
+}
 func cloneEvent(e domain.OutboxEvent) domain.OutboxEvent {
 	if e.Payload != nil {
-		e.Payload = map[string]any{}
+		payload := make(map[string]any, len(e.Payload))
 		for k, v := range e.Payload {
-			e.Payload[k] = v
+			payload[k] = v
 		}
+		e.Payload = payload
 	}
 	return e
 }
