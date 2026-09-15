@@ -273,6 +273,51 @@ type Message struct {
 	CreatedAt            time.Time    `json:"created_at"`
 }
 
+// UnifiedMessage is the platform-neutral boundary created only after a raw
+// transport candidate has passed filtering and Redis deduplication.
+type UnifiedMessage struct {
+	Source            UnifiedMessageSource       `json:"source"`
+	Message           UnifiedMessageBody         `json:"message"`
+	Attachments       []UnifiedMessageAttachment `json:"attachments"`
+	Cursor            string                     `json:"cursor,omitempty"`
+	SchemaVersion     int                        `json:"schema_version"`
+	PayloadHash       string                     `json:"-"`
+	SourcePayloadHash string                     `json:"-"`
+}
+
+type UnifiedMessageSource struct {
+	Platform               string `json:"platform"`
+	AccountID              string `json:"account_id"`
+	WorkspaceID            string `json:"workspace_id,omitempty"`
+	ConversationExternalID string `json:"conversation_external_id"`
+	MessageExternalID      string `json:"message_external_id"`
+	CollectorID            string `json:"-"`
+}
+
+type UnifiedMessageBody struct {
+	Type        string               `json:"type"`
+	Text        string               `json:"text"`
+	RawText     string               `json:"raw_text"`
+	ContentHash string               `json:"content_hash"`
+	SentAt      time.Time            `json:"sent_at"`
+	CollectedAt time.Time            `json:"collected_at"`
+	Sender      UnifiedMessageSender `json:"sender"`
+}
+
+type UnifiedMessageSender struct {
+	ExternalID  string `json:"external_id,omitempty"`
+	DisplayName string `json:"display_name,omitempty"`
+}
+
+type UnifiedMessageAttachment struct {
+	ExternalAttachmentID string `json:"external_attachment_id"`
+	FileName             string `json:"file_name"`
+	MIMEType             string `json:"mime_type,omitempty"`
+	SizeBytes            int64  `json:"size_bytes"`
+	ContentHash          string `json:"content_hash,omitempty"`
+	DownloadRef          string `json:"download_ref,omitempty"`
+}
+
 // KnowledgeItem is the service boundary consumed by RAG. Platform-specific
 // message and attachment identifiers remain source metadata and are never
 // used as the public processing identity.
@@ -366,6 +411,27 @@ type OutboxEvent struct {
 	LastError      string         `json:"last_error,omitempty"`
 	AvailableAt    time.Time      `json:"available_at,omitempty"`
 	PublishedAt    *time.Time     `json:"published_at,omitempty"`
+}
+
+// EventEnvelope is the stable cross-service contract. Outbox delivery fields
+// stay internal and are never serialized into Redis Stream entries.
+type EventEnvelope struct {
+	EventID        string         `json:"event_id"`
+	EventType      string         `json:"event_type"`
+	SchemaVersion  int            `json:"schema_version"`
+	OccurredAt     time.Time      `json:"occurred_at"`
+	TraceID        string         `json:"trace_id"`
+	OrganizationID string         `json:"organization_id"`
+	Producer       string         `json:"producer"`
+	Payload        map[string]any `json:"payload"`
+}
+
+func (e OutboxEvent) Envelope() EventEnvelope {
+	return EventEnvelope{
+		EventID: e.ID, EventType: e.EventType, SchemaVersion: e.SchemaVersion,
+		OccurredAt: e.OccurredAt, TraceID: e.TraceID, OrganizationID: e.OrganizationID,
+		Producer: e.Producer, Payload: e.Payload,
+	}
 }
 
 func IsPlatform(value string) bool {

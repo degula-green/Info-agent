@@ -1093,7 +1093,7 @@ func (s *PostgresStore) IngestMessage(ctx context.Context, input IngestMessageIn
 	}
 	var existingSourceHash, existingSourceContentHash, existingSourceType string
 	sourceErr := tx.QueryRow(ctx, `SELECT ms.payload_hash,m.content_hash,m.message_type FROM knowledge.message_sources ms JOIN knowledge.messages m ON m.id=ms.message_id WHERE ms.collector_id=$1 AND ms.external_message_id=$2`, input.CollectorID, input.ExternalMessageID).Scan(&existingSourceHash, &existingSourceContentHash, &existingSourceType)
-	if sourceErr == nil && !strings.EqualFold(existingSourceHash, SourcePayloadHash(input)) && !strings.EqualFold(existingSourceContentHash, input.ContentHash) && input.SenderExternalID == "" && !canReclassifyLegacyFile(existingSourceType, input.MessageType, input.Attachments) {
+	if sourceErr == nil && !strings.EqualFold(existingSourceHash, SourcePayloadHash(input)) && !strings.EqualFold(existingSourceContentHash, input.ContentHash) && !canReclassifyLegacyFile(existingSourceType, input.MessageType, input.Attachments) {
 		return nil, apperror.New("external_id_conflict", "external message id has conflicting payload", 409, false)
 	}
 	if sourceErr != nil && !errors.Is(sourceErr, pgx.ErrNoRows) {
@@ -1109,8 +1109,14 @@ func (s *PostgresStore) IngestMessage(ctx context.Context, input IngestMessageIn
 		}
 		identity = identityID
 	}
+	normalizedContent := any(nil)
+	classificationStatus := "pending"
+	if scope == "private" {
+		normalizedContent = nilString(input.Content)
+		classificationStatus = "succeeded"
+	}
 	messageID := uuid.NewString()
-	tag, err := tx.Exec(ctx, `INSERT INTO knowledge.messages (id,conversation_ingestion_id,external_message_id,sender_identity_id,sender_display_name,message_type,normalized_content,content_hash,sent_at,sensitive,classification_status) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,FALSE,'pending') ON CONFLICT (conversation_ingestion_id,external_message_id) DO NOTHING`, messageID, conversationID, input.ExternalMessageID, identity, nilString(senderDisplayName), input.MessageType, nilString(""), input.ContentHash, input.SentAt)
+	tag, err := tx.Exec(ctx, `INSERT INTO knowledge.messages (id,conversation_ingestion_id,external_message_id,sender_identity_id,sender_display_name,message_type,normalized_content,content_hash,sent_at,sensitive,classification_status) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,FALSE,$10) ON CONFLICT (conversation_ingestion_id,external_message_id) DO NOTHING`, messageID, conversationID, input.ExternalMessageID, identity, nilString(senderDisplayName), input.MessageType, normalizedContent, input.ContentHash, input.SentAt, classificationStatus)
 	if err != nil {
 		return nil, dbError(err)
 	}
@@ -1131,7 +1137,7 @@ func (s *PostgresStore) IngestMessage(ctx context.Context, input IngestMessageIn
 		// The provider can improve group-sender parsing without changing the
 		// message identity. Preserve the original body in that case, but allow
 		// its verified sender identity to be corrected during replay.
-		if !strings.EqualFold(existingHash, input.ContentHash) && input.SenderExternalID == "" {
+		if !strings.EqualFold(existingHash, input.ContentHash) {
 			return nil, apperror.New("external_id_conflict", "external message id has conflicting content", 409, false)
 		}
 		if existingType != input.MessageType {
@@ -1154,7 +1160,11 @@ func (s *PostgresStore) IngestMessage(ctx context.Context, input IngestMessageIn
 		}
 	}
 	sourceID := uuid.NewString()
-	_, err = tx.Exec(ctx, `INSERT INTO knowledge.message_sources (id,message_id,collector_id,external_message_id,payload_hash,ingest_cursor,collected_at) VALUES ($1,$2,$3,$4,$5,$6,now()) ON CONFLICT (collector_id,external_message_id) DO UPDATE SET payload_hash=EXCLUDED.payload_hash,ingest_cursor=COALESCE(NULLIF(EXCLUDED.ingest_cursor,''),knowledge.message_sources.ingest_cursor)`, sourceID, messageID, input.CollectorID, input.ExternalMessageID, SourcePayloadHash(input), nilString(input.Cursor))
+	collectedAt := input.CollectedAt.UTC()
+	if collectedAt.IsZero() {
+		collectedAt = time.Now().UTC()
+	}
+	_, err = tx.Exec(ctx, `INSERT INTO knowledge.message_sources (id,message_id,collector_id,external_message_id,payload_hash,ingest_cursor,collected_at) VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT (collector_id,external_message_id) DO UPDATE SET payload_hash=EXCLUDED.payload_hash,ingest_cursor=COALESCE(NULLIF(EXCLUDED.ingest_cursor,''),knowledge.message_sources.ingest_cursor)`, sourceID, messageID, input.CollectorID, input.ExternalMessageID, SourcePayloadHash(input), nilString(input.Cursor), collectedAt)
 	if err != nil {
 		return nil, dbError(err)
 	}
@@ -1210,16 +1220,18 @@ func (s *PostgresStore) IngestMessage(ctx context.Context, input IngestMessageIn
 		if _, err = tx.Exec(ctx, `INSERT INTO knowledge.message_private_content (message_id,content) VALUES ($1,$2)`, messageID, input.Content); err != nil {
 			return nil, dbError(err)
 		}
-		payload, _ := json.Marshal(map[string]any{"message_id": messageID, "content_version": 1})
-		_, err = tx.Exec(ctx, `INSERT INTO knowledge.outbox_events (id,aggregate_type,aggregate_id,event_type,trace_id,organization_id,payload) VALUES ($1,'message',$2,'privacy.scan.requested',$3,$4,$5)`, uuid.NewString(), messageID, traceID, nilString(org), payload)
-		if err != nil {
-			return nil, dbError(err)
+		if scope != "private" && strings.TrimSpace(input.Content) != "" {
+			payload, _ := json.Marshal(map[string]any{"message_id": messageID, "content_version": 1})
+			_, err = tx.Exec(ctx, `INSERT INTO knowledge.outbox_events (id,aggregate_type,aggregate_id,event_type,trace_id,organization_id,payload) VALUES ($1,'message',$2,'privacy.scan.requested',$3,$4,$5)`, uuid.NewString(), messageID, traceID, nilString(org), payload)
+			if err != nil {
+				return nil, dbError(err)
+			}
 		}
 	}
 	if err = tx.Commit(ctx); err != nil {
 		return nil, dbError(err)
 	}
-	now := time.Now().UTC()
+	now := collectedAt
 	message := domain.Message{ID: messageID, ConversationID: conversationID, ExternalMessageID: input.ExternalMessageID, SenderDisplayName: input.SenderDisplayName, MessageType: input.MessageType, Content: "", Sensitive: false, ClassificationStatus: "pending", ContentHash: input.ContentHash, ContentVersion: 1, SentAt: input.SentAt, CollectedAt: now, LifecycleStatus: "active", VectorStatus: "pending", Attachments: attachments, CreatedAt: now}
 	return &IngestResult{Message: message, Attachments: attachments, Duplicate: duplicate, CursorUpdated: false}, nil
 }
@@ -1257,7 +1269,10 @@ func ensureMessageKnowledgeItem(ctx context.Context, tx pgx.Tx, source knowledge
 		return "", dbError(err)
 	}
 	securityStatus, sensitivity, visibility := "pending", any(nil), "original"
-	if classified {
+	if scope == "private" {
+		classified, sensitive = true, false
+		securityStatus, sensitivity = "not_required", "internal"
+	} else if classified {
 		securityStatus, sensitivity = "classified", "internal"
 		if sensitive {
 			sensitivity, visibility = "restricted", "masked"
@@ -1306,14 +1321,18 @@ func ensureAttachmentKnowledgeItem(ctx context.Context, tx pgx.Tx, source knowle
 	if attachment.Sensitive {
 		visibility, sensitivity = "metadata_only", "restricted"
 	}
+	securityStatus := "classified"
+	if scope == "private" {
+		securityStatus = "not_required"
+	}
 	contentRef := "attachment:" + attachment.ID
 	if attachment.ObjectRef != "" {
 		contentRef = attachment.ObjectRef
 	}
 	err = tx.QueryRow(ctx, `INSERT INTO knowledge.knowledge_items
 		(id,knowledge_base_id,knowledge_scope,access_scope,owner_user_id,organization_id,conversation_ingestion_id,source_type,source_message_id,source_attachment_id,content_type,content_ref,original_content_ref,content_hash,content_version,content_visibility,original_access_required,security_status,sensitivity,content_saved,ownership_ready,security_ready,permission_ready,acl_version,acl_sync_status,processing_status,lifecycle_status)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$12,$13,$14,$15,$16,'classified',$17,$18,TRUE,TRUE,FALSE,0,'pending','pending','active')
-		ON CONFLICT DO NOTHING RETURNING id::text`, itemID, nilString(source.KnowledgeBaseID), scope, access, owner, organization, source.ConversationID, sourceType, messageID, attachment.ID, contentType, contentRef, contentHash, attachment.ContentVersion, visibility, attachment.Sensitive, sensitivity, attachment.ContentStatus == "ready").Scan(&itemID)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$12,$13,$14,$15,$16,$17,$18,$19,TRUE,TRUE,FALSE,0,'pending','pending','active')
+		ON CONFLICT DO NOTHING RETURNING id::text`, itemID, nilString(source.KnowledgeBaseID), scope, access, owner, organization, source.ConversationID, sourceType, messageID, attachment.ID, contentType, contentRef, contentHash, attachment.ContentVersion, visibility, attachment.Sensitive, securityStatus, sensitivity, attachment.ContentStatus == "ready").Scan(&itemID)
 	inserted := err == nil
 	if errors.Is(err, pgx.ErrNoRows) {
 		err = tx.QueryRow(ctx, `SELECT id::text FROM knowledge.knowledge_items WHERE source_attachment_id=$1`, attachment.ID).Scan(&itemID)
@@ -1746,7 +1765,7 @@ func (s *PostgresStore) TryMarkKnowledgeReady(ctx context.Context, id, traceID s
 	if err != nil {
 		return false, dbError(err)
 	}
-	if item.ProcessingStatus == "published" || item.ProcessingStatus == "processing" || item.ProcessingStatus == "ready" {
+	if item.ProcessingStatus == "processing" || item.ProcessingStatus == "ready" {
 		return false, nil
 	}
 	if !item.ContentSaved || !item.OwnershipReady || !item.SecurityReady || !item.PermissionReady || item.ACLSyncStatus != "synced" {
@@ -1758,7 +1777,7 @@ func (s *PostgresStore) TryMarkKnowledgeReady(ctx context.Context, id, traceID s
 		"content_version": item.ContentVersion, "acl_version": item.ACLVersion,
 		"content_variant": "display", "content_access_required": item.ContentAccessRequired,
 	})
-	if _, err = tx.Exec(ctx, `UPDATE knowledge.knowledge_items SET processing_status='published',last_error=NULL,updated_at=now() WHERE id=$1`, id); err != nil {
+	if _, err = tx.Exec(ctx, `UPDATE knowledge.knowledge_items SET processing_status='ready',last_error=NULL,updated_at=now() WHERE id=$1`, id); err != nil {
 		return false, dbError(err)
 	}
 	tag, err := tx.Exec(ctx, `INSERT INTO knowledge.outbox_events (id,aggregate_type,aggregate_id,event_type,event_version,schema_version,organization_id,trace_id,payload,status,retry_count,available_at) VALUES ($1,'knowledge_item',$2,'knowledge.ready',$3,1,$4,$5,$6,'pending',0,now()) ON CONFLICT DO NOTHING`, uuid.NewString(), id, item.ContentVersion, nilString(item.OrganizationID), traceID, payload)

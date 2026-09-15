@@ -177,9 +177,8 @@ func TestMemoryMessageAttachmentIdempotenceAndCursorMonotonicity(t *testing.T) {
 	input.Content = "hello without a legacy sender marker"
 	input.ContentHash = hashForTest(input.Content)
 	input.PayloadHash, _ = CalculatePayloadHash(input)
-	corrected, err = repo.IngestMessage(ctx, input)
-	if err != nil || !corrected.Duplicate || corrected.Message.SenderDisplayName != "Correct sender" {
-		t.Fatalf("sender correction with a legacy content hash failed: result=%+v err=%v", corrected, err)
+	if _, err = repo.IngestMessage(ctx, input); apperror.From(err).Code != "external_id_conflict" {
+		t.Fatalf("conflicting content with a sender id was not rejected: %v", err)
 	}
 	tracePreserved := false
 	for _, event := range repo.outbox {

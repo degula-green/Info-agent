@@ -100,13 +100,10 @@ def normalized_type(raw: dict[str, Any]) -> str:
     if value in {"49", "文件/链接/卡片"}:
         return "file" if is_file_payload(str(raw.get("content") or "")) else "text"
     mapped = {
-        "49": "file", "3": "image", "43": "file", "video": "file", "10000": "system",
-        # Knowledge's ingestion contract represents provider videos as files
-        # with a video MIME type. Keep the media classification below as
-        # "video" so downloads and previews still use the video path.
-        "文本": "text", "图片": "image", "视频": "file", "文件": "file",
+        "49": "file", "3": "image", "43": "video", "video": "video", "10000": "system",
+        "文本": "text", "图片": "image", "视频": "video", "文件": "file",
     }
-    return mapped.get(value, value if value in {"text", "image", "file", "mixed", "system"} else "text")
+    return mapped.get(value, value if value in {"text", "image", "file", "video", "mixed", "system"} else "text")
 
 def is_file_payload(content: str) -> bool:
     # WeChat stores files, links, and mini-program cards under one type. A

@@ -25,13 +25,13 @@ type capturingKV struct {
 	kv.Store
 	mu        sync.Mutex
 	streams   []string
-	published []domain.OutboxEvent
+	published []domain.EventEnvelope
 }
 
 func (s *capturingKV) Publish(_ context.Context, stream string, payload any) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	event, ok := payload.(domain.OutboxEvent)
+	event, ok := payload.(domain.EventEnvelope)
 	if !ok {
 		return nil
 	}
@@ -175,7 +175,7 @@ func TestPrivacyPermissionAndReadyOutboxContract(t *testing.T) {
 		t.Fatal(err)
 	}
 	item, _ = f.repo.GetKnowledgeItemByMessage(context.Background(), result.Message.ID)
-	if !item.PermissionReady || item.ACLSyncStatus != "synced" || item.ACLVersion != 3 || item.ProcessingStatus != "published" {
+	if !item.PermissionReady || item.ACLSyncStatus != "synced" || item.ACLVersion != 3 || item.ProcessingStatus != "ready" {
 		t.Fatalf("ready gate did not complete: %+v", item)
 	}
 	if _, err := f.repo.TryMarkKnowledgeReady(context.Background(), item.ID, "again"); err != nil {
@@ -193,6 +193,15 @@ func TestPrivacyPermissionAndReadyOutboxContract(t *testing.T) {
 	}
 	if len(f.store.streams) != 1 || f.store.streams[0] != "knowledge:ready" || len(f.store.published) != 1 {
 		t.Fatalf("ready event was published to wrong stream: streams=%+v events=%+v", f.store.streams, f.store.published)
+	}
+	raw, err := json.Marshal(f.store.published[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, internalField := range []string{"retry_count", "last_error", "available_at", "published_at"} {
+		if bytes.Contains(raw, []byte(internalField)) {
+			t.Fatalf("outbox field %q leaked into Redis envelope: %s", internalField, raw)
+		}
 	}
 	if remaining, _ := f.repo.GetOutbox(context.Background(), 10); len(remaining) != 0 {
 		t.Fatalf("published outbox row remained pending: %+v", remaining)
@@ -238,5 +247,32 @@ func TestFeishuAndWechatUseSameNormalizedMessageSemantics(t *testing.T) {
 	}
 	if left.Message.MessageType != right.Message.MessageType || left.Message.ContentHash != right.Message.ContentHash || left.Message.SenderDisplayName != right.Message.SenderDisplayName || !left.Message.SentAt.Equal(right.Message.SentAt) {
 		t.Fatalf("platforms produced different normalized semantics: feishu=%+v wechat=%+v", left.Message, right.Message)
+	}
+}
+
+func TestNormalizationCreatesCompleteUnifiedMessageAfterFiltering(t *testing.T) {
+	f := newPipelineFixture(t, domain.PlatformFeishu)
+	collectedAt := time.Date(2026, 9, 16, 8, 30, 0, 0, time.UTC)
+	input := pipelineInput(f, "unified-1", "file", `{"file_key":"f-1","file_name":"report.docx"}`, repository.AttachmentInput{
+		ExternalAttachmentID: "f-1", FileName: "report.docx", MIMEType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document", DownloadRef: "https://provider.invalid/f-1",
+	})
+	filtered, discarded := repository.FilterMessageCandidate(input)
+	if discarded || filtered.Content != "" {
+		t.Fatalf("attachment candidate was not filtered before normalization: %+v", filtered)
+	}
+	unified, err := normalizeMessageCandidate(filtered, input.Content, input.PayloadHash, domain.ConnectorAccount{
+		ID: "internal-account", ExternalAccountID: "provider-account", Platform: domain.PlatformFeishu, WorkspaceKey: "tenant-1",
+	}, collectedAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if unified.SchemaVersion != 1 || unified.Source.Platform != domain.PlatformFeishu || unified.Source.AccountID != "provider-account" || unified.Source.WorkspaceID != "tenant-1" {
+		t.Fatalf("unified source contract is incomplete: %+v", unified)
+	}
+	if unified.Message.Text != "" || unified.Message.RawText != input.Content || !unified.Message.CollectedAt.Equal(collectedAt) || !unified.Message.SentAt.Equal(input.SentAt) {
+		t.Fatalf("unified message timestamps/content are incorrect: %+v", unified.Message)
+	}
+	if len(unified.Attachments) != 1 || unified.Attachments[0].DownloadRef == "" {
+		t.Fatalf("unified attachment contract is incomplete: %+v", unified.Attachments)
 	}
 }

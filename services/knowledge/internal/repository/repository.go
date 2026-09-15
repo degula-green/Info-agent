@@ -51,6 +51,12 @@ type IngestMessageInput struct {
 	SentAt                 time.Time         `json:"sent_at"`
 	Cursor                 string            `json:"cursor"`
 	Attachments            []AttachmentInput `json:"attachments"`
+	Platform               string            `json:"-"`
+	AccountID              string            `json:"-"`
+	WorkspaceID            string            `json:"-"`
+	RawContent             string            `json:"-"`
+	CollectedAt            time.Time         `json:"-"`
+	SchemaVersion          int               `json:"-"`
 }
 
 type AttachmentInput struct {
@@ -59,6 +65,7 @@ type AttachmentInput struct {
 	MIMEType             string `json:"mime_type"`
 	SizeBytes            int64  `json:"size_bytes"`
 	ContentHash          string `json:"content_hash"`
+	DownloadRef          string `json:"download_ref,omitempty"`
 }
 
 func validateIngestInput(input IngestMessageInput) error {

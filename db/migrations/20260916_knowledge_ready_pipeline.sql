@@ -104,6 +104,19 @@ CREATE INDEX IF NOT EXISTS knowledge_items_ready_gate_runtime_idx
     ON knowledge.knowledge_items(processing_status, updated_at)
     WHERE lifecycle_status = 'active';
 
+-- Private conversations are owner-only and do not enter the organization
+-- privacy scanner. Make their display content immediately usable.
+UPDATE knowledge.messages m
+SET normalized_content=pc.content,
+    sensitive=FALSE,
+    classification_status='succeeded'
+FROM knowledge.message_private_content pc,
+     knowledge.conversation_ingestions ci
+WHERE pc.message_id=m.id
+  AND ci.id=m.conversation_ingestion_id
+  AND ci.ingestion_scope='private'
+  AND btrim(pc.content)<>'';
+
 INSERT INTO knowledge.knowledge_items (
     id,knowledge_base_id,knowledge_scope,access_scope,owner_user_id,organization_id,
     conversation_ingestion_id,source_type,source_message_id,content_type,content_ref,
@@ -120,11 +133,11 @@ SELECT gen_random_uuid(),ci.knowledge_base_id,
        CASE WHEN ci.ingestion_scope='private' THEN 'private_conversation' ELSE 'platform_conversation' END,
        m.id,'text','message:'||m.id::text||':display','message:'||m.id::text||':original',
        m.content_hash,m.content_version,
-       CASE WHEN COALESCE(m.sensitive,FALSE) THEN 'masked' ELSE 'original' END,
-       COALESCE(m.sensitive,FALSE),
-       CASE WHEN m.classification_status='succeeded' THEN 'classified' ELSE 'pending' END,
+       CASE WHEN ci.ingestion_scope='private' THEN 'original' WHEN COALESCE(m.sensitive,FALSE) THEN 'masked' ELSE 'original' END,
+       CASE WHEN ci.ingestion_scope='private' THEN FALSE ELSE COALESCE(m.sensitive,FALSE) END,
+       CASE WHEN ci.ingestion_scope='private' THEN 'not_required' WHEN m.classification_status='succeeded' THEN 'classified' ELSE 'pending' END,
        CASE WHEN COALESCE(m.sensitive,FALSE) THEN 'restricted' ELSE 'internal' END,
-       TRUE,TRUE,m.classification_status='succeeded',FALSE,0,'pending','pending','active'
+       TRUE,TRUE,(ci.ingestion_scope='private' OR m.classification_status='succeeded'),FALSE,0,'pending','pending','active'
 FROM knowledge.messages m
 JOIN knowledge.conversation_ingestions ci ON ci.id=m.conversation_ingestion_id
 JOIN knowledge.message_private_content pc ON pc.message_id=m.id AND btrim(pc.content)<>''
@@ -156,7 +169,7 @@ SELECT gen_random_uuid(),ci.knowledge_base_id,
        COALESCE(a.content_hash,encode(digest(a.file_name,'sha256'),'hex')),
        a.content_version,
        CASE WHEN COALESCE(a.sensitive,FALSE) THEN 'metadata_only' ELSE 'original' END,
-       COALESCE(a.sensitive,FALSE),'classified',
+       COALESCE(a.sensitive,FALSE),CASE WHEN ci.ingestion_scope='private' THEN 'not_required' ELSE 'classified' END,
        CASE WHEN COALESCE(a.sensitive,FALSE) THEN 'restricted' ELSE 'internal' END,
        a.content_status='ready',TRUE,TRUE,FALSE,0,'pending','pending','active'
 FROM knowledge.attachments a

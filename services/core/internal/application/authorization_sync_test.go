@@ -5,9 +5,18 @@ import (
 	"testing"
 )
 
-type recordingRelationWriter struct{ tuples []RelationTuple }
+type recordingRelationWriter struct {
+	tuples         []RelationTuple
+	managedObjects []string
+}
 
 func (w *recordingRelationWriter) WriteRelations(_ context.Context, tuples []RelationTuple) error {
+	w.tuples = append([]RelationTuple(nil), tuples...)
+	return nil
+}
+
+func (w *recordingRelationWriter) SyncRelations(_ context.Context, managedObjects []string, tuples []RelationTuple) error {
+	w.managedObjects = append([]string(nil), managedObjects...)
 	w.tuples = append([]RelationTuple(nil), tuples...)
 	return nil
 }
@@ -48,6 +57,9 @@ func TestPermissionSyncBuildsOrganizationAttachmentRelationsAndStableVersion(t *
 	}
 	if first.ACLVersion != 1 || first.RelationCount != 8 {
 		t.Fatalf("unexpected first sync: %+v tuples=%+v", first, writer.tuples)
+	}
+	if len(writer.managedObjects) != 4 || writer.managedObjects[3] != "attachment_content:att-1" {
+		t.Fatalf("permission sync did not own the complete resource set: %+v", writer.managedObjects)
 	}
 	want := map[RelationTuple]bool{
 		{User: "user:member-1", Relation: "member", Object: "organization:org-1"}:                                    true,

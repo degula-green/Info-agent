@@ -14,11 +14,21 @@ class StreamUnavailable(RuntimeError):
 
 
 def validate_envelope(value: dict[str, Any]) -> dict[str, Any]:
-    required = ("event_id", "event_type", "schema_version", "occurred_at", "trace_id", "producer", "payload")
-    if not isinstance(value, dict) or any(not value.get(name) for name in required):
+    required = ("event_id", "event_type", "schema_version", "occurred_at", "trace_id", "organization_id", "producer", "payload")
+    if not isinstance(value, dict) or any(name not in value for name in required):
         raise ValueError("event envelope is missing required fields")
+    if any(not value.get(name) for name in ("event_id", "event_type", "schema_version", "occurred_at", "trace_id", "producer")):
+        raise ValueError("event envelope has empty required fields")
     if not isinstance(value["payload"], dict):
         raise ValueError("event payload must be an object")
+    if value["event_type"] == "knowledge.ready":
+        payload_fields = (
+            "resource_type", "resource_id", "knowledge_item_id",
+            "content_version", "acl_version", "content_variant",
+            "content_access_required",
+        )
+        if any(name not in value["payload"] for name in payload_fields):
+            raise ValueError("knowledge.ready payload is missing required fields")
     return value
 
 

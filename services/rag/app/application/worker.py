@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import tempfile
 import shutil
+import tempfile
 import uuid
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -140,7 +140,27 @@ class RAGEventHandler:
         if isinstance(attachments, list) and attachments:
             base = {key: value for key, value in knowledge.items() if key != "attachments"}
             base.setdefault("organization_id", organization_id)
-            return [AttachmentContext.from_mapping({**base, **item, "knowledge_item_id": knowledge_item_id, "content_version": payload.get("content_version", knowledge.get("content_version", 1)), "acl_version": payload.get("acl_version", knowledge.get("acl_version", 0))}) for item in attachments if isinstance(item, dict)]
+            contexts: list[AttachmentContext] = []
+            for item in attachments:
+                if not isinstance(item, dict):
+                    continue
+                candidate = {
+                    **base,
+                    **item,
+                    "knowledge_item_id": knowledge_item_id,
+                    "content_version": payload.get("content_version", knowledge.get("content_version", 1)),
+                    "acl_version": payload.get("acl_version", knowledge.get("acl_version", 0)),
+                }
+                context = AttachmentContext.from_mapping(candidate)
+                if not context.content_access_required:
+                    detail = self.knowledge.get_attachment(
+                        context.attachment_id,
+                        content_version=context.content_version,
+                        acl_version=context.acl_version,
+                    )
+                    context = AttachmentContext.from_mapping({**candidate, **detail})
+                contexts.append(context)
+            return contexts
         content = self.knowledge.get_content(knowledge_item_id, content_version=payload.get("content_version"), acl_version=payload.get("acl_version"), content_variant=payload.get("content_variant") or "display")
         text = content.get("text") or content.get("content") or content.get("body") if isinstance(content, dict) else None
         if not isinstance(text, str) or not text.strip():

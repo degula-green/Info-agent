@@ -83,12 +83,98 @@ func (c *Client) WriteRelations(ctx context.Context, tuples []application.Relati
 	if len(missing) == 0 {
 		return nil
 	}
-	body := map[string]any{"writes": map[string]any{"tuple_keys": missing}}
+	return c.writeChanges(ctx, missing, nil)
+}
+
+func (c *Client) SyncRelations(ctx context.Context, managedObjects []string, tuples []application.RelationTuple) error {
+	desired := make(map[string]application.RelationTuple, len(tuples))
+	for _, tuple := range tuples {
+		desired[relationKey(tuple)] = tuple
+	}
+	managed := make(map[string]struct{}, len(managedObjects))
+	current := make(map[string]application.RelationTuple)
+	for _, object := range managedObjects {
+		object = strings.TrimSpace(object)
+		if object == "" {
+			continue
+		}
+		managed[object] = struct{}{}
+		tuplesForObject, err := c.readObjectRelations(ctx, object)
+		if err != nil {
+			return err
+		}
+		for _, tuple := range tuplesForObject {
+			current[relationKey(tuple)] = tuple
+		}
+	}
+	writes := make([]map[string]string, 0)
+	deletes := make([]map[string]string, 0)
+	for key, tuple := range current {
+		if _, keep := desired[key]; !keep {
+			deletes = append(deletes, relationMap(tuple))
+		}
+	}
+	for key, tuple := range desired {
+		if _, owned := managed[tuple.Object]; owned {
+			if _, exists := current[key]; !exists {
+				writes = append(writes, relationMap(tuple))
+			}
+			continue
+		}
+		exists, err := c.relationExists(ctx, tuple)
+		if err != nil {
+			return err
+		}
+		if !exists {
+			writes = append(writes, relationMap(tuple))
+		}
+	}
+	return c.writeChanges(ctx, writes, deletes)
+}
+
+func (c *Client) readObjectRelations(ctx context.Context, object string) ([]application.RelationTuple, error) {
+	body := map[string]any{"tuple_key": map[string]string{"object": object}, "page_size": 100}
+	var response struct {
+		Tuples []struct {
+			Key application.RelationTuple `json:"key"`
+		} `json:"tuples"`
+	}
+	if err := c.post(ctx, "/read", body, &response); err != nil {
+		return nil, err
+	}
+	out := make([]application.RelationTuple, 0, len(response.Tuples))
+	for _, tuple := range response.Tuples {
+		if tuple.Key.Object == object {
+			out = append(out, tuple.Key)
+		}
+	}
+	return out, nil
+}
+
+func (c *Client) writeChanges(ctx context.Context, writes, deletes []map[string]string) error {
+	if len(writes) == 0 && len(deletes) == 0 {
+		return nil
+	}
+	body := map[string]any{}
+	if len(writes) > 0 {
+		body["writes"] = map[string]any{"tuple_keys": writes}
+	}
+	if len(deletes) > 0 {
+		body["deletes"] = map[string]any{"tuple_keys": deletes}
+	}
 	if c.modelID != "" {
 		body["authorization_model_id"] = c.modelID
 	}
 	var response map[string]any
 	return c.post(ctx, "/write", body, &response)
+}
+
+func relationKey(tuple application.RelationTuple) string {
+	return tuple.User + "\x00" + tuple.Relation + "\x00" + tuple.Object
+}
+
+func relationMap(tuple application.RelationTuple) map[string]string {
+	return map[string]string{"user": tuple.User, "relation": tuple.Relation, "object": tuple.Object}
 }
 
 func (c *Client) relationExists(ctx context.Context, tuple application.RelationTuple) (bool, error) {

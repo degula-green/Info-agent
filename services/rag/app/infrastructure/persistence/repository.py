@@ -95,7 +95,7 @@ class PostgresRagRepository:
                     -- with a different payload must be rejected below rather
                     -- than silently replacing the idempotency fingerprint.
                     ON CONFLICT (source_event_id) DO UPDATE
-                      SET payload_hash=rag.processing_jobs.payload_hash
+                      SET payload_hash={self.schema}.processing_jobs.payload_hash
                     RETURNING id::text,payload_hash""",
                     (event_id, str(envelope.get("event_type") or ""), payload_hash, envelope.get("organization_id"), knowledge_item_id, int(payload.get("content_version") or 1), int(payload.get("acl_version") or 0), job_type),
                 )

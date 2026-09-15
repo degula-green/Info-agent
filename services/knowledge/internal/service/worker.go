@@ -388,7 +388,7 @@ func isAuthorizationError(err error) bool {
 func attachmentInputs(values []platform.Attachment) []repository.AttachmentInput {
 	out := make([]repository.AttachmentInput, 0, len(values))
 	for _, value := range values {
-		out = append(out, repository.AttachmentInput{ExternalAttachmentID: value.ExternalAttachmentID, FileName: value.FileName, MIMEType: value.MIMEType, SizeBytes: value.SizeBytes, ContentHash: value.ContentHash})
+		out = append(out, repository.AttachmentInput{ExternalAttachmentID: value.ExternalAttachmentID, FileName: value.FileName, MIMEType: value.MIMEType, SizeBytes: value.SizeBytes, ContentHash: value.ContentHash, DownloadRef: value.DownloadURL})
 	}
 	return out
 }

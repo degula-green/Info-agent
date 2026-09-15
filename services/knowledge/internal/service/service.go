@@ -1458,7 +1458,11 @@ func (s *Service) IngestMessage(ctx context.Context, input repository.IngestMess
 	if err != nil {
 		return nil, err
 	}
-	dedupeKey := messageDedupeKey(account.Platform, account.ID, input.ExternalConversationID, input.ExternalMessageID)
+	accountID := strings.TrimSpace(account.ExternalAccountID)
+	if accountID == "" {
+		accountID = account.ID
+	}
+	dedupeKey := messageDedupeKey(account.Platform, accountID, input.ExternalConversationID, input.ExternalMessageID)
 	if s.KV != nil {
 		var cached messageDedupeRecord
 		if found, cacheErr := s.KV.Get(ctx, dedupeKey, &cached); cacheErr != nil {
@@ -1472,11 +1476,11 @@ func (s *Service) IngestMessage(ctx context.Context, input repository.IngestMess
 			return &result, nil
 		}
 	}
-	normalized, err := normalizeMessageCandidate(filtered, input.PayloadHash)
+	normalized, err := normalizeMessageCandidate(filtered, input.Content, input.PayloadHash, *account, s.Now())
 	if err != nil {
 		return nil, apperror.Wrap("invalid_message", "message candidate cannot be normalized", 400, false, err)
 	}
-	result, err := s.Repo.IngestMessage(ctx, normalized)
+	result, err := s.Repo.IngestMessage(ctx, repositoryInputFromUnified(normalized))
 	if err != nil {
 		return nil, err
 	}
@@ -1488,21 +1492,66 @@ func (s *Service) IngestMessage(ctx context.Context, input repository.IngestMess
 	return result, nil
 }
 
-func normalizeMessageCandidate(input repository.IngestMessageInput, sourcePayloadHash string) (repository.IngestMessageInput, error) {
+func normalizeMessageCandidate(input repository.IngestMessageInput, rawContent, sourcePayloadHash string, account domain.ConnectorAccount, collectedAt time.Time) (domain.UnifiedMessage, error) {
 	// Platform adapters already extracted source identities and attachment
 	// metadata. This is the first point at which they become the shared domain
 	// contract; provider-specific types never pass this boundary.
 	input.MessageType = strings.ToLower(input.MessageType)
 	input.SentAt = input.SentAt.UTC()
-	input.SourcePayloadHash = sourcePayloadHash
 	contentSum := sha256.Sum256([]byte(input.Content))
 	input.ContentHash = hex.EncodeToString(contentSum[:])
 	payloadHash, err := repository.CalculatePayloadHash(input)
 	if err != nil {
-		return input, err
+		return domain.UnifiedMessage{}, err
 	}
-	input.PayloadHash = payloadHash
-	return input, nil
+	attachments := make([]domain.UnifiedMessageAttachment, 0, len(input.Attachments))
+	for _, attachment := range input.Attachments {
+		attachments = append(attachments, domain.UnifiedMessageAttachment{
+			ExternalAttachmentID: attachment.ExternalAttachmentID,
+			FileName:             attachment.FileName, MIMEType: attachment.MIMEType,
+			SizeBytes: attachment.SizeBytes, ContentHash: attachment.ContentHash,
+			DownloadRef: attachment.DownloadRef,
+		})
+	}
+	return domain.UnifiedMessage{
+		Source: domain.UnifiedMessageSource{
+			Platform: account.Platform, AccountID: firstNonEmptyString(account.ExternalAccountID, account.ID),
+			WorkspaceID: account.WorkspaceKey, ConversationExternalID: input.ExternalConversationID,
+			MessageExternalID: input.ExternalMessageID, CollectorID: input.CollectorID,
+		},
+		Message: domain.UnifiedMessageBody{
+			Type: input.MessageType, Text: input.Content, RawText: rawContent,
+			ContentHash: input.ContentHash, SentAt: input.SentAt,
+			CollectedAt: collectedAt.UTC(),
+			Sender:      domain.UnifiedMessageSender{ExternalID: input.SenderExternalID, DisplayName: input.SenderDisplayName},
+		},
+		Attachments: attachments, Cursor: input.Cursor, SchemaVersion: 1, PayloadHash: payloadHash,
+		SourcePayloadHash: sourcePayloadHash,
+	}, nil
+}
+
+func repositoryInputFromUnified(input domain.UnifiedMessage) repository.IngestMessageInput {
+	attachments := make([]repository.AttachmentInput, 0, len(input.Attachments))
+	for _, attachment := range input.Attachments {
+		attachments = append(attachments, repository.AttachmentInput{
+			ExternalAttachmentID: attachment.ExternalAttachmentID,
+			FileName:             attachment.FileName, MIMEType: attachment.MIMEType,
+			SizeBytes: attachment.SizeBytes, ContentHash: attachment.ContentHash,
+			DownloadRef: attachment.DownloadRef,
+		})
+	}
+	return repository.IngestMessageInput{
+		CollectorID:            input.Source.CollectorID,
+		ExternalConversationID: input.Source.ConversationExternalID,
+		ExternalMessageID:      input.Source.MessageExternalID,
+		PayloadHash:            input.PayloadHash, SourcePayloadHash: input.SourcePayloadHash,
+		SenderExternalID: input.Message.Sender.ExternalID, SenderDisplayName: input.Message.Sender.DisplayName,
+		MessageType: input.Message.Type, Content: input.Message.Text, ContentHash: input.Message.ContentHash,
+		SentAt: input.Message.SentAt, Cursor: input.Cursor, Attachments: attachments,
+		Platform: input.Source.Platform, AccountID: input.Source.AccountID,
+		WorkspaceID: input.Source.WorkspaceID, RawContent: input.Message.RawText,
+		CollectedAt: input.Message.CollectedAt, SchemaVersion: input.SchemaVersion,
+	}
 }
 
 func messageDedupeKey(platformName, accountID, conversationID, messageID string) string {
@@ -1681,7 +1730,7 @@ func (s *Service) PublishOutbox(ctx context.Context) error {
 	}
 	var firstErr error
 	for _, event := range events {
-		if err := s.KV.Publish(ctx, "knowledge:ready", event); err != nil {
+		if err := s.KV.Publish(ctx, "knowledge:ready", event.Envelope()); err != nil {
 			shift := event.RetryCount
 			if shift > 6 {
 				shift = 6

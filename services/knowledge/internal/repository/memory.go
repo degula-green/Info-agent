@@ -1264,7 +1264,10 @@ func (s *MemoryStore) IngestMessage(ctx context.Context, input IngestMessageInpu
 	if input.ExternalConversationID != "" && input.ExternalConversationID != conversation.ExternalConversationID {
 		return nil, apperror.New("conversation_mismatch", "external conversation does not match collector", 409, false)
 	}
-	now := time.Now().UTC()
+	now := input.CollectedAt.UTC()
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
 	if input.SentAt.IsZero() {
 		input.SentAt = now
 	}
@@ -1278,7 +1281,7 @@ func (s *MemoryStore) IngestMessage(ctx context.Context, input IngestMessageInpu
 		if source.CollectorID != input.CollectorID || source.ExternalMessageID != input.ExternalMessageID || strings.EqualFold(source.PayloadHash, SourcePayloadHash(input)) {
 			continue
 		}
-		if !exists || (!strings.EqualFold(message.ContentHash, input.ContentHash) && input.SenderExternalID == "" && !canReclassifyLegacyFile(message.MessageType, input.MessageType, input.Attachments)) {
+		if !exists || (!strings.EqualFold(message.ContentHash, input.ContentHash) && !canReclassifyLegacyFile(message.MessageType, input.MessageType, input.Attachments)) {
 			return nil, apperror.New("external_id_conflict", "external message id has conflicting payload", 409, false)
 		}
 		sourceCorrection = true
@@ -1290,7 +1293,7 @@ func (s *MemoryStore) IngestMessage(ctx context.Context, input IngestMessageInpu
 	legacyTypeCorrection := false
 	legacyAttachmentCleanup := false
 	if exists {
-		if !strings.EqualFold(message.ContentHash, input.ContentHash) && input.SenderExternalID == "" {
+		if !strings.EqualFold(message.ContentHash, input.ContentHash) {
 			return nil, apperror.New("external_id_conflict", "external message id has conflicting content", 409, false)
 		}
 		if message.MessageType != input.MessageType {
@@ -1318,10 +1321,14 @@ func (s *MemoryStore) IngestMessage(ctx context.Context, input IngestMessageInpu
 		if senderName == "" {
 			senderName = s.identityByIDLocked(identityID).DisplayName
 		}
-		message = domain.Message{ID: uuid.NewString(), ConversationID: conversation.ID, ExternalMessageID: input.ExternalMessageID, SenderIdentityID: identityID, SenderDisplayName: senderName, MessageType: input.MessageType, Content: "", Sensitive: false, ClassificationStatus: "pending", ContentHash: input.ContentHash, ContentVersion: 1, SentAt: input.SentAt.UTC(), CollectedAt: now, LifecycleStatus: "active", VectorStatus: "pending", CreatedAt: now}
+		content, classificationStatus := "", "pending"
+		if conversation.IngestionScope == "private" {
+			content, classificationStatus = input.Content, "succeeded"
+		}
+		message = domain.Message{ID: uuid.NewString(), ConversationID: conversation.ID, ExternalMessageID: input.ExternalMessageID, SenderIdentityID: identityID, SenderDisplayName: senderName, MessageType: input.MessageType, Content: content, Sensitive: false, ClassificationStatus: classificationStatus, ContentHash: input.ContentHash, ContentVersion: 1, SentAt: input.SentAt.UTC(), CollectedAt: now, LifecycleStatus: "active", VectorStatus: "pending", CreatedAt: now}
 		s.messages[key] = message
 		s.privateContent[message.ID] = input.Content
-		if input.MessageType == "text" {
+		if conversation.IngestionScope != "private" && strings.TrimSpace(input.Content) != "" {
 			s.addEventLocked(ctx, "privacy.scan.requested", conversation, map[string]any{"message_id": message.ID, "content_version": 1})
 		}
 	}
@@ -1512,7 +1519,7 @@ func (s *MemoryStore) TryMarkKnowledgeReady(ctx context.Context, id, traceID str
 	if !ok {
 		return false, apperror.New("knowledge_not_found", "knowledge item not found", 404, false)
 	}
-	if item.ProcessingStatus == "published" || item.ProcessingStatus == "processing" || item.ProcessingStatus == "ready" {
+	if item.ProcessingStatus == "processing" || item.ProcessingStatus == "ready" {
 		return false, nil
 	}
 	if !item.ContentSaved || !item.OwnershipReady || !item.SecurityReady || !item.PermissionReady || item.ACLSyncStatus != "synced" {
@@ -1520,12 +1527,12 @@ func (s *MemoryStore) TryMarkKnowledgeReady(ctx context.Context, id, traceID str
 	}
 	for _, event := range s.outbox {
 		if event.EventType == "knowledge.ready" && event.Payload["knowledge_item_id"] == id && event.Payload["content_version"] == item.ContentVersion {
-			item.ProcessingStatus = "published"
+			item.ProcessingStatus = "ready"
 			s.knowledgeItems[id] = item
 			return false, nil
 		}
 	}
-	item.ProcessingStatus, item.LastError, item.UpdatedAt = "published", "", time.Now().UTC()
+	item.ProcessingStatus, item.LastError, item.UpdatedAt = "ready", "", time.Now().UTC()
 	s.knowledgeItems[id] = item
 	if traceID == "" {
 		traceID = trace.TraceID(ctx)
@@ -2011,7 +2018,9 @@ func (s *MemoryStore) ensureMessageKnowledgeItemLocked(ctx context.Context, conv
 		SecurityStatus: "pending", ContentSaved: true, OwnershipReady: true, ACLSyncStatus: "pending",
 		ProcessingStatus: "pending", LifecycleStatus: "active", CreatedAt: now, UpdatedAt: now,
 	}
-	if message.ClassificationStatus == "succeeded" {
+	if conversation.IngestionScope == "private" {
+		item.SecurityReady, item.SecurityStatus, item.Sensitivity = true, "not_required", "internal"
+	} else if message.ClassificationStatus == "succeeded" {
 		item.SecurityReady, item.SecurityStatus, item.Sensitivity = true, "classified", "internal"
 		item.ContentAccessRequired, item.OriginalAccessRequired = message.Sensitive, message.Sensitive
 		if message.Sensitive {
@@ -2053,6 +2062,9 @@ func (s *MemoryStore) ensureAttachmentKnowledgeItemLocked(ctx context.Context, c
 		ContentSaved: attachment.ContentStatus == "ready", OwnershipReady: true, SecurityReady: true,
 		ACLSyncStatus: "pending", ProcessingStatus: "pending", LifecycleStatus: "active",
 		ContentAccessRequired: attachment.ContentAccessRequired, CreatedAt: now, UpdatedAt: now,
+	}
+	if conversation.IngestionScope == "private" {
+		item.SecurityStatus = "not_required"
 	}
 	if attachment.Sensitive {
 		item.ContentVisibility, item.Sensitivity = "metadata_only", "restricted"

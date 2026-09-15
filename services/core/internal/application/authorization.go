@@ -56,6 +56,10 @@ type RelationWriter interface {
 	WriteRelations(ctx context.Context, tuples []RelationTuple) error
 }
 
+type RelationSynchronizer interface {
+	SyncRelations(ctx context.Context, managedObjects []string, tuples []RelationTuple) error
+}
+
 type ACLVersionRepository interface {
 	ResolveACLVersion(ctx context.Context, resourceID, fingerprint string) (int64, error)
 }
@@ -90,8 +94,15 @@ func (s *PermissionSyncService) Sync(ctx context.Context, input ResourcePermissi
 	if err != nil {
 		return PermissionSyncResult{}, err
 	}
-	if err := s.writer.WriteRelations(ctx, tuples); err != nil {
-		return PermissionSyncResult{}, err
+	managedObjects := permissionManagedObjects(input)
+	var writeErr error
+	if synchronizer, ok := s.writer.(RelationSynchronizer); ok {
+		writeErr = synchronizer.SyncRelations(ctx, managedObjects, tuples)
+	} else {
+		writeErr = s.writer.WriteRelations(ctx, tuples)
+	}
+	if writeErr != nil {
+		return PermissionSyncResult{}, writeErr
 	}
 	parts := make([]string, 0, len(tuples))
 	for _, tuple := range tuples {
@@ -104,6 +115,15 @@ func (s *PermissionSyncService) Sync(ctx context.Context, input ResourcePermissi
 		return PermissionSyncResult{}, err
 	}
 	return PermissionSyncResult{ACLVersion: version, RelationCount: len(tuples)}, nil
+}
+
+func permissionManagedObjects(input ResourcePermission) []string {
+	itemID := strings.TrimSpace(input.KnowledgeItemID)
+	objects := []string{"knowledge_item:" + itemID, "knowledge_original:" + itemID}
+	if attachmentID := strings.TrimSpace(input.AttachmentID); attachmentID != "" {
+		objects = append(objects, "attachment_meta:"+attachmentID, "attachment_content:"+attachmentID)
+	}
+	return objects
 }
 
 func permissionTuples(input ResourcePermission) ([]RelationTuple, error) {
@@ -148,6 +168,9 @@ func permissionTuples(input ResourcePermission) ([]RelationTuple, error) {
 		return nil, errors.New("knowledge_scope must be private or organization")
 	}
 	add(itemObject, "parent", "knowledge_original:"+itemID)
+	if input.KnowledgeScope == "private" {
+		add("user:"+input.OwnerUserID, "owner", "knowledge_original:"+itemID)
+	}
 	if input.AttachmentID != "" {
 		meta := "attachment_meta:" + input.AttachmentID
 		content := "attachment_content:" + input.AttachmentID

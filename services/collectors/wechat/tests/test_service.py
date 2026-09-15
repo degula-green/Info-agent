@@ -58,8 +58,8 @@ class CollectorServiceTest(unittest.TestCase):
     def test_media_metadata_supports_image_file_and_video(self):
         self.assertEqual(service.normalized_type({"type": 3}), "image")
         self.assertEqual(service.normalized_type({"type": 49}), "text")
-        self.assertEqual(service.normalized_type({"type": 43}), "file")
-        self.assertEqual(service.normalized_type({"type": "视频"}), "file")
+        self.assertEqual(service.normalized_type({"type": 43}), "video")
+        self.assertEqual(service.normalized_type({"type": "视频"}), "video")
         self.assertEqual(service.media_type({"type": 43}), "video")
         self.assertEqual(service.media_type({"type": "视频"}), "video")
         self.assertEqual(service.attachment_metadata("chat", {"type": 43, "local_id": 9})[0]["file_name"], "video.mp4")
