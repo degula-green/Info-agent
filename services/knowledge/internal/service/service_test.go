@@ -7,6 +7,8 @@ import (
 	"encoding/hex"
 	"errors"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
@@ -14,6 +16,7 @@ import (
 
 	"info-agent/knowledge/internal/apperror"
 	"info-agent/knowledge/internal/config"
+	"info-agent/knowledge/internal/coreclient"
 	"info-agent/knowledge/internal/crypto"
 	"info-agent/knowledge/internal/domain"
 	"info-agent/knowledge/internal/kv"
@@ -182,6 +185,62 @@ func TestFeishuOpenIDMappingAllowsInitialGroupAttach(t *testing.T) {
 	}
 }
 
+func TestAttachBackfillsMissingConnectorOrganizationFromCore(t *testing.T) {
+	core := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/organizations/current" {
+			if r.Header.Get("Authorization") != "Bearer user-token" {
+				t.Fatalf("user authorization was not propagated: %q", r.Header.Get("Authorization"))
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"organization":{"id":"11111111-1111-1111-1111-111111111111"},"membership":{"user_id":"u1","status":"active"}}`))
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer core.Close()
+
+	service, repo, _ := newServiceForTest(nil)
+	service.Config.JWTRequired = true
+	service.Config.CoreServiceToken = "service-token"
+	service.Core = coreclient.New(core.URL, "service-token")
+	now := time.Now().UTC()
+	account, err := repo.SaveConnector(context.Background(), domain.ConnectorAccount{ID: "a1", OwnerUserID: "u1", Platform: domain.PlatformFeishu, WorkspaceKey: "tenant", ExternalAccountID: "user", Status: domain.ConnectorActive})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = service.saveDiscovery(context.Background(), domain.Discovery{ID: "d1", OwnerUserID: "u1", ConnectorID: account.ID, Platform: domain.PlatformFeishu, ExpiresAt: now.Add(time.Minute), Conversations: []domain.AvailableConversation{{ExternalID: "group-1", Name: "Team", ConversationType: "group"}}}); err != nil {
+		t.Fatal(err)
+	}
+
+	conversation, err := service.Attach(context.Background(), repository.AttachInput{UserID: "u1", Platform: domain.PlatformFeishu, ExternalConversationID: "group-1", ConversationType: "group", DiscoveryID: "d1", RequestedStartAt: &now}, "Bearer user-token")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if conversation.OrganizationID != "11111111-1111-1111-1111-111111111111" {
+		t.Fatalf("organization was not applied to conversation: %+v", conversation)
+	}
+	updated, err := repo.GetConnectorByID(context.Background(), account.ID)
+	if err != nil || updated.DefaultOrganizationID != conversation.OrganizationID {
+		t.Fatalf("connector organization was not backfilled: account=%+v err=%v", updated, err)
+	}
+}
+
+func TestResolveCurrentOrganizationRejectsDifferentCoreUser(t *testing.T) {
+	core := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"organization":{"id":"org-1"},"membership":{"user_id":"another-user","status":"active"}}`))
+	}))
+	defer core.Close()
+	service, _, _ := newServiceForTest(nil)
+	service.Config.JWTRequired = true
+	service.Core = coreclient.New(core.URL, "")
+
+	_, err := service.ResolveCurrentOrganization(context.Background(), "u1", "", "Bearer user-token")
+	if apperror.From(err).Code != "forbidden" {
+		t.Fatalf("mismatched Core user was accepted: %v", err)
+	}
+}
+
 func TestCompleteFeishuOAuthRecoversAfterResultCacheFailure(t *testing.T) {
 	provider := &fakeOAuthProvider{profile: platform.Profile{ExternalAccountID: "feishu-user", ExternalUserID: "feishu-user", WorkspaceKey: "tenant", DisplayName: "Alice"}}
 	service, _, store := newServiceForTest(provider)
@@ -274,7 +333,7 @@ func TestCompleteFeishuOAuthRestoresAuthorizationCollectors(t *testing.T) {
 	if _, err := repo.SaveConnector(ctx, account); err != nil {
 		t.Fatal(err)
 	}
-	start, err := service.StartFeishuOAuth(ctx, "u1", "rebind", "")
+	start, err := service.StartFeishuOAuth(ctx, "u1", "rebind", "org-1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -287,6 +346,46 @@ func TestCompleteFeishuOAuthRestoresAuthorizationCollectors(t *testing.T) {
 	}
 	if restored.Status != domain.CollectorActive || restored.LastError != "" {
 		t.Fatalf("authorization collector was not restored: %+v", restored)
+	}
+}
+
+func TestCompleteFeishuOAuthReusesRevokedConnectorAndRestoresCollectors(t *testing.T) {
+	provider := &fakeOAuthProvider{profile: platform.Profile{ExternalAccountID: "feishu-user", ExternalUserID: "feishu-user", WorkspaceKey: "tenant", DisplayName: "Alice"}}
+	service, repo, _ := newServiceForTest(provider)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	account := domain.ConnectorAccount{ID: "a1", OwnerUserID: "u1", Platform: domain.PlatformFeishu, WorkspaceKey: "tenant", ExternalAccountID: "feishu-user", Status: domain.ConnectorRevoked}
+	if _, err := repo.SaveConnector(ctx, account); err != nil {
+		t.Fatal(err)
+	}
+	conversation, err := repo.AttachConversation(ctx, repository.AttachInput{UserID: "u1", OrganizationID: "org-1", Platform: domain.PlatformFeishu, WorkspaceKey: "tenant", ExternalConversationID: "chat", ConversationType: "group", RequestedStartAt: &now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	collector, err := repo.AddCollector(ctx, repository.CollectorInput{ConversationID: conversation.ID, ConnectorAccountID: account.ID, CollectorUserID: "u1", Role: domain.CollectorPrimary})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.UpdateConnectorStatus(ctx, account.ID, domain.ConnectorRevoked, "connector_revoked"); err != nil {
+		t.Fatal(err)
+	}
+	start, err := service.StartFeishuOAuth(ctx, "u1", "rebind", "org-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	saved, err := service.CompleteFeishuOAuth(ctx, start.StateID, "code", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if saved.ID != account.ID || saved.Status != domain.ConnectorActive {
+		t.Fatalf("revoked connector was not reused: %+v", saved)
+	}
+	restored, err := repo.GetCollector(ctx, collector.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if restored.Status != domain.CollectorActive || restored.LastError != "" {
+		t.Fatalf("revoked collector was not restored: %+v", restored)
 	}
 }
 
@@ -561,6 +660,31 @@ func TestDiscoverRefreshesAfterAuthorizationExpiry(t *testing.T) {
 	}
 	if len(discovery.Conversations) != 1 || provider.discoverCalls != 2 || provider.refreshCalls != 1 {
 		t.Fatalf("discovery did not refresh and retry: discovery=%+v discover_calls=%d refresh_calls=%d", discovery, provider.discoverCalls, provider.refreshCalls)
+	}
+}
+
+func TestDiscoverUsesManagedFeishuDiscoveryWhenTokenRefreshFails(t *testing.T) {
+	now := time.Now().UTC()
+	provider := &fakeOAuthProvider{refreshErr: context.DeadlineExceeded}
+	service, repo, _ := newServiceForTest(provider)
+	ctx := context.Background()
+	account := domain.ConnectorAccount{ID: "a1", OwnerUserID: "u1", Platform: domain.PlatformFeishu, WorkspaceKey: "tenant", ExternalAccountID: "user-1", CredentialRef: "credential-a1", Status: domain.ConnectorActive}
+	if _, err := repo.SaveConnector(ctx, account); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.Vault.Put(ctx, account.CredentialRef, vault.TokenSet{AccessToken: "access-old", RefreshToken: "refresh-1", ExpiresAt: now.Add(-time.Minute)}, 2*time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.ReportManagedDiscovery(ctx, account.ID, domain.PlatformFeishu, []domain.AvailableConversation{{ExternalID: "sim-feishu-group", Name: "模拟飞书群", ConversationType: "group", MemberCount: 3}}); err != nil {
+		t.Fatal(err)
+	}
+
+	discovery, err := service.Discover(ctx, "u1", domain.PlatformFeishu)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(discovery.Conversations) != 1 || discovery.Conversations[0].ExternalID != "sim-feishu-group" || provider.discoverCalls != 0 || provider.refreshCalls != 1 {
+		t.Fatalf("managed discovery was not used after refresh failure: discovery=%+v discover_calls=%d refresh_calls=%d", discovery, provider.discoverCalls, provider.refreshCalls)
 	}
 }
 

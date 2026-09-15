@@ -47,7 +47,7 @@ func (s *Service) WechatCollector() *wechatclient.Client {
 	return wechatclient.New(s.Config.WechatCollectorURL, s.Config.CollectorInternalToken)
 }
 
-func (s *Service) BindWechat(ctx context.Context, userID, wxid, dbDir string, rebind bool) (map[string]any, error) {
+func (s *Service) BindWechat(ctx context.Context, userID, wxid, dbDir, organizationID string, rebind bool) (map[string]any, error) {
 	if strings.TrimSpace(wxid) == "" || strings.TrimSpace(dbDir) == "" {
 		return nil, apperror.New("invalid_request", "wxid and db_dir are required", 400, false)
 	}
@@ -56,10 +56,24 @@ func (s *Service) BindWechat(ctx context.Context, userID, wxid, dbDir string, re
 		return nil, apperror.Wrap("wechat_collector_unavailable", "wechat collector binding failed", 502, true, err)
 	}
 	now := s.Now()
-	account := domain.ConnectorAccount{OwnerUserID: userID, Platform: domain.PlatformWechat, ExternalAccountID: strings.TrimSpace(wxid), DisplayName: strings.TrimSpace(wxid), DatabaseRef: strings.TrimSpace(dbDir), Status: domain.ConnectorActive, CreatedAt: now, UpdatedAt: now}
+	account := domain.ConnectorAccount{OwnerUserID: userID, Platform: domain.PlatformWechat, ExternalAccountID: strings.TrimSpace(wxid), DisplayName: strings.TrimSpace(wxid), DatabaseRef: strings.TrimSpace(dbDir), DefaultOrganizationID: strings.TrimSpace(organizationID), Status: domain.ConnectorActive, CreatedAt: now, UpdatedAt: now}
 	if rebind {
 		if previous, findErr := s.Repo.GetConnector(ctx, userID, domain.PlatformWechat); findErr == nil {
-			saved, saveErr := s.Repo.ReplaceConnector(ctx, previous.ID, account)
+			var saved *domain.ConnectorAccount
+			var saveErr error
+			if strings.EqualFold(strings.TrimSpace(previous.ExternalAccountID), strings.TrimSpace(wxid)) {
+				// Rebinding the same account should not create a second row. This
+				// also keeps existing conversation collectors attached to it.
+				saved = previous
+				if organizationID != "" {
+					saved, saveErr = s.Repo.SetConnectorDefaultOrganization(ctx, previous.ID, userID, organizationID)
+				}
+				if saveErr == nil {
+					saveErr = s.Repo.UpdateConnectorStatus(ctx, previous.ID, domain.ConnectorActive, "")
+				}
+			} else {
+				saved, saveErr = s.Repo.ReplaceConnector(ctx, previous.ID, account)
+			}
 			if saveErr != nil {
 				return nil, saveErr
 			}
@@ -301,6 +315,30 @@ func (s *Service) GetConnector(ctx context.Context, userID, platformName string)
 	return s.Repo.GetConnector(ctx, userID, platformName)
 }
 
+func (s *Service) ResolveCurrentOrganization(ctx context.Context, userID, claimedOrganizationID, authorization string) (string, error) {
+	claimedOrganizationID = strings.TrimSpace(claimedOrganizationID)
+	if claimedOrganizationID != "" {
+		return claimedOrganizationID, nil
+	}
+	if s.Core == nil {
+		if !s.Config.JWTRequired {
+			return "", nil
+		}
+		return "", apperror.New("core_dependency_unavailable", "organization service is unavailable", 503, true)
+	}
+	current, err := s.Core.GetCurrentOrganization(ctx, authorization)
+	if err != nil {
+		return "", apperror.Wrap("core_dependency_unavailable", "organization service is unavailable", 503, true, err)
+	}
+	if current.OrganizationID == "" {
+		return "", nil
+	}
+	if current.UserID != userID || (current.Status != "" && current.Status != "active") {
+		return "", apperror.Clone(apperror.ErrForbidden)
+	}
+	return current.OrganizationID, nil
+}
+
 func (s *Service) StartFeishuOAuth(ctx context.Context, userID, intent string, organizationID ...string) (OAuthStart, error) {
 	if intent != "bind" && intent != "rebind" {
 		intent = "bind"
@@ -411,6 +449,11 @@ func (s *Service) CompleteFeishuOAuth(ctx context.Context, state, code, provider
 		return fail(findErr)
 	}
 	account, accountErr := s.Repo.GetConnector(ctx, data.UserID, domain.PlatformFeishu)
+	if accountErr != nil && apperror.From(accountErr).Code == "connector_not_found" {
+		// A revoked connector is still the user's binding for OAuth purposes.
+		// Reuse its ID so existing conversation collectors survive reauth.
+		account, accountErr = s.Repo.GetConnectorForOAuth(ctx, data.UserID, domain.PlatformFeishu)
+	}
 	if accountErr != nil && apperror.From(accountErr).Code != "connector_not_found" {
 		return fail(accountErr)
 	}
@@ -729,7 +772,7 @@ func (s *Service) Discover(ctx context.Context, userID, platformName string) (do
 	if platformName == domain.PlatformFeishu {
 		token, tokenErr := s.GetToken(ctx, account)
 		if tokenErr != nil {
-			return domain.Discovery{}, tokenErr
+			return s.cachedDiscoveryOrError(ctx, userID, account, tokenErr)
 		}
 		if s.Feishu == nil {
 			return domain.Discovery{}, apperror.New("feishu_not_configured", "feishu connector is not configured", 503, true)
@@ -758,6 +801,9 @@ func (s *Service) Discover(ctx context.Context, userID, platformName string) (do
 			_ = s.Repo.UpdateConnectorStatus(ctx, account.ID, domain.ConnectorExpired, "authorization_expired")
 			return domain.Discovery{}, apperror.New("reauthorization_required", "connector authorization is required", 401, false)
 		}
+		if cached, cachedErr := s.cachedDiscoveryOrError(ctx, userID, account, err); cachedErr == nil {
+			return cached, nil
+		}
 		s.markConnectorError(ctx, account, "conversation_discovery_failed")
 		slog.Default().WarnContext(ctx, "conversation discovery failed",
 			"request_id", trace.RequestID(ctx),
@@ -778,6 +824,22 @@ func (s *Service) Discover(ctx context.Context, userID, platformName string) (do
 	discovery := domain.Discovery{ID: uuid.NewString(), OwnerUserID: userID, ConnectorID: account.ID, Platform: platformName, ExpiresAt: s.Now().Add(5 * time.Minute), Conversations: conversations}
 	if err := s.saveDiscovery(ctx, discovery); err != nil {
 		return domain.Discovery{}, apperror.Wrap("discovery_store_failed", "cannot save discovery result", 503, true, err)
+	}
+	return discovery, nil
+}
+
+func (s *Service) cachedDiscoveryOrError(ctx context.Context, userID string, account *domain.ConnectorAccount, cause error) (domain.Discovery, error) {
+	discoveries, err := s.listDiscoveries(ctx, userID, account.ID)
+	if err != nil {
+		return domain.Discovery{}, err
+	}
+	if len(discoveries) == 0 {
+		return domain.Discovery{}, cause
+	}
+	discovery := discoveries[0]
+	discovery.Conversations = dedupeConversations(discovery.Conversations)
+	if err := s.annotateAttachedConversations(ctx, userID, account, discovery.Conversations); err != nil {
+		return domain.Discovery{}, err
 	}
 	return discovery, nil
 }
@@ -841,7 +903,7 @@ func (s *Service) ListDeviceCollectors(ctx context.Context, device *domain.Agent
 	return out, nil
 }
 
-func (s *Service) Attach(ctx context.Context, input repository.AttachInput) (*domain.ConversationIngestion, error) {
+func (s *Service) Attach(ctx context.Context, input repository.AttachInput, authorization ...string) (*domain.ConversationIngestion, error) {
 	if input.Platform != domain.PlatformFeishu && input.Platform != domain.PlatformWechat {
 		return nil, apperror.New("unsupported_platform", "platform is not supported in this release", 400, false)
 	}
@@ -905,7 +967,21 @@ func (s *Service) Attach(ctx context.Context, input repository.AttachInput) (*do
 	}
 	if input.ConversationType == "group" {
 		if strings.TrimSpace(account.DefaultOrganizationID) == "" {
-			return nil, apperror.New("organization_required", "connector account has no default organization", 400, false)
+			userAuthorization := ""
+			if len(authorization) > 0 {
+				userAuthorization = authorization[0]
+			}
+			organizationID, resolveErr := s.ResolveCurrentOrganization(ctx, input.UserID, "", userAuthorization)
+			if resolveErr != nil {
+				return nil, resolveErr
+			}
+			if organizationID == "" {
+				return nil, apperror.New("organization_required", "an active organization is required for group conversation", 400, false)
+			}
+			account, err = s.Repo.SetConnectorDefaultOrganization(ctx, account.ID, input.UserID, organizationID)
+			if err != nil {
+				return nil, err
+			}
 		}
 		if input.OrganizationID == "" {
 			input.OrganizationID = account.DefaultOrganizationID
@@ -916,7 +992,7 @@ func (s *Service) Attach(ctx context.Context, input repository.AttachInput) (*do
 		if input.OrganizationID != account.DefaultOrganizationID {
 			return nil, apperror.Clone(apperror.ErrForbidden)
 		}
-		if err := s.requireOrganizationMember(ctx, input.UserID, input.OrganizationID); err != nil {
+		if err := s.requireOrganizationMember(ctx, input.UserID, input.OrganizationID, authorization...); err != nil {
 			return nil, err
 		}
 	}
@@ -931,7 +1007,7 @@ func (s *Service) Attach(ctx context.Context, input repository.AttachInput) (*do
 	return conversation, nil
 }
 
-func (s *Service) AddCollector(ctx context.Context, userID, conversationID string) (*domain.Collector, error) {
+func (s *Service) AddCollector(ctx context.Context, userID, conversationID string, authorization ...string) (*domain.Collector, error) {
 	conversation, err := s.Repo.GetConversation(ctx, conversationID)
 	if err != nil {
 		return nil, err
@@ -953,10 +1029,27 @@ func (s *Service) AddCollector(ctx context.Context, userID, conversationID strin
 	if conversation.OrganizationID == "" {
 		return nil, apperror.New("organization_required", "conversation organization is missing", 500, false)
 	}
-	if strings.TrimSpace(account.DefaultOrganizationID) == "" || conversation.OrganizationID != account.DefaultOrganizationID {
+	if strings.TrimSpace(account.DefaultOrganizationID) == "" {
+		userAuthorization := ""
+		if len(authorization) > 0 {
+			userAuthorization = authorization[0]
+		}
+		organizationID, resolveErr := s.ResolveCurrentOrganization(ctx, userID, "", userAuthorization)
+		if resolveErr != nil {
+			return nil, resolveErr
+		}
+		if organizationID == "" || organizationID != conversation.OrganizationID {
+			return nil, apperror.Clone(apperror.ErrForbidden)
+		}
+		account, err = s.Repo.SetConnectorDefaultOrganization(ctx, account.ID, userID, organizationID)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if conversation.OrganizationID != account.DefaultOrganizationID {
 		return nil, apperror.Clone(apperror.ErrForbidden)
 	}
-	if err := s.requireOrganizationMember(ctx, userID, conversation.OrganizationID); err != nil {
+	if err := s.requireOrganizationMember(ctx, userID, conversation.OrganizationID, authorization...); err != nil {
 		return nil, err
 	}
 	known, member, membershipErr := s.Repo.CheckConversationMembership(ctx, conversationID, conversation.Platform, conversation.WorkspaceKey, userID)
@@ -969,7 +1062,7 @@ func (s *Service) AddCollector(ctx context.Context, userID, conversationID strin
 	return s.Repo.AddCollector(ctx, repository.CollectorInput{ConversationID: conversationID, ConnectorAccountID: account.ID, CollectorUserID: userID, Role: domain.CollectorSupplemental})
 }
 
-func (s *Service) requireOrganizationMember(ctx context.Context, userID, organizationID string) error {
+func (s *Service) requireOrganizationMember(ctx context.Context, userID, organizationID string, authorization ...string) error {
 	if !s.Config.JWTRequired && (s.Core == nil || strings.TrimSpace(s.Config.CoreServiceToken) == "") {
 		return nil
 	}
@@ -978,7 +1071,17 @@ func (s *Service) requireOrganizationMember(ctx context.Context, userID, organiz
 	}
 	ok, err := s.Core.CheckOrganizationMember(ctx, userID, organizationID)
 	if err != nil {
-		return apperror.Wrap("core_dependency_unavailable", "organization membership service is unavailable", 503, true, err)
+		if len(authorization) == 0 || strings.TrimSpace(authorization[0]) == "" {
+			return apperror.Wrap("core_dependency_unavailable", "organization membership service is unavailable", 503, true, err)
+		}
+		current, currentErr := s.Core.GetCurrentOrganization(ctx, authorization[0])
+		if currentErr != nil {
+			return apperror.Wrap("core_dependency_unavailable", "organization membership service is unavailable", 503, true, currentErr)
+		}
+		if current.OrganizationID != organizationID || current.UserID != userID || (current.Status != "" && current.Status != "active") {
+			return apperror.Clone(apperror.ErrForbidden)
+		}
+		return nil
 	}
 	if !ok {
 		return apperror.Clone(apperror.ErrForbidden)
@@ -1250,7 +1353,9 @@ func (s *Service) GetContact(ctx context.Context, userID, relationID string) (*d
 	if relation == nil {
 		return nil, apperror.New("contact_not_found", "contact relation was not found", 404, false)
 	}
-	view, err := s.ListContacts(ctx, userID, relation.ExternalIdentity.Platform)
+	// Resolve the complete merged view. Filtering by the clicked identity's
+	// platform would hide other mapped identities for the same internal user.
+	view, err := s.ListContacts(ctx, userID, "")
 	if err != nil {
 		return nil, err
 	}
@@ -1265,6 +1370,10 @@ func (s *Service) GetContact(ctx context.Context, userID, relationID string) (*d
 		return nil, apperror.New("contact_not_found", "contact relation was not found", 404, false)
 	}
 	detail := &domain.ContactDetail{ContactView: *matched, Messages: []domain.Message{}, Attachments: []domain.Attachment{}}
+	identityIDs := make(map[string]struct{}, len(matched.Identities))
+	for _, identity := range matched.Identities {
+		identityIDs[identity.ID] = struct{}{}
+	}
 	for _, conversationID := range matched.ConversationIDs {
 		// Reuse the existing conversation authorization boundary before reading
 		// any messages or attachment references through the contact view.
@@ -1276,7 +1385,7 @@ func (s *Service) GetContact(ctx context.Context, userID, relationID string) (*d
 			return nil, messageErr
 		}
 		for _, message := range messages {
-			if message.SenderIdentityID == relation.ExternalIdentity.ID {
+			if _, ok := identityIDs[message.SenderIdentityID]; ok {
 				detail.Messages = append(detail.Messages, message)
 				detail.Attachments = append(detail.Attachments, message.Attachments...)
 			}
@@ -1469,7 +1578,7 @@ func (s *Service) OpenAttachment(ctx context.Context, userID, id string) (*domai
 	if _, err := s.GetConversation(ctx, userID, conversation.ID); err != nil {
 		return nil, nil, err
 	}
-	if attachment.ContentAccessRequired {
+	if attachment.Sensitive && attachment.ContentAccessRequired {
 		return nil, nil, apperror.New("attachment_content_restricted", "attachment content requires approval", 403, false)
 	}
 	if attachment.ContentStatus != "ready" || attachment.ObjectRef == "" {
@@ -1497,6 +1606,45 @@ func (s *Service) PublishOutbox(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+// ReportManagedWechatDiscovery accepts discovery data from the server-managed
+// WeChat collector, which does not have an agent device key.
+func (s *Service) ReportManagedWechatDiscovery(ctx context.Context, connectorID string, items []domain.AvailableConversation) (domain.Discovery, error) {
+	return s.ReportManagedDiscovery(ctx, connectorID, domain.PlatformWechat, items)
+}
+
+// ReportManagedDiscovery accepts service-token protected discovery snapshots
+// from managed collectors and local E2E harnesses without exposing provider
+// credentials to the browser.
+func (s *Service) ReportManagedDiscovery(ctx context.Context, connectorID, platformName string, items []domain.AvailableConversation) (domain.Discovery, error) {
+	if platformName != domain.PlatformWechat && platformName != domain.PlatformFeishu {
+		return domain.Discovery{}, apperror.New("unsupported_platform", "platform is not supported in this release", 400, false)
+	}
+	account, err := s.Repo.GetConnectorByID(ctx, strings.TrimSpace(connectorID))
+	if err != nil {
+		return domain.Discovery{}, err
+	}
+	if account.Platform != platformName {
+		return domain.Discovery{}, apperror.New("connector_platform_mismatch", "connector belongs to another platform", 409, false)
+	}
+	conversations := dedupeConversations(items)
+	if err := s.annotateAttachedConversations(ctx, account.OwnerUserID, account, conversations); err != nil {
+		return domain.Discovery{}, err
+	}
+	for _, candidate := range conversations {
+		if candidate.AttachedConversationID == "" || len(candidate.Members) == 0 {
+			continue
+		}
+		if err := s.Repo.UpsertConversationMemberships(ctx, candidate.AttachedConversationID, candidate.Members); err != nil {
+			return domain.Discovery{}, err
+		}
+	}
+	discovery := domain.Discovery{ID: uuid.NewString(), OwnerUserID: account.OwnerUserID, ConnectorID: account.ID, Platform: platformName, ExpiresAt: s.Now().Add(5 * time.Minute), Conversations: conversations}
+	if err := s.saveDiscovery(ctx, discovery); err != nil {
+		return domain.Discovery{}, apperror.Wrap("discovery_store_failed", "cannot save discovery result", 503, true, err)
+	}
+	return discovery, nil
 }
 
 // ProcessPrivacy scans protected pending message content and only then opens

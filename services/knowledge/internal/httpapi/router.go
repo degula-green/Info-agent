@@ -13,7 +13,6 @@ import (
 	"mime"
 	"net/http"
 	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -597,15 +596,12 @@ func registerUserRoutes(r *gin.Engine, app *App, prefix string) {
 			return
 		}
 		defer reader.Close()
-		contentType := strings.TrimSpace(attachment.MIMEType)
-		if contentType == "" {
-			contentType = mime.TypeByExtension(filepath.Ext(attachment.FileName))
-		}
+		fileName, contentType := normalizedAttachmentMetadata(attachment.FileName, attachment.MIMEType)
 		if contentType == "" {
 			contentType = "application/octet-stream"
 		}
 		c.Header("Content-Type", contentType)
-		c.Header("Content-Disposition", `inline; filename="`+safeHeaderName(attachment.FileName)+`"`)
+		c.Header("Content-Disposition", `inline; filename="`+safeHeaderName(fileName)+`"`)
 		if attachment.SizeBytes > 0 {
 			c.Header("Content-Length", strconv.FormatInt(attachment.SizeBytes, 10))
 		}
@@ -803,6 +799,31 @@ func registerInternalRoutes(r *gin.Engine, app *App, prefix string) {
 			return
 		}
 		c.JSON(http.StatusOK, publicIngestResultFromDomain(out))
+	})
+	g.POST("/collectors/:collector_id/cursor-receipt", func(c *gin.Context) {
+		device := agentDevice(c)
+		collectorID := c.Param("collector_id")
+		collector, err := app.Service.Repo.GetCollector(c, collectorID)
+		if err != nil {
+			writeError(c, err)
+			return
+		}
+		if device != nil && collector.ConnectorAccountID != device.ConnectorID && !serviceAuthorized(c) {
+			writeError(c, apperror.Clone(apperror.ErrForbidden))
+			return
+		}
+		var body struct {
+			Cursor string `json:"cursor"`
+		}
+		if err := c.ShouldBindJSON(&body); err != nil {
+			writeError(c, apperror.New("invalid_cursor", "invalid cursor payload", 400, false))
+			return
+		}
+		if err := app.Service.Repo.RecordCursorReceipt(c, collectorID, body.Cursor, app.Service.Now().UTC()); err != nil {
+			writeError(c, err)
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"status": "recorded", "cursor": body.Cursor})
 	})
 	g.POST("/collectors/:collector_id/cursor", func(c *gin.Context) {
 		device := agentDevice(c)
@@ -1172,7 +1193,7 @@ func serviceTokenPathAllowed(path string) bool {
 	if !strings.Contains(path, "/internal/collectors/") {
 		return false
 	}
-	for _, operation := range []string{"/messages", "/cursor", "/attachments", "/heartbeat", "/failure"} {
+	for _, operation := range []string{"/messages", "/cursor-receipt", "/cursor", "/attachments", "/heartbeat", "/failure"} {
 		if strings.HasSuffix(path, operation) {
 			return true
 		}

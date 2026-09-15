@@ -33,7 +33,11 @@ const loading = ref(false); const error = ref(''); const textContent = ref(''); 
 const wordContainer = ref<HTMLElement | null>(null); const spreadsheetContainer = ref<HTMLElement | null>(null); const presentationContainer = ref<HTMLElement | null>(null)
 const isImage = ref(false); const isPdf = ref(false); const isWord = ref(false); const isSpreadsheet = ref(false); const isPresentation = ref(false); const isText = ref(false)
 const pdfPages = ref<number[]>([]); const pdfCanvases = new Map<number, HTMLCanvasElement>(); let pdfDocument: PDFDocumentProxy | null = null; let loadVersion = 0
-const extension = () => String(props.file.name.split('.').pop() || props.file.type || '').toLowerCase().replace(/^\./, '')
+const extension = () => {
+  const nameExtension = String(props.file.name.split('.').pop() || '').toLowerCase().replace(/^\./, '')
+  if (nameExtension && nameExtension !== props.file.name.toLowerCase()) return nameExtension
+  return String(props.file.type || props.file.mimeType || '').toLowerCase().replace(/^\./, '')
+}
 function release() { if (blobUrl.value) URL.revokeObjectURL(blobUrl.value); blobUrl.value = ''; pdfDocument?.cleanup(); pdfDocument = null; pdfPages.value = []; pdfCanvases.clear(); wordContainer.value?.replaceChildren(); spreadsheetContainer.value?.replaceChildren(); presentationContainer.value?.replaceChildren() }
 function setPdfCanvas(element: Element | ComponentPublicInstance | null, page: number) { if (element instanceof HTMLCanvasElement) pdfCanvases.set(page, element) }
 async function sniffImageMime(blob: Blob) {

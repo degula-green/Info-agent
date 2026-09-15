@@ -39,6 +39,17 @@ function Start-ServiceWindow([string]$Title, [string]$WorkingDirectory, [string]
     }
 }
 
+function Stop-PortProcess([int]$Port) {
+    $listeners = Get-NetTCPConnection -State Listen -LocalPort $Port -ErrorAction SilentlyContinue
+    foreach ($listener in $listeners) {
+        $process = Get-Process -Id $listener.OwningProcess -ErrorAction SilentlyContinue
+        if ($process -and $process.Path -and $process.Path -match 'python|uvicorn') {
+            Write-Host "Stopping existing Python listener on port $Port (PID $($process.Id))..."
+            Stop-Process -Id $process.Id -Force
+        }
+    }
+}
+
 function Import-EnvFile([string]$Path) {
     if (-not (Test-Path $Path)) { return }
     foreach ($line in Get-Content -LiteralPath $Path) {
@@ -114,6 +125,7 @@ if ($env:RAG_REDIS_URL) {
 }
 Start-ServiceWindow 'info-agent web :5173' $webPath "& '$npm' run dev -- --host 0.0.0.0"
 if ($python) {
+    Stop-PortProcess 8091
     Start-ServiceWindow 'info-agent wechat collector :8091' $projectRoot "`$env:PYTHONPATH = '$wechatRuntime;$projectRoot'; & '$python' -m services.collectors.wechat.main"
 }
 

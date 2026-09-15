@@ -168,6 +168,21 @@ func (s *MemoryStore) GetConnector(_ context.Context, userID, platform string) (
 	}
 	return nil, apperror.New("connector_not_found", "connector is not bound", 404, false)
 }
+func (s *MemoryStore) GetConnectorForOAuth(_ context.Context, userID, platform string) (*domain.ConnectorAccount, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var found *domain.ConnectorAccount
+	for _, account := range s.connectors {
+		if account.OwnerUserID == userID && account.Platform == platform && (found == nil || account.UpdatedAt.After(found.UpdatedAt)) {
+			copy := account
+			found = &copy
+		}
+	}
+	if found == nil {
+		return nil, apperror.New("connector_not_found", "connector is not bound", 404, false)
+	}
+	return found, nil
+}
 
 func (s *MemoryStore) GetConnectorByID(_ context.Context, connectorID string) (*domain.ConnectorAccount, error) {
 	s.mu.RLock()
@@ -360,7 +375,7 @@ func (s *MemoryStore) BindConnector(_ context.Context, previousConnectorID strin
 	}
 	s.identities[identityKey] = mappedIdentity
 	for id, collector := range s.collectors {
-		if collector.ConnectorAccountID == input.ID && collector.Status == domain.CollectorUnavailable && (collector.LastError == "authorization_expired" || collector.LastError == "refresh_token_invalid") {
+		if collector.ConnectorAccountID == input.ID && collector.Status == domain.CollectorUnavailable && (collector.LastError == "authorization_expired" || collector.LastError == "refresh_token_invalid" || collector.LastError == "connector_revoked" || collector.LastError == "connector_replaced") {
 			collector.Status = domain.CollectorActive
 			collector.LastError = ""
 			collector.NextPollAt = nil
@@ -395,14 +410,41 @@ func (s *MemoryStore) UpdateConnectorStatus(_ context.Context, connectorID, stat
 	return nil
 }
 
+func (s *MemoryStore) SetConnectorDefaultOrganization(_ context.Context, connectorID, ownerUserID, organizationID string) (*domain.ConnectorAccount, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	account, ok := s.connectors[connectorID]
+	if !ok || account.Status == domain.ConnectorRevoked {
+		return nil, apperror.New("connector_not_found", "connector is not bound", 404, false)
+	}
+	if account.OwnerUserID != ownerUserID || (account.DefaultOrganizationID != "" && account.DefaultOrganizationID != organizationID) {
+		return nil, apperror.Clone(apperror.ErrForbidden)
+	}
+	account.DefaultOrganizationID = organizationID
+	account.UpdatedAt = time.Now().UTC()
+	s.connectors[connectorID] = account
+	out := cloneAccount(account)
+	return &out, nil
+}
+
 func (s *MemoryStore) RestoreAuthorizationCollectors(_ context.Context, connectorID string, now time.Time) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	target, ok := s.connectors[connectorID]
+	if ok {
+		for id, c := range s.collectors {
+			owner := s.connectors[c.ConnectorAccountID]
+			if owner.OwnerUserID == target.OwnerUserID && owner.Platform == target.Platform && owner.Status == domain.ConnectorRevoked && c.Status == domain.CollectorUnavailable && (c.LastError == "connector_revoked" || c.LastError == "connector_replaced") {
+				c.ConnectorAccountID = connectorID
+				s.collectors[id] = c
+			}
+		}
+	}
 	for id, c := range s.collectors {
 		if c.ConnectorAccountID != connectorID || c.Status != domain.CollectorUnavailable {
 			continue
 		}
-		if c.LastError != "authorization_expired" && c.LastError != "refresh_token_invalid" {
+		if c.LastError != "authorization_expired" && c.LastError != "refresh_token_invalid" && c.LastError != "connector_revoked" && c.LastError != "connector_replaced" {
 			continue
 		}
 		c.Status = domain.CollectorActive
@@ -1047,6 +1089,7 @@ func (s *MemoryStore) GetConversation(_ context.Context, id string) (*domain.Con
 	}
 	c.Collectors = s.collectorsForLocked(id)
 	c.Memberships = s.membershipsForLocked(id)
+	c.MessageCount, c.AttachmentCount = s.conversationCountsLocked(id)
 	return cloneConversationPtr(c), nil
 }
 
@@ -1062,6 +1105,7 @@ func (s *MemoryStore) FindConversationByExternal(_ context.Context, platform, wo
 		}
 		conversation.Collectors = s.collectorsForLocked(conversation.ID)
 		conversation.Memberships = s.membershipsForLocked(conversation.ID)
+		conversation.MessageCount, conversation.AttachmentCount = s.conversationCountsLocked(conversation.ID)
 		return cloneConversationPtr(conversation), nil
 	}
 	return nil, apperror.New("conversation_not_found", "conversation not found", 404, false)
@@ -1078,6 +1122,7 @@ func (s *MemoryStore) ListConversations(_ context.Context, userID, platform stri
 		if c.OwnerUserID == userID || s.userIsCollectorLocked(c.ID, userID) {
 			c.Collectors = s.collectorsForLocked(c.ID)
 			c.Memberships = s.membershipsForLocked(c.ID)
+			c.MessageCount, c.AttachmentCount = s.conversationCountsLocked(c.ID)
 			out = append(out, cloneConversation(c))
 		}
 	}
@@ -1209,7 +1254,7 @@ func (s *MemoryStore) IngestMessage(ctx context.Context, input IngestMessageInpu
 		return nil, apperror.New("collector_revoked", "collector is not active", 403, false)
 	}
 	conversation, ok := s.conversations[collector.ConversationID]
-	if !ok || conversation.Status == domain.ConversationDetached {
+	if !ok || conversation.Status != domain.ConversationActive {
 		return nil, apperror.New("conversation_not_found", "conversation is not active", 404, false)
 	}
 	if input.ExternalConversationID != "" && input.ExternalConversationID != conversation.ExternalConversationID {
@@ -1228,15 +1273,48 @@ func (s *MemoryStore) IngestMessage(ctx context.Context, input IngestMessageInpu
 	// uploaded after this metadata transaction, so advancing here could skip a
 	// message when its content upload fails.
 	result := &IngestResult{Duplicate: exists, CursorUpdated: false}
-	if exists && (!strings.EqualFold(message.ContentHash, input.ContentHash) || message.MessageType != input.MessageType) {
-		return nil, apperror.New("external_id_conflict", "external message id has conflicting content", 409, false)
+	legacyTypeCorrection := false
+	legacyAttachmentCleanup := false
+	if exists {
+		if !strings.EqualFold(message.ContentHash, input.ContentHash) && input.SenderExternalID == "" {
+			return nil, apperror.New("external_id_conflict", "external message id has conflicting content", 409, false)
+		}
+		if message.MessageType != input.MessageType {
+			if !canReclassifyLegacyFile(message.MessageType, input.MessageType, input.Attachments) {
+				return nil, apperror.New("external_id_conflict", "external message id has conflicting content", 409, false)
+			}
+			legacyTypeCorrection = true
+			legacyAttachmentCleanup = strings.EqualFold(message.MessageType, "file") && strings.EqualFold(input.MessageType, "text")
+			message.MessageType = input.MessageType
+			s.messages[key] = message
+		}
+		if input.SenderExternalID != "" {
+			identityID := s.ensureIdentityLocked(conversation.Platform, conversation.WorkspaceKey, input.SenderExternalID, input.SenderDisplayName)
+			message.SenderIdentityID = identityID
+			message.SenderDisplayName = strings.TrimSpace(input.SenderDisplayName)
+			if message.SenderDisplayName == "" {
+				message.SenderDisplayName = s.identityByIDLocked(identityID).DisplayName
+			}
+			s.messages[key] = message
+		}
 	}
 	if !exists {
-		message = domain.Message{ID: uuid.NewString(), ConversationID: conversation.ID, ExternalMessageID: input.ExternalMessageID, SenderIdentityID: s.ensureIdentityLocked(conversation.Platform, conversation.WorkspaceKey, input.SenderExternalID, input.SenderDisplayName), SenderDisplayName: input.SenderDisplayName, MessageType: input.MessageType, Content: "", Sensitive: false, ClassificationStatus: "pending", ContentHash: input.ContentHash, ContentVersion: 1, SentAt: input.SentAt.UTC(), LifecycleStatus: "active", VectorStatus: "pending", CreatedAt: now}
+		identityID := s.ensureIdentityLocked(conversation.Platform, conversation.WorkspaceKey, input.SenderExternalID, input.SenderDisplayName)
+		senderName := strings.TrimSpace(input.SenderDisplayName)
+		if senderName == "" {
+			senderName = s.identityByIDLocked(identityID).DisplayName
+		}
+		message = domain.Message{ID: uuid.NewString(), ConversationID: conversation.ID, ExternalMessageID: input.ExternalMessageID, SenderIdentityID: identityID, SenderDisplayName: senderName, MessageType: input.MessageType, Content: "", Sensitive: false, ClassificationStatus: "pending", ContentHash: input.ContentHash, ContentVersion: 1, SentAt: input.SentAt.UTC(), LifecycleStatus: "active", VectorStatus: "pending", CreatedAt: now}
 		s.messages[key] = message
 		s.privateContent[message.ID] = input.Content
 		if input.MessageType == "text" {
 			s.addEventLocked(ctx, "privacy.scan.requested", conversation, map[string]any{"message_id": message.ID, "content_version": 1})
+		}
+	}
+	if message.SenderDisplayName == "" && message.SenderIdentityID != "" {
+		if identityName := s.identityByIDLocked(message.SenderIdentityID).DisplayName; identityName != "" {
+			message.SenderDisplayName = identityName
+			s.messages[key] = message
 		}
 	}
 	sourceKey := message.ID + "|" + input.CollectorID
@@ -1252,7 +1330,11 @@ func (s *MemoryStore) IngestMessage(ctx context.Context, input IngestMessageInpu
 		attachmentKey := conversation.ID + "|" + a.ExternalAttachmentID
 		existing, found := s.attachments[attachmentKey]
 		if found {
-			if (existing.ContentHash != "" && a.ContentHash != "" && !strings.EqualFold(existing.ContentHash, a.ContentHash)) || (existing.SizeBytes > 0 && a.SizeBytes > 0 && existing.SizeBytes != a.SizeBytes) {
+			// Provider-declared sizes are not stable for WeChat resources (the
+			// same file may be reported before/after download). A verified hash
+			// is the reliable identity check; tolerate size-only corrections so
+			// replay can reconcile older incomplete metadata.
+			if existing.ContentHash != "" && a.ContentHash != "" && !strings.EqualFold(existing.ContentHash, a.ContentHash) {
 				return nil, apperror.New("external_id_conflict", "external attachment id has conflicting metadata", 409, false)
 			}
 			result.Attachments = append(result.Attachments, cloneAttachment(existing))
@@ -1260,10 +1342,23 @@ func (s *MemoryStore) IngestMessage(ctx context.Context, input IngestMessageInpu
 		}
 		name := sanitizeName(a.FileName)
 		sensitive := privacy.SensitiveAttachmentName(name)
-		attachment := domain.Attachment{ID: uuid.NewString(), ConversationID: conversation.ID, MessageID: message.ID, ExternalAttachmentID: a.ExternalAttachmentID, FileName: name, MIMEType: a.MIMEType, SizeBytes: a.SizeBytes, ContentHash: a.ContentHash, ContentVersion: 1, ContentStatus: "pending", AccessScope: "conversation_members", ContentAccessRequired: conversation.IngestionScope == "organization" || sensitive, Sensitive: sensitive, ClassificationStatus: "succeeded", PreviewCapability: previewCapability(a.MIMEType), CreatedAt: now, UpdatedAt: now}
+		attachment := domain.Attachment{ID: uuid.NewString(), ConversationID: conversation.ID, MessageID: message.ID, ExternalAttachmentID: a.ExternalAttachmentID, FileName: name, MIMEType: a.MIMEType, SizeBytes: a.SizeBytes, ContentHash: a.ContentHash, ContentVersion: 1, ContentStatus: "pending", AccessScope: "conversation_members", ContentAccessRequired: sensitive, Sensitive: sensitive, ClassificationStatus: "succeeded", PreviewCapability: previewCapability(a.MIMEType), CreatedAt: now, UpdatedAt: now}
 		s.attachments[attachmentKey] = attachment
 		result.Attachments = append(result.Attachments, cloneAttachment(attachment))
 		s.addEventLocked(ctx, "attachment.processing.requested", conversation, map[string]any{"resource_id": attachment.ID, "content_version": 1})
+	}
+	if legacyTypeCorrection && legacyAttachmentCleanup {
+		for attachmentKey, attachment := range s.attachments {
+			if attachment.MessageID != message.ID || attachment.ContentStatus != "pending" || attachment.ObjectRef != "" {
+				continue
+			}
+			delete(s.attachments, attachmentKey)
+			for eventID, event := range s.outbox {
+				if (event.EventType == "attachment.processing.requested" || event.EventType == "document.processing.requested") && event.Payload["resource_id"] == attachment.ID {
+					delete(s.outbox, eventID)
+				}
+			}
+		}
 	}
 	result.Message = cloneMessage(message)
 	return result, nil
@@ -1729,4 +1824,18 @@ func (s *MemoryStore) attachmentsForMessageLocked(messageID string) []domain.Att
 		}
 	}
 	return out
+}
+
+func (s *MemoryStore) conversationCountsLocked(conversationID string) (messages, attachments int) {
+	for _, message := range s.messages {
+		if message.ConversationID == conversationID {
+			messages++
+		}
+	}
+	for _, attachment := range s.attachments {
+		if attachment.ConversationID == conversationID {
+			attachments++
+		}
+	}
+	return messages, attachments
 }

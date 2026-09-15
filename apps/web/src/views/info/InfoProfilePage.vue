@@ -58,7 +58,7 @@
             </div>
             <t-tag :theme="connector.bound ? 'success' : 'default'" variant="light">{{ connectorStatus(connector) }}</t-tag>
             <t-button class="connector-action" :theme="connector.bound || connector.cleanup_pending ? 'default' : 'primary'" :variant="connector.bound || connector.cleanup_pending ? 'outline' : 'base'" size="medium" :loading="connectorPending[connector.platform]" :disabled="connector.availability !== 'available' || connectorPending[connector.platform]" @click="handleConnector(connector)">
-				{{ connector.cleanup_pending ? '重试解绑' : connector.status === 'expired' && connector.platform === 'feishu' ? '重新授权' : connector.bound ? '解除绑定' : connector.availability === 'available' ? `绑定${connector.display_name}` : '暂未开放' }}
+              {{ connector.cleanup_pending ? '重试解绑' : needsFeishuAuthorization(connector) ? '重新授权' : connector.bound ? '解除绑定' : connector.availability === 'available' ? `绑定${connector.display_name}` : '暂未开放' }}
             </t-button>
           </div>
         </div>
@@ -207,12 +207,16 @@ async function onAvatarSelected(event: Event) {
 function connectorStatus(connector: Connector) {
   if (connector.availability !== 'available') return '暂未开放'
   if (connector.cleanup_pending) return '待完成解绑'
+  if (needsFeishuAuthorization(connector)) return '需要重新授权'
   return ({ unbound: '未绑定', active: '已绑定', expired: '需要重新授权', reauthorization_required: '需要重新授权', revoked: '已撤销', paused: '已暂停', error: '异常', offline: '离线' } as Record<string, string>)[connector.status] || '状态未知'
 }
 function connectorSummary(connector: Connector) {
   if (connector.availability !== 'available') return '该连接器暂未开放'
   if (connector.cleanup_pending) return connector.last_error === 'wechat_stop_failed' ? '采集器尚未停止，请重试解绑' : '认证凭据尚未清理，请重试解绑'
   if (!connector.bound) return `未绑定，绑定后开放${connector.display_name}知识库`
+  if (connector.last_error === 'token_refresh_failed') return '飞书授权刷新失败，请重新授权'
+  if (connector.last_error === 'refresh_token_invalid' || connector.last_error === 'authorization_expired') return '飞书授权已失效，请重新授权'
+  if (connector.last_error === 'conversation_discovery_failed') return '会话列表获取失败，请重试'
   if (connector.status === 'expired' || connector.status === 'reauthorization_required') return '授权已失效，请重新授权'
   if (connector.platform === 'wechat') {
     if (connector.agent_online === false) return 'Agent 当前离线，请检查本机 Agent'
@@ -220,6 +224,9 @@ function connectorSummary(connector: Connector) {
     return '已绑定，等待 Agent heartbeat'
   }
   return connector.account_name || '已绑定，等待同步账号信息'
+}
+function needsFeishuAuthorization(connector: Connector) {
+  return connector.platform === 'feishu' && (connector.status === 'expired' || connector.status === 'reauthorization_required' || connector.last_error === 'token_refresh_failed' || connector.last_error === 'refresh_token_invalid' || connector.last_error === 'authorization_expired')
 }
 function heartbeatAge(value?: string | null) {
   if (!value) return '未知'
@@ -234,7 +241,7 @@ function heartbeatAge(value?: string | null) {
 async function refreshConnectors() { connectors.value = await getConnectors() }
 async function handleConnector(connector: Connector) {
 	if (connectorPending[connector.platform]) return
-	if (connector.platform === 'feishu' && (connector.status === 'expired' || connector.status === 'reauthorization_required')) {
+	if (needsFeishuAuthorization(connector)) {
 		feishuDialogVisible.value = true
 		return
 	}
@@ -256,7 +263,7 @@ async function confirmFeishuBind() {
   feishuBinding.value = true
   try {
 	const current = connectors.value.find((item) => item.platform === 'feishu')
-	const url = await getFeishuAuthorizeURL(current?.status === 'expired' ? 'rebind' : 'bind')
+	const url = await getFeishuAuthorizeURL(current?.bound ? 'rebind' : 'bind')
     window.location.assign(url)
   } catch (cause) { MessagePlugin.error(errorMessage(cause, '飞书授权暂不可用')) }
   finally { feishuBinding.value = false }

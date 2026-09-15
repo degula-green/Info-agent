@@ -119,6 +119,22 @@ func discardMessage(input IngestMessageInput) bool {
 	return false
 }
 
+// A provider-aware classifier may correct an older file/link classification
+// without changing the message body. Only this exact transition is safe to
+// reconcile; other type or content changes remain conflicts.
+func canReclassifyLegacyFile(existingType, nextType string, attachments []AttachmentInput) bool {
+	// Older WeChat rows were ingested as text when media was nested inside a
+	// forwarded type=57 payload. A later provider replay may safely promote
+	// that exact row to a media type once verified attachment metadata is
+	// available. This covers files, images, and videos without allowing a
+	// content-only type change to rewrite a real text message.
+	if strings.EqualFold(existingType, "text") &&
+		(strings.EqualFold(nextType, "file") || strings.EqualFold(nextType, "image") || strings.EqualFold(nextType, "video")) {
+		return len(attachments) > 0
+	}
+	return strings.EqualFold(existingType, "file") && strings.EqualFold(nextType, "text") && len(attachments) == 0
+}
+
 func classifyMessage(input IngestMessageInput) (bool, string) { return privacy.Scan(input.Content) }
 
 type PendingMessage struct {
@@ -248,6 +264,7 @@ type Repository interface {
 
 	ListConnectorViews(ctx context.Context, userID string) ([]domain.ConnectorView, error)
 	GetConnector(ctx context.Context, userID, platform string) (*domain.ConnectorAccount, error)
+	GetConnectorForOAuth(ctx context.Context, userID, platform string) (*domain.ConnectorAccount, error)
 	GetConnectorByID(ctx context.Context, connectorID string) (*domain.ConnectorAccount, error)
 	FindConnectorByExternal(ctx context.Context, platform, workspaceKey, externalAccountID string) (*domain.ConnectorAccount, error)
 	ListConnectorAccounts(ctx context.Context, platform string) ([]domain.ConnectorAccount, error)
@@ -259,6 +276,7 @@ type Repository interface {
 	UpdateWechatRuntime(ctx context.Context, connectorID, status, lastError string, heartbeat, collectedAt *time.Time) error
 	ReplaceConnector(ctx context.Context, previousConnectorID string, account domain.ConnectorAccount) (*domain.ConnectorAccount, error)
 	BindConnector(ctx context.Context, previousConnectorID string, account domain.ConnectorAccount, identity ExternalIdentityInput, now time.Time) (*domain.ConnectorAccount, error)
+	SetConnectorDefaultOrganization(ctx context.Context, connectorID, ownerUserID, organizationID string) (*domain.ConnectorAccount, error)
 	UpdateConnectorStatus(ctx context.Context, connectorID, status, lastError string) error
 	RestoreAuthorizationCollectors(ctx context.Context, connectorID string, now time.Time) error
 	RevokeConnector(ctx context.Context, userID, platform string) error

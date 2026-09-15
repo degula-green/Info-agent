@@ -53,6 +53,7 @@ type Config struct {
 	EncryptionKeys         string
 	WechatCollectorURL     string
 	CollectorInternalToken string
+	FixtureReplayEnabled   bool
 }
 
 func Load() Config {
@@ -93,12 +94,13 @@ func Load() Config {
 		PairingTTL:             envDuration("KNOWLEDGE_PAIRING_TTL", 10*time.Minute),
 		DeviceTTL:              envDuration("KNOWLEDGE_DEVICE_TTL", 365*24*time.Hour),
 		AgentClockSkew:         envDuration("KNOWLEDGE_AGENT_CLOCK_SKEW", 2*time.Minute),
-		MaxAttachmentBytes:     envInt64("KNOWLEDGE_MAX_ATTACHMENT_BYTES", 100*1024*1024),
+		MaxAttachmentBytes:     envInt64("KNOWLEDGE_MAX_ATTACHMENT_BYTES", 512*1024*1024),
 		FrontendURL:            env("KNOWLEDGE_FRONTEND_URL", ""),
 		EncryptionKeyVersion:   env("KNOWLEDGE_ENCRYPTION_KEY_VERSION", "v1"),
 		EncryptionKeys:         env("KNOWLEDGE_ENCRYPTION_KEYS", env("KNOWLEDGE_ENCRYPTION_KEY", "")),
 		WechatCollectorURL:     env("KNOWLEDGE_WECHAT_COLLECTOR_URL", "http://127.0.0.1:8091"),
 		CollectorInternalToken: env("KNOWLEDGE_COLLECTOR_INTERNAL_TOKEN", "local-development-only"),
+		FixtureReplayEnabled:   envBool("KNOWLEDGE_FIXTURE_REPLAY_ENABLED", false),
 	}
 }
 

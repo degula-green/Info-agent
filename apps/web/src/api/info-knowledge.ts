@@ -1,4 +1,4 @@
-import { ApiError, knowledgeContentURL, knowledgeHeaders, knowledgeRequest } from './http.ts'
+import { ApiError, knowledgeContentURL, knowledgeFetch, knowledgeHeaders, knowledgeRequest } from './http.ts'
 
 export type ConnectorPlatform = 'feishu' | 'wecom' | 'wechat'
 export type ConnectorStatus = 'unbound' | 'active' | 'expired' | 'revoked' | 'error' | 'reauthorization_required'
@@ -32,6 +32,7 @@ export interface AvailableConversationDTO {
   name: string
   conversation_type: 'private' | 'group' | string
   member_count: number
+  members?: Array<{ external_user_id: string; display_name?: string; member_role?: string }>
   last_seen_at?: string | null
   message_count?: number
   attachment_count?: number
@@ -121,8 +122,11 @@ export interface ConversationDTO {
   detached_at?: string | null
   created_at: string
   updated_at: string
+  message_count: number
+  attachment_count: number
   collectors?: CollectorDTO[]
-  memberships?: Array<{ id: string; external_user_id: string; display_name?: string; member_role?: string; status: string }>
+  memberships?: Array<{ id: string; external_identity_id?: string; external_user_id: string; display_name?: string; member_role?: string; status: string }>
+  member_count?: number
 }
 
 export interface ConversationDetail {
@@ -146,7 +150,7 @@ export async function bindWechat(wxid: string, dbDir: string, rebind = false) {
 }
 export async function getWechatStatus() { return knowledgeRequest<Record<string, any>>('/connectors/wechat/status') }
 export async function stopWechat() { return knowledgeRequest<{ status: string }>('/connectors/wechat/stop', { method: 'POST' }) }
-export async function getWechatConversations() { return knowledgeRequest<Record<string, any>>('/connectors/wechat/conversations') }
+export async function getWechatConversations() { return knowledgeRequest<Record<string, any>>('/connectors/wechat/local-conversations') }
 export async function getWechatConfig() { return knowledgeRequest<Record<string, any>>('/connectors/wechat/config') }
 export async function saveWechatConfig(value: Record<string, any>) { return knowledgeRequest<Record<string, any>>('/connectors/wechat/config', { method: 'PUT', body: JSON.stringify(value) }) }
 
@@ -193,15 +197,16 @@ export async function setConversationStatus(conversationID: string, status: 'pau
 
 export async function getConversationDetail(conversationID: string, limit = 200): Promise<ConversationDetail> {
   const conversation = await knowledgeRequest<ConversationDTO>(`/conversations/${encodeURIComponent(conversationID)}`)
-  const [messageBody, attachmentBody] = await Promise.all([
-    knowledgeRequest<{ items: MessageDTO[] }>(`/conversations/${encodeURIComponent(conversationID)}/messages?limit=${limit}`),
-    knowledgeRequest<{ items: AttachmentDTO[] }>(`/conversations/${encodeURIComponent(conversationID)}/attachments`),
-  ])
+  // Fetch the two potentially expensive collections in sequence. The global
+  // request queue also limits traffic, but keeping this path sequential avoids
+  // a burst when a detail page is opened or refreshed.
+  const messageBody = await knowledgeRequest<{ items: MessageDTO[] }>(`/conversations/${encodeURIComponent(conversationID)}/messages?limit=${limit}`)
+  const attachmentBody = await knowledgeRequest<{ items: AttachmentDTO[] }>(`/conversations/${encodeURIComponent(conversationID)}/attachments`)
   return { conversation, messages: messageBody.items || [], attachments: attachmentBody.items || [] }
 }
 
 export async function getKnowledgeAttachmentContent(id: string, download = false) {
-  const response = await fetch(knowledgeContentURL(`/attachments/${encodeURIComponent(id)}/content`), {
+  const response = await knowledgeFetch(knowledgeContentURL(`/attachments/${encodeURIComponent(id)}/content`), {
     headers: knowledgeHeaders(undefined, download ? 'application/octet-stream' : '*/*'),
   })
   if (!response.ok) {

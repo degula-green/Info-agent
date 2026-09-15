@@ -15,24 +15,27 @@
         </div>
       </header>
 
-      <div class="kb-section-label"><span>平台知识库</span><small>固定接入的三个数据来源</small></div>
-      <div v-if="filteredSources.length" class="kb-grid">
-        <button v-for="source in filteredSources" :key="source.key" class="kb-card" type="button" :disabled="source.available === false" @click="openSource(source)">
-          <div class="kb-card__head">
-            <span class="kb-card__icon" :style="{ background: sourceColor[source.key] }">{{ source.name.slice(0, 1) }}</span>
-            <t-tag :theme="source.bound ? 'success' : source.available === false ? 'warning' : 'default'" variant="light" size="small">{{ source.bound ? '已连接' : source.available === false ? '暂未开放' : '未绑定' }}</t-tag>
-          </div>
-          <div class="kb-card__name">{{ source.kbName }}</div>
-          <p>{{ source.description }}<template v-if="source.lastError"> · {{ source.lastError }}</template></p>
-          <div class="kb-card__foot">
-            <span v-if="source.available === false"><t-icon name="lock-on" />当前未开放</span>
-            <span v-else-if="source.bound"><t-icon name="chat" />{{ source.selectedConversationCount ?? source.chats.length }} 个已接入会话</span>
-            <span v-else><t-icon name="lock-on" />绑定{{ source.name }}后开放</span>
-            <t-icon name="chevron-right" />
-          </div>
-        </button>
-      </div>
-      <div v-else class="wk-empty wk-empty--small"><t-icon name="search" size="24px" /><p>没有匹配的知识库或内容</p></div>
+      <div v-if="accessLoading" class="wk-empty wk-empty--small"><t-loading size="small" text="正在加载连接状态..." /></div>
+      <template v-else>
+        <div class="kb-section-label"><span>平台知识库</span><small>固定接入的三个数据来源</small></div>
+        <div v-if="filteredSources.length" class="kb-grid">
+          <button v-for="source in filteredSources" :key="source.key" class="kb-card" type="button" :disabled="source.available === false" @click="openSource(source)">
+            <div class="kb-card__head">
+              <span class="kb-card__icon" :style="{ background: sourceColor[source.key] }">{{ source.name.slice(0, 1) }}</span>
+              <t-tag :theme="source.bound ? 'success' : source.available === false ? 'warning' : 'default'" variant="light" size="small">{{ source.bound ? '已连接' : source.available === false ? '暂未开放' : '未绑定' }}</t-tag>
+            </div>
+            <div class="kb-card__name">{{ source.kbName }}</div>
+            <p>{{ source.description }}<template v-if="source.lastError"> · {{ source.lastError }}</template></p>
+            <div class="kb-card__foot">
+              <span v-if="source.available === false"><t-icon name="lock-on" />当前未开放</span>
+              <span v-else-if="source.bound"><t-icon name="chat" />{{ source.selectedConversationCount ?? source.chats.length }} 个已接入会话</span>
+              <span v-else><t-icon name="lock-on" />绑定{{ source.name }}后开放</span>
+              <t-icon name="chevron-right" />
+            </div>
+          </button>
+        </div>
+        <div v-else class="wk-empty wk-empty--small"><t-icon name="search" size="24px" /><p>没有匹配的知识库或内容</p></div>
+      </template>
     </template>
 
     <template v-else>
@@ -45,7 +48,9 @@
         <t-button theme="primary" :disabled="!activeSource.bound || activeSource.available === false" @click="openAccessDialog"><template #icon><t-icon name="add" /></template>接入群聊</t-button>
       </header>
 
-      <div v-if="activeSource.available === false" class="wk-empty">
+      <div v-if="accessLoading && !activeSource.bound" class="wk-empty wk-empty--small"><t-loading size="small" text="正在加载连接状态..." /></div>
+
+      <div v-else-if="activeSource.available === false" class="wk-empty">
         <t-icon name="pause" size="30px" /><h3>{{ activeSource.name }}暂未开放</h3><p>当前平台不支持采集消息。</p><t-button theme="primary" @click="$emit('profile')">查看连接器</t-button>
       </div>
 
@@ -95,14 +100,19 @@
       <div v-if="activeSource" class="access-dialog">
         <div class="access-dialog__intro">
           <p>选择当前账号可接入的群聊或私人聊天；已由组织成员接入的群聊可以加入协同采集。</p>
-          <t-button size="small" variant="outline" :loading="accessLoading" @click="emit('refresh-access')">
+          <t-button size="small" variant="outline" :loading="isAccessLoading" @click="emit('refresh-access')">
             <template #icon><t-icon name="refresh" /></template>刷新群聊列表
           </t-button>
         </div>
         <t-input v-model="accessQuery" clearable placeholder="搜索群聊或联系人昵称" class="access-dialog__search">
           <template #prefix-icon><t-icon name="search" /></template>
         </t-input>
-        <div v-if="accessLoading" class="access-dialog__loading"><t-loading size="small" text="正在刷新可接入会话..." /></div>
+        <div v-if="isAccessLoading" class="access-dialog__loading"><t-loading size="small" text="正在刷新可接入会话..." /></div>
+        <div v-else-if="activeSource.discoveryError" class="access-dialog__error" role="alert">
+          <t-icon name="error-circle" size="20px" />
+          <div><strong>会话列表加载失败</strong><p>{{ activeSource.discoveryError }}</p></div>
+          <t-button size="small" variant="outline" @click="emit('refresh-access')">重试</t-button>
+        </div>
         <div v-else-if="filteredAvailableSessions.length" class="access-session-list">
           <button v-for="session in filteredAvailableSessions" :key="session.id" type="button" class="access-session" :disabled="discoveryAction(session) === 'attached'" @click="accessSession(session.id)">
             <span class="access-session__icon" :style="{ background: sourceColor[activeSource.key] }"><t-icon :name="session.isDirect ? 'user' : 'chat'" /></span>
@@ -110,7 +120,7 @@
             <span class="access-session__action"><t-icon :name="discoveryAction(session) === 'attached' ? 'check-circle' : discoveryAction(session) === 'join' ? 'user-add' : 'add'" />{{ discoveryAction(session) === 'attached' ? '已接入' : discoveryAction(session) === 'join' ? '加入协同采集' : '接入' }}</span>
           </button>
         </div>
-        <div v-else class="access-dialog__empty"><t-icon :name="accessQuery.trim() ? 'search' : 'check-circle-filled'" size="24px" /><p>{{ accessQuery.trim() ? '没有匹配的会话' : '当前可接入会话已全部接入' }}</p></div>
+        <div v-else class="access-dialog__empty"><t-icon :name="accessQuery.trim() ? 'search' : 'chat'" size="24px" /><p>{{ accessQuery.trim() ? '没有匹配的会话' : '当前没有发现可接入会话' }}</p><t-button v-if="activeSource.discoveryLoaded" size="small" variant="outline" @click="emit('refresh-access')">重新刷新</t-button></div>
       </div>
     </t-dialog>
 
@@ -142,7 +152,9 @@ const emit = defineEmits<{
 }>()
 
 const query = ref('')
-const activeSource = ref<InfoSource | null>(null)
+const activeSourceKey = ref<InfoSource['key'] | null>(null)
+const activeSource = computed(() => activeSourceKey.value ? props.sources.find((source) => source.key === activeSourceKey.value) ?? null : null)
+const isAccessLoading = computed(() => Boolean(activeSource.value?.discoveryLoading || props.accessLoading))
 const accessDialogVisible = ref(false)
 const accessQuery = ref('')
 const collectDialogVisible = ref(false)
@@ -169,8 +181,8 @@ const filteredAvailableSessions = computed(() => {
   return source.availableSessions.filter((session) => `${session.name} ${session.externalId || session.id}`.toLowerCase().includes(needle))
 })
 
-watch(() => [props.initialSourceKey, props.sources], ([key]) => {
-  activeSource.value = key ? props.sources.find((source) => source.key === key) ?? null : null
+watch(() => props.initialSourceKey, (key) => {
+  activeSourceKey.value = key || null
 }, { immediate: true })
 
 const totalSessionCount = computed(() => props.sources.reduce((sum, source) => sum + source.chats.length, 0))
@@ -210,7 +222,7 @@ function collectorTelemetry(collector: InfoCollector) {
   if (collector.lastError) parts.push(collector.lastError)
   return parts.join(' · ')
 }
-function openSource(source: InfoSource) { activeSource.value = source; emit('open-source', source.key) }
+function openSource(source: InfoSource) { activeSourceKey.value = source.key; emit('open-source', source.key) }
 function statusLabel(status: CollectionStatus) { return status === 'collecting' ? '采集中' : status === 'paused' ? '已停止采集' : status === 'detached' ? '已解除接入' : status === 'missing' ? '群聊已不存在' : status === 'error' ? '采集异常' : '未开始' }
 function pauseChat(chat: InfoChat) { emit('toggle', chat.source, chat.externalId || chat.id) }
 function resumeChat(chat: InfoChat) { emit('resume', chat.source, chat.id) }

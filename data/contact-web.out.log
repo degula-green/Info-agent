@@ -1,0 +1,20 @@
+
+> info-agent-prototype@1.0.0 dev
+> vite --host 0.0.0.0
+
+
+  VITE v7.3.6  ready in 821 ms
+
+  ➜  Local:   http://localhost:5173/
+  ➜  Network: http://198.18.0.1:5173/
+  ➜  Network: http://172.24.48.1:5173/
+  ➜  Network: http://192.168.239.1:5173/
+  ➜  Network: http://192.168.74.1:5173/
+  ➜  Network: http://10.14.109.153:5173/
+  ➜  press h + enter to show help
+01:21:27 [vite] (client) hmr update /src/views/info/InfoShell.vue
+01:33:03 [vite] (client) hmr update /src/views/info/InfoContactsPage.vue
+01:33:03 [vite] (client) hmr update /src/views/info/InfoContactsPage.vue, /src/views/info/InfoContactsPage.vue?vue&type=style&index=0&scoped=5f73992f&lang.css
+01:46:25 [vite] (client) hmr update /src/views/info/InfoContactsPage.vue
+01:46:25 [vite] (client) hmr update /src/views/info/InfoContactsPage.vue
+01:52:13 [vite] (client) hmr update /src/views/info/InfoContactsPage.vue, /src/views/info/InfoContactsPage.vue?vue&type=style&index=0&scoped=5f73992f&lang.css

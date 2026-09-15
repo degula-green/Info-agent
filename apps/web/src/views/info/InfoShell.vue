@@ -143,7 +143,7 @@ const activeKey = computed(() => {
   if (paletteVisible.value) return 'search'
   if (route.name === 'chat') return 'new-chat'; if (route.name === 'search') return 'search'; if (route.name === 'knowledge' || route.name === 'knowledgePlatform' || route.params.platform) return 'knowledge'; if (route.name === 'organization') return 'organization'; if (route.name === 'contacts') return 'contacts'; if (route.name === 'profile') return 'profile'; return 'new-chat'
 })
-const pageTitle = computed(() => ({ dashboard: '概览', search: '搜索', knowledge: '知识库', organization: '我的组织', chat: '新对话', profile: '个人中心' } as Record<string, string>)[String(route.name)] || (route.params.platform ? knowledgeStore.findSource(normalizeSourceKey(String(route.params.platform)) || undefined)?.kbName || store.findSource(normalizeSourceKey(String(route.params.platform)) || undefined)?.kbName || '知识库' : '概览'))
+const pageTitle = computed(() => ({ dashboard: '概览', search: '搜索', knowledge: '知识库', organization: '我的组织', contacts: '联系人列表', chat: '新对话', profile: '个人中心' } as Record<string, string>)[String(route.name)] || (route.params.platform ? knowledgeStore.findSource(normalizeSourceKey(String(route.params.platform)) || undefined)?.kbName || store.findSource(normalizeSourceKey(String(route.params.platform)) || undefined)?.kbName || '知识库' : '概览'))
 
 async function navigate(view: string) {
   if (view === 'search') { openSearch(); return }

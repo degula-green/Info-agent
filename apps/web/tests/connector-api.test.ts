@@ -83,3 +83,26 @@ test('attachment content errors preserve the backend permission code', async () 
     return true
   })
 })
+
+test('bounds concurrent detail loads to avoid a pending-request burst', async () => {
+  Object.defineProperty(globalThis, 'sessionStorage', { configurable: true, value: storage('jwt-token') })
+  let active = 0
+  let peak = 0
+  let calls = 0
+  const conversation = (id: string) => ({ id, platform: 'feishu', external_conversation_id: id, conversation_type: 'group', name: id, ingestion_scope: 'organization', organization_id: 'org', created_at: '2026-09-05T00:00:00Z', updated_at: '2026-09-05T00:00:00Z', message_count: 0, attachment_count: 0 })
+  globalThis.fetch = async (input) => {
+    const url = String(input)
+    calls += 1
+    active += 1
+    peak = Math.max(peak, active)
+    await new Promise((resolve) => setTimeout(resolve, 15))
+    active -= 1
+    if (/\/conversations\/c[12]$/.test(url)) return json(conversation(url.endsWith('/c1') ? 'c1' : 'c2'))
+    if (url.includes('/messages')) return json({ items: [] })
+    if (url.includes('/attachments')) return json({ items: [] })
+    return json({ items: [] })
+  }
+  await Promise.all([getConversationDetail('c1'), getConversationDetail('c2')])
+  assert.equal(peak <= 2, true, `request peak was ${peak}`)
+  assert.equal(calls, 6)
+})

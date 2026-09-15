@@ -1,8 +1,20 @@
 export interface CoreUser { id: string; email: string; nickname: string; status: string; avatar_url?: string }
 export interface CoreTokenResponse { access_token: string; token_type: string; expires_at: string }
-export class CoreAuthError extends Error { constructor(public message: string, public code = 'request_failed', public status = 500, public retryable = false) { super(message); this.name = 'CoreAuthError' } }
+export class CoreAuthError extends Error {
+  code: string
+  status: number
+  retryable: boolean
+  constructor(message: string, code = 'request_failed', status = 500, retryable = false) {
+    super(message)
+    this.name = 'CoreAuthError'
+    this.code = code
+    this.status = status
+    this.retryable = retryable
+  }
+}
 const env = ((import.meta as ImportMeta & { env?: Record<string, string> }).env || {})
 const baseURL = String(env.VITE_CORE_BASE_URL || '/api/core').replace(/\/$/, '')
+let refreshPromise: Promise<CoreTokenResponse> | null = null
 function requestID() { return globalThis.crypto?.randomUUID?.() || `web-${Date.now()}-${Math.random().toString(16).slice(2)}` }
 export function getAccessToken() { try { return sessionStorage.getItem('access_token') || localStorage.getItem('access_token') || '' } catch { return '' } }
 export function saveAccessToken(token: string) { try { sessionStorage.setItem('access_token', token); localStorage.setItem('access_token', token) } catch { /* ignore unavailable storage */ } }
@@ -25,7 +37,13 @@ async function request<T>(path: string, init: RequestInit = {}, retried = false)
 }
 export const login = (email: string, password: string) => request<CoreTokenResponse>('/auth/login', { method: 'POST', body: JSON.stringify({ email, password }) })
 export const register = (email: string, username: string, password: string, confirm: string) => request<CoreUser>('/auth/register', { method: 'POST', body: JSON.stringify({ email, username, password, confirm }) })
-export async function refresh() { const result = await request<CoreTokenResponse>('/auth/refresh', { method: 'POST' }); saveAccessToken(result.access_token); return result }
+export async function refresh() {
+  if (refreshPromise) return refreshPromise
+  refreshPromise = request<CoreTokenResponse>('/auth/refresh', { method: 'POST' })
+    .then((result) => { saveAccessToken(result.access_token); return result })
+    .finally(() => { refreshPromise = null })
+  return refreshPromise
+}
 export const logout = () => request<void>('/auth/logout', { method: 'POST' })
 export const getCurrentUser = () => request<CoreUser>('/auth/me', { method: 'GET' })
 export const updateCurrentUser = (nickname: string) => request<CoreUser>('/auth/me', { method: 'PATCH', body: JSON.stringify({ nickname }) })

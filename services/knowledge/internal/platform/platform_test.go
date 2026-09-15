@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -92,14 +93,32 @@ func TestExchangeCodeCapturesRefreshTokenExpiry(t *testing.T) {
 	}
 }
 
+func TestTokenEndpointUsesHostedFeishuOAuthV3Endpoint(t *testing.T) {
+	provider := NewHTTPFeishu(
+		"app", "secret", "redirect",
+		"https://accounts.feishu.cn/open-apis/authen/v1/authorize",
+		"https://open.feishu.cn", "",
+	)
+	if got, want := provider.tokenEndpoint(), "https://accounts.feishu.cn/oauth/v3/token"; got != want {
+		t.Fatalf("token endpoint = %q, want %q", got, want)
+	}
+}
+
+func TestTokenEndpointUsesOpenFeishuOAuthV2EndpointForCustomAuthHost(t *testing.T) {
+	provider := NewHTTPFeishu("app", "secret", "redirect", "https://oauth.example.test/authorize", "https://open.feishu.cn", "")
+	if got, want := provider.tokenEndpoint(), "https://open.feishu.cn/open-apis/authen/v2/oauth/token"; got != want {
+		t.Fatalf("token endpoint = %q, want %q", got, want)
+	}
+}
+
 func TestPollMessagesParsesMillisecondTimeAndAppliesHistoryStart(t *testing.T) {
-	start := time.Date(2026, 9, 5, 0, 0, 0, 0, time.UTC)
+	start := time.Now().UTC().Add(-time.Hour).Truncate(time.Second)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Query().Get("sort_type") != "ByCreateTimeAsc" || r.URL.Query().Get("start_time") != "1788566400" || r.URL.Query().Get("page_token") != "" {
+		if r.URL.Query().Get("sort_type") != "ByCreateTimeAsc" || r.URL.Query().Get("start_time") != strconv.FormatInt(start.Unix(), 10) || r.URL.Query().Get("page_token") != "" {
 			t.Errorf("unexpected message query: %s", r.URL.RawQuery)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"code":0,"data":{"items":[{"message_id":"old","sender":{"id":"u1"},"msg_type":"text","body":{"content":"{\"text\":\"old\"}"},"create_time":"1788566399000"},{"message_id":"new","sender":{"id":"u1","name":"Alice"},"msg_type":"text","body":{"content":"{\"text\":\"hello\"}"},"create_time":"1788566400000"}],"has_more":false}}`))
+		_, _ = w.Write([]byte(fmt.Sprintf(`{"code":0,"data":{"items":[{"message_id":"old","sender":{"id":"u1"},"msg_type":"text","body":{"content":"{\"text\":\"old\"}"},"create_time":"%d"},{"message_id":"new","sender":{"id":"u1","name":"Alice"},"msg_type":"text","body":{"content":"{\"text\":\"hello\"}"},"create_time":"%d"}],"has_more":false}}`, start.Add(-time.Second).UnixMilli(), start.UnixMilli())))
 	}))
 	defer server.Close()
 	provider := NewHTTPFeishu("app", "secret", "redirect", server.URL, server.URL, "")

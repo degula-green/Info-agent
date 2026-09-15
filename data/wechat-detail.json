@@ -1,0 +1,298 @@
+{
+  "id": "599ecb5b-7d85-494b-8673-629ee7e9af08",
+  "platform": "wechat",
+  "external_conversation_id": "44505237054@chatroom",
+  "conversation_type": "group",
+  "name": "数据252",
+  "knowledge_base_id": "092de2c4-f0ac-4b5c-bae1-a021ba5c9441",
+  "ingestion_scope": "organization",
+  "organization_id": "61d4401e-5f94-4ade-a907-fab8e2c6db9b",
+  "requested_start_at": "2026-09-06T00:17:12.067688+08:00",
+  "effective_start_at": "2026-09-06T00:17:12.067688+08:00",
+  "status": "active",
+  "last_synced_at": "2026-09-14T22:42:42.970482+08:00",
+  "created_at": "2026-09-12T00:17:13.625049+08:00",
+  "updated_at": "2026-09-14T22:42:42.970482+08:00",
+  "message_count": 260,
+  "attachment_count": 44,
+  "member_count": 29,
+  "collectors": [
+    {
+      "id": "87f9a34a-6ccf-4c8f-966e-7735830ed1e1",
+      "conversation_id": "599ecb5b-7d85-494b-8673-629ee7e9af08",
+      "collector_user_id": "40a975eb-41f6-44e6-be62-788554aa6f21",
+      "collector_role": "primary",
+      "status": "active",
+      "last_cursor": "1789396951000",
+      "last_success_at": "2026-09-14T22:42:42.970482+08:00",
+      "last_attempt_at": "2026-09-14T22:42:42.970482+08:00",
+      "consecutive_failures": 0,
+      "joined_at": "2026-09-12T00:17:13.625049+08:00",
+      "agent_online": true,
+      "last_heartbeat_at": "2026-09-15T02:46:02.225781+08:00"
+    }
+  ],
+  "memberships": [
+    {
+      "id": "01238e66-e8c0-4f85-bbee-acf72f840540",
+      "external_identity_id": "e8eb6a31-fc7b-47e6-ac42-2502dd1cbf2b",
+      "external_user_id": "wxid_7c8a9kpxo00n22",
+      "display_name": "赵福尚15893282932",
+      "status": "active",
+      "joined_at": "2026-09-12T23:20:16.102235+08:00",
+      "last_seen_at": "2026-09-14T22:42:04.568581+08:00"
+    },
+    {
+      "id": "09b2213f-79b2-43e0-b451-429dcb328799",
+      "external_identity_id": "d78aa78c-4844-45e7-b433-9d4bd96ce218",
+      "external_user_id": "wxid_rebbd5tul28y22",
+      "display_name": "丰硕18530661705",
+      "status": "active",
+      "joined_at": "2026-09-12T23:20:16.102235+08:00",
+      "last_seen_at": "2026-09-14T22:42:04.568581+08:00"
+    },
+    {
+      "id": "09be39cd-8d76-4407-89f6-bdeb49dbb94d",
+      "external_identity_id": "1687c725-50ab-4fd7-9dd8-0ceced10db78",
+      "external_user_id": "wxid_h6wbovytx1l922",
+      "display_name": "何翔17656353506",
+      "status": "active",
+      "joined_at": "2026-09-12T23:20:16.102235+08:00",
+      "last_seen_at": "2026-09-14T22:42:04.568581+08:00"
+    },
+    {
+      "id": "0e64a758-6657-44af-9bf8-4f8f80dbf217",
+      "external_identity_id": "bf5af3b7-5e08-4b6b-be70-110eda270509",
+      "external_user_id": "wxid_4bnrfr1fwl7i22",
+      "display_name": "贺佳昊18737483696",
+      "status": "active",
+      "joined_at": "2026-09-12T23:20:16.102235+08:00",
+      "last_seen_at": "2026-09-14T22:42:04.568581+08:00"
+    },
+    {
+      "id": "12b64e32-66c6-465c-a11d-cba0ff17f1e6",
+      "external_identity_id": "32242edd-d513-4b98-b298-e45c9fa6a29f",
+      "external_user_id": "wxid_1ga9mj9bvt3422",
+      "display_name": "师筱涵   17537525913",
+      "status": "active",
+      "joined_at": "2026-09-12T23:20:16.102235+08:00",
+      "last_seen_at": "2026-09-14T22:42:04.568581+08:00"
+    },
+    {
+      "id": "1f325918-4517-435f-94a4-a295a7de7ab5",
+      "external_identity_id": "1b16ba01-a18e-4279-be05-dfc46c07840b",
+      "external_user_id": "wxid_akkrh2q7v2nl22",
+      "display_name": "张子君",
+      "status": "active",
+      "joined_at": "2026-09-12T23:20:16.102235+08:00",
+      "last_seen_at": "2026-09-14T22:42:04.568581+08:00"
+    },
+    {
+      "id": "242e8292-fb20-4c18-b52c-c54260f9ea35",
+      "external_identity_id": "d9b4b08b-1dbc-4be4-b50e-f7cee90bcfcc",
+      "external_user_id": "wxid_kcuwvtc5jnt322",
+      "display_name": "李翼航15893730036",
+      "status": "active",
+      "joined_at": "2026-09-12T23:20:16.102235+08:00",
+      "last_seen_at": "2026-09-14T22:42:04.568581+08:00"
+    },
+    {
+      "id": "41ff723d-bfd9-466a-bef2-4ec5fec52858",
+      "external_identity_id": "0a74d103-087c-4502-8d91-d701bb977419",
+      "external_user_id": "wxid_en6at2u441sy22",
+      "display_name": "余金河15565225639",
+      "status": "active",
+      "joined_at": "2026-09-12T23:20:16.102235+08:00",
+      "last_seen_at": "2026-09-14T22:42:04.568581+08:00"
+    },
+    {
+      "id": "5346ac36-8aa9-4d6b-8f58-2592ac46f981",
+      "external_identity_id": "a132fb28-14ac-443c-95bc-56e1feac4edb",
+      "external_user_id": "wxid_y4lb5imvl3mf22",
+      "display_name": "儿子李阳",
+      "status": "active",
+      "joined_at": "2026-09-12T23:20:16.102235+08:00",
+      "last_seen_at": "2026-09-14T22:42:04.568581+08:00"
+    },
+    {
+      "id": "6a78e064-5dd3-4f26-b7b7-d1cc70cbbbd4",
+      "external_identity_id": "80546cdb-3742-4517-aee7-feebfa6741e1",
+      "external_user_id": "wxid_z0eevwn9g20n12",
+      "display_name": "卫桐嘉 17335636218",
+      "status": "active",
+      "joined_at": "2026-09-12T23:20:16.102235+08:00",
+      "last_seen_at": "2026-09-14T22:42:04.568581+08:00"
+    },
+    {
+      "id": "6f727dfe-f26f-4a65-b7e0-e8c872a189bb",
+      "external_identity_id": "cd4f3259-51d7-4b73-94fb-bfd15fe14a50",
+      "external_user_id": "wxid_4e25rhmxxfbt22",
+      "display_name": "潘晨晓 13938028956",
+      "status": "active",
+      "joined_at": "2026-09-12T23:20:16.102235+08:00",
+      "last_seen_at": "2026-09-14T22:42:04.568581+08:00"
+    },
+    {
+      "id": "7a8de1d3-07c9-4902-a60f-fe36f228eee8",
+      "external_identity_id": "0e3d2d2d-6123-42e8-ad19-de11f6ec8046",
+      "external_user_id": "wxid_t1cqamg10ymv22",
+      "display_name": "任怡静",
+      "status": "active",
+      "joined_at": "2026-09-12T23:20:16.102235+08:00",
+      "last_seen_at": "2026-09-14T22:42:04.568581+08:00"
+    },
+    {
+      "id": "7b2891ff-f116-4a0b-8dca-90e766b61c33",
+      "external_identity_id": "ead1ebe0-794d-437a-b199-a4dc99bac107",
+      "external_user_id": "wxid_zfl1la6y6urv22",
+      "display_name": "张欣迎13839983173",
+      "status": "active",
+      "joined_at": "2026-09-12T23:20:16.102235+08:00",
+      "last_seen_at": "2026-09-14T22:42:04.568581+08:00"
+    },
+    {
+      "id": "7fc8554c-5f2d-406b-bd68-5ae333028039",
+      "external_identity_id": "35ea7878-bab2-4a19-9726-54d751fa2f8c",
+      "external_user_id": "wxid_ru2ykfmgr5gc22",
+      "display_name": "杨若鑫17596886482",
+      "status": "active",
+      "joined_at": "2026-09-12T23:20:16.102235+08:00",
+      "last_seen_at": "2026-09-14T22:42:04.568581+08:00"
+    },
+    {
+      "id": "841e0b52-95cd-447b-90fe-830b771217e2",
+      "external_identity_id": "3bdaed23-b449-4c33-a961-66d19be74fe8",
+      "external_user_id": "wxid_8rz0nr9wha8e22",
+      "display_name": "张迎秋15893351196",
+      "status": "active",
+      "joined_at": "2026-09-12T23:20:16.102235+08:00",
+      "last_seen_at": "2026-09-14T22:42:04.568581+08:00"
+    },
+    {
+      "id": "9557ac29-024e-4017-bfe4-3f7cc2bc9494",
+      "external_identity_id": "c63941b2-55e8-48a2-b521-7a1910b43342",
+      "external_user_id": "wxid_jvmbijid5v7y22",
+      "display_name": "陈烁17398999432",
+      "status": "active",
+      "joined_at": "2026-09-12T23:20:16.102235+08:00",
+      "last_seen_at": "2026-09-14T22:42:04.568581+08:00"
+    },
+    {
+      "id": "9d723713-c9e2-40e0-9039-d29e5b093731",
+      "external_identity_id": "781cfb23-4627-4c9f-ad66-9892bf230e40",
+      "external_user_id": "wxid_u6yd5xbkpaf322",
+      "display_name": "朱宇鹏18800733665",
+      "status": "active",
+      "joined_at": "2026-09-12T23:20:16.102235+08:00",
+      "last_seen_at": "2026-09-14T22:42:04.568581+08:00"
+    },
+    {
+      "id": "9dbeb8f7-32a4-4940-8ebf-c02f71b86a0d",
+      "external_identity_id": "2eef9f84-4ed5-425f-a9a7-b6fa187303ff",
+      "external_user_id": "wxid_prbs0qbb7t2522",
+      "display_name": "小呆呆仓鼠",
+      "status": "active",
+      "joined_at": "2026-09-12T23:20:16.102235+08:00",
+      "last_seen_at": "2026-09-14T22:42:04.568581+08:00"
+    },
+    {
+      "id": "a2d5baed-a767-4986-ae41-fa47cb01594b",
+      "external_identity_id": "210feeb0-56c6-41de-8f31-3e7f7784f6f0",
+      "external_user_id": "wxid_e1p2bgb90fpg22",
+      "display_name": "谢柯佳17837727496",
+      "status": "active",
+      "joined_at": "2026-09-12T23:20:16.102235+08:00",
+      "last_seen_at": "2026-09-14T22:42:04.568581+08:00"
+    },
+    {
+      "id": "a62e1b93-c2f0-416c-96a7-56358aafc70d",
+      "external_identity_id": "94447f38-8fc5-4a33-8475-37161413eea6",
+      "external_user_id": "wxid_yjinea6uuqm822",
+      "display_name": "高家乐 15890511490",
+      "status": "active",
+      "joined_at": "2026-09-12T23:20:16.102235+08:00",
+      "last_seen_at": "2026-09-14T22:42:04.568581+08:00"
+    },
+    {
+      "id": "a7c53856-eae8-41ff-afc6-83e9c7ba59b4",
+      "external_identity_id": "443585fc-0bb2-4c1a-85ce-c97e23af9dea",
+      "external_user_id": "wxid_dos40posr6e722",
+      "display_name": "吴晶晶13460069010",
+      "status": "active",
+      "joined_at": "2026-09-12T23:20:16.102235+08:00",
+      "last_seen_at": "2026-09-14T22:42:04.568581+08:00"
+    },
+    {
+      "id": "accbf992-c2ea-4c6b-9698-2026daa65d36",
+      "external_identity_id": "b7ef1dd4-0b6c-4dc6-b388-b320d61712d3",
+      "external_user_id": "wxid_eftqopl0tgc522",
+      "display_name": "沙子涵13072652830",
+      "status": "active",
+      "joined_at": "2026-09-12T23:20:16.102235+08:00",
+      "last_seen_at": "2026-09-14T22:42:04.568581+08:00"
+    },
+    {
+      "id": "ae0cd9f2-1c3f-422d-abed-86409f67488f",
+      "external_identity_id": "5a4d4480-dbeb-4ac4-8d0d-9c5e5c331a96",
+      "external_user_id": "wxid_mix6l9typtgz22",
+      "display_name": "数据252王子颖",
+      "status": "active",
+      "joined_at": "2026-09-12T23:20:16.102235+08:00",
+      "last_seen_at": "2026-09-14T22:42:04.568581+08:00"
+    },
+    {
+      "id": "b2a90bcd-dfa6-4230-978f-0c9776908b71",
+      "external_identity_id": "18ea1ec7-c2f6-492a-93c9-be0ab7ac9522",
+      "external_user_id": "wxid_9l8is277mwj022",
+      "display_name": "何论    19837713289",
+      "status": "active",
+      "joined_at": "2026-09-12T23:20:16.102235+08:00",
+      "last_seen_at": "2026-09-14T22:42:04.568581+08:00"
+    },
+    {
+      "id": "b424d422-8efc-48d3-8071-57ebb57dd593",
+      "external_identity_id": "69bc1ff9-acac-43a8-bf3c-1e74b6e2dc18",
+      "external_user_id": "wxid_l8nxnm1iickt22",
+      "display_name": "张昊基 18568769430",
+      "status": "active",
+      "joined_at": "2026-09-12T23:20:16.102235+08:00",
+      "last_seen_at": "2026-09-14T22:42:04.568581+08:00"
+    },
+    {
+      "id": "c3ab0282-bf17-45fb-b29c-a9f9e8490fb6",
+      "external_identity_id": "817760e1-911e-4ee5-8014-f2408ce145fc",
+      "external_user_id": "wxid_v0o8tmxy91ea22",
+      "display_name": "稻成",
+      "status": "active",
+      "joined_at": "2026-09-12T23:20:16.102235+08:00",
+      "last_seen_at": "2026-09-14T22:42:04.568581+08:00"
+    },
+    {
+      "id": "e7350a16-107a-4cda-aa29-4508c8cfb3b6",
+      "external_identity_id": "f082783d-d1b0-44c3-81ea-92f3e7f48b23",
+      "external_user_id": "wxid_0ppw4rmkt9hi22",
+      "display_name": "Kllll陈汉祯",
+      "status": "active",
+      "joined_at": "2026-09-12T23:20:16.102235+08:00",
+      "last_seen_at": "2026-09-14T22:42:04.568581+08:00"
+    },
+    {
+      "id": "f0cb780c-193d-403a-9b8f-4f8194fa2953",
+      "external_identity_id": "6261d68b-3b24-4d0f-84aa-f9542498444a",
+      "external_user_id": "wxid_u07hy79vvz6f22",
+      "display_name": "数据252郑文博16690945226",
+      "status": "active",
+      "joined_at": "2026-09-12T23:20:16.102235+08:00",
+      "last_seen_at": "2026-09-14T22:42:04.568581+08:00"
+    },
+    {
+      "id": "f549a09b-8c3e-481a-95b2-594e07535c73",
+      "external_identity_id": "9954e654-68a6-4cef-9ce7-d5c270cc98ee",
+      "external_user_id": "wxid_5zy801uy9j4h22",
+      "display_name": "赵明月18439428097",
+      "status": "active",
+      "joined_at": "2026-09-12T23:20:16.102235+08:00",
+      "last_seen_at": "2026-09-14T22:42:04.568581+08:00"
+    }
+  ]
+}

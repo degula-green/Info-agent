@@ -102,8 +102,8 @@
 
         <footer class="detail-modal__footer">
           <div class="detail-modal__status">
-            <span class="status-dot" :class="statusTone(activeMessage.vectorStatus)" />
-            <span>{{ messageStatus(activeMessage.vectorStatus) }}</span>
+            <span class="status-dot status-dot--success" />
+            <span>已采集</span>
             <span class="record-id">消息 ID: {{ activeMessage.sourceMessageId || activeMessage.id }}</span>
           </div>
           <div class="detail-modal__actions">
@@ -201,7 +201,7 @@ const items = computed<ConversationItem[]>(() => [
       kind: 'message' as const,
       name: messagePreview(message.content),
       detail: `${message.sender} · ${message.time}`,
-      status: message.vectorStatus === 'failed' ? '索引失败' : message.vectorStatus === 'completed' ? '索引完成' : message.vectorStatus || '已采集',
+      status: '已采集',
       size: '-',
       type: '消息',
       source: sourceName(chat.value.source),
@@ -220,7 +220,10 @@ const items = computed<ConversationItem[]>(() => [
     updatedAt: file.uploadedAt || file.time,
     file,
   })),
-])
+].sort((a, b) => {
+  const time = (item: ConversationItem) => item.message?.timestamp || item.file?.timestamp || ''
+  return Date.parse(time(b)) - Date.parse(time(a))
+}))
 
 const collectionHint = computed(() => chat.value.collectionStatus === 'collecting'
   ? '持续采集中'
@@ -237,12 +240,6 @@ function openItem(item: ConversationItem) { if (item.kind === 'message' && item.
 function openMessage(message: InfoMessage) { activeMessage.value = message; activeFile.value = null; messageDialogVisible.value = true }
 function openFile(file: InfoFile) { activeFile.value = file; activeMessage.value = null; fileDialogVisible.value = true }
 
-function messageStatus(status?: string | null) {
-  if (status === 'failed') return '索引失败'
-  if (status === 'completed') return '索引完成'
-  return status || '已采集'
-}
-
 function isRichMessage(content?: string | null) {
   return /<\/?(?:p|div|span|br|strong|b|em|i|a|img|ul|ol|li|table|thead|tbody|tr|td|th)\b/i.test(String(content || ''))
 }
@@ -255,7 +252,7 @@ function messagePreview(content?: string | null) {
 }
 
 function displayMessageContent(content?: string | null) {
-  const value = String(content || '').trim()
+  const value = String(content || '').trim().replace(/^(?:wxid_[A-Za-z0-9_-]+(?:@chatroom)?|[A-Za-z0-9_-]+@chatroom)\s*:\s*/i, '')
   if (!/^<(?:\?xml|msg|appmsg)\b/i.test(value)) return value
   const decode = (text: string) => text
     .replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, '$1')
@@ -343,8 +340,10 @@ async function downloadFile() {
 .conversation-meta svg { width: 13px; }
 .wk-panel { overflow: hidden; border: 1px solid var(--td-component-stroke); border-radius: 8px; background: var(--td-bg-color-container); }
 .conversation-list__tabs { display: flex; align-items: center; justify-content: space-between; min-height: 64px; padding: 0 20px; border-bottom: 1px solid var(--td-component-stroke); }
-.conversation-tab { align-self: stretch; padding: 0 4px; border: 0; border-bottom: 3px solid transparent; color: var(--td-text-color-secondary); background: transparent; font-size: 16px; cursor: pointer; }
-.conversation-tab--active { border-bottom-color: var(--td-brand-color); color: var(--td-text-color-primary); font-weight: 600; }
+.conversation-tab { position: relative; align-self: stretch; padding: 0 4px; border: 0; color: var(--td-text-color-secondary); background: transparent; font-size: 16px; cursor: pointer; }
+.conversation-tab::after { position: absolute; right: 0; bottom: 0; left: 0; height: 3px; border-radius: 2px 2px 0 0; background: transparent; content: ''; }
+.conversation-tab--active { color: var(--td-text-color-primary); font-weight: 600; }
+.conversation-tab--active::after { background: var(--td-brand-color); }
 .conversation-tab span { color: var(--td-text-color-secondary); font-weight: 400; }
 .conversation-list__hint { color: var(--td-text-color-placeholder); font-size: 11px; }
 .conversation-table__head, .conversation-row { display: grid; grid-template-columns: minmax(300px, 2.2fr) .9fr .7fr .9fr 1.1fr 1fr; align-items: center; gap: 18px; }

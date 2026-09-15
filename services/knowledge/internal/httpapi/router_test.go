@@ -10,6 +10,8 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -18,6 +20,7 @@ import (
 	"info-agent/knowledge/internal/config"
 	"info-agent/knowledge/internal/domain"
 	"info-agent/knowledge/internal/repository"
+	"info-agent/knowledge/internal/service"
 )
 
 func TestHealth(t *testing.T) {
@@ -115,7 +118,7 @@ func TestSignedAttachmentUploadCursorAndProtectedContent(t *testing.T) {
 	}
 	fileContent := []byte("attachment-content")
 	fileHash := sha256Hex(fileContent)
-	message := repository.IngestMessageInput{CollectorID: collector.ID, ExternalConversationID: "chat-1", ExternalMessageID: "message-1", MessageType: "file", Content: "attachment", ContentHash: sha256Hex([]byte("attachment")), SentAt: now, Cursor: "1", Attachments: []repository.AttachmentInput{{ExternalAttachmentID: "external-file-1", FileName: "note.txt", MIMEType: "text/plain", SizeBytes: int64(len(fileContent)), ContentHash: fileHash}}}
+	message := repository.IngestMessageInput{CollectorID: collector.ID, ExternalConversationID: "chat-1", ExternalMessageID: "message-1", MessageType: "file", Content: "attachment", ContentHash: sha256Hex([]byte("attachment")), SentAt: now, Cursor: "1", Attachments: []repository.AttachmentInput{{ExternalAttachmentID: "external-file-1", FileName: "production-passwords.xlsx", MIMEType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", SizeBytes: int64(len(fileContent)), ContentHash: fileHash}}}
 	message.PayloadHash, err = repository.CalculatePayloadHash(message)
 	if err != nil {
 		t.Fatal(err)
@@ -128,12 +131,12 @@ func TestSignedAttachmentUploadCursorAndProtectedContent(t *testing.T) {
 
 	var uploadBody bytes.Buffer
 	writer := multipart.NewWriter(&uploadBody)
-	for name, value := range map[string]string{"attachment_id": attachmentID, "file_name": "note.txt", "mime_type": "text/plain", "content_hash": fileHash} {
+	for name, value := range map[string]string{"attachment_id": attachmentID, "file_name": "production-passwords.xlsx", "mime_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "content_hash": fileHash} {
 		if err := writer.WriteField(name, value); err != nil {
 			t.Fatal(err)
 		}
 	}
-	part, err := writer.CreateFormFile("file", "note.txt")
+	part, err := writer.CreateFormFile("file", "production-passwords.xlsx")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -291,6 +294,136 @@ func TestPublicConversationResponseDoesNotExposeInternalReferences(t *testing.T)
 	}
 	if response["id"] != conversation.ID || response["external_conversation_id"] != "private-chat" {
 		t.Fatalf("public conversation response lost required resource fields: %s", body)
+	}
+}
+
+func TestFixtureReplayHTTPRoundTripPersistsAndDeduplicates(t *testing.T) {
+	cfg := config.Config{
+		AllowDevAuth:         true,
+		DevUserID:            "fixture-http-user",
+		DevOrganizationID:    "fixture-http-org",
+		InternalServiceToken: "fixture-http-service-token",
+		FixtureReplayEnabled: true,
+		MaxAttachmentBytes:   1024 * 1024,
+	}
+	app := newApp(cfg)
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+	account, err := app.Service.Repo.SaveConnector(ctx, domain.ConnectorAccount{
+		ID:                    "fixture-http-connector",
+		OwnerUserID:           cfg.DevUserID,
+		Platform:              domain.PlatformFeishu,
+		WorkspaceKey:          "fixture-http-workspace",
+		ExternalAccountID:     "fixture-http-account",
+		DefaultOrganizationID: cfg.DevOrganizationID,
+		Status:                domain.ConnectorActive,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	discovery, err := app.Service.ReportManagedDiscovery(ctx, account.ID, domain.PlatformFeishu, []domain.AvailableConversation{{
+		ExternalID: "fixture-http-chat", Name: "Fixture HTTP 验收群", ConversationType: "group", MemberCount: 4,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := now.Add(-6 * 24 * time.Hour)
+	conversation, err := app.Service.Attach(ctx, repository.AttachInput{
+		UserID: cfg.DevUserID, Platform: domain.PlatformFeishu, ExternalConversationID: "fixture-http-chat",
+		ConversationType: "group", DiscoveryID: discovery.ID, OrganizationID: cfg.DevOrganizationID,
+		RequestedStartAt: &start,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(conversation.Collectors) != 1 {
+		t.Fatalf("expected one fixture collector, got %+v", conversation.Collectors)
+	}
+
+	fixtureRaw, err := os.ReadFile(filepath.Join("..", "..", "testdata", "collection_fixture.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fixture struct {
+		Pages []service.FixturePage `json:"pages"`
+	}
+	if err := json.Unmarshal(fixtureRaw, &fixture); err != nil {
+		t.Fatal(err)
+	}
+	payload, err := json.Marshal(service.FixtureReplayInput{
+		ConversationID: conversation.ID, CollectorID: conversation.Collectors[0].ID,
+		StartAt: start, EndAt: now, Pages: fixture.Pages,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	router := NewRouterWithApp(app)
+	replay := httptest.NewRequest(http.MethodPost, "/api/knowledge/v1/internal/fixtures/replay", bytes.NewReader(payload))
+	replay.Header.Set("Content-Type", "application/json")
+	replay.Header.Set("X-Service-Token", cfg.InternalServiceToken)
+	replayRecorder := httptest.NewRecorder()
+	router.ServeHTTP(replayRecorder, replay)
+	if replayRecorder.Code != http.StatusOK {
+		t.Fatalf("fixture replay HTTP request failed: status=%d body=%s", replayRecorder.Code, replayRecorder.Body.String())
+	}
+	var first service.FixtureReplayResult
+	if err := json.Unmarshal(replayRecorder.Body.Bytes(), &first); err != nil {
+		t.Fatal(err)
+	}
+	if first.PagesCompleted != 2 || first.MessagesSaved != 2 || first.MessagesSkipped != 1 || first.AttachmentsReady != 1 || first.LastCursor != "3" {
+		t.Fatalf("unexpected HTTP replay result: %+v", first)
+	}
+
+	get := func(path string, out any) {
+		recorder := httptest.NewRecorder()
+		router.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, path, nil))
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("GET %s failed: status=%d body=%s", path, recorder.Code, recorder.Body.String())
+		}
+		if err := json.Unmarshal(recorder.Body.Bytes(), out); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var public struct {
+		Name            string            `json:"name"`
+		MessageCount    int               `json:"message_count"`
+		AttachmentCount int               `json:"attachment_count"`
+		Collectors      []publicCollector `json:"collectors"`
+	}
+	get("/api/knowledge/v1/conversations/"+conversation.ID, &public)
+	if public.Name != "Fixture HTTP 验收群" || public.MessageCount != 2 || public.AttachmentCount != 1 || len(public.Collectors) != 1 || public.Collectors[0].LastCursor != "3" {
+		t.Fatalf("public conversation did not expose persisted fixture state: %+v", public)
+	}
+	var messages struct {
+		Items []publicMessage `json:"items"`
+	}
+	get("/api/knowledge/v1/conversations/"+conversation.ID+"/messages?limit=20", &messages)
+	if len(messages.Items) != 2 || messages.Items[0].SenderDisplayName != "Alice" || messages.Items[1].SenderDisplayName != "Bob" || len(messages.Items[1].Attachments) != 1 || messages.Items[1].Attachments[0].ContentStatus != "ready" {
+		t.Fatalf("public message query lost sender or attachment state: %+v", messages.Items)
+	}
+	var attachments struct {
+		Items []publicAttachment `json:"items"`
+	}
+	get("/api/knowledge/v1/conversations/"+conversation.ID+"/attachments", &attachments)
+	if len(attachments.Items) != 1 || attachments.Items[0].FileName != "采集验收说明.txt" || attachments.Items[0].ContentStatus != "ready" {
+		t.Fatalf("public attachment query returned unexpected data: %+v", attachments.Items)
+	}
+
+	replayAgain := httptest.NewRequest(http.MethodPost, "/api/knowledge/v1/internal/fixtures/replay", bytes.NewReader(payload))
+	replayAgain.Header.Set("Content-Type", "application/json")
+	replayAgain.Header.Set("X-Service-Token", cfg.InternalServiceToken)
+	replayAgainRecorder := httptest.NewRecorder()
+	router.ServeHTTP(replayAgainRecorder, replayAgain)
+	if replayAgainRecorder.Code != http.StatusOK {
+		t.Fatalf("duplicate fixture replay HTTP request failed: status=%d body=%s", replayAgainRecorder.Code, replayAgainRecorder.Body.String())
+	}
+	var second service.FixtureReplayResult
+	if err := json.Unmarshal(replayAgainRecorder.Body.Bytes(), &second); err != nil {
+		t.Fatal(err)
+	}
+	if second.MessagesSaved != 0 || second.Duplicates != 2 || second.AttachmentsReady != 1 || second.LastCursor != "3" {
+		t.Fatalf("duplicate HTTP replay was not idempotent: %+v", second)
 	}
 }
 

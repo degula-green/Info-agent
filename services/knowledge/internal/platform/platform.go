@@ -126,6 +126,9 @@ func (p *HTTPFeishu) Refresh(ctx context.Context, token vault.TokenSet) (vault.T
 }
 
 func (p *HTTPFeishu) tokenEndpoint() string {
+	// Feishu's hosted OAuth domain uses the v3 token endpoint. Keep the
+	// open.feishu.cn v2 endpoint for self-hosted/test providers and older
+	// configurations so local fakes remain compatible.
 	if parsed, err := url.Parse(p.authURL); err == nil && strings.EqualFold(parsed.Hostname(), "accounts.feishu.cn") {
 		return "https://accounts.feishu.cn/oauth/v3/token"
 	}

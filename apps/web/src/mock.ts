@@ -25,8 +25,8 @@ export interface InfoMessage {
 }
 
 export interface InfoFile {
-  id: string; name: string; type: string; size: string; time: string
-  uploadedAt: string; uploader: string; content: string; documentId?: number | null; documentStatus?: string | null
+  id: string; name: string; type: string; mimeType?: string; size: string; time: string
+    uploadedAt: string; uploader: string; content: string; timestamp?: string; documentId?: number | null; documentStatus?: string | null
   parseStatus?: string; previewCapability?: string; contentAccessRequired?: boolean; isDeleted?: boolean; fileSizeBytes?: number | null
 }
 
@@ -49,6 +49,7 @@ export interface InfoSource {
   key: SourceKey; name: string; kbName: string; description: string
   account: string; bound: boolean; chats: InfoChat[]; availableSessions: InfoAvailableSession[]
   selectedConversationCount?: number; lastSyncAt?: string | null; enabled?: boolean; available?: boolean; historyStartAt?: string | null; lastError?: string | null; status?: 'unbound' | 'active' | 'paused' | 'error' | 'offline' | 'expired' | 'revoked' | 'reauthorization_required'
+  discoveryLoading?: boolean; discoveryLoaded?: boolean; discoveryError?: string | null
   agentOnline?: boolean; lastHeartbeatAt?: string | null
 }
 

@@ -33,6 +33,7 @@ const pollTimer = ref<number | null>(null)
 const resumeDialogVisible = ref(false)
 const resumeLoading = ref(false)
 const pendingResumeChat = ref<InfoChat | null>(null)
+const conversationLoads = new Map<string, Promise<void>>()
 
 async function toggleChat(current: any) {
   if (current.collectionStatus === 'detached') return
@@ -63,6 +64,10 @@ async function confirmResume() {
 }
 function toast(text: string) { MessagePlugin.success(text) }
 async function loadCurrentConversation(platform: string, id: string, force = false) {
+  const loadKey = `${platform}:${id}`
+  const existing = conversationLoads.get(loadKey)
+  if (existing) return existing
+  const request = (async () => {
   loading.value = true
   try {
     // The shell refreshes conversation summaries globally. Do not force a
@@ -73,16 +78,23 @@ async function loadCurrentConversation(platform: string, id: string, force = fal
   } finally {
     loading.value = false
   }
+  })()
+  conversationLoads.set(loadKey, request)
+  void request.then(() => {
+    if (conversationLoads.get(loadKey) === request) conversationLoads.delete(loadKey)
+  }, () => {
+    if (conversationLoads.get(loadKey) === request) conversationLoads.delete(loadKey)
+  })
+  return request
 }
-onMounted(async () => {
-  await loadCurrentConversation(sourceKey.value, conversationId.value)
+onMounted(() => {
   pollTimer.value = window.setInterval(() => {
     void loadCurrentConversation(sourceKey.value, conversationId.value, true)
   }, 30000)
 })
 watch([sourceKey, conversationId], async ([platform, id]) => {
   await loadCurrentConversation(platform, id, true)
-})
+}, { immediate: true })
 onBeforeUnmount(() => {
   if (pollTimer.value != null) window.clearInterval(pollTimer.value)
 })

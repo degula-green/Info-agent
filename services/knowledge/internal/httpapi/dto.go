@@ -1,6 +1,9 @@
 package httpapi
 
 import (
+	"mime"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"info-agent/knowledge/internal/domain"
@@ -45,14 +48,15 @@ type publicCollector struct {
 }
 
 type publicMembership struct {
-	ID             string     `json:"id"`
-	ExternalUserID string     `json:"external_user_id"`
-	DisplayName    string     `json:"display_name,omitempty"`
-	MemberRole     string     `json:"member_role,omitempty"`
-	Status         string     `json:"status"`
-	JoinedAt       *time.Time `json:"joined_at,omitempty"`
-	LeftAt         *time.Time `json:"left_at,omitempty"`
-	LastSeenAt     time.Time  `json:"last_seen_at"`
+	ID                 string     `json:"id"`
+	ExternalIdentityID string     `json:"external_identity_id"`
+	ExternalUserID     string     `json:"external_user_id"`
+	DisplayName        string     `json:"display_name,omitempty"`
+	MemberRole         string     `json:"member_role,omitempty"`
+	Status             string     `json:"status"`
+	JoinedAt           *time.Time `json:"joined_at,omitempty"`
+	LeftAt             *time.Time `json:"left_at,omitempty"`
+	LastSeenAt         time.Time  `json:"last_seen_at"`
 }
 
 type publicContact struct {
@@ -133,20 +137,30 @@ type publicConversation struct {
 	DetachedAt             *time.Time         `json:"detached_at,omitempty"`
 	CreatedAt              time.Time          `json:"created_at"`
 	UpdatedAt              time.Time          `json:"updated_at"`
+	MessageCount           int                `json:"message_count"`
+	AttachmentCount        int                `json:"attachment_count"`
+	MemberCount            int                `json:"member_count"`
 	Collectors             []publicCollector  `json:"collectors,omitempty"`
 	Memberships            []publicMembership `json:"memberships,omitempty"`
 }
 
 type publicAvailableConversation struct {
-	ExternalID             string     `json:"external_id"`
-	Name                   string     `json:"name"`
-	ConversationType       string     `json:"conversation_type"`
-	MemberCount            int        `json:"member_count"`
-	LastSeenAt             *time.Time `json:"last_seen_at,omitempty"`
-	MessageCount           int        `json:"message_count,omitempty"`
-	AttachmentCount        int        `json:"attachment_count,omitempty"`
-	AttachedConversationID string     `json:"attached_conversation_id,omitempty"`
-	CurrentUserCollector   bool       `json:"current_user_collector"`
+	ExternalID             string                  `json:"external_id"`
+	Name                   string                  `json:"name"`
+	ConversationType       string                  `json:"conversation_type"`
+	MemberCount            int                     `json:"member_count"`
+	Members                []publicDiscoveryMember `json:"members,omitempty"`
+	LastSeenAt             *time.Time              `json:"last_seen_at,omitempty"`
+	MessageCount           int                     `json:"message_count,omitempty"`
+	AttachmentCount        int                     `json:"attachment_count,omitempty"`
+	AttachedConversationID string                  `json:"attached_conversation_id,omitempty"`
+	CurrentUserCollector   bool                    `json:"current_user_collector"`
+}
+
+type publicDiscoveryMember struct {
+	ExternalUserID string `json:"external_user_id"`
+	DisplayName    string `json:"display_name,omitempty"`
+	MemberRole     string `json:"member_role,omitempty"`
 }
 
 type publicDiscovery struct {
@@ -204,22 +218,46 @@ func publicCollectorFromDomain(value domain.Collector) publicCollector {
 
 func publicMembershipFromDomain(value domain.ConversationMembership) publicMembership {
 	return publicMembership{
-		ID: value.ID, ExternalUserID: value.ExternalUserID, DisplayName: value.DisplayName,
+		ID: value.ID, ExternalIdentityID: value.ExternalIdentityID, ExternalUserID: value.ExternalUserID, DisplayName: value.DisplayName,
 		MemberRole: value.MemberRole, Status: value.Status, JoinedAt: value.JoinedAt,
 		LeftAt: value.LeftAt, LastSeenAt: value.LastSeenAt,
 	}
 }
 
 func publicAttachmentFromDomain(value domain.Attachment) publicAttachment {
+	// Older WeChat collector rows used image.bin/application/octet-stream for
+	// image payloads. Their object bytes are still valid image data; normalize
+	// this legacy metadata at the public boundary so existing attachments can
+	// use the same preview path as newly collected images.
+	fileName, mimeType := normalizedAttachmentMetadata(value.FileName, value.MIMEType)
+	preview := value.PreviewCapability
+	if fileName == "image.jpg" && mimeType == "image/jpeg" {
+		preview = "preview"
+	}
+	if mimeType == "" {
+		mimeType = mime.TypeByExtension(filepath.Ext(fileName))
+	}
 	return publicAttachment{
 		ID: value.ID, ConversationID: value.ConversationID, MessageID: value.MessageID,
-		ExternalAttachmentID: value.ExternalAttachmentID, FileName: value.FileName, MIMEType: value.MIMEType,
+		ExternalAttachmentID: value.ExternalAttachmentID, FileName: fileName, MIMEType: mimeType,
 		SizeBytes: value.SizeBytes, ContentHash: value.ContentHash, ContentVersion: value.ContentVersion,
 		ContentStatus: value.ContentStatus, AccessScope: value.AccessScope,
-		ContentAccessRequired: value.ContentAccessRequired, PreviewCapability: value.PreviewCapability,
+		ContentAccessRequired: value.ContentAccessRequired && value.Sensitive, PreviewCapability: preview,
 		Sensitive: value.Sensitive, ClassificationStatus: value.ClassificationStatus,
 		LastError: value.LastError, CreatedAt: value.CreatedAt, UpdatedAt: value.UpdatedAt,
 	}
+}
+
+func normalizedAttachmentMetadata(fileName, mimeType string) (string, string) {
+	fileName = strings.TrimSpace(fileName)
+	mimeType = strings.TrimSpace(mimeType)
+	if strings.EqualFold(fileName, "image.bin") && (mimeType == "" || mimeType == "application/octet-stream") {
+		return "image.jpg", "image/jpeg"
+	}
+	if mimeType == "" {
+		mimeType = mime.TypeByExtension(filepath.Ext(fileName))
+	}
+	return fileName, mimeType
 }
 
 func publicMessageFromDomain(value domain.Message) publicMessage {
@@ -253,16 +291,22 @@ func publicConversationFromDomain(value domain.ConversationIngestion) publicConv
 		OrganizationID: value.OrganizationID, RequestedStartAt: value.RequestedStartAt,
 		EffectiveStartAt: value.EffectiveStartAt, Status: value.Status, PauseReason: value.PauseReason,
 		LastSyncedAt: value.LastSyncedAt, DetachedAt: value.DetachedAt, CreatedAt: value.CreatedAt,
-		UpdatedAt: value.UpdatedAt, Collectors: collectors, Memberships: memberships,
+		UpdatedAt: value.UpdatedAt, MessageCount: value.MessageCount, AttachmentCount: value.AttachmentCount,
+		MemberCount: len(memberships),
+		Collectors:  collectors, Memberships: memberships,
 	}
 }
 
 func publicAvailableFromDomain(value domain.AvailableConversation) publicAvailableConversation {
+	members := make([]publicDiscoveryMember, 0, len(value.Members))
+	for _, member := range value.Members {
+		members = append(members, publicDiscoveryMember{ExternalUserID: member.ExternalUserID, DisplayName: member.DisplayName, MemberRole: member.MemberRole})
+	}
 	return publicAvailableConversation{
 		ExternalID: value.ExternalID, Name: value.Name, ConversationType: value.ConversationType,
 		MemberCount: value.MemberCount, LastSeenAt: value.LastSeenAt, MessageCount: value.MessageCount,
 		AttachmentCount: value.AttachmentCount, AttachedConversationID: value.AttachedConversationID,
-		CurrentUserCollector: value.CurrentUserCollector,
+		CurrentUserCollector: value.CurrentUserCollector, Members: members,
 	}
 }
 

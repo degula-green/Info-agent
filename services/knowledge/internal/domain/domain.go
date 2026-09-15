@@ -214,6 +214,8 @@ type ConversationIngestion struct {
 	DetachedAt             *time.Time               `json:"detached_at,omitempty"`
 	CreatedAt              time.Time                `json:"created_at"`
 	UpdatedAt              time.Time                `json:"updated_at"`
+	MessageCount           int                      `json:"message_count"`
+	AttachmentCount        int                      `json:"attachment_count"`
 	Collectors             []Collector              `json:"collectors,omitempty"`
 	Memberships            []ConversationMembership `json:"memberships,omitempty"`
 }
