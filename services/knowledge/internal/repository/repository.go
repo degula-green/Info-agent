@@ -113,8 +113,31 @@ func discardMessage(input IngestMessageInput) bool {
 		return true
 	}
 	content := strings.TrimSpace(input.Content)
+	// Provider-generated attachment/forwarding labels are not user messages.
+	// Keep the actual attachment row, but never persist these labels as text.
+	switch strings.ToLower(content) {
+	case "merged and forwarded message", "forwarded message", "file name", "filename":
+		return true
+	}
+	if len(input.Attachments) == 0 && isAttachmentMetadataJSON(content) {
+		return true
+	}
 	if len(input.Attachments) == 0 && (content == "[无法解析]" || content == "[表情]" || content == "[动画表情]" || content == "<msg>") {
 		return true
+	}
+	return false
+}
+
+func isAttachmentMetadataJSON(content string) bool {
+	var payload map[string]any
+	if json.Unmarshal([]byte(content), &payload) != nil || len(payload) == 0 {
+		return false
+	}
+	for key := range payload {
+		switch strings.ToLower(strings.TrimSpace(key)) {
+		case "file_key", "file_token", "image_key", "image_token", "file_name", "filename":
+			return true
+		}
 	}
 	return false
 }

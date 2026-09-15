@@ -30,7 +30,6 @@ class CollectorServiceTest(unittest.TestCase):
         service.binding.clear(); service.binding.update({"status": "running", "wxid": "wxid-test"})
         service.config.clear(); service.config.update({"enabled": True, "listen_mode": "whitelist", "selected_conversations": ["chat"], "connector_id": "account"})
         service.checkpoints.clear(); service.db = FakeDB(); self.calls = []
-
         def knowledge(path, method="GET", payload=None):
             self.calls.append((path, method, payload))
             if path.endswith("assignments?connector_id=account"):
@@ -47,6 +46,11 @@ class CollectorServiceTest(unittest.TestCase):
         service.knowledge = knowledge; service.download_attachment = download
         service.upload_attachment = lambda *args: self.calls.append(("upload", args, None)) or {}
         service.save_state = lambda: None
+
+    def test_parse_time_accepts_numeric_string_without_using_current_time(self):
+        parsed = service.parse_time("1721000000000")
+        self.assertEqual(parsed.year, 2024)
+        self.assertEqual(parsed.month, 7)
 
     def tearDown(self):
         for name, value in self.original.items(): setattr(service, name, value)

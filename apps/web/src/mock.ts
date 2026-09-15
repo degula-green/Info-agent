@@ -19,14 +19,14 @@ export interface InfoCollector {
 }
 
 export interface InfoMessage {
-  id: string; sender: string; content: string; time: string; timestamp: string
+  id: string; sender: string; content: string; time: string; timestamp: string; collectedAt?: string; collectionTimestamp?: string
   attachments?: InfoAttachment[]; vectorStatus?: string; sourceMessageId?: string; senderAvatarUrl?: string
   isDeleted?: boolean; isUpdated?: boolean; messageType?: string; sourceMessageType?: string; metadata?: Record<string, unknown>
 }
 
 export interface InfoFile {
   id: string; name: string; type: string; mimeType?: string; size: string; time: string
-    uploadedAt: string; uploader: string; content: string; timestamp?: string; documentId?: number | null; documentStatus?: string | null
+    uploadedAt: string; uploader: string; content: string; timestamp?: string; sentAt?: string; collectedAt?: string; collectionTimestamp?: string; documentId?: number | null; documentStatus?: string | null
   parseStatus?: string; previewCapability?: string; contentAccessRequired?: boolean; isDeleted?: boolean; fileSizeBytes?: number | null
 }
 

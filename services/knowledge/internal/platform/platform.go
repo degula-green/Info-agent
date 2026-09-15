@@ -515,8 +515,10 @@ func parseFeishuMessage(apiURL, messageID, messageType, raw string) (string, []A
 	attachments := []Attachment{}
 	var payload map[string]any
 	if json.Unmarshal([]byte(raw), &payload) == nil {
+		hasText := false
 		if textValue, ok := payload["text"].(string); ok && strings.TrimSpace(textValue) != "" {
 			content = textValue
+			hasText = true
 		}
 		key := firstString(payload, "file_key", "file_token", "image_key", "image_token")
 		if key != "" {
@@ -538,7 +540,20 @@ func parseFeishuMessage(apiURL, messageID, messageType, raw string) (string, []A
 			}
 			resourceURL := apiURL + "/open-apis/im/v1/messages/" + url.PathEscape(messageID) + "/resources/" + url.PathEscape(key) + "?type=" + resourceType
 			attachments = append(attachments, Attachment{ExternalAttachmentID: messageID + ":" + key, FileName: name, MIMEType: mimeType, SizeBytes: int64(firstNumber(payload, "size", "size_bytes")), ContentHash: firstString(payload, "content_hash", "hash"), DownloadURL: resourceURL})
+			if !hasText {
+				// Attachment metadata is persisted with the attachment row. Do not
+				// index or display the provider's JSON envelope as message text.
+				content = ""
+			}
 		}
+		// Feishu forwarding/file envelopes can contain only metadata. They are
+		// represented by the attachment record and must not leak as JSON text.
+		if !hasText && len(attachments) == 0 && hasProviderMetadata(payload) {
+			content = ""
+		}
+	}
+	if isFeishuSystemLabel(content) {
+		content = ""
 	}
 	if strings.EqualFold(messageType, "text") || strings.EqualFold(messageType, "post") {
 		messageType = "text"
@@ -550,6 +565,25 @@ func parseFeishuMessage(apiURL, messageID, messageType, raw string) (string, []A
 		return content, attachments
 	}
 	return content, nil
+}
+
+func hasProviderMetadata(payload map[string]any) bool {
+	for key := range payload {
+		key = strings.ToLower(strings.TrimSpace(key))
+		if key == "file_key" || key == "file_token" || key == "image_key" || key == "image_token" || key == "file_name" || key == "filename" {
+			return true
+		}
+	}
+	return false
+}
+
+func isFeishuSystemLabel(value string) bool {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "merged and forwarded message", "forwarded message", "file name", "filename":
+		return true
+	default:
+		return false
+	}
 }
 
 func normalizeFeishuMessageType(value string) string {

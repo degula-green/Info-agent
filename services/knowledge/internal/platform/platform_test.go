@@ -131,6 +131,27 @@ func TestPollMessagesParsesMillisecondTimeAndAppliesHistoryStart(t *testing.T) {
 	}
 }
 
+func TestParseFeishuMessageKeepsAttachmentSeparateFromMessageText(t *testing.T) {
+	content, attachments := parseFeishuMessage("https://open.feishu.cn", "m-file", "file", `{"file_key":"file_v3_0015i_demo","file_name":"安排.docx"}`)
+	if content != "" {
+		t.Fatalf("attachment metadata leaked into message content: %q", content)
+	}
+	if len(attachments) != 1 || attachments[0].FileName != "安排.docx" {
+		t.Fatalf("unexpected attachment metadata: %+v", attachments)
+	}
+	content, attachments = parseFeishuMessage("https://open.feishu.cn", "m-text-file", "mixed", `{"text":"请查收","file_key":"file_v3_0015i_demo","file_name":"安排.docx"}`)
+	if content != "请查收" || len(attachments) != 1 {
+		t.Fatalf("text plus attachment was not preserved: content=%q attachments=%+v", content, attachments)
+	}
+}
+
+func TestParseFeishuMessageDropsForwardingSystemLabel(t *testing.T) {
+	content, attachments := parseFeishuMessage("https://open.feishu.cn", "m-forward", "text", `Merged and Forwarded Message`)
+	if content != "" || len(attachments) != 0 {
+		t.Fatalf("forwarding system label leaked into normalized message: content=%q attachments=%+v", content, attachments)
+	}
+}
+
 func TestPollMessagesUsesPageTokensOnlyWithinCycleAndFindsLaterMessages(t *testing.T) {
 	start := time.Now().UTC().Add(-time.Hour).Truncate(time.Second)
 	round := 1

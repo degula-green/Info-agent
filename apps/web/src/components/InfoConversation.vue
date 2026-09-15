@@ -43,7 +43,7 @@
           <span>大小</span>
           <span>类型</span>
           <span>来源</span>
-          <span>更新时间</span>
+          <span>采集时间</span>
         </div>
         <button
           v-for="item in items"
@@ -132,7 +132,8 @@
             <div class="detail-modal__meta">
               <span><t-icon name="file" />{{ fileTypeLabel(activeFile) }}</span>
               <span><t-icon name="data" />{{ activeFile.size }}</span>
-              <span><t-icon name="time" />{{ activeFile.uploadedAt || activeFile.time }}</span>
+              <span><t-icon name="user" />{{ activeFile.uploader || '未知发送人' }} · {{ activeFile.sentAt || '发送时间未知' }}</span>
+              <span><t-icon name="time" />采集于 {{ activeFile.uploadedAt || activeFile.collectedAt || '尚未同步' }}</span>
             </div>
           </div>
           <button type="button" class="detail-modal__close" aria-label="关闭文档预览" @click="fileDialogVisible = false">
@@ -196,7 +197,7 @@ const activeFile = ref<InfoFile | null>(null)
 const fileDownloading = ref(false)
 
 const items = computed<ConversationItem[]>(() => [
-    ...chat.value.messages.map((message) => ({
+    ...chat.value.messages.filter((message) => !isAttachmentOnlyMessage(message)).map((message) => ({
       key: `message-${message.id}`,
       kind: 'message' as const,
       name: messagePreview(message.content),
@@ -205,23 +206,23 @@ const items = computed<ConversationItem[]>(() => [
       size: '-',
       type: '消息',
       source: sourceName(chat.value.source),
-      updatedAt: message.time,
+      updatedAt: message.collectedAt || '尚未同步',
     message,
   })),
   ...chat.value.files.map((file) => ({
       key: `file-${file.id}`,
       kind: 'file' as const,
       name: file.name,
-      detail: `${file.uploader} · ${file.type}`,
+      detail: `${file.uploader || '未知发送人'} · ${file.sentAt || '发送时间未知'}`,
       status: file.contentAccessRequired ? '仅元数据' : file.documentStatus === 'failed' ? '解析失败' : file.documentStatus === 'completed' ? '解析完成' : file.documentStatus || file.parseStatus || '待解析',
       size: file.size,
       type: file.type,
       source: sourceName(chat.value.source),
-    updatedAt: file.uploadedAt || file.time,
+    updatedAt: file.uploadedAt || file.collectedAt || '尚未同步',
     file,
   })),
 ].sort((a, b) => {
-  const time = (item: ConversationItem) => item.message?.timestamp || item.file?.timestamp || ''
+  const time = (item: ConversationItem) => item.message?.collectionTimestamp || item.file?.collectionTimestamp || ''
   return Date.parse(time(b)) - Date.parse(time(a))
 }))
 
@@ -251,8 +252,39 @@ function messagePreview(content?: string | null) {
   return value
 }
 
+function isAttachmentOnlyMessage(message: InfoMessage) {
+  const raw = String(message.content || '').trim()
+  const visible = displayMessageContent(raw).trim()
+  if (!visible) return true
+  if (/^(?:merged and forwarded message|forwarded message|file name|filename)$/i.test(raw)) return true
+  if (!message.attachments?.length) return false
+  if (/^\s*\{[\s\S]*\}\s*$/.test(raw)) {
+    try {
+      const payload = JSON.parse(raw) as Record<string, unknown>
+      const text = [payload.text, payload.title, payload.content]
+        .find((value) => typeof value === 'string' && value.trim())
+      if (text) return false
+      if (Object.keys(payload).some((key) => /^(?:file|image)_(?:key|token|name)$/i.test(key) || /^filename$/i.test(key))) return true
+    } catch { /* keep the conservative media check below */ }
+  }
+  // XML media bodies are retained for privacy/audit processing, but their
+  // visible representation is already the separate attachment row.
+  return /^<\s*(?:\?xml[^>]*>\s*)?<msg\b/i.test(raw)
+    && ['image', 'file', 'mixed'].includes(String(message.messageType || '').toLowerCase())
+}
+
 function displayMessageContent(content?: string | null) {
   const value = String(content || '').trim().replace(/^(?:wxid_[A-Za-z0-9_-]+(?:@chatroom)?|[A-Za-z0-9_-]+@chatroom)\s*:\s*/i, '')
+  if (/^\{[\s\S]*\}$/.test(value)) {
+    try {
+      const payload = JSON.parse(value) as Record<string, unknown>
+      for (const key of ['text', 'title', 'content', 'description']) {
+        const text = payload[key]
+        if (typeof text === 'string' && text.trim()) return text.trim()
+      }
+      if (Object.keys(payload).some((key) => /^(?:file|image)_(?:key|token)$/i.test(key))) return ''
+    } catch { /* fall through to the original content */ }
+  }
   if (!/^<(?:\?xml|msg|appmsg)\b/i.test(value)) return value
   const decode = (text: string) => text
     .replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, '$1')
@@ -267,7 +299,7 @@ function displayMessageContent(content?: string | null) {
       if (text && !fields.includes(text)) fields.push(text)
     }
   }
-  return fields.join('\n') || '结构化消息（无可显示正文）'
+  return fields.join('\n')
 }
 
 function fileStatus(file: InfoFile) {

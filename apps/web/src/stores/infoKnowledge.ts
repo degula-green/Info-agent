@@ -111,7 +111,7 @@ function displayKnowledgeError(error: any, fallback: string) {
   return fallback
 }
 
-function mapAttachment(value: AttachmentDTO, uploader = ''): InfoFile {
+function mapAttachment(value: AttachmentDTO, uploader = '', sentAt = ''): InfoFile {
   const name = friendlyAttachmentName(value.file_name, value.mime_type)
   const extension = name.includes('.') ? name.split('.').pop() || '' : ''
   return {
@@ -120,9 +120,12 @@ function mapAttachment(value: AttachmentDTO, uploader = ''): InfoFile {
     type: extension || extensionForMime(value.mime_type) || value.mime_type || 'FILE',
     mimeType: value.mime_type || '',
     size: formatSize(value.size_bytes),
-    time: displayTime(value.created_at),
+    time: sentAt || '发送时间未知',
     uploadedAt: displayTime(value.created_at),
     timestamp: value.created_at,
+    sentAt,
+    collectedAt: displayTime(value.created_at),
+    collectionTimestamp: value.created_at,
     uploader,
     content: '',
     documentStatus: mapAttachmentStatus(value.content_status),
@@ -141,6 +144,8 @@ function mapMessage(value: MessageDTO, attachments: AttachmentDTO[], senderNames
     content: value.content || '',
     time: displayTime(value.sent_at),
     timestamp: value.sent_at,
+    collectedAt: displayTime(value.created_at),
+    collectionTimestamp: value.created_at,
     sourceMessageId: value.external_message_id,
     messageType: value.message_type,
     vectorStatus: value.vector_status,
@@ -148,14 +153,37 @@ function mapMessage(value: MessageDTO, attachments: AttachmentDTO[], senderNames
   }
 }
 
+function isAttachmentOnlyMessage(value: MessageDTO, attachments: AttachmentDTO[]) {
+  const content = String(value.content || '').trim()
+  if (!content) return true
+  const hasAttachment = attachments.some((item) => item.message_id === value.id)
+  if (!hasAttachment) return false
+  if (/^\s*\{[\s\S]*\}\s*$/.test(content)) {
+    try {
+      const payload = JSON.parse(content) as Record<string, unknown>
+      const text = [payload.text, payload.title, payload.content]
+        .find((item) => typeof item === 'string' && item.trim())
+      if (text) return false
+      if (Object.keys(payload).some((key) => /^(?:file|image)_(?:key|token|name)$/i.test(key) || /^filename$/i.test(key))) return true
+    } catch { /* fall through to media type detection */ }
+  }
+  return /^<\s*(?:\?xml[^>]*>\s*)?<msg\b/i.test(content)
+    && ['image', 'file', 'mixed'].includes(String(value.message_type || '').toLowerCase())
+}
+
 function mapConversation(value: ConversationDTO, messages: MessageDTO[] = [], attachments: AttachmentDTO[] = []): InfoChat {
   const senderNames = new Map<string, string>((value.memberships || []).flatMap((member): Array<[string, string]> => {
     const name = member.display_name || member.external_user_id
     return [[member.id, name], ...(member.external_identity_id ? [[member.external_identity_id, name] as [string, string]] : [])]
   }))
-  const mappedMessages = messages.map((item) => mapMessage(item, attachments, senderNames)).sort((a, b) => Date.parse(b.timestamp) - Date.parse(a.timestamp))
-  const senderByAttachment = new Map(attachments.map((item) => [item.id, mappedMessages.find((message) => message.id === item.message_id)?.sender || '']))
-  const mappedFiles = attachments.map((item) => mapAttachment(item, senderByAttachment.get(item.id) || ''))
+  const allMappedMessages = messages.map((item) => mapMessage(item, attachments, senderNames))
+  const visibleMessages = messages.filter((item) => !isAttachmentOnlyMessage(item, attachments))
+  const mappedMessages = visibleMessages.map((item) => mapMessage(item, attachments, senderNames)).sort((a, b) => Date.parse(b.timestamp) - Date.parse(a.timestamp))
+  const messageById = new Map(allMappedMessages.map((message) => [message.id, message]))
+  const mappedFiles = attachments.map((item) => {
+    const message = item.message_id ? messageById.get(item.message_id) : undefined
+    return mapAttachment(item, message?.sender || '', message?.time || '')
+  })
   const hasUnavailableCollector = (value.collectors || []).some((collector) => collector.status === 'unavailable')
   const hasActiveCollector = (value.collectors || []).some((collector) => collector.status === 'active')
   const status = value.status === 'active' && hasUnavailableCollector && !hasActiveCollector
@@ -198,7 +226,8 @@ function mapConversation(value: ConversationDTO, messages: MessageDTO[] = [], at
 }
 
 function mapAvailable(value: { external_id: string; name: string; conversation_type: string; member_count: number; members?: Array<{ external_user_id: string; display_name?: string }>; last_seen_at?: string | null; message_count?: number; attachment_count?: number; attached_conversation_id?: string; current_user_collector?: boolean }): InfoAvailableSession {
-  return { id: value.external_id, externalId: value.external_id, name: value.name || value.external_id, members: value.member_count || value.members?.length || 0, isDirect: isPrivateConversation(value.conversation_type), lastSeenAt: value.last_seen_at, messageCount: value.message_count, attachmentCount: value.attachment_count, attachedConversationId: value.attached_conversation_id, currentUserCollector: value.current_user_collector }
+  const isDirect = isPrivateConversation(value.conversation_type)
+  return { id: value.external_id, externalId: value.external_id, name: value.name || value.external_id, members: value.member_count || value.members?.length || (isDirect ? 2 : 0), isDirect, lastSeenAt: value.last_seen_at, messageCount: value.message_count, attachmentCount: value.attachment_count, attachedConversationId: value.attached_conversation_id, currentUserCollector: value.current_user_collector }
 }
 
 function mapConnector(value: ConnectorDTO, conversations: ConversationDTO[] = []): InfoSource {

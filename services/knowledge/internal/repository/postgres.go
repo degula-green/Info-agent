@@ -964,7 +964,7 @@ func (s *PostgresStore) ListConversations(ctx context.Context, userID, platformN
 }
 
 func (s *PostgresStore) populateConversationCounts(ctx context.Context, c *domain.ConversationIngestion) error {
-	if err := s.pool.QueryRow(ctx, `SELECT COUNT(*) FROM knowledge.messages WHERE conversation_ingestion_id=$1`, c.ID).Scan(&c.MessageCount); err != nil {
+	if err := s.pool.QueryRow(ctx, `SELECT COUNT(*) FROM knowledge.messages m WHERE m.conversation_ingestion_id=$1 AND btrim(COALESCE(m.normalized_content,'')) <> '' AND NOT (m.message_type IN ('image','file') AND EXISTS (SELECT 1 FROM knowledge.attachments a WHERE a.message_id=m.id))`, c.ID).Scan(&c.MessageCount); err != nil {
 		return dbError(err)
 	}
 	if err := s.pool.QueryRow(ctx, `SELECT COUNT(*) FROM knowledge.attachments WHERE conversation_ingestion_id=$1`, c.ID).Scan(&c.AttachmentCount); err != nil {
@@ -1402,7 +1402,7 @@ func (s *PostgresStore) ListMessages(ctx context.Context, conversationID string,
 			return nil, dbError(lookupErr)
 		}
 	}
-	query := `SELECT m.id::text,m.conversation_ingestion_id::text,m.external_message_id,COALESCE(m.sender_identity_id::text,''),COALESCE(NULLIF(m.sender_display_name,''),ei.display_name,''),m.message_type,COALESCE(m.normalized_content_ref,''),COALESCE(m.normalized_content,''),m.content_hash,m.content_version,m.sent_at,m.lifecycle_status,m.vector_status,m.created_at,m.sensitive,m.classification_status FROM knowledge.messages m LEFT JOIN knowledge.external_identities ei ON ei.id=m.sender_identity_id WHERE m.conversation_ingestion_id=$1`
+	query := `SELECT m.id::text,m.conversation_ingestion_id::text,m.external_message_id,COALESCE(m.sender_identity_id::text,''),COALESCE(NULLIF(ei.display_name,''),NULLIF(m.sender_display_name,''),''),m.message_type,COALESCE(m.normalized_content_ref,''),COALESCE(m.normalized_content,''),m.content_hash,m.content_version,m.sent_at,m.lifecycle_status,m.vector_status,m.created_at,m.sensitive,m.classification_status FROM knowledge.messages m LEFT JOIN knowledge.external_identities ei ON ei.id=m.sender_identity_id WHERE m.conversation_ingestion_id=$1`
 	args := []any{conversationID}
 	if !cutoff.IsZero() {
 		if cutoffID != "" {

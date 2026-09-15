@@ -162,7 +162,17 @@ def parse_time(value: Any) -> datetime:
     if isinstance(value, (int, float)):
         number = float(value); number /= 1000 if number > 10_000_000_000 else 1
         return datetime.fromtimestamp(number, timezone.utc)
-    try: return datetime.fromisoformat(str(value).replace("Z", "+00:00")).astimezone(timezone.utc)
+    text = str(value or "").strip()
+    # SQLite/provider adapters may return Unix timestamps as strings. Treat
+    # them exactly like numeric values instead of falling back to now(), which
+    # makes historical messages appear to have been sent during collection.
+    try:
+        number = float(text)
+        number /= 1000 if number > 10_000_000_000 else 1
+        return datetime.fromtimestamp(number, timezone.utc)
+    except (TypeError, ValueError, OverflowError):
+        pass
+    try: return datetime.fromisoformat(text.replace("Z", "+00:00")).astimezone(timezone.utc)
     except (TypeError, ValueError): return datetime.now(timezone.utc)
 
 def payload_hash(value: dict[str, Any]) -> str:
@@ -175,7 +185,24 @@ def nickname_index() -> dict[str, str]:
     if db is None:
         return {}
     try:
-        return {str(key): str(value) for key, value in db._nickname_index().items() if value}
+        # The library's helper prefers ``remark``.  A remark is an internal
+        # label and often contains a group prefix or phone number; message
+        # rows should use the contact's actual WeChat nickname first.
+        for rel, path, _ in db._db_files:
+            if Path(path).name != "contact.db":
+                continue
+            conn = db._open(rel)
+            try:
+                return {
+                    str(username): str(nick_name or remark or username)
+                    for username, nick_name, remark in conn.execute(
+                        "SELECT username, nick_name, remark FROM contact"
+                    )
+                    if username
+                }
+            finally:
+                conn.close()
+        return {}
     except Exception:
         return {}
 
@@ -333,7 +360,18 @@ def messages_after(db_instance: Any, chat_id: str, since: int, limit: int = 200)
 
 def collect_once() -> None:
     if binding.get("status") == "running" and config.get("enabled") and config.get("connector_id") and db is not None:
-        assignments = knowledge("/api/knowledge/v1/internal/wechat/assignments?connector_id=" + str(config["connector_id"])).get("items", []); selected = set(config.get("selected_conversations") or []); names = nickname_index()
+        assignments = knowledge("/api/knowledge/v1/internal/wechat/assignments?connector_id=" + str(config["connector_id"])).get("items", [])
+        selected = set(config.get("selected_conversations") or [])
+        # An attached active conversation is already an explicit collection
+        # choice. Keep it collectable even when an older whitelist snapshot
+        # predates the attachment (notably for private chats).
+        if config.get("listen_mode") == "whitelist":
+            selected.update(
+                str((item.get("conversation") or {}).get("external_conversation_id") or "")
+                for item in assignments
+                if (item.get("conversation") or {}).get("status") == "active"
+            )
+        names = nickname_index()
         for item in assignments:
             conversation = item.get("conversation") or {}; collector = item.get("collector") or {}; chat_id = str(conversation.get("external_conversation_id") or ""); collector_id = str(collector.get("id") or "")
             if conversation.get("status") != "active" or not chat_id or not collector_id or (config.get("listen_mode") == "whitelist" and chat_id not in selected): continue
@@ -422,8 +460,8 @@ def discover_conversations() -> dict[str, Any]:
     connector_id = str(binding.get("connector_id") or config.get("connector_id") or "").strip()
     if db is None or not connector_id:
         return {"items": []}
-    items = []; names = nickname_index(); selected = set(config.get("selected_conversations") or [])
-    include_members = os.getenv("WECHAT_DISCOVERY_INCLUDE_MEMBERS", "0").strip().lower() in {"1", "true", "yes", "on"}
+    items = []; names = nickname_index()
+    include_members = os.getenv("WECHAT_DISCOVERY_INCLUDE_MEMBERS", "1").strip().lower() in {"1", "true", "yes", "on"}
     for row in db.get_sessions(limit=1000):
         external_id = str(row.get("username") or row.get("chat_id") or "").strip()
         if not external_id:
@@ -433,7 +471,7 @@ def discover_conversations() -> dict[str, Any]:
         # expand groups already selected for collection; unselected groups are
         # still discoverable immediately and get their memberships when the
         # user enables them.
-        members = group_members(external_id) if include_members and external_id.endswith("@chatroom") and external_id in selected else []
+        members = group_members(external_id) if include_members and external_id.endswith("@chatroom") else []
         items.append({
             "external_id": external_id,
             "name": name,
@@ -476,7 +514,7 @@ def group_members(chat_id: str) -> list[dict[str, str]]:
                 if not room:
                     return []
                 rows = conn.execute("SELECT c.username,c.nick_name,c.remark FROM chatroom_member m JOIN contact c ON c.id=m.member_id WHERE m.room_id=?", (room["id"],)).fetchall()
-                return [{"external_user_id": str(row["username"]), "display_name": str(row["remark"] or row["nick_name"] or row["username"])} for row in rows if row["username"]]
+                return [{"external_user_id": str(row["username"]), "display_name": str(row["nick_name"] or row["remark"] or row["username"])} for row in rows if row["username"]]
             finally:
                 conn.close()
     except Exception:
