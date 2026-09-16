@@ -1435,9 +1435,6 @@ func (s *MemoryStore) IngestMessage(ctx context.Context, input IngestMessageInpu
 				return nil, apperror.New("external_id_conflict", "external attachment id has conflicting metadata", 409, false)
 			}
 			result.Attachments = append(result.Attachments, cloneAttachment(existing))
-			if conversation.IngestionScope == "private" && input.Cursor != "" {
-				s.attachmentReceipts[existing.ID] = attachmentCursorReceipt{CollectorID: input.CollectorID, Cursor: input.Cursor}
-			}
 			continue
 		}
 		name := sanitizeName(a.FileName)
@@ -1801,7 +1798,7 @@ func (s *MemoryStore) cursorReceiptReadyLocked(collectorID, cursor string) bool 
 			continue
 		}
 		for _, attachment := range s.attachments {
-			if attachment.ID == attachmentID && attachment.ContentStatus != "ready" {
+			if attachment.MessageID == source.MessageID && attachment.ContentStatus != "ready" {
 				return false
 			}
 		}
