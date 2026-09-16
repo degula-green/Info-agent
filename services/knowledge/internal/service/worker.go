@@ -81,6 +81,9 @@ func (w *Worker) scheduleDelay(ctx context.Context) time.Duration {
 
 func (w *Worker) Tick(ctx context.Context) error {
 	ctx = trace.Ensure(ctx)
+	if err := w.service.ProcessPermissions(ctx); err != nil {
+		return err
+	}
 	accounts, err := w.service.Repo.ListConnectorAccounts(ctx, domain.PlatformFeishu)
 	if err != nil {
 		return err

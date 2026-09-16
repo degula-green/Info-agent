@@ -292,6 +292,10 @@ type Repository interface {
 	FailLocalUpload(ctx context.Context, requestID, message string) error
 	GetKnowledgeItem(ctx context.Context, id string) (*domain.KnowledgeItem, error)
 	GetKnowledgeItemByAttachment(ctx context.Context, attachmentID string) (*domain.KnowledgeItem, error)
+	ListPendingKnowledgePermissions(ctx context.Context, limit int) ([]domain.KnowledgeItem, error)
+	MarkKnowledgePermissionSynced(ctx context.Context, id string, aclVersion int) error
+	MarkKnowledgePermissionFailed(ctx context.Context, id, failure string) error
+	TryMarkKnowledgeReady(ctx context.Context, id, traceID string) (bool, error)
 }
 
 type ExternalIdentityInput struct {

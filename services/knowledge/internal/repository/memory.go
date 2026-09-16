@@ -1413,7 +1413,7 @@ func (s *MemoryStore) CreateLocalUploadTask(_ context.Context, input domain.Loca
 	if input.UploadDestination == "organization_file_library" {
 		scope, owner = "organization", ""
 	}
-	s.knowledgeItems[a.ResourceID] = domain.KnowledgeItem{ID: a.ResourceID, KnowledgeBaseID: baseID, KnowledgeScope: scope, AccessScope: a.AccessScope, OwnerUserID: owner, OrganizationID: a.OrganizationID, SourceType: "local_upload", SourceAttachmentID: a.ID, ContentType: "file", ContentRef: "pending/" + a.ID, ContentHash: a.ContentHash, ContentVersion: 1, ContentVisibility: "display", SecurityStatus: "not_required", OwnershipReady: true, SecurityReady: true, PermissionReady: true, ACLVersion: 1, ACLSyncStatus: "synced", ProcessingStatus: "pending", LifecycleStatus: "pending", CreatedAt: now, UpdatedAt: now}
+	s.knowledgeItems[a.ResourceID] = domain.KnowledgeItem{ID: a.ResourceID, KnowledgeBaseID: baseID, KnowledgeScope: scope, AccessScope: a.AccessScope, OwnerUserID: owner, OrganizationID: a.OrganizationID, SourceType: "local_upload", SourceAttachmentID: a.ID, ContentType: "file", ContentRef: "pending/" + a.ID, ContentHash: a.ContentHash, ContentVersion: 1, ContentVisibility: "display", SecurityStatus: "not_required", OwnershipReady: true, SecurityReady: true, PermissionReady: false, ACLVersion: 0, ACLSyncStatus: "pending", ProcessingStatus: "pending", LifecycleStatus: "pending", CreatedAt: now, UpdatedAt: now}
 	out := cloneAttachment(a)
 	return &out, nil
 }
@@ -1468,11 +1468,8 @@ func (s *MemoryStore) FinalizeLocalUpload(_ context.Context, requestID, objectRe
 		a.UpdatedAt = time.Now().UTC()
 		item := s.knowledgeItems[a.ResourceID]
 		item.ContentRef, item.ContentHash, item.ContentSaved = objectRef, contentHash, true
-		item.ProcessingStatus, item.LifecycleStatus, item.UpdatedAt = "ready", "ready", a.UpdatedAt
+		item.UpdatedAt = a.UpdatedAt
 		s.knowledgeItems[item.ID] = item
-		eventID := uuid.NewString()
-		payload := map[string]any{"resource_type": "knowledge_item", "resource_id": item.ID, "knowledge_item_id": item.ID, "source_message_id": nil, "source_attachment_id": a.ID, "attachment_id": a.ID, "content_version": item.ContentVersion, "acl_version": item.ACLVersion, "content_variant": "display", "content_access_required": false}
-		s.outbox[eventID] = domain.OutboxEvent{ID: eventID, EventType: "knowledge.ready", SchemaVersion: 1, OccurredAt: a.UpdatedAt, TraceID: a.TraceID, OrganizationID: a.OrganizationID, Producer: "module-2", Payload: payload, AvailableAt: a.UpdatedAt}
 		s.attachments[key] = a
 		out := cloneAttachment(a)
 		return &out, nil
@@ -1500,6 +1497,72 @@ func (s *MemoryStore) GetKnowledgeItemByAttachment(_ context.Context, attachment
 		}
 	}
 	return nil, apperror.New("knowledge_not_found", "knowledge item not found", 404, false)
+}
+
+func (s *MemoryStore) ListPendingKnowledgePermissions(_ context.Context, limit int) ([]domain.KnowledgeItem, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := []domain.KnowledgeItem{}
+	for _, item := range s.knowledgeItems {
+		if !item.PermissionReady && (item.ACLSyncStatus == "pending" || item.ACLSyncStatus == "failed") {
+			out = append(out, item)
+		}
+	}
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
+}
+func (s *MemoryStore) MarkKnowledgePermissionSynced(_ context.Context, id string, version int) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	item, ok := s.knowledgeItems[id]
+	if !ok {
+		return apperror.New("knowledge_not_found", "knowledge item not found", 404, false)
+	}
+	item.PermissionReady, item.ACLSyncStatus, item.ACLVersion = true, "synced", version
+	item.UpdatedAt = time.Now().UTC()
+	s.knowledgeItems[id] = item
+	return nil
+}
+func (s *MemoryStore) MarkKnowledgePermissionFailed(_ context.Context, id, failure string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	item, ok := s.knowledgeItems[id]
+	if !ok {
+		return apperror.New("knowledge_not_found", "knowledge item not found", 404, false)
+	}
+	item.PermissionReady, item.ACLSyncStatus, item.LastError = false, "failed", safeError(failure)
+	item.UpdatedAt = time.Now().UTC()
+	s.knowledgeItems[id] = item
+	return nil
+}
+func (s *MemoryStore) TryMarkKnowledgeReady(ctx context.Context, id, traceID string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	item, ok := s.knowledgeItems[id]
+	if !ok {
+		return false, apperror.New("knowledge_not_found", "knowledge item not found", 404, false)
+	}
+	if !item.ContentSaved || !item.OwnershipReady || !item.SecurityReady || !item.PermissionReady || item.ACLSyncStatus != "synced" || item.ACLVersion < 1 {
+		return false, nil
+	}
+	for _, e := range s.outbox {
+		if e.EventType == "knowledge.ready" && e.Payload["knowledge_item_id"] == id {
+			return false, nil
+		}
+	}
+	if traceID == "" {
+		traceID = trace.TraceID(ctx)
+	}
+	if traceID == "" {
+		traceID = uuid.NewString()
+	}
+	item.ProcessingStatus, item.LifecycleStatus, item.UpdatedAt = "ready", "ready", time.Now().UTC()
+	s.knowledgeItems[id] = item
+	e := domain.OutboxEvent{ID: uuid.NewString(), EventType: "knowledge.ready", SchemaVersion: 1, OccurredAt: item.UpdatedAt, TraceID: traceID, OrganizationID: item.OrganizationID, Producer: "module-2", AvailableAt: item.UpdatedAt, Payload: map[string]any{"resource_type": "knowledge_item", "resource_id": id, "knowledge_item_id": id, "source_message_id": nil, "source_attachment_id": item.SourceAttachmentID, "attachment_id": item.SourceAttachmentID, "content_version": item.ContentVersion, "acl_version": item.ACLVersion, "content_variant": "display", "content_access_required": false}}
+	s.outbox[e.ID] = e
+	return true, nil
 }
 
 func (s *MemoryStore) FailLocalUpload(_ context.Context, requestID, message string) error {

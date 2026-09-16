@@ -1,13 +1,16 @@
 package coreclient
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
 
+	"info-agent/knowledge/internal/domain"
 	"info-agent/knowledge/internal/trace"
 )
 
@@ -15,6 +18,51 @@ type Client struct {
 	BaseURL      string
 	ServiceToken string
 	HTTP         *http.Client
+}
+
+type PermissionSyncResult struct {
+	KnowledgeItemID string `json:"knowledge_item_id"`
+	ACLVersion      int    `json:"acl_version"`
+	Status          string `json:"status"`
+}
+
+func (c *Client) SyncKnowledgePermissions(ctx context.Context, item domain.KnowledgeItem) (PermissionSyncResult, error) {
+	if c == nil || c.BaseURL == "" || c.ServiceToken == "" {
+		return PermissionSyncResult{}, errors.New("core permission service is not configured")
+	}
+	body, err := json.Marshal(map[string]any{"knowledge_item_id": item.ID, "attachment_id": item.SourceAttachmentID, "knowledge_scope": item.KnowledgeScope, "owner_user_id": item.OwnerUserID, "organization_id": item.OrganizationID, "content_access_required": false})
+	if err != nil {
+		return PermissionSyncResult{}, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.BaseURL+"/internal/v1/authorization/resource-relations/sync", bytes.NewReader(body))
+	if err != nil {
+		return PermissionSyncResult{}, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+c.ServiceToken)
+	req.Header.Set("X-Caller-Service", "knowledge")
+	if id := trace.RequestID(ctx); id != "" {
+		req.Header.Set("X-Request-ID", id)
+	}
+	if id := trace.TraceID(ctx); id != "" {
+		req.Header.Set("X-Trace-ID", id)
+	}
+	resp, err := c.HTTP.Do(req)
+	if err != nil {
+		return PermissionSyncResult{}, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		return PermissionSyncResult{}, fmt.Errorf("core permission synchronization failed: status %d", resp.StatusCode)
+	}
+	var result PermissionSyncResult
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return PermissionSyncResult{}, err
+	}
+	if result.KnowledgeItemID != item.ID || result.ACLVersion < 1 || result.Status != "synced" {
+		return PermissionSyncResult{}, errors.New("core permission synchronization response is incomplete")
+	}
+	return result, nil
 }
 
 func (c *Client) CurrentOrganization(ctx context.Context, userID string) (string, error) {

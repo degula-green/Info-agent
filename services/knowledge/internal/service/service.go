@@ -1279,10 +1279,38 @@ func (s *Service) UploadLocalContent(ctx context.Context, userID, requestID stri
 		_ = s.Objects.Delete(ctx, key)
 		return nil, err
 	}
+	// The content write is durable. Permission synchronization is retried by
+	// the worker; an unavailable Core must not make the upload non-idempotent.
+	_ = s.ProcessPermissions(ctx)
 	if s.KV != nil {
 		_ = s.KV.Set(ctx, localDedupKey(saved), saved.ID, 24*time.Hour)
 	}
 	return saved, nil
+}
+
+func (s *Service) ProcessPermissions(ctx context.Context) error {
+	items, err := s.Repo.ListPendingKnowledgePermissions(ctx, 100)
+	if err != nil {
+		return err
+	}
+	for _, item := range items {
+		if s.Core == nil {
+			_ = s.Repo.MarkKnowledgePermissionFailed(ctx, item.ID, "core_permission_unavailable")
+			continue
+		}
+		result, syncErr := s.Core.SyncKnowledgePermissions(ctx, item)
+		if syncErr != nil {
+			_ = s.Repo.MarkKnowledgePermissionFailed(ctx, item.ID, "core_permission_sync_failed")
+			return syncErr
+		}
+		if err := s.Repo.MarkKnowledgePermissionSynced(ctx, item.ID, result.ACLVersion); err != nil {
+			return err
+		}
+		if _, err := s.Repo.TryMarkKnowledgeReady(ctx, item.ID, trace.TraceID(ctx)); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func localDedupKey(task *domain.Attachment) string {

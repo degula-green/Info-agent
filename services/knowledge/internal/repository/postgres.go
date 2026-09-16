@@ -1233,6 +1233,72 @@ func (s *PostgresStore) GetKnowledgeItemByAttachment(ctx context.Context, attach
 	}
 	return s.GetKnowledgeItem(ctx, id)
 }
+func (s *PostgresStore) ListPendingKnowledgePermissions(ctx context.Context, limit int) ([]domain.KnowledgeItem, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	rows, err := s.pool.Query(ctx, `SELECT id::text FROM knowledge.knowledge_items WHERE permission_ready=FALSE AND acl_sync_status IN ('pending','failed') ORDER BY updated_at LIMIT $1`, limit)
+	if err != nil {
+		return nil, dbError(err)
+	}
+	defer rows.Close()
+	out := []domain.KnowledgeItem{}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, dbError(err)
+		}
+		item, e := s.GetKnowledgeItem(ctx, id)
+		if e != nil {
+			return nil, e
+		}
+		out = append(out, *item)
+	}
+	return out, dbError(rows.Err())
+}
+func (s *PostgresStore) MarkKnowledgePermissionSynced(ctx context.Context, id string, version int) error {
+	if version < 1 {
+		return apperror.New("invalid_acl_version", "acl_version must be positive", 400, false)
+	}
+	_, err := s.pool.Exec(ctx, `UPDATE knowledge.knowledge_items SET permission_ready=TRUE,acl_version=$2,acl_sync_status='synced',last_error=NULL,updated_at=now() WHERE id=$1`, id, version)
+	return dbError(err)
+}
+func (s *PostgresStore) MarkKnowledgePermissionFailed(ctx context.Context, id, failure string) error {
+	_, err := s.pool.Exec(ctx, `UPDATE knowledge.knowledge_items SET permission_ready=FALSE,acl_sync_status='failed',last_error=$2,updated_at=now() WHERE id=$1`, id, failure)
+	return dbError(err)
+}
+func (s *PostgresStore) TryMarkKnowledgeReady(ctx context.Context, id, traceID string) (bool, error) {
+	item, err := s.GetKnowledgeItem(ctx, id)
+	if err != nil {
+		return false, err
+	}
+	if !item.ContentSaved || !item.OwnershipReady || !item.SecurityReady || !item.PermissionReady || item.ACLSyncStatus != "synced" || item.ACLVersion < 1 {
+		return false, nil
+	}
+	if traceID == "" {
+		traceID = trace.TraceID(ctx)
+	}
+	if traceID == "" {
+		traceID = uuid.NewString()
+	}
+	payload, _ := json.Marshal(map[string]any{"resource_type": "knowledge_item", "resource_id": id, "knowledge_item_id": id, "source_message_id": nil, "source_attachment_id": item.SourceAttachmentID, "attachment_id": item.SourceAttachmentID, "content_version": item.ContentVersion, "acl_version": item.ACLVersion, "content_variant": "display", "content_access_required": false})
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return false, dbError(err)
+	}
+	defer tx.Rollback(ctx)
+	if _, err = tx.Exec(ctx, `UPDATE knowledge.knowledge_items SET lifecycle_status='ready',processing_status='ready',updated_at=now() WHERE id=$1 AND lifecycle_status<>'ready'`, id); err != nil {
+		return false, dbError(err)
+	}
+	_, err = tx.Exec(ctx, `INSERT INTO knowledge.outbox_events (id,aggregate_type,aggregate_id,event_type,event_version,schema_version,trace_id,organization_id,payload,status,retry_count,available_at) VALUES ($1,'knowledge_item',$2,'knowledge.ready',$3,1,$4,$5,$6,'pending',0,now()) ON CONFLICT DO NOTHING`, uuid.NewString(), id, item.ContentVersion, traceID, nilString(item.OrganizationID), payload)
+	if err != nil {
+		return false, dbError(err)
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return false, dbError(err)
+	}
+	return true, nil
+}
 
 func localAttachmentQuery() string {
 	return `id::text,COALESCE(request_id,''),COALESCE(uploaded_by_user_id::text,''),COALESCE(upload_destination,''),COALESCE(organization_id::text,''),file_name,mime_type,size_bytes,COALESCE(object_ref,''),COALESCE(content_hash,''),content_version,metadata_access_scope,content_access_scope,content_access_required,upload_status,COALESCE(upload_error,''),processing_status,created_at,updated_at`
@@ -1284,7 +1350,7 @@ func (s *PostgresStore) CreateLocalUploadTask(ctx context.Context, input domain.
 	}
 	existing.AccessScope = existing.ContentAccessScope
 	existing.ResourceID = resourceID
-	if _, err = tx.Exec(ctx, `INSERT INTO knowledge.knowledge_items (id,knowledge_base_id,knowledge_scope,access_scope,owner_user_id,organization_id,source_type,source_attachment_id,content_type,content_ref,content_hash,content_version,content_visibility,security_status,content_saved,ownership_ready,security_ready,permission_ready,acl_version,acl_sync_status,processing_status,lifecycle_status) VALUES ($1,$2,$3,$4,$5,$6,'local_upload',$7,'file',$8,$9,1,'display','not_required',false,true,true,true,1,'synced','pending','pending')`, resourceID, baseID, scope, access, owner, org, existing.ID, placeholder, input.ContentHash); err != nil {
+	if _, err = tx.Exec(ctx, `INSERT INTO knowledge.knowledge_items (id,knowledge_base_id,knowledge_scope,access_scope,owner_user_id,organization_id,source_type,source_attachment_id,content_type,content_ref,content_hash,content_version,content_visibility,security_status,content_saved,ownership_ready,security_ready,permission_ready,acl_version,acl_sync_status,processing_status,lifecycle_status) VALUES ($1,$2,$3,$4,$5,$6,'local_upload',$7,'file',$8,$9,1,'display','not_required',false,true,true,false,0,'pending','pending','pending')`, resourceID, baseID, scope, access, owner, org, existing.ID, placeholder, input.ContentHash); err != nil {
 		return nil, dbError(err)
 	}
 	if err = tx.Commit(ctx); err != nil {
