@@ -98,6 +98,7 @@ export interface MessageDTO {
   content_hash: string
   content_version: number
   sent_at: string
+  collected_at: string
   lifecycle_status: string
   vector_status?: string
   attachments?: AttachmentDTO[]
