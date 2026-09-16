@@ -11,8 +11,10 @@ ALTER TABLE knowledge.attachments ADD COLUMN IF NOT EXISTS upload_error TEXT;
 ALTER TABLE knowledge.attachments ADD COLUMN IF NOT EXISTS processing_status VARCHAR(32) NOT NULL DEFAULT 'pending';
 ALTER TABLE knowledge.attachments ADD COLUMN IF NOT EXISTS content_access_required BOOLEAN NOT NULL DEFAULT FALSE;
 CREATE UNIQUE INDEX IF NOT EXISTS attachments_request_id_unique ON knowledge.attachments (request_id) WHERE request_id IS NOT NULL;
-CREATE UNIQUE INDEX IF NOT EXISTS attachments_private_hash_unique ON knowledge.attachments (uploaded_by_user_id, content_hash) WHERE upload_destination='private_local_library' AND upload_status IN ('uploaded','duplicate');
-CREATE UNIQUE INDEX IF NOT EXISTS attachments_organization_hash_unique ON knowledge.attachments (organization_id, content_hash) WHERE upload_destination='organization_file_library' AND upload_status IN ('uploaded','duplicate');
+-- Only the canonical uploaded row is unique. Duplicate tasks remain auditable
+-- records and reuse its object reference without violating this constraint.
+CREATE UNIQUE INDEX IF NOT EXISTS attachments_private_hash_unique ON knowledge.attachments (uploaded_by_user_id, content_hash) WHERE upload_destination='private_local_library' AND upload_status='uploaded';
+CREATE UNIQUE INDEX IF NOT EXISTS attachments_organization_hash_unique ON knowledge.attachments (organization_id, content_hash) WHERE upload_destination='organization_file_library' AND upload_status='uploaded';
 
 ALTER TABLE knowledge.knowledge_items ADD COLUMN IF NOT EXISTS acl_version INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE knowledge.knowledge_items ADD COLUMN IF NOT EXISTS lifecycle_status VARCHAR(32) NOT NULL DEFAULT 'pending';

@@ -1065,7 +1065,7 @@ func (s *PostgresStore) AdvanceCursor(ctx context.Context, collectorID, cursor s
 	return dbError(tx.Commit(ctx))
 }
 
-const attachmentColumns = `id::text,conversation_ingestion_id::text,COALESCE(message_id::text,''),external_attachment_id,file_name,COALESCE(mime_type,''),size_bytes,COALESCE(object_ref,''),COALESCE(content_hash,''),content_version,content_status,access_scope,content_access_required,COALESCE(preview_capability,''),COALESCE(last_error,''),created_at,updated_at`
+const attachmentColumns = `id::text,COALESCE(conversation_ingestion_id::text,''),COALESCE(message_id::text,''),COALESCE(external_attachment_id,''),file_name,COALESCE(mime_type,''),size_bytes,COALESCE(object_ref,''),COALESCE(content_hash,''),content_version,content_status,access_scope,content_access_required,COALESCE(preview_capability,''),COALESCE(last_error,''),created_at,updated_at`
 
 func scanAttachment(row rowScanner) (*domain.Attachment, error) {
 	var a domain.Attachment
@@ -1333,7 +1333,7 @@ func (s *PostgresStore) FinalizeLocalUpload(ctx context.Context, requestID, obje
 	defer tx.Rollback(ctx)
 	var a domain.Attachment
 	var scanned *domain.Attachment
-	scanned, err = scanLocalAttachment(tx.QueryRow(ctx, `UPDATE knowledge.attachments SET object_ref=$2,content_hash=$3,size_bytes=$4,upload_status='uploaded',processing_status='pending',upload_error=NULL,updated_at=now() WHERE request_id=$1 AND content_hash=$3 RETURNING `+localAttachmentQuery(), requestID, objectRef, contentHash, size))
+	scanned, err = scanLocalAttachment(tx.QueryRow(ctx, `UPDATE knowledge.attachments SET object_ref=$2,content_hash=$3,size_bytes=$4,content_status='ready',upload_status='uploaded',processing_status='ready',upload_error=NULL,updated_at=now() WHERE request_id=$1 AND content_hash=$3 RETURNING `+localAttachmentQuery(), requestID, objectRef, contentHash, size))
 	if err != nil {
 		return nil, dbError(err)
 	}
@@ -1372,7 +1372,7 @@ func (s *PostgresStore) FinalizeLocalUpload(ctx context.Context, requestID, obje
 }
 
 func (s *PostgresStore) MarkLocalDuplicate(ctx context.Context, requestID string, existing *domain.Attachment) (*domain.Attachment, error) {
-	a, err := scanLocalAttachment(s.pool.QueryRow(ctx, `UPDATE knowledge.attachments SET object_ref=$2,upload_status='duplicate',processing_status='pending',updated_at=now() WHERE request_id=$1 RETURNING `+localAttachmentQuery(), requestID, existing.ObjectRef))
+	a, err := scanLocalAttachment(s.pool.QueryRow(ctx, `UPDATE knowledge.attachments SET object_ref=$2,content_hash=$3,size_bytes=$4,content_status='ready',upload_status='duplicate',processing_status='ready',updated_at=now() WHERE request_id=$1 RETURNING `+localAttachmentQuery(), requestID, existing.ObjectRef, existing.ContentHash, existing.SizeBytes))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, apperror.New("upload_task_not_found", "upload task not found", 404, false)
 	}
