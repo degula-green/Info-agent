@@ -140,6 +140,15 @@ func FilterMessageCandidate(input IngestMessageInput) (IngestMessageInput, bool)
 		}
 		input.Content = ""
 	}
+	// Media XML is a provider envelope, not user-authored text. If attachment
+	// extraction failed there is nothing useful to retain; with attachments the
+	// attachment rows are the authoritative resource and the body stays empty.
+	if isLegacyMediaEnvelope(input.MessageType, content) {
+		if len(input.Attachments) == 0 {
+			return input, true
+		}
+		input.Content = ""
+	}
 	if len(input.Attachments) == 0 && (content == "[无法解析]" || content == "[表情]" || content == "[动画表情]" || content == "<msg>") {
 		return input, true
 	}

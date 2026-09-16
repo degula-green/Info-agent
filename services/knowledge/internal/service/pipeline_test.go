@@ -164,6 +164,15 @@ func TestLegacyMediaEnvelopeReplayIsNormalizedInsteadOfConflicting(t *testing.T)
 	}
 }
 
+func TestMediaXMLWithoutAttachmentIsFiltered(t *testing.T) {
+	f := newPipelineFixture(t, domain.PlatformWechat)
+	input := pipelineInput(f, "media-without-attachment", "file", `<?xml version="1.0"?><msg><appmsg><type>6</type></appmsg></msg>`)
+	result, err := f.service.IngestMessage(context.Background(), input)
+	if err != nil || !result.Discarded {
+		t.Fatalf("provider media XML without an attachment should be discarded: result=%+v err=%v", result, err)
+	}
+}
+
 func TestMediaPrivacyDoesNotPromoteProviderEnvelopeToMessageText(t *testing.T) {
 	if !isMediaMessageEnvelope("file", `<?xml version="1.0"?><msg><appmsg><type>6</type></appmsg></msg>`) {
 		t.Fatal("file XML should be recognized as a media envelope")
