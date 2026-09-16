@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"info-agent/knowledge/internal/config"
+	"info-agent/knowledge/internal/coreclient"
 	"info-agent/knowledge/internal/domain"
 	"info-agent/knowledge/internal/repository"
 )
@@ -42,6 +43,9 @@ func TestHealth(t *testing.T) {
 func TestLocalUploadLifecycleAndIdempotency(t *testing.T) {
 	cfg := config.Config{AllowDevAuth: true, DevUserID: "u1", DevOrganizationID: "org-1", MaxAttachmentBytes: 1024}
 	app := newApp(cfg)
+	permissionServer := newPermissionSyncServer(t)
+	defer permissionServer.Close()
+	app.Service.Core = coreclient.New(permissionServer.URL, "test-token")
 	body := []byte("hello local upload")
 	digest := sha256Hex(body)
 	createBody := `{"request_id":"req-local-1","trace_id":"trace-local-1","upload_destination":"private_local_library","file_name":"note.txt","mime_type":"text/plain","size_bytes":18,"content_hash":"sha256:` + digest + `"}`
@@ -139,6 +143,9 @@ func TestLocalUploadLifecycleAndIdempotency(t *testing.T) {
 func TestInternalLocalAttachmentContract(t *testing.T) {
 	cfg := config.Config{AllowDevAuth: true, DevUserID: "u1", MaxAttachmentBytes: 1024, InternalServiceToken: "internal-token"}
 	app := newApp(cfg)
+	permissionServer := newPermissionSyncServer(t)
+	defer permissionServer.Close()
+	app.Service.Core = coreclient.New(permissionServer.URL, "test-token")
 	body := []byte("internal attachment")
 	digest := sha256Hex(body)
 	create := `{"request_id":"req-internal","trace_id":"trace-internal","upload_destination":"private_local_library","file_name":"note.txt","mime_type":"text/plain","size_bytes":19,"content_hash":"sha256:` + digest + `"}`
@@ -177,6 +184,22 @@ func TestInternalLocalAttachmentContract(t *testing.T) {
 	if recorder.Code != http.StatusOK || recorder.Body.String() != string(body) {
 		t.Fatalf("content proxy: %d %s", recorder.Code, recorder.Body.String())
 	}
+}
+
+func newPermissionSyncServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/internal/v1/authorization/resource-relations/sync" || r.Header.Get("Authorization") != "Bearer test-token" {
+			t.Fatalf("unexpected permission sync request: %s %s", r.Method, r.URL.Path)
+		}
+		var payload struct {
+			KnowledgeItemID string `json:"knowledge_item_id"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil || payload.KnowledgeItemID == "" {
+			t.Fatalf("invalid permission sync payload: %v", err)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"knowledge_item_id": payload.KnowledgeItemID, "acl_version": 1, "status": "synced"})
+	}))
 }
 
 func TestLocalUploadRejectsHashAndClientOrganization(t *testing.T) {
