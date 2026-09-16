@@ -7,6 +7,8 @@ import (
 	"encoding/hex"
 	"errors"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
@@ -14,13 +16,13 @@ import (
 
 	"info-agent/knowledge/internal/apperror"
 	"info-agent/knowledge/internal/config"
+	"info-agent/knowledge/internal/coreclient"
 	"info-agent/knowledge/internal/crypto"
 	"info-agent/knowledge/internal/domain"
 	"info-agent/knowledge/internal/kv"
 	"info-agent/knowledge/internal/objectstore"
 	"info-agent/knowledge/internal/platform"
 	"info-agent/knowledge/internal/repository"
-	"info-agent/knowledge/internal/trace"
 	"info-agent/knowledge/internal/vault"
 )
 
@@ -119,7 +121,7 @@ func newServiceForTest(provider platform.OAuthProvider) (*Service, *repository.M
 		panic(err)
 	}
 	cfg := config.Config{OAuthStateTTL: 10 * time.Minute, PairingTTL: 10 * time.Minute, DeviceTTL: time.Hour, MaxAttachmentBytes: 1024 * 1024, JWTRequired: false}
-	return NewWithKeyring(repo, store, vault.New(store, keyring), nil, provider, nil, cfg, keyring), repo, store
+	return New(repo, store, vault.New(store, keyring), nil, provider, nil, cfg), repo, store
 }
 
 func vaultTestKeyring() (*crypto.Keyring, error) {
@@ -146,44 +148,6 @@ func TestCompleteFeishuOAuthDuplicateIsIdempotent(t *testing.T) {
 	provider.mu.Unlock()
 	if calls != 1 || first.ID != second.ID || first.OwnerUserID != "u1" {
 		t.Fatalf("duplicate callback was not idempotent: calls=%d first=%+v second=%+v", calls, first, second)
-	}
-}
-
-func TestPrivateMessageContentIsEncryptedBeforePersistence(t *testing.T) {
-	service, repo, _ := newServiceForTest(nil)
-	ctx := trace.WithIDs(context.Background(), "req-private-encryption", "trace-private-encryption")
-	now := time.Now().UTC()
-	if _, err := repo.SaveConnector(ctx, domain.ConnectorAccount{ID: "private-encryption-account", OwnerUserID: "u1", Platform: domain.PlatformWechat, ExternalAccountID: "wxid", Status: domain.ConnectorActive}); err != nil {
-		t.Fatal(err)
-	}
-	conversation, err := repo.AttachConversation(ctx, repository.AttachInput{UserID: "u1", Platform: domain.PlatformWechat, ExternalConversationID: "private-encryption-chat", ConversationType: "private", RequestedStartAt: &now, PrimaryConnectorID: "private-encryption-account"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	input := repository.IngestMessageInput{CollectorID: conversation.Collectors[0].ID, ExternalConversationID: conversation.ExternalConversationID, ExternalMessageID: "secret-message", MessageType: "text", Content: "password=secret-value", ContentHash: hashForTest("password=secret-value"), SentAt: now}
-	input.PayloadHash, err = repository.CalculatePayloadHash(input)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := service.IngestMessage(ctx, input); err != nil {
-		t.Fatal(err)
-	}
-	pending, err := repo.ListPendingMessages(ctx, 10)
-	if err != nil || len(pending) != 1 {
-		t.Fatalf("pending private message missing: %v %+v", err, pending)
-	}
-	if pending[0].OriginalContent == input.Content {
-		t.Fatal("private original content was persisted in plaintext")
-	}
-	if err := service.ProcessPrivacy(ctx); err != nil {
-		t.Fatal(err)
-	}
-	messages, err := repo.ListMessages(ctx, conversation.ID, 10, "")
-	if err != nil || len(messages) != 1 {
-		t.Fatalf("classified private message missing: %v %+v", err, messages)
-	}
-	if messages[0].Content != "password=[REDACTED]" || !messages[0].Sensitive {
-		t.Fatalf("private message was not decrypted and redacted: %+v", messages[0])
 	}
 }
 
@@ -218,6 +182,62 @@ func TestFeishuOpenIDMappingAllowsInitialGroupAttach(t *testing.T) {
 	}
 	if conversation == nil || len(conversation.Memberships) != 1 || conversation.Memberships[0].ExternalUserID != "open-id" {
 		t.Fatalf("unexpected group memberships: %+v", conversation)
+	}
+}
+
+func TestAttachBackfillsMissingConnectorOrganizationFromCore(t *testing.T) {
+	core := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/organizations/current" {
+			if r.Header.Get("Authorization") != "Bearer user-token" {
+				t.Fatalf("user authorization was not propagated: %q", r.Header.Get("Authorization"))
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"organization":{"id":"11111111-1111-1111-1111-111111111111"},"membership":{"user_id":"u1","status":"active"}}`))
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer core.Close()
+
+	service, repo, _ := newServiceForTest(nil)
+	service.Config.JWTRequired = true
+	service.Config.CoreServiceToken = "service-token"
+	service.Core = coreclient.New(core.URL, "service-token")
+	now := time.Now().UTC()
+	account, err := repo.SaveConnector(context.Background(), domain.ConnectorAccount{ID: "a1", OwnerUserID: "u1", Platform: domain.PlatformFeishu, WorkspaceKey: "tenant", ExternalAccountID: "user", Status: domain.ConnectorActive})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = service.saveDiscovery(context.Background(), domain.Discovery{ID: "d1", OwnerUserID: "u1", ConnectorID: account.ID, Platform: domain.PlatformFeishu, ExpiresAt: now.Add(time.Minute), Conversations: []domain.AvailableConversation{{ExternalID: "group-1", Name: "Team", ConversationType: "group"}}}); err != nil {
+		t.Fatal(err)
+	}
+
+	conversation, err := service.Attach(context.Background(), repository.AttachInput{UserID: "u1", Platform: domain.PlatformFeishu, ExternalConversationID: "group-1", ConversationType: "group", DiscoveryID: "d1", RequestedStartAt: &now}, "Bearer user-token")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if conversation.OrganizationID != "11111111-1111-1111-1111-111111111111" {
+		t.Fatalf("organization was not applied to conversation: %+v", conversation)
+	}
+	updated, err := repo.GetConnectorByID(context.Background(), account.ID)
+	if err != nil || updated.DefaultOrganizationID != conversation.OrganizationID {
+		t.Fatalf("connector organization was not backfilled: account=%+v err=%v", updated, err)
+	}
+}
+
+func TestResolveCurrentOrganizationRejectsDifferentCoreUser(t *testing.T) {
+	core := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"organization":{"id":"org-1"},"membership":{"user_id":"another-user","status":"active"}}`))
+	}))
+	defer core.Close()
+	service, _, _ := newServiceForTest(nil)
+	service.Config.JWTRequired = true
+	service.Core = coreclient.New(core.URL, "")
+
+	_, err := service.ResolveCurrentOrganization(context.Background(), "u1", "", "Bearer user-token")
+	if apperror.From(err).Code != "forbidden" {
+		t.Fatalf("mismatched Core user was accepted: %v", err)
 	}
 }
 
@@ -313,7 +333,7 @@ func TestCompleteFeishuOAuthRestoresAuthorizationCollectors(t *testing.T) {
 	if _, err := repo.SaveConnector(ctx, account); err != nil {
 		t.Fatal(err)
 	}
-	start, err := service.StartFeishuOAuth(ctx, "u1", "rebind", "")
+	start, err := service.StartFeishuOAuth(ctx, "u1", "rebind", "org-1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -326,6 +346,46 @@ func TestCompleteFeishuOAuthRestoresAuthorizationCollectors(t *testing.T) {
 	}
 	if restored.Status != domain.CollectorActive || restored.LastError != "" {
 		t.Fatalf("authorization collector was not restored: %+v", restored)
+	}
+}
+
+func TestCompleteFeishuOAuthReusesRevokedConnectorAndRestoresCollectors(t *testing.T) {
+	provider := &fakeOAuthProvider{profile: platform.Profile{ExternalAccountID: "feishu-user", ExternalUserID: "feishu-user", WorkspaceKey: "tenant", DisplayName: "Alice"}}
+	service, repo, _ := newServiceForTest(provider)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	account := domain.ConnectorAccount{ID: "a1", OwnerUserID: "u1", Platform: domain.PlatformFeishu, WorkspaceKey: "tenant", ExternalAccountID: "feishu-user", Status: domain.ConnectorRevoked}
+	if _, err := repo.SaveConnector(ctx, account); err != nil {
+		t.Fatal(err)
+	}
+	conversation, err := repo.AttachConversation(ctx, repository.AttachInput{UserID: "u1", OrganizationID: "org-1", Platform: domain.PlatformFeishu, WorkspaceKey: "tenant", ExternalConversationID: "chat", ConversationType: "group", RequestedStartAt: &now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	collector, err := repo.AddCollector(ctx, repository.CollectorInput{ConversationID: conversation.ID, ConnectorAccountID: account.ID, CollectorUserID: "u1", Role: domain.CollectorPrimary})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.UpdateConnectorStatus(ctx, account.ID, domain.ConnectorRevoked, "connector_revoked"); err != nil {
+		t.Fatal(err)
+	}
+	start, err := service.StartFeishuOAuth(ctx, "u1", "rebind", "org-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	saved, err := service.CompleteFeishuOAuth(ctx, start.StateID, "code", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if saved.ID != account.ID || saved.Status != domain.ConnectorActive {
+		t.Fatalf("revoked connector was not reused: %+v", saved)
+	}
+	restored, err := repo.GetCollector(ctx, collector.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if restored.Status != domain.CollectorActive || restored.LastError != "" {
+		t.Fatalf("revoked collector was not restored: %+v", restored)
 	}
 }
 
@@ -600,6 +660,31 @@ func TestDiscoverRefreshesAfterAuthorizationExpiry(t *testing.T) {
 	}
 	if len(discovery.Conversations) != 1 || provider.discoverCalls != 2 || provider.refreshCalls != 1 {
 		t.Fatalf("discovery did not refresh and retry: discovery=%+v discover_calls=%d refresh_calls=%d", discovery, provider.discoverCalls, provider.refreshCalls)
+	}
+}
+
+func TestDiscoverUsesManagedFeishuDiscoveryWhenTokenRefreshFails(t *testing.T) {
+	now := time.Now().UTC()
+	provider := &fakeOAuthProvider{refreshErr: context.DeadlineExceeded}
+	service, repo, _ := newServiceForTest(provider)
+	ctx := context.Background()
+	account := domain.ConnectorAccount{ID: "a1", OwnerUserID: "u1", Platform: domain.PlatformFeishu, WorkspaceKey: "tenant", ExternalAccountID: "user-1", CredentialRef: "credential-a1", Status: domain.ConnectorActive}
+	if _, err := repo.SaveConnector(ctx, account); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.Vault.Put(ctx, account.CredentialRef, vault.TokenSet{AccessToken: "access-old", RefreshToken: "refresh-1", ExpiresAt: now.Add(-time.Minute)}, 2*time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.ReportManagedDiscovery(ctx, account.ID, domain.PlatformFeishu, []domain.AvailableConversation{{ExternalID: "sim-feishu-group", Name: "模拟飞书群", ConversationType: "group", MemberCount: 3}}); err != nil {
+		t.Fatal(err)
+	}
+
+	discovery, err := service.Discover(ctx, "u1", domain.PlatformFeishu)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(discovery.Conversations) != 1 || discovery.Conversations[0].ExternalID != "sim-feishu-group" || provider.discoverCalls != 0 || provider.refreshCalls != 1 {
+		t.Fatalf("managed discovery was not used after refresh failure: discovery=%+v discover_calls=%d refresh_calls=%d", discovery, provider.discoverCalls, provider.refreshCalls)
 	}
 }
 

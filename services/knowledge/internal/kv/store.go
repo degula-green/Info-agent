@@ -155,6 +155,6 @@ func (r *Redis) Publish(ctx context.Context, stream string, payload any) error {
 	if err != nil {
 		return err
 	}
-	return r.client.XAdd(ctx, &redis.XAddArgs{Stream: stream, Values: map[string]any{"payload": string(raw)}}).Err()
+	return r.client.XAdd(ctx, &redis.XAddArgs{Stream: stream, Values: map[string]any{"event": string(raw)}}).Err()
 }
 func (r *Redis) Close() error { return r.client.Close() }

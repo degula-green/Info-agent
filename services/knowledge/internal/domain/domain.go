@@ -142,6 +142,48 @@ type AvailableMember struct {
 	MemberRole     string `json:"member_role,omitempty"`
 }
 
+// AvailableContact is a provider-owned contact record returned during an
+// explicit contact discovery. It is not persisted until the user selects it.
+// The fields intentionally contain platform identifiers and basic profile
+// data only; identity mapping is resolved by the knowledge service.
+type AvailableContact struct {
+	ExternalUserID string `json:"external_user_id"`
+	DisplayName    string `json:"display_name,omitempty"`
+	AvatarURL      string `json:"avatar_url,omitempty"`
+	Email          string `json:"email,omitempty"`
+	Department     string `json:"department,omitempty"`
+	JobTitle       string `json:"job_title,omitempty"`
+	Selected       bool   `json:"selected"`
+}
+
+type ContactIdentity struct {
+	ID             string `json:"id"`
+	Platform       string `json:"platform"`
+	WorkspaceKey   string `json:"platform_workspace_key,omitempty"`
+	ExternalUserID string `json:"external_user_id"`
+	DisplayName    string `json:"display_name,omitempty"`
+	AvatarURL      string `json:"avatar_url,omitempty"`
+	MappedUserID   string `json:"mapped_user_id,omitempty"`
+	MappingStatus  string `json:"mapping_status"`
+}
+
+type ContactView struct {
+	ID              string            `json:"id"`
+	Kind            string            `json:"kind"` // internal or external
+	InternalUserID  string            `json:"internal_user_id,omitempty"`
+	DisplayName     string            `json:"display_name,omitempty"`
+	Identities      []ContactIdentity `json:"identities"`
+	ConversationIDs []string          `json:"conversation_ids,omitempty"`
+	MessageCount    int               `json:"message_count"`
+	AttachmentCount int               `json:"attachment_count"`
+}
+
+type ContactDetail struct {
+	ContactView
+	Messages    []Message    `json:"messages"`
+	Attachments []Attachment `json:"attachments"`
+}
+
 type Discovery struct {
 	ID            string                  `json:"discovery_id"`
 	OwnerUserID   string                  `json:"owner_user_id"`
@@ -172,6 +214,8 @@ type ConversationIngestion struct {
 	DetachedAt             *time.Time               `json:"detached_at,omitempty"`
 	CreatedAt              time.Time                `json:"created_at"`
 	UpdatedAt              time.Time                `json:"updated_at"`
+	MessageCount           int                      `json:"message_count"`
+	AttachmentCount        int                      `json:"attachment_count"`
 	Collectors             []Collector              `json:"collectors,omitempty"`
 	Memberships            []ConversationMembership `json:"memberships,omitempty"`
 }
@@ -222,10 +266,104 @@ type Message struct {
 	ContentHash          string       `json:"content_hash"`
 	ContentVersion       int          `json:"content_version"`
 	SentAt               time.Time    `json:"sent_at"`
+	CollectedAt          time.Time    `json:"collected_at"`
 	LifecycleStatus      string       `json:"lifecycle_status"`
 	VectorStatus         string       `json:"vector_status,omitempty"`
 	Attachments          []Attachment `json:"attachments,omitempty"`
 	CreatedAt            time.Time    `json:"created_at"`
+}
+
+// UnifiedMessage is the platform-neutral boundary created only after a raw
+// transport candidate has passed filtering and Redis deduplication.
+type UnifiedMessage struct {
+	Source            UnifiedMessageSource       `json:"source"`
+	Message           UnifiedMessageBody         `json:"message"`
+	Attachments       []UnifiedMessageAttachment `json:"attachments"`
+	Cursor            string                     `json:"cursor,omitempty"`
+	SchemaVersion     int                        `json:"schema_version"`
+	PayloadHash       string                     `json:"-"`
+	SourcePayloadHash string                     `json:"-"`
+}
+
+type UnifiedMessageSource struct {
+	Platform               string `json:"platform"`
+	AccountID              string `json:"account_id"`
+	WorkspaceID            string `json:"workspace_id,omitempty"`
+	ConversationExternalID string `json:"conversation_external_id"`
+	MessageExternalID      string `json:"message_external_id"`
+	CollectorID            string `json:"-"`
+}
+
+type UnifiedMessageBody struct {
+	Type        string               `json:"type"`
+	Text        string               `json:"text"`
+	RawText     string               `json:"raw_text"`
+	ContentHash string               `json:"content_hash"`
+	SentAt      time.Time            `json:"sent_at"`
+	CollectedAt time.Time            `json:"collected_at"`
+	Sender      UnifiedMessageSender `json:"sender"`
+}
+
+type UnifiedMessageSender struct {
+	ExternalID  string `json:"external_id,omitempty"`
+	DisplayName string `json:"display_name,omitempty"`
+}
+
+type UnifiedMessageAttachment struct {
+	ExternalAttachmentID string `json:"external_attachment_id"`
+	FileName             string `json:"file_name"`
+	MIMEType             string `json:"mime_type,omitempty"`
+	SizeBytes            int64  `json:"size_bytes"`
+	ContentHash          string `json:"content_hash,omitempty"`
+	DownloadRef          string `json:"download_ref,omitempty"`
+}
+
+// KnowledgeItem is the service boundary consumed by RAG. Platform-specific
+// message and attachment identifiers remain source metadata and are never
+// used as the public processing identity.
+type KnowledgeItem struct {
+	ID                     string      `json:"id"`
+	KnowledgeBaseID        string      `json:"knowledge_base_id,omitempty"`
+	KnowledgeScope         string      `json:"knowledge_scope"`
+	AccessScope            string      `json:"access_scope"`
+	OwnerUserID            string      `json:"owner_user_id,omitempty"`
+	OrganizationID         string      `json:"organization_id,omitempty"`
+	ConversationID         string      `json:"conversation_ingestion_id"`
+	ExternalConversationID string      `json:"external_conversation_id,omitempty"`
+	SourceType             string      `json:"source_type"`
+	SourceMessageID        string      `json:"source_message_id,omitempty"`
+	SourceAttachmentID     string      `json:"source_attachment_id,omitempty"`
+	ContentType            string      `json:"content_type"`
+	ContentRef             string      `json:"content_ref"`
+	OriginalContentRef     string      `json:"original_content_ref,omitempty"`
+	ContentHash            string      `json:"content_hash"`
+	ContentVersion         int         `json:"content_version"`
+	ContentVisibility      string      `json:"content_visibility"`
+	OriginalAccessRequired bool        `json:"original_access_required"`
+	SecurityStatus         string      `json:"security_status"`
+	Sensitivity            string      `json:"sensitivity,omitempty"`
+	ContentSaved           bool        `json:"content_saved"`
+	OwnershipReady         bool        `json:"ownership_ready"`
+	SecurityReady          bool        `json:"security_ready"`
+	PermissionReady        bool        `json:"permission_ready"`
+	ACLVersion             int64       `json:"acl_version"`
+	ACLSyncStatus          string      `json:"acl_sync_status"`
+	ProcessingStatus       string      `json:"processing_status"`
+	LifecycleStatus        string      `json:"lifecycle_status"`
+	ContentAccessRequired  bool        `json:"content_access_required"`
+	LastError              string      `json:"last_error,omitempty"`
+	Message                *Message    `json:"message,omitempty"`
+	Attachment             *Attachment `json:"attachment,omitempty"`
+	CreatedAt              time.Time   `json:"created_at"`
+	UpdatedAt              time.Time   `json:"updated_at"`
+}
+
+type KnowledgeContent struct {
+	KnowledgeItemID string `json:"knowledge_item_id"`
+	ContentVersion  int    `json:"content_version"`
+	ContentVariant  string `json:"content_variant"`
+	ContentHash     string `json:"content_hash"`
+	Text            string `json:"text"`
 }
 
 type MessageSource struct {
@@ -260,63 +398,40 @@ type Attachment struct {
 	UpdatedAt             time.Time `json:"updated_at"`
 }
 
-type PrivateShareReference struct {
-	ID                      string    `json:"share_reference_id"`
-	OrganizationID          string    `json:"organization_id"`
-	SourcePrivateResourceID string    `json:"source_private_resource_id"`
-	SourceResourceType      string    `json:"source_resource_type"`
-	SourceContentVersion    int       `json:"source_content_version"`
-	ShareBatchID            string    `json:"share_batch_id"`
-	ShareRequestID          string    `json:"share_request_id"`
-	CreatedByUserID         string    `json:"created_by_user_id"`
-	Status                  string    `json:"status"`
-	Sensitive               bool      `json:"sensitive"`
-	ContentAccessRequired   bool      `json:"content_access_required"`
-	CreatedAt               time.Time `json:"created_at"`
-}
-
-type PrivateShareRequest struct {
-	ID                    string     `json:"id"`
-	RequesterUserID       string     `json:"requester_user_id"`
-	RequestID             string     `json:"request_id"`
-	RequestFingerprint    string     `json:"request_fingerprint"`
-	PrivateConversationID string     `json:"private_conversation_id"`
-	OrganizationID        string     `json:"organization_id"`
-	ShareBatchID          string     `json:"share_batch_id"`
-	Status                string     `json:"status"`
-	SharedMessageCount    int        `json:"shared_message_count"`
-	SharedAttachmentCount int        `json:"shared_attachment_count"`
-	LastError             string     `json:"last_error,omitempty"`
-	CreatedAt             time.Time  `json:"created_at"`
-	UpdatedAt             time.Time  `json:"updated_at"`
-	CompletedAt           *time.Time `json:"completed_at,omitempty"`
-}
-
-type PrivateAccessRequest struct {
-	ID               string     `json:"id"`
-	RequesterUserID  string     `json:"requester_user_id"`
-	ShareReferenceID string     `json:"share_reference_id"`
-	ResourceID       string     `json:"resource_id"`
-	ResourceType     string     `json:"resource_type"`
-	RequestedAction  string     `json:"requested_action"`
-	Reason           string     `json:"reason,omitempty"`
-	Status           string     `json:"status"`
-	ReviewedByUserID string     `json:"reviewed_by_user_id,omitempty"`
-	ReviewNote       string     `json:"review_note,omitempty"`
-	CreatedAt        time.Time  `json:"created_at"`
-	ReviewedAt       *time.Time `json:"reviewed_at,omitempty"`
-}
-
 type OutboxEvent struct {
 	ID             string         `json:"event_id"`
 	EventType      string         `json:"event_type"`
 	SchemaVersion  int            `json:"schema_version"`
 	OccurredAt     time.Time      `json:"occurred_at"`
-	TraceID        string         `json:"trace_id,omitempty"`
-	OrganizationID string         `json:"organization_id,omitempty"`
+	TraceID        string         `json:"trace_id"`
+	OrganizationID string         `json:"organization_id"`
 	Producer       string         `json:"producer"`
 	Payload        map[string]any `json:"payload"`
+	RetryCount     int            `json:"retry_count,omitempty"`
+	LastError      string         `json:"last_error,omitempty"`
+	AvailableAt    time.Time      `json:"available_at,omitempty"`
 	PublishedAt    *time.Time     `json:"published_at,omitempty"`
+}
+
+// EventEnvelope is the stable cross-service contract. Outbox delivery fields
+// stay internal and are never serialized into Redis Stream entries.
+type EventEnvelope struct {
+	EventID        string         `json:"event_id"`
+	EventType      string         `json:"event_type"`
+	SchemaVersion  int            `json:"schema_version"`
+	OccurredAt     time.Time      `json:"occurred_at"`
+	TraceID        string         `json:"trace_id"`
+	OrganizationID string         `json:"organization_id"`
+	Producer       string         `json:"producer"`
+	Payload        map[string]any `json:"payload"`
+}
+
+func (e OutboxEvent) Envelope() EventEnvelope {
+	return EventEnvelope{
+		EventID: e.ID, EventType: e.EventType, SchemaVersion: e.SchemaVersion,
+		OccurredAt: e.OccurredAt, TraceID: e.TraceID, OrganizationID: e.OrganizationID,
+		Producer: e.Producer, Payload: e.Payload,
+	}
 }
 
 func IsPlatform(value string) bool {

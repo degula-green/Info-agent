@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"strconv"
 	"testing"
 	"time"
 
@@ -162,9 +163,31 @@ func TestMemoryMessageAttachmentIdempotenceAndCursorMonotonicity(t *testing.T) {
 	if first.Duplicate || !second.Duplicate || len(second.Attachments) != 1 {
 		t.Fatalf("unexpected duplicate result: first=%+v second=%+v", first, second)
 	}
-	events, err := repo.GetOutbox(ctx, 10)
-	if err != nil || len(events) == 0 || events[0].TraceID != "trace-ingest" {
-		t.Fatalf("outbox event did not preserve trace id: events=%+v err=%v", events, err)
+	input.SenderExternalID = "wxid-corrected"
+	input.SenderDisplayName = "Correct sender"
+	input.PayloadHash, _ = CalculatePayloadHash(input)
+	corrected, err := repo.IngestMessage(ctx, input)
+	if err != nil || !corrected.Duplicate || corrected.Message.SenderDisplayName != "Correct sender" {
+		t.Fatalf("duplicate sender correction failed: result=%+v err=%v", corrected, err)
+	}
+	messages, err := repo.ListMessages(ctx, conversation.ID, 10, "")
+	if err != nil || len(messages) != 1 || messages[0].SenderDisplayName != "Correct sender" {
+		t.Fatalf("corrected sender was not persisted: messages=%+v err=%v", messages, err)
+	}
+	input.Content = "hello without a legacy sender marker"
+	input.ContentHash = hashForTest(input.Content)
+	input.PayloadHash, _ = CalculatePayloadHash(input)
+	if _, err = repo.IngestMessage(ctx, input); apperror.From(err).Code != "external_id_conflict" {
+		t.Fatalf("conflicting content with a sender id was not rejected: %v", err)
+	}
+	tracePreserved := false
+	for _, event := range repo.outbox {
+		if event.EventType == "permission.sync.requested" && event.TraceID == "trace-ingest" {
+			tracePreserved = true
+		}
+	}
+	if !tracePreserved {
+		t.Fatal("internal permission event did not preserve trace id")
 	}
 	if _, err := repo.CompleteAttachment(ctx, first.Attachments[0].ID, "object", attachmentHash, 10, "ready"); err != nil {
 		t.Fatal(err)
@@ -199,6 +222,246 @@ func TestMemoryMessageAttachmentIdempotenceAndCursorMonotonicity(t *testing.T) {
 	current, _ = repo.GetCollector(ctx, collector.ID)
 	if current.LastCursor != "100" {
 		t.Fatalf("stale cursor advanced collector: %q", current.LastCursor)
+	}
+}
+
+func TestMemoryRejectsIngestIntoPausedConversation(t *testing.T) {
+	repo := NewMemoryStore()
+	ctx := context.Background()
+	now := time.Now().UTC()
+	if _, err := repo.SaveConnector(ctx, domain.ConnectorAccount{ID: "a1", OwnerUserID: "u1", Platform: domain.PlatformWechat, ExternalAccountID: "wxid", Status: domain.ConnectorActive}); err != nil {
+		t.Fatal(err)
+	}
+	conversation, err := repo.AttachConversation(ctx, AttachInput{UserID: "u1", Platform: domain.PlatformWechat, ExternalConversationID: "chat", ConversationType: "group", OrganizationID: "org-1", RequestedStartAt: &now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	collector, err := repo.AddCollector(ctx, CollectorInput{ConversationID: conversation.ID, ConnectorAccountID: "a1", CollectorUserID: "u1", Role: domain.CollectorPrimary})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.SetConversationStatus(ctx, conversation.ID, domain.ConversationPaused, "user_paused"); err != nil {
+		t.Fatal(err)
+	}
+	input := IngestMessageInput{CollectorID: collector.ID, ExternalConversationID: "chat", ExternalMessageID: "paused-message", MessageType: "text", Content: "must not persist", ContentHash: hashForTest("must not persist"), SentAt: now}
+	input.PayloadHash, _ = CalculatePayloadHash(input)
+	if _, err := repo.IngestMessage(ctx, input); apperror.From(err).Code != "conversation_not_found" {
+		t.Fatalf("expected paused conversation rejection, got %v", err)
+	}
+	messages, err := repo.ListMessages(ctx, conversation.ID, 10, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(messages) != 0 {
+		t.Fatalf("paused conversation received messages: %+v", messages)
+	}
+}
+
+func TestMemoryListConversationsIncludesMessageAndAttachmentCounts(t *testing.T) {
+	repo := NewMemoryStore()
+	ctx := context.Background()
+	now := time.Now().UTC()
+	conversation, err := repo.AttachConversation(ctx, AttachInput{
+		UserID:                 "u1",
+		Platform:               domain.PlatformWechat,
+		ExternalConversationID: "chat-counts",
+		ConversationType:       "private",
+		Name:                   "数据252",
+		RequestedStartAt:       &now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	collector, err := repo.AddCollector(ctx, CollectorInput{
+		ConversationID:     conversation.ID,
+		ConnectorAccountID: "connector-1",
+		CollectorUserID:    "u1",
+		Role:               domain.CollectorPrimary,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, member := range []struct{ id, name string }{{"user-alice", "Alice"}, {"user-bob", "Bob"}} {
+		if _, identityErr := repo.UpsertExternalIdentity(ctx, ExternalIdentityInput{
+			Platform: domain.PlatformWechat, ExternalUserID: member.id, DisplayName: member.name,
+		}); identityErr != nil {
+			t.Fatal(identityErr)
+		}
+	}
+	for i, content := range []string{"one", "two"} {
+		input := IngestMessageInput{
+			CollectorID:            collector.ID,
+			ExternalConversationID: conversation.ExternalConversationID,
+			ExternalMessageID:      "message-" + strconv.Itoa(i),
+			SenderExternalID:       []string{"user-alice", "user-bob"}[i],
+			MessageType:            "text",
+			Content:                content,
+			ContentHash:            hashForTest(content),
+			SentAt:                 now.Add(time.Duration(i) * time.Minute),
+			Cursor:                 "cursor-" + strconv.Itoa(i),
+			Attachments: []AttachmentInput{{
+				ExternalAttachmentID: "attachment-" + strconv.Itoa(i),
+				FileName:             "file-" + strconv.Itoa(i) + ".txt",
+				MIMEType:             "text/plain",
+			}},
+		}
+		input.PayloadHash, _ = CalculatePayloadHash(input)
+		result, ingestErr := repo.IngestMessage(ctx, input)
+		if ingestErr != nil {
+			t.Fatal(ingestErr)
+		}
+		if result == nil {
+			t.Fatal("expected ingest result")
+		}
+	}
+	items, err := repo.ListConversations(ctx, "u1", domain.PlatformWechat)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 || items[0].MessageCount != 2 || items[0].AttachmentCount != 2 {
+		t.Fatalf("unexpected conversation counts: %+v", items)
+	}
+	messages, err := repo.ListMessages(ctx, conversation.ID, 20, "")
+	if err != nil || len(messages) != 2 || messages[0].SenderDisplayName != "Alice" || messages[1].SenderDisplayName != "Bob" {
+		t.Fatalf("sender names were not resolved from identities: messages=%+v err=%v", messages, err)
+	}
+}
+
+func TestMemoryReclassifiesLegacyFileLinkWithoutKeepingAttachment(t *testing.T) {
+	repo := NewMemoryStore()
+	ctx := context.Background()
+	now := time.Now().UTC()
+	if _, err := repo.SaveConnector(ctx, domain.ConnectorAccount{ID: "a1", OwnerUserID: "u1", Platform: domain.PlatformWechat, ExternalAccountID: "wxid", Status: domain.ConnectorActive}); err != nil {
+		t.Fatal(err)
+	}
+	conversation, err := repo.AttachConversation(ctx, AttachInput{UserID: "u1", Platform: domain.PlatformWechat, ExternalConversationID: "chat", ConversationType: "group", OrganizationID: "org-1", RequestedStartAt: &now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	collector, err := repo.AddCollector(ctx, CollectorInput{ConversationID: conversation.ID, ConnectorAccountID: "a1", CollectorUserID: "u1", Role: domain.CollectorPrimary})
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy := IngestMessageInput{CollectorID: collector.ID, ExternalConversationID: "chat", ExternalMessageID: "link-1", MessageType: "file", Content: "provider link payload", ContentHash: hashForTest("provider link payload"), SentAt: now, Cursor: "10", Attachments: []AttachmentInput{{ExternalAttachmentID: "legacy-attachment", FileName: "link-card", MIMEType: "application/octet-stream"}}}
+	legacy.PayloadHash, _ = CalculatePayloadHash(legacy)
+	if _, err := repo.IngestMessage(ctx, legacy); err != nil {
+		t.Fatal(err)
+	}
+	corrected := legacy
+	corrected.MessageType = "text"
+	corrected.Attachments = nil
+	corrected.PayloadHash, _ = CalculatePayloadHash(corrected)
+	result, err := repo.IngestMessage(ctx, corrected)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Duplicate || result.Message.MessageType != "text" || len(result.Attachments) != 0 {
+		t.Fatalf("legacy file link was not reconciled: %+v", result)
+	}
+	attachments, err := repo.ListAttachments(ctx, conversation.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(attachments) != 0 {
+		t.Fatalf("legacy attachment was retained: %+v", attachments)
+	}
+}
+
+func TestMemoryReclassifiesLegacyTextAsFileWhenAttachmentArrives(t *testing.T) {
+	repo := NewMemoryStore()
+	ctx := context.Background()
+	now := time.Now().UTC()
+	if _, err := repo.SaveConnector(ctx, domain.ConnectorAccount{ID: "a-text-file", OwnerUserID: "u1", Platform: domain.PlatformWechat, ExternalAccountID: "wxid", Status: domain.ConnectorActive}); err != nil {
+		t.Fatal(err)
+	}
+	conversation, err := repo.AttachConversation(ctx, AttachInput{UserID: "u1", Platform: domain.PlatformWechat, ExternalConversationID: "chat-text-file", ConversationType: "group", OrganizationID: "org-1", RequestedStartAt: &now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	collector, err := repo.AddCollector(ctx, CollectorInput{ConversationID: conversation.ID, ConnectorAccountID: "a-text-file", CollectorUserID: "u1", Role: domain.CollectorPrimary})
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy := IngestMessageInput{CollectorID: collector.ID, ExternalConversationID: conversation.ExternalConversationID, ExternalMessageID: "nested-file-1", SenderExternalID: "wxid-sender", MessageType: "text", Content: "forwarded file", ContentHash: hashForTest("forwarded file"), SentAt: now, Cursor: "10"}
+	legacy.PayloadHash, _ = CalculatePayloadHash(legacy)
+	if _, err := repo.IngestMessage(ctx, legacy); err != nil {
+		t.Fatal(err)
+	}
+	corrected := legacy
+	corrected.MessageType = "file"
+	corrected.Attachments = []AttachmentInput{{ExternalAttachmentID: "nested-file-attachment", FileName: "report.xls", MIMEType: "application/vnd.ms-excel", SizeBytes: 2048}}
+	corrected.PayloadHash, _ = CalculatePayloadHash(corrected)
+	result, err := repo.IngestMessage(ctx, corrected)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Duplicate || result.Message.MessageType != "file" || len(result.Attachments) != 1 {
+		t.Fatalf("legacy text was not promoted to file: %+v", result)
+	}
+	attachments, err := repo.ListAttachments(ctx, conversation.ID)
+	if err != nil || len(attachments) != 1 || attachments[0].FileName != "report.xls" {
+		t.Fatalf("replayed attachment was not persisted: attachments=%+v err=%v", attachments, err)
+	}
+}
+
+func TestMemoryReclassifiesLegacyTextAsImageWhenAttachmentArrives(t *testing.T) {
+	repo := NewMemoryStore()
+	ctx := context.Background()
+	now := time.Now().UTC()
+	if _, err := repo.SaveConnector(ctx, domain.ConnectorAccount{ID: "a-text-image", OwnerUserID: "u1", Platform: domain.PlatformWechat, ExternalAccountID: "wxid", Status: domain.ConnectorActive}); err != nil {
+		t.Fatal(err)
+	}
+	conversation, err := repo.AttachConversation(ctx, AttachInput{UserID: "u1", Platform: domain.PlatformWechat, ExternalConversationID: "chat-text-image", ConversationType: "group", OrganizationID: "org-1", RequestedStartAt: &now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	collector, err := repo.AddCollector(ctx, CollectorInput{ConversationID: conversation.ID, ConnectorAccountID: "a-text-image", CollectorUserID: "u1", Role: domain.CollectorPrimary})
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy := IngestMessageInput{CollectorID: collector.ID, ExternalConversationID: conversation.ExternalConversationID, ExternalMessageID: "nested-image-1", SenderExternalID: "wxid-sender", MessageType: "text", Content: "forwarded image", ContentHash: hashForTest("forwarded image"), SentAt: now, Cursor: "10"}
+	legacy.PayloadHash, _ = CalculatePayloadHash(legacy)
+	if _, err := repo.IngestMessage(ctx, legacy); err != nil {
+		t.Fatal(err)
+	}
+	corrected := legacy
+	corrected.MessageType = "image"
+	corrected.Attachments = []AttachmentInput{{ExternalAttachmentID: "nested-image-attachment", FileName: "image.jpg", MIMEType: "image/jpeg", SizeBytes: 1024}}
+	corrected.PayloadHash, _ = CalculatePayloadHash(corrected)
+	result, err := repo.IngestMessage(ctx, corrected)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Duplicate || result.Message.MessageType != "image" || len(result.Attachments) != 1 {
+		t.Fatalf("legacy text was not promoted to image: %+v", result)
+	}
+}
+
+func TestMemoryToleratesProviderSizeCorrectionWithoutHash(t *testing.T) {
+	repo := NewMemoryStore()
+	ctx := context.Background()
+	now := time.Now().UTC()
+	if _, err := repo.SaveConnector(ctx, domain.ConnectorAccount{ID: "a-size-correction", OwnerUserID: "u1", Platform: domain.PlatformWechat, ExternalAccountID: "wxid", Status: domain.ConnectorActive}); err != nil {
+		t.Fatal(err)
+	}
+	conversation, err := repo.AttachConversation(ctx, AttachInput{UserID: "u1", Platform: domain.PlatformWechat, ExternalConversationID: "chat-size-correction", ConversationType: "private", RequestedStartAt: &now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	collector, err := repo.AddCollector(ctx, CollectorInput{ConversationID: conversation.ID, ConnectorAccountID: "a-size-correction", CollectorUserID: "u1", Role: domain.CollectorPrimary})
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := IngestMessageInput{CollectorID: collector.ID, ExternalConversationID: conversation.ExternalConversationID, ExternalMessageID: "size-correction-1", SenderExternalID: "wxid-sender", MessageType: "file", Content: "file", ContentHash: hashForTest("file"), SentAt: now, Attachments: []AttachmentInput{{ExternalAttachmentID: "size-correction-att", FileName: "report.docx", MIMEType: "application/octet-stream", SizeBytes: 100}}}
+	input.PayloadHash, _ = CalculatePayloadHash(input)
+	if _, err := repo.IngestMessage(ctx, input); err != nil {
+		t.Fatal(err)
+	}
+	corrected := input
+	corrected.Attachments = []AttachmentInput{{ExternalAttachmentID: "size-correction-att", FileName: "report.docx", MIMEType: "application/octet-stream", SizeBytes: 200}}
+	corrected.PayloadHash, _ = CalculatePayloadHash(corrected)
+	if _, err := repo.IngestMessage(ctx, corrected); err != nil {
+		t.Fatalf("size-only provider correction should be accepted: %v", err)
 	}
 }
 
@@ -238,130 +501,66 @@ func TestMemoryRejectsBadPayloadHashAndUnverifiedCursor(t *testing.T) {
 	}
 }
 
-func TestPrivatePipelineFiltersClassifiesAndSharesExplicitResources(t *testing.T) {
+func TestMemoryFiltersSystemAndRedactsSensitiveContent(t *testing.T) {
 	repo := NewMemoryStore()
-	ctx := trace.WithIDs(context.Background(), "req-private", "trace-private")
+	ctx := context.Background()
 	now := time.Now().UTC()
-	if _, err := repo.SaveConnector(ctx, domain.ConnectorAccount{ID: "private-account", OwnerUserID: "owner", Platform: domain.PlatformWechat, ExternalAccountID: "wxid", DefaultOrganizationID: "org-1", Status: domain.ConnectorActive}); err != nil {
+	if _, err := repo.SaveConnector(ctx, domain.ConnectorAccount{ID: "filter-account", OwnerUserID: "u1", Platform: domain.PlatformWechat, ExternalAccountID: "wxid", Status: domain.ConnectorActive}); err != nil {
 		t.Fatal(err)
 	}
-	conversation, err := repo.AttachConversation(ctx, AttachInput{UserID: "owner", Platform: domain.PlatformWechat, ExternalConversationID: "private-chat", ConversationType: "private", RequestedStartAt: &now, PrimaryConnectorID: "private-account"})
+	conversation, err := repo.AttachConversation(ctx, AttachInput{UserID: "u1", Platform: domain.PlatformWechat, ExternalConversationID: "filter-chat", ConversationType: "group", OrganizationID: "org-1", PrimaryConnectorID: "filter-account", RequestedStartAt: &now})
 	if err != nil {
 		t.Fatal(err)
 	}
 	collector := conversation.Collectors[0]
-	makeInput := func(id, content string, attachments []AttachmentInput) IngestMessageInput {
-		input := IngestMessageInput{CollectorID: collector.ID, ExternalConversationID: "private-chat", ExternalMessageID: id, MessageType: "text", Content: content, ContentHash: hashForTest(content), SentAt: now, Cursor: id, Attachments: attachments}
-		input.PayloadHash, _ = CalculatePayloadHash(input)
-		return input
+	makeInput := func(id, typ, content string) IngestMessageInput {
+		in := IngestMessageInput{CollectorID: collector.ID, ExternalConversationID: "filter-chat", ExternalMessageID: id, MessageType: typ, Content: content, ContentHash: hashForTest(content), SentAt: now, Cursor: id}
+		in.PayloadHash, _ = CalculatePayloadHash(in)
+		return in
 	}
-	filtered, err := repo.IngestMessage(ctx, makeInput("system", "通话通知", nil))
+	filtered, err := repo.IngestMessage(ctx, makeInput("system-1", "system", "joined"))
 	if err != nil || !filtered.Discarded {
-		t.Fatalf("system notice was not filtered: %+v %v", filtered, err)
+		t.Fatalf("system message was not filtered: %+v %v", filtered, err)
 	}
-	input := makeInput("message-1", "password=secret-value", []AttachmentInput{{ExternalAttachmentID: "attachment-1", FileName: "private-passwords.txt", MIMEType: "text/plain", SizeBytes: 4, ContentHash: hashForTest("data")}})
-	first, err := repo.IngestMessage(ctx, input)
+	saved, err := repo.IngestMessage(ctx, makeInput("secret-1", "text", "password=abc123"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if first.Message.Content != "" || first.Message.ClassificationStatus != "pending" || first.Attachments[0].MessageID != "" || first.Attachments[0].AccessScope != "owner_only" || !first.Attachments[0].Sensitive {
-		t.Fatalf("private resource was not protected: %+v", first)
+	if saved.Message.Sensitive || saved.Message.Content != "" || saved.Message.ClassificationStatus != "pending" {
+		t.Fatalf("message was exposed before scan: %+v", saved.Message)
 	}
-	if err := repo.CompleteMessageClassification(ctx, first.Message.ID, "password=[REDACTED]", true); err != nil {
+	pending, _ := repo.ListPendingMessages(ctx, 10)
+	if len(pending) != 1 || pending[0].OriginalContent != "password=abc123" {
+		t.Fatalf("protected pending content missing: %+v", pending)
+	}
+	sensitive, display := classifyMessage(makeInput("secret-1", "text", pending[0].OriginalContent))
+	if err := repo.CompleteMessageClassification(ctx, saved.Message.ID, display, sensitive); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := repo.CompleteAttachment(ctx, first.Attachments[0].ID, "attachments/private", hashForTest("data"), 4, "ready"); err != nil {
+	updated, _ := repo.ListMessages(ctx, conversation.ID, 10, "")
+	if len(updated) != 1 || !updated[0].Sensitive || updated[0].Content == "password=abc123" {
+		t.Fatalf("secret was exposed after scan: %+v", updated)
+	}
+	if events, _ := repo.GetOutbox(ctx, 10); len(events) != 0 {
+		t.Fatalf("privacy completion published before permission gate: %+v", events)
+	}
+	item, err := repo.GetKnowledgeItemByMessage(ctx, saved.Message.ID)
+	if err != nil || !item.SecurityReady || item.PermissionReady {
+		t.Fatalf("unexpected privacy gate state: item=%+v err=%v", item, err)
+	}
+	if err := repo.MarkKnowledgePermissionSynced(ctx, item.ID, 3); err != nil {
 		t.Fatal(err)
 	}
-	result, err := repo.SharePrivateResources(ctx, PrivateShareInput{RequesterUserID: "owner", RequestID: "share-1", TraceID: "trace-share", PrivateConversationID: conversation.ID, OrganizationID: "org-1", MessageIDs: []string{first.Message.ID}})
-	if err != nil {
-		t.Fatal(err)
+	created, err := repo.TryMarkKnowledgeReady(ctx, item.ID, "trace-ready")
+	if err != nil || !created {
+		t.Fatalf("ready gate did not create event: created=%v err=%v", created, err)
 	}
-	if result.Status != "accepted" || result.SharedMessageCount != 1 || result.SharedAttachmentCount != 0 {
-		t.Fatalf("unexpected message-only share result: %+v", result)
+	if again, err := repo.TryMarkKnowledgeReady(ctx, item.ID, "trace-ready-2"); err != nil || again {
+		t.Fatalf("ready gate was not idempotent: created=%v err=%v", again, err)
 	}
-	result, err = repo.SharePrivateResources(ctx, PrivateShareInput{RequesterUserID: "owner", RequestID: "share-2", TraceID: "trace-share", PrivateConversationID: conversation.ID, OrganizationID: "org-1", AttachmentIDs: []string{first.Attachments[0].ID}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result.SharedMessageCount != 0 || result.SharedAttachmentCount != 1 {
-		t.Fatalf("attachment was not independently shared: %+v", result)
-	}
-	repeated, err := repo.SharePrivateResources(ctx, PrivateShareInput{RequesterUserID: "owner", RequestID: "share-1", TraceID: "trace-share", PrivateConversationID: conversation.ID, OrganizationID: "org-1", MessageIDs: []string{first.Message.ID}})
-	if err != nil || repeated.Status != "already_processed" {
-		t.Fatalf("share request was not idempotent: %+v %v", repeated, err)
-	}
-	if _, err := repo.SharePrivateResources(ctx, PrivateShareInput{RequesterUserID: "intruder", RequestID: "share-3", PrivateConversationID: conversation.ID, OrganizationID: "org-1", MessageIDs: []string{first.Message.ID}}); apperror.From(err).Code != "forbidden" {
-		t.Fatalf("private conversation leaked to another user: %v", err)
-	}
-}
-
-func TestPrivateAccessRequestValidatesShareReferenceAndSensitivity(t *testing.T) {
-	repo := NewMemoryStore()
-	ctx := trace.WithIDs(context.Background(), "req-access", "trace-access")
-	now := time.Now().UTC()
-	if _, err := repo.SaveConnector(ctx, domain.ConnectorAccount{ID: "access-account", OwnerUserID: "owner", Platform: domain.PlatformWechat, ExternalAccountID: "wxid-access", DefaultOrganizationID: "org-1", Status: domain.ConnectorActive}); err != nil {
-		t.Fatal(err)
-	}
-	conversation, err := repo.AttachConversation(ctx, AttachInput{UserID: "owner", Platform: domain.PlatformWechat, ExternalConversationID: "access-chat", ConversationType: "private", RequestedStartAt: &now, PrimaryConnectorID: "access-account"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	input := IngestMessageInput{CollectorID: conversation.Collectors[0].ID, ExternalConversationID: "access-chat", ExternalMessageID: "sensitive-message", MessageType: "text", Content: "token=secret", ContentHash: hashForTest("token=secret"), SentAt: now}
-	input.PayloadHash, _ = CalculatePayloadHash(input)
-	message, err := repo.IngestMessage(ctx, input)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := repo.CompleteMessageClassification(ctx, message.Message.ID, "token=[REDACTED]", true); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := repo.SharePrivateResources(ctx, PrivateShareInput{RequesterUserID: "owner", RequestID: "access-share", TraceID: "trace-access", PrivateConversationID: conversation.ID, OrganizationID: "org-1", MessageIDs: []string{message.Message.ID}}); err != nil {
-		t.Fatal(err)
-	}
-	events, err := repo.GetOutbox(ctx, 20)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var referenceID string
-	for _, event := range events {
-		if event.EventType == "private.share.ready" {
-			referenceID, _ = event.Payload["share_reference_id"].(string)
-			break
-		}
-	}
-	if referenceID == "" {
-		t.Fatalf("share reference event was not created: %+v", events)
-	}
-	if _, err := repo.CreatePrivateAccessRequest(ctx, PrivateAccessRequestInput{RequesterUserID: "member", ShareReferenceID: referenceID, ResourceID: "wrong-resource", ResourceType: "message", RequestedAction: "view"}); apperror.From(err).Code != "resource_mismatch" {
-		t.Fatalf("expected share/resource mismatch, got %v", err)
-	}
-	request, err := repo.CreatePrivateAccessRequest(ctx, PrivateAccessRequestInput{RequesterUserID: "member", ShareReferenceID: referenceID, ResourceID: message.Message.ID, ResourceType: "message", RequestedAction: "view"})
-	if err != nil || request.Status != "pending" {
-		t.Fatalf("sensitive access request was not created: %+v %v", request, err)
-	}
-
-	plainInput := IngestMessageInput{CollectorID: conversation.Collectors[0].ID, ExternalConversationID: "access-chat", ExternalMessageID: "plain-message", MessageType: "text", Content: "hello", ContentHash: hashForTest("hello"), SentAt: now}
-	plainInput.PayloadHash, _ = CalculatePayloadHash(plainInput)
-	plain, err := repo.IngestMessage(ctx, plainInput)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := repo.CompleteMessageClassification(ctx, plain.Message.ID, "hello", false); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := repo.SharePrivateResources(ctx, PrivateShareInput{RequesterUserID: "owner", RequestID: "plain-share", TraceID: "trace-access", PrivateConversationID: conversation.ID, OrganizationID: "org-1", MessageIDs: []string{plain.Message.ID}}); err != nil {
-		t.Fatal(err)
-	}
-	events, _ = repo.GetOutbox(ctx, 30)
-	var plainReference string
-	for _, event := range events {
-		if event.EventType == "private.share.ready" && event.Payload["source_private_resource_id"] == plain.Message.ID {
-			plainReference, _ = event.Payload["share_reference_id"].(string)
-		}
-	}
-	if _, err := repo.CreatePrivateAccessRequest(ctx, PrivateAccessRequestInput{RequesterUserID: "member", ShareReferenceID: plainReference, ResourceID: plain.Message.ID, ResourceType: "message", RequestedAction: "view"}); apperror.From(err).Code != "approval_not_required" {
-		t.Fatalf("expected non-sensitive resource to skip approval, got %v", err)
+	events, _ := repo.GetOutbox(ctx, 10)
+	if len(events) != 1 || events[0].EventType != "knowledge.ready" || events[0].Payload["knowledge_item_id"] != item.ID {
+		t.Fatalf("unexpected ready events: %+v", events)
 	}
 }
 

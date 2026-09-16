@@ -6,11 +6,13 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"mime"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -18,7 +20,6 @@ import (
 	"info-agent/knowledge/internal/apperror"
 	"info-agent/knowledge/internal/config"
 	"info-agent/knowledge/internal/coreclient"
-	knowledgecrypto "info-agent/knowledge/internal/crypto"
 	"info-agent/knowledge/internal/domain"
 	"info-agent/knowledge/internal/kv"
 	"info-agent/knowledge/internal/objectstore"
@@ -38,7 +39,6 @@ type Service struct {
 	Feishu  platform.OAuthProvider
 	Core    *coreclient.Client
 	Config  config.Config
-	Keyring *knowledgecrypto.Keyring
 	Now     func() time.Time
 }
 
@@ -47,7 +47,7 @@ func (s *Service) WechatCollector() *wechatclient.Client {
 	return wechatclient.New(s.Config.WechatCollectorURL, s.Config.CollectorInternalToken)
 }
 
-func (s *Service) BindWechat(ctx context.Context, userID, wxid, dbDir string, rebind bool) (map[string]any, error) {
+func (s *Service) BindWechat(ctx context.Context, userID, wxid, dbDir, organizationID string, rebind bool) (map[string]any, error) {
 	if strings.TrimSpace(wxid) == "" || strings.TrimSpace(dbDir) == "" {
 		return nil, apperror.New("invalid_request", "wxid and db_dir are required", 400, false)
 	}
@@ -56,10 +56,24 @@ func (s *Service) BindWechat(ctx context.Context, userID, wxid, dbDir string, re
 		return nil, apperror.Wrap("wechat_collector_unavailable", "wechat collector binding failed", 502, true, err)
 	}
 	now := s.Now()
-	account := domain.ConnectorAccount{OwnerUserID: userID, Platform: domain.PlatformWechat, ExternalAccountID: strings.TrimSpace(wxid), DisplayName: strings.TrimSpace(wxid), DatabaseRef: strings.TrimSpace(dbDir), Status: domain.ConnectorActive, CreatedAt: now, UpdatedAt: now}
+	account := domain.ConnectorAccount{OwnerUserID: userID, Platform: domain.PlatformWechat, ExternalAccountID: strings.TrimSpace(wxid), DisplayName: strings.TrimSpace(wxid), DatabaseRef: strings.TrimSpace(dbDir), DefaultOrganizationID: strings.TrimSpace(organizationID), Status: domain.ConnectorActive, CreatedAt: now, UpdatedAt: now}
 	if rebind {
 		if previous, findErr := s.Repo.GetConnector(ctx, userID, domain.PlatformWechat); findErr == nil {
-			saved, saveErr := s.Repo.ReplaceConnector(ctx, previous.ID, account)
+			var saved *domain.ConnectorAccount
+			var saveErr error
+			if strings.EqualFold(strings.TrimSpace(previous.ExternalAccountID), strings.TrimSpace(wxid)) {
+				// Rebinding the same account should not create a second row. This
+				// also keeps existing conversation collectors attached to it.
+				saved = previous
+				if organizationID != "" {
+					saved, saveErr = s.Repo.SetConnectorDefaultOrganization(ctx, previous.ID, userID, organizationID)
+				}
+				if saveErr == nil {
+					saveErr = s.Repo.UpdateConnectorStatus(ctx, previous.ID, domain.ConnectorActive, "")
+				}
+			} else {
+				saved, saveErr = s.Repo.ReplaceConnector(ctx, previous.ID, account)
+			}
 			if saveErr != nil {
 				return nil, saveErr
 			}
@@ -270,6 +284,11 @@ type CollectorAssignment struct {
 }
 type MessageInput struct{ repository.IngestMessageInput }
 
+type messageDedupeRecord struct {
+	PayloadHash string                  `json:"payload_hash"`
+	Result      repository.IngestResult `json:"result"`
+}
+
 type StateData struct {
 	UserID         string    `json:"user_id"`
 	Platform       string    `json:"platform"`
@@ -288,11 +307,7 @@ type oauthCompletion struct {
 }
 
 func New(repo repository.Repository, store kv.Store, vaultStore *vault.Vault, objects objectstore.Store, feishu platform.OAuthProvider, core *coreclient.Client, cfg config.Config) *Service {
-	return NewWithKeyring(repo, store, vaultStore, objects, feishu, core, cfg, nil)
-}
-
-func NewWithKeyring(repo repository.Repository, store kv.Store, vaultStore *vault.Vault, objects objectstore.Store, feishu platform.OAuthProvider, core *coreclient.Client, cfg config.Config, keyring *knowledgecrypto.Keyring) *Service {
-	return &Service{Repo: repo, KV: store, Vault: vaultStore, Objects: objects, Feishu: feishu, Core: core, Config: cfg, Keyring: keyring, Now: func() time.Time { return time.Now().UTC() }}
+	return &Service{Repo: repo, KV: store, Vault: vaultStore, Objects: objects, Feishu: feishu, Core: core, Config: cfg, Now: func() time.Time { return time.Now().UTC() }}
 }
 
 func (s *Service) ListConnectors(ctx context.Context, userID string) ([]domain.ConnectorView, error) {
@@ -303,6 +318,30 @@ func (s *Service) GetConnector(ctx context.Context, userID, platformName string)
 		return nil, apperror.New("unsupported_platform", "platform is not supported in this release", 400, false)
 	}
 	return s.Repo.GetConnector(ctx, userID, platformName)
+}
+
+func (s *Service) ResolveCurrentOrganization(ctx context.Context, userID, claimedOrganizationID, authorization string) (string, error) {
+	claimedOrganizationID = strings.TrimSpace(claimedOrganizationID)
+	if claimedOrganizationID != "" {
+		return claimedOrganizationID, nil
+	}
+	if s.Core == nil {
+		if !s.Config.JWTRequired {
+			return "", nil
+		}
+		return "", apperror.New("core_dependency_unavailable", "organization service is unavailable", 503, true)
+	}
+	current, err := s.Core.GetCurrentOrganization(ctx, authorization)
+	if err != nil {
+		return "", apperror.Wrap("core_dependency_unavailable", "organization service is unavailable", 503, true, err)
+	}
+	if current.OrganizationID == "" {
+		return "", nil
+	}
+	if current.UserID != userID || (current.Status != "" && current.Status != "active") {
+		return "", apperror.Clone(apperror.ErrForbidden)
+	}
+	return current.OrganizationID, nil
 }
 
 func (s *Service) StartFeishuOAuth(ctx context.Context, userID, intent string, organizationID ...string) (OAuthStart, error) {
@@ -415,6 +454,11 @@ func (s *Service) CompleteFeishuOAuth(ctx context.Context, state, code, provider
 		return fail(findErr)
 	}
 	account, accountErr := s.Repo.GetConnector(ctx, data.UserID, domain.PlatformFeishu)
+	if accountErr != nil && apperror.From(accountErr).Code == "connector_not_found" {
+		// A revoked connector is still the user's binding for OAuth purposes.
+		// Reuse its ID so existing conversation collectors survive reauth.
+		account, accountErr = s.Repo.GetConnectorForOAuth(ctx, data.UserID, domain.PlatformFeishu)
+	}
 	if accountErr != nil && apperror.From(accountErr).Code != "connector_not_found" {
 		return fail(accountErr)
 	}
@@ -733,7 +777,7 @@ func (s *Service) Discover(ctx context.Context, userID, platformName string) (do
 	if platformName == domain.PlatformFeishu {
 		token, tokenErr := s.GetToken(ctx, account)
 		if tokenErr != nil {
-			return domain.Discovery{}, tokenErr
+			return s.cachedDiscoveryOrError(ctx, userID, account, tokenErr)
 		}
 		if s.Feishu == nil {
 			return domain.Discovery{}, apperror.New("feishu_not_configured", "feishu connector is not configured", 503, true)
@@ -762,6 +806,9 @@ func (s *Service) Discover(ctx context.Context, userID, platformName string) (do
 			_ = s.Repo.UpdateConnectorStatus(ctx, account.ID, domain.ConnectorExpired, "authorization_expired")
 			return domain.Discovery{}, apperror.New("reauthorization_required", "connector authorization is required", 401, false)
 		}
+		if cached, cachedErr := s.cachedDiscoveryOrError(ctx, userID, account, err); cachedErr == nil {
+			return cached, nil
+		}
 		s.markConnectorError(ctx, account, "conversation_discovery_failed")
 		slog.Default().WarnContext(ctx, "conversation discovery failed",
 			"request_id", trace.RequestID(ctx),
@@ -782,6 +829,22 @@ func (s *Service) Discover(ctx context.Context, userID, platformName string) (do
 	discovery := domain.Discovery{ID: uuid.NewString(), OwnerUserID: userID, ConnectorID: account.ID, Platform: platformName, ExpiresAt: s.Now().Add(5 * time.Minute), Conversations: conversations}
 	if err := s.saveDiscovery(ctx, discovery); err != nil {
 		return domain.Discovery{}, apperror.Wrap("discovery_store_failed", "cannot save discovery result", 503, true, err)
+	}
+	return discovery, nil
+}
+
+func (s *Service) cachedDiscoveryOrError(ctx context.Context, userID string, account *domain.ConnectorAccount, cause error) (domain.Discovery, error) {
+	discoveries, err := s.listDiscoveries(ctx, userID, account.ID)
+	if err != nil {
+		return domain.Discovery{}, err
+	}
+	if len(discoveries) == 0 {
+		return domain.Discovery{}, cause
+	}
+	discovery := discoveries[0]
+	discovery.Conversations = dedupeConversations(discovery.Conversations)
+	if err := s.annotateAttachedConversations(ctx, userID, account, discovery.Conversations); err != nil {
+		return domain.Discovery{}, err
 	}
 	return discovery, nil
 }
@@ -845,7 +908,7 @@ func (s *Service) ListDeviceCollectors(ctx context.Context, device *domain.Agent
 	return out, nil
 }
 
-func (s *Service) Attach(ctx context.Context, input repository.AttachInput) (*domain.ConversationIngestion, error) {
+func (s *Service) Attach(ctx context.Context, input repository.AttachInput, authorization ...string) (*domain.ConversationIngestion, error) {
 	if input.Platform != domain.PlatformFeishu && input.Platform != domain.PlatformWechat {
 		return nil, apperror.New("unsupported_platform", "platform is not supported in this release", 400, false)
 	}
@@ -909,7 +972,21 @@ func (s *Service) Attach(ctx context.Context, input repository.AttachInput) (*do
 	}
 	if input.ConversationType == "group" {
 		if strings.TrimSpace(account.DefaultOrganizationID) == "" {
-			return nil, apperror.New("organization_required", "connector account has no default organization", 400, false)
+			userAuthorization := ""
+			if len(authorization) > 0 {
+				userAuthorization = authorization[0]
+			}
+			organizationID, resolveErr := s.ResolveCurrentOrganization(ctx, input.UserID, "", userAuthorization)
+			if resolveErr != nil {
+				return nil, resolveErr
+			}
+			if organizationID == "" {
+				return nil, apperror.New("organization_required", "an active organization is required for group conversation", 400, false)
+			}
+			account, err = s.Repo.SetConnectorDefaultOrganization(ctx, account.ID, input.UserID, organizationID)
+			if err != nil {
+				return nil, err
+			}
 		}
 		if input.OrganizationID == "" {
 			input.OrganizationID = account.DefaultOrganizationID
@@ -920,7 +997,7 @@ func (s *Service) Attach(ctx context.Context, input repository.AttachInput) (*do
 		if input.OrganizationID != account.DefaultOrganizationID {
 			return nil, apperror.Clone(apperror.ErrForbidden)
 		}
-		if err := s.requireOrganizationMember(ctx, input.UserID, input.OrganizationID); err != nil {
+		if err := s.requireOrganizationMember(ctx, input.UserID, input.OrganizationID, authorization...); err != nil {
 			return nil, err
 		}
 	}
@@ -935,7 +1012,7 @@ func (s *Service) Attach(ctx context.Context, input repository.AttachInput) (*do
 	return conversation, nil
 }
 
-func (s *Service) AddCollector(ctx context.Context, userID, conversationID string) (*domain.Collector, error) {
+func (s *Service) AddCollector(ctx context.Context, userID, conversationID string, authorization ...string) (*domain.Collector, error) {
 	conversation, err := s.Repo.GetConversation(ctx, conversationID)
 	if err != nil {
 		return nil, err
@@ -957,10 +1034,27 @@ func (s *Service) AddCollector(ctx context.Context, userID, conversationID strin
 	if conversation.OrganizationID == "" {
 		return nil, apperror.New("organization_required", "conversation organization is missing", 500, false)
 	}
-	if strings.TrimSpace(account.DefaultOrganizationID) == "" || conversation.OrganizationID != account.DefaultOrganizationID {
+	if strings.TrimSpace(account.DefaultOrganizationID) == "" {
+		userAuthorization := ""
+		if len(authorization) > 0 {
+			userAuthorization = authorization[0]
+		}
+		organizationID, resolveErr := s.ResolveCurrentOrganization(ctx, userID, "", userAuthorization)
+		if resolveErr != nil {
+			return nil, resolveErr
+		}
+		if organizationID == "" || organizationID != conversation.OrganizationID {
+			return nil, apperror.Clone(apperror.ErrForbidden)
+		}
+		account, err = s.Repo.SetConnectorDefaultOrganization(ctx, account.ID, userID, organizationID)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if conversation.OrganizationID != account.DefaultOrganizationID {
 		return nil, apperror.Clone(apperror.ErrForbidden)
 	}
-	if err := s.requireOrganizationMember(ctx, userID, conversation.OrganizationID); err != nil {
+	if err := s.requireOrganizationMember(ctx, userID, conversation.OrganizationID, authorization...); err != nil {
 		return nil, err
 	}
 	known, member, membershipErr := s.Repo.CheckConversationMembership(ctx, conversationID, conversation.Platform, conversation.WorkspaceKey, userID)
@@ -973,7 +1067,7 @@ func (s *Service) AddCollector(ctx context.Context, userID, conversationID strin
 	return s.Repo.AddCollector(ctx, repository.CollectorInput{ConversationID: conversationID, ConnectorAccountID: account.ID, CollectorUserID: userID, Role: domain.CollectorSupplemental})
 }
 
-func (s *Service) requireOrganizationMember(ctx context.Context, userID, organizationID string) error {
+func (s *Service) requireOrganizationMember(ctx context.Context, userID, organizationID string, authorization ...string) error {
 	if !s.Config.JWTRequired && (s.Core == nil || strings.TrimSpace(s.Config.CoreServiceToken) == "") {
 		return nil
 	}
@@ -982,7 +1076,17 @@ func (s *Service) requireOrganizationMember(ctx context.Context, userID, organiz
 	}
 	ok, err := s.Core.CheckOrganizationMember(ctx, userID, organizationID)
 	if err != nil {
-		return apperror.Wrap("core_dependency_unavailable", "organization membership service is unavailable", 503, true, err)
+		if len(authorization) == 0 || strings.TrimSpace(authorization[0]) == "" {
+			return apperror.Wrap("core_dependency_unavailable", "organization membership service is unavailable", 503, true, err)
+		}
+		current, currentErr := s.Core.GetCurrentOrganization(ctx, authorization[0])
+		if currentErr != nil {
+			return apperror.Wrap("core_dependency_unavailable", "organization membership service is unavailable", 503, true, currentErr)
+		}
+		if current.OrganizationID != organizationID || current.UserID != userID || (current.Status != "" && current.Status != "active") {
+			return apperror.Clone(apperror.ErrForbidden)
+		}
+		return nil
 	}
 	if !ok {
 		return apperror.Clone(apperror.ErrForbidden)
@@ -1051,6 +1155,259 @@ func (s *Service) ListConversations(ctx context.Context, userID, platformName st
 	}
 	return s.Repo.ListConversations(ctx, userID, platformName)
 }
+
+func contactViewFromRelation(relation repository.ContactRelation) domain.ContactView {
+	i := relation.ExternalIdentity
+	return domain.ContactView{ID: relation.ID, Kind: "external", DisplayName: i.DisplayName, Identities: []domain.ContactIdentity{{ID: i.ID, Platform: i.Platform, WorkspaceKey: i.WorkspaceKey, ExternalUserID: i.ExternalUserID, DisplayName: i.DisplayName, AvatarURL: i.AvatarURL, MappingStatus: i.MappingStatus}}, ConversationIDs: []string{}}
+}
+
+func (s *Service) ListContacts(ctx context.Context, userID, platform string) ([]domain.ContactView, error) {
+	if platform != "" && !supportedPlatform(platform) {
+		return nil, apperror.New("unsupported_platform", "platform is not supported in this release", 400, false)
+	}
+	relations, err := s.Repo.ListContactRelations(ctx, userID, platform)
+	if err != nil {
+		return nil, err
+	}
+	views := make([]domain.ContactView, 0, len(relations))
+	memberships, membershipErr := s.Repo.ListContactMemberships(ctx, userID)
+	if membershipErr != nil {
+		return nil, membershipErr
+	}
+	for _, relation := range relations {
+		view := contactViewFromRelation(relation)
+		for _, membership := range memberships {
+			if membership.Identity.ID != relation.ExternalIdentity.ID {
+				continue
+			}
+			if !containsString(view.ConversationIDs, membership.ConversationID) {
+				view.ConversationIDs = append(view.ConversationIDs, membership.ConversationID)
+			}
+		}
+		for _, conversationID := range view.ConversationIDs {
+			messages, messageErr := s.Repo.ListMessages(ctx, conversationID, 200, "")
+			if messageErr != nil {
+				return nil, messageErr
+			}
+			for _, message := range messages {
+				if message.SenderIdentityID == relation.ExternalIdentity.ID {
+					view.MessageCount++
+					view.AttachmentCount += len(message.Attachments)
+				}
+			}
+		}
+		if relation.ExternalIdentity.MappedUserID != "" {
+			view.Kind = "internal"
+			view.InternalUserID = relation.ExternalIdentity.MappedUserID
+		}
+		views = append(views, view)
+	}
+	// Merge one view per internal user, as required by the identity contract.
+	merged := map[string]*domain.ContactView{}
+	for _, view := range views {
+		key := view.ID
+		if view.Kind == "internal" {
+			key = "internal:" + view.InternalUserID
+		}
+		current := merged[key]
+		if current == nil {
+			copy := view
+			merged[key] = &copy
+			continue
+		}
+		current.Identities = append(current.Identities, view.Identities...)
+		for _, id := range view.ConversationIDs {
+			if !containsString(current.ConversationIDs, id) {
+				current.ConversationIDs = append(current.ConversationIDs, id)
+			}
+		}
+		current.MessageCount += view.MessageCount
+		current.AttachmentCount += view.AttachmentCount
+	}
+	out := make([]domain.ContactView, 0, len(merged))
+	for _, view := range merged {
+		out = append(out, *view)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].DisplayName < out[j].DisplayName })
+	return out, nil
+}
+
+func (s *Service) DiscoverContacts(ctx context.Context, userID, platformName, keyword string) ([]domain.AvailableContact, error) {
+	account, err := s.GetConnector(ctx, userID, platformName)
+	if err != nil {
+		return nil, err
+	}
+	keyword = strings.TrimSpace(keyword)
+	if platformName == domain.PlatformWechat {
+		out, err := s.WechatCollector().Contacts(ctx, keyword)
+		if err != nil {
+			return nil, apperror.Wrap("wechat_collector_unavailable", "wechat contacts unavailable", 503, true, err)
+		}
+		items, _ := out["contacts"].([]any)
+		contacts := make([]domain.AvailableContact, 0, len(items))
+		for _, raw := range items {
+			value, ok := raw.(map[string]any)
+			if !ok {
+				continue
+			}
+			contacts = append(contacts, domain.AvailableContact{ExternalUserID: fmt.Sprint(value["username"]), DisplayName: firstNonEmptyString(fmt.Sprint(value["remark"]), fmt.Sprint(value["nick_name"]))})
+		}
+		relations, _ := s.Repo.ListContactRelations(ctx, userID, platformName)
+		selected := map[string]bool{}
+		for _, relation := range relations {
+			selected[relation.ExternalIdentity.ExternalUserID] = true
+		}
+		for index := range contacts {
+			contacts[index].Selected = selected[contacts[index].ExternalUserID]
+		}
+		return contacts, nil
+	}
+	if platformName != domain.PlatformFeishu {
+		return nil, apperror.New("unsupported_platform", "platform is not supported in this release", 400, false)
+	}
+	provider, ok := s.Feishu.(interface {
+		DiscoverContacts(context.Context, vault.TokenSet, string) ([]domain.AvailableContact, error)
+	})
+	if !ok {
+		return nil, apperror.New("contacts_not_supported", "contact discovery is not supported by this connector", 501, false)
+	}
+	token, err := s.GetToken(ctx, account)
+	if err != nil {
+		return nil, err
+	}
+	contacts, err := provider.DiscoverContacts(ctx, token, keyword)
+	if err != nil {
+		return nil, err
+	}
+	relations, _ := s.Repo.ListContactRelations(ctx, userID, platformName)
+	selected := map[string]bool{}
+	for _, relation := range relations {
+		selected[relation.ExternalIdentity.ExternalUserID] = true
+	}
+	for index := range contacts {
+		contacts[index].Selected = selected[contacts[index].ExternalUserID]
+	}
+	return contacts, nil
+}
+
+func firstNonEmptyString(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" && value != "<nil>" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
+}
+
+func (s *Service) AttachContact(ctx context.Context, userID, platformName, externalUserID, displayName, avatarURL string) (*domain.ContactView, error) {
+	account, err := s.GetConnector(ctx, userID, platformName)
+	if err != nil {
+		return nil, err
+	}
+	externalUserID = strings.TrimSpace(externalUserID)
+	if externalUserID == "" {
+		return nil, apperror.New("invalid_contact", "external_user_id is required", 400, false)
+	}
+	identity, err := s.Repo.GetExternalIdentity(ctx, platformName, account.WorkspaceKey, externalUserID)
+	if err != nil && apperror.From(err).Code == "external_identity_not_found" {
+		_, err = s.Repo.UpsertExternalIdentity(ctx, repository.ExternalIdentityInput{Platform: platformName, WorkspaceKey: account.WorkspaceKey, ExternalUserID: externalUserID, DisplayName: strings.TrimSpace(displayName), AvatarURL: strings.TrimSpace(avatarURL)})
+		if err == nil {
+			identity, err = s.Repo.GetExternalIdentity(ctx, platformName, account.WorkspaceKey, externalUserID)
+		}
+	}
+	if err != nil {
+		return nil, err
+	}
+	relation, err := s.Repo.UpsertContactRelation(ctx, repository.ContactRelationInput{OwnerUserID: userID, ConnectorID: account.ID, ExternalIdentityID: identity.ID})
+	if err != nil {
+		return nil, err
+	}
+	view := contactViewFromRelation(*relation)
+	if identity.MappedUserID != "" {
+		view.Kind = "internal"
+		view.InternalUserID = identity.MappedUserID
+	}
+	return &view, nil
+}
+
+func (s *Service) RemoveContact(ctx context.Context, userID, relationID string) error {
+	return s.Repo.DeleteContactRelation(ctx, userID, relationID)
+}
+
+func containsString(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Service) GetContact(ctx context.Context, userID, relationID string) (*domain.ContactDetail, error) {
+	relations, err := s.Repo.ListContactRelations(ctx, userID, "")
+	if err != nil {
+		return nil, err
+	}
+	var relation *repository.ContactRelation
+	for index := range relations {
+		if relations[index].ID == relationID {
+			relation = &relations[index]
+			break
+		}
+	}
+	if relation == nil {
+		return nil, apperror.New("contact_not_found", "contact relation was not found", 404, false)
+	}
+	// Resolve the complete merged view. Filtering by the clicked identity's
+	// platform would hide other mapped identities for the same internal user.
+	view, err := s.ListContacts(ctx, userID, "")
+	if err != nil {
+		return nil, err
+	}
+	var matched *domain.ContactView
+	for index := range view {
+		if containsIdentity(view[index].Identities, relation.ExternalIdentity.ID) {
+			matched = &view[index]
+			break
+		}
+	}
+	if matched == nil {
+		return nil, apperror.New("contact_not_found", "contact relation was not found", 404, false)
+	}
+	detail := &domain.ContactDetail{ContactView: *matched, Messages: []domain.Message{}, Attachments: []domain.Attachment{}}
+	identityIDs := make(map[string]struct{}, len(matched.Identities))
+	for _, identity := range matched.Identities {
+		identityIDs[identity.ID] = struct{}{}
+	}
+	for _, conversationID := range matched.ConversationIDs {
+		// Reuse the existing conversation authorization boundary before reading
+		// any messages or attachment references through the contact view.
+		if _, accessErr := s.GetConversation(ctx, userID, conversationID); accessErr != nil {
+			return nil, accessErr
+		}
+		messages, messageErr := s.Repo.ListMessages(ctx, conversationID, 200, "")
+		if messageErr != nil {
+			return nil, messageErr
+		}
+		for _, message := range messages {
+			if _, ok := identityIDs[message.SenderIdentityID]; ok {
+				detail.Messages = append(detail.Messages, message)
+				detail.Attachments = append(detail.Attachments, message.Attachments...)
+			}
+		}
+	}
+	return detail, nil
+}
+
+func containsIdentity(values []domain.ContactIdentity, id string) bool {
+	for _, value := range values {
+		if value.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *Service) GetConversation(ctx context.Context, userID, id string) (*domain.ConversationIngestion, error) {
 	conversation, err := s.Repo.GetConversation(ctx, id)
 	if err != nil {
@@ -1074,8 +1431,17 @@ func (s *Service) IngestMessage(ctx context.Context, input repository.IngestMess
 	if input.MessageType == "" {
 		input.MessageType = "text"
 	}
+	// The transport candidate is deliberately filtered before Redis lookup and
+	// before construction of the normalized domain input.
+	filtered, discard := repository.FilterMessageCandidate(input)
+	if discard {
+		return &repository.IngestResult{Discarded: true}, nil
+	}
 	if len(input.Content) > 2*1024*1024 {
 		return nil, apperror.New("message_too_large", "message content is too large", 413, false)
+	}
+	if err := repository.ValidateMessageCandidate(input); err != nil {
+		return nil, err
 	}
 	collector, err := s.Repo.GetCollector(ctx, input.CollectorID)
 	if err != nil {
@@ -1085,78 +1451,112 @@ func (s *Service) IngestMessage(ctx context.Context, input repository.IngestMess
 	if err != nil {
 		return nil, err
 	}
-	if conversation.IngestionScope == "private" && strings.TrimSpace(input.Content) != "" {
-		if s.Keyring == nil {
-			return nil, apperror.New("private_content_encryption_unavailable", "private message encryption is not configured", 503, false)
-		}
-		sealed, encryptErr := s.Keyring.Encrypt([]byte(input.Content), privateContentAAD(input.ExternalMessageID))
-		if encryptErr != nil {
-			return nil, apperror.New("private_content_encryption_failed", "private message encryption failed", 503, true)
-		}
-		input.PrivateContentCiphertext = string(sealed)
+	if conversation.ExternalConversationID != input.ExternalConversationID {
+		return nil, apperror.New("conversation_mismatch", "external conversation does not match collector", 409, false)
 	}
-	return s.Repo.IngestMessage(ctx, input)
-}
-
-func (s *Service) ProcessPrivacy(ctx context.Context) error {
-	pending, err := s.Repo.ListPendingMessages(ctx, 100)
+	account, err := s.Repo.GetConnectorByID(ctx, collector.ConnectorAccountID)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	for _, item := range pending {
-		original := item.OriginalContent
-		if s.Keyring != nil {
-			if plain, _, decryptErr := s.Keyring.Decrypt([]byte(original), privateContentAAD(item.Message.ExternalMessageID)); decryptErr == nil {
-				original = string(plain)
-			} else if strings.HasPrefix(strings.TrimSpace(original), "{\"key_version\"") {
-				return apperror.New("private_content_decryption_failed", "private message decryption failed", 503, true)
+	accountID := strings.TrimSpace(account.ExternalAccountID)
+	if accountID == "" {
+		accountID = account.ID
+	}
+	dedupeKey := messageDedupeKey(account.Platform, accountID, input.ExternalConversationID, input.ExternalMessageID)
+	if s.KV != nil {
+		var cached messageDedupeRecord
+		if found, cacheErr := s.KV.Get(ctx, dedupeKey, &cached); cacheErr != nil {
+			slog.WarnContext(ctx, "knowledge message dedupe cache unavailable", "error", cacheErr)
+		} else if found {
+			if !strings.EqualFold(cached.PayloadHash, input.PayloadHash) {
+				return nil, apperror.New("external_id_conflict", "external message id has conflicting payload", 409, false)
 			}
-		}
-		sensitive, display := privacy.Scan(original)
-		if err := s.Repo.CompleteMessageClassification(ctx, item.Message.ID, display, sensitive); err != nil {
-			return err
+			result := cached.Result
+			result.Duplicate = true
+			return &result, nil
 		}
 	}
-	return nil
-}
-
-func privateContentAAD(externalMessageID string) string {
-	return "knowledge:private-message:" + strings.TrimSpace(externalMessageID)
-}
-
-func (s *Service) SharePrivateResources(ctx context.Context, userID string, input repository.PrivateShareInput) (*repository.PrivateShareResult, error) {
-	input.RequesterUserID = userID
-	conversation, err := s.Repo.GetConversation(ctx, input.PrivateConversationID)
+	normalized, err := normalizeMessageCandidate(filtered, input.Content, input.PayloadHash, *account, s.Now())
+	if err != nil {
+		return nil, apperror.Wrap("invalid_message", "message candidate cannot be normalized", 400, false, err)
+	}
+	result, err := s.Repo.IngestMessage(ctx, repositoryInputFromUnified(normalized))
 	if err != nil {
 		return nil, err
 	}
-	if conversation.ConversationType != "private" || conversation.OwnerUserID != userID {
-		return nil, apperror.Clone(apperror.ErrForbidden)
+	if s.KV != nil {
+		if cacheErr := s.KV.Set(ctx, dedupeKey, messageDedupeRecord{PayloadHash: input.PayloadHash, Result: *result}, 7*24*time.Hour); cacheErr != nil {
+			slog.WarnContext(ctx, "knowledge message dedupe cache write failed", "error", cacheErr)
+		}
 	}
-	account, err := s.GetConnector(ctx, userID, domain.PlatformWechat)
+	return result, nil
+}
+
+func normalizeMessageCandidate(input repository.IngestMessageInput, rawContent, sourcePayloadHash string, account domain.ConnectorAccount, collectedAt time.Time) (domain.UnifiedMessage, error) {
+	// Platform adapters already extracted source identities and attachment
+	// metadata. This is the first point at which they become the shared domain
+	// contract; provider-specific types never pass this boundary.
+	input.MessageType = strings.ToLower(input.MessageType)
+	input.SentAt = input.SentAt.UTC()
+	contentSum := sha256.Sum256([]byte(input.Content))
+	input.ContentHash = hex.EncodeToString(contentSum[:])
+	payloadHash, err := repository.CalculatePayloadHash(input)
 	if err != nil {
-		return nil, err
+		return domain.UnifiedMessage{}, err
 	}
-	if strings.TrimSpace(account.DefaultOrganizationID) == "" {
-		return nil, apperror.New("organization_required", "a bound organization is required to share private resources", 400, false)
+	attachments := make([]domain.UnifiedMessageAttachment, 0, len(input.Attachments))
+	for _, attachment := range input.Attachments {
+		attachments = append(attachments, domain.UnifiedMessageAttachment{
+			ExternalAttachmentID: attachment.ExternalAttachmentID,
+			FileName:             attachment.FileName, MIMEType: attachment.MIMEType,
+			SizeBytes: attachment.SizeBytes, ContentHash: attachment.ContentHash,
+			DownloadRef: attachment.DownloadRef,
+		})
 	}
-	if err := s.requireOrganizationMember(ctx, userID, account.DefaultOrganizationID); err != nil {
-		return nil, err
-	}
-	input.OrganizationID = account.DefaultOrganizationID
-	input.TraceID = trace.TraceID(ctx)
-	input.Now = s.Now()
-	return s.Repo.SharePrivateResources(ctx, input)
+	return domain.UnifiedMessage{
+		Source: domain.UnifiedMessageSource{
+			Platform: account.Platform, AccountID: firstNonEmptyString(account.ExternalAccountID, account.ID),
+			WorkspaceID: account.WorkspaceKey, ConversationExternalID: input.ExternalConversationID,
+			MessageExternalID: input.ExternalMessageID, CollectorID: input.CollectorID,
+		},
+		Message: domain.UnifiedMessageBody{
+			Type: input.MessageType, Text: input.Content, RawText: rawContent,
+			ContentHash: input.ContentHash, SentAt: input.SentAt,
+			CollectedAt: collectedAt.UTC(),
+			Sender:      domain.UnifiedMessageSender{ExternalID: input.SenderExternalID, DisplayName: input.SenderDisplayName},
+		},
+		Attachments: attachments, Cursor: input.Cursor, SchemaVersion: 1, PayloadHash: payloadHash,
+		SourcePayloadHash: sourcePayloadHash,
+	}, nil
 }
 
-func (s *Service) CreatePrivateAccessRequest(ctx context.Context, userID string, input repository.PrivateAccessRequestInput) (*domain.PrivateAccessRequest, error) {
-	input.RequesterUserID = userID
-	input.Now = s.Now()
-	return s.Repo.CreatePrivateAccessRequest(ctx, input)
+func repositoryInputFromUnified(input domain.UnifiedMessage) repository.IngestMessageInput {
+	attachments := make([]repository.AttachmentInput, 0, len(input.Attachments))
+	for _, attachment := range input.Attachments {
+		attachments = append(attachments, repository.AttachmentInput{
+			ExternalAttachmentID: attachment.ExternalAttachmentID,
+			FileName:             attachment.FileName, MIMEType: attachment.MIMEType,
+			SizeBytes: attachment.SizeBytes, ContentHash: attachment.ContentHash,
+			DownloadRef: attachment.DownloadRef,
+		})
+	}
+	return repository.IngestMessageInput{
+		CollectorID:            input.Source.CollectorID,
+		ExternalConversationID: input.Source.ConversationExternalID,
+		ExternalMessageID:      input.Source.MessageExternalID,
+		PayloadHash:            input.PayloadHash, SourcePayloadHash: input.SourcePayloadHash,
+		SenderExternalID: input.Message.Sender.ExternalID, SenderDisplayName: input.Message.Sender.DisplayName,
+		MessageType: input.Message.Type, Content: input.Message.Text, ContentHash: input.Message.ContentHash,
+		SentAt: input.Message.SentAt, Cursor: input.Cursor, Attachments: attachments,
+		Platform: input.Source.Platform, AccountID: input.Source.AccountID,
+		WorkspaceID: input.Source.WorkspaceID, RawContent: input.Message.RawText,
+		CollectedAt: input.Message.CollectedAt, SchemaVersion: input.SchemaVersion,
+	}
 }
 
-func (s *Service) ReviewPrivateAccessRequest(ctx context.Context, userID, requestID, status, note string) (*domain.PrivateAccessRequest, error) {
-	return s.Repo.ReviewPrivateAccessRequest(ctx, requestID, userID, status, note, s.Now())
+func messageDedupeKey(platformName, accountID, conversationID, messageID string) string {
+	sum := sha256.Sum256([]byte(strings.Join([]string{platformName, accountID, conversationID, messageID}, "\x00")))
+	return "knowledge:dedupe:" + hex.EncodeToString(sum[:])
 }
 func (s *Service) Heartbeat(ctx context.Context, collectorID, version string) (*domain.Collector, error) {
 	now := s.Now()
@@ -1290,6 +1690,11 @@ func (s *Service) UploadAttachment(ctx context.Context, collectorID, attachmentI
 	}
 	saved.FileName = safeFileName(fileName)
 	saved.MIMEType = mimeType
+	if item, lookupErr := s.Repo.GetKnowledgeItemByAttachment(ctx, saved.ID); lookupErr == nil {
+		if _, readyErr := s.Repo.TryMarkKnowledgeReady(ctx, item.ID, trace.TraceID(ctx)); readyErr != nil {
+			return UploadResult{}, readyErr
+		}
+	}
 	return UploadResult{Attachment: *saved}, nil
 }
 
@@ -1305,7 +1710,7 @@ func (s *Service) OpenAttachment(ctx context.Context, userID, id string) (*domai
 	if _, err := s.GetConversation(ctx, userID, conversation.ID); err != nil {
 		return nil, nil, err
 	}
-	if attachment.ContentAccessRequired && conversation.IngestionScope != "private" {
+	if attachment.Sensitive && attachment.ContentAccessRequired {
 		return nil, nil, apperror.New("attachment_content_restricted", "attachment content requires approval", 403, false)
 	}
 	if attachment.ContentStatus != "ready" || attachment.ObjectRef == "" {
@@ -1323,16 +1728,207 @@ func (s *Service) PublishOutbox(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	var firstErr error
 	for _, event := range events {
-		if err := s.KV.Publish(ctx, "knowledge:ready", event); err != nil {
-			return err
+		if err := s.KV.Publish(ctx, "knowledge:ready", event.Envelope()); err != nil {
+			shift := event.RetryCount
+			if shift > 6 {
+				shift = 6
+			}
+			delay := time.Second * time.Duration(1<<shift)
+			if markErr := s.Repo.MarkOutboxFailed(ctx, event.ID, "redis_publish_failed", s.Now().Add(delay)); markErr != nil {
+				return markErr
+			}
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
 		}
 		now := s.Now()
 		if err := s.Repo.MarkOutboxPublished(ctx, event.ID, now); err != nil {
 			return err
 		}
 	}
+	return firstErr
+}
+
+// ReportManagedWechatDiscovery accepts discovery data from the server-managed
+// WeChat collector, which does not have an agent device key.
+func (s *Service) ReportManagedWechatDiscovery(ctx context.Context, connectorID string, items []domain.AvailableConversation) (domain.Discovery, error) {
+	return s.ReportManagedDiscovery(ctx, connectorID, domain.PlatformWechat, items)
+}
+
+// ReportManagedDiscovery accepts service-token protected discovery snapshots
+// from managed collectors and local E2E harnesses without exposing provider
+// credentials to the browser.
+func (s *Service) ReportManagedDiscovery(ctx context.Context, connectorID, platformName string, items []domain.AvailableConversation) (domain.Discovery, error) {
+	if platformName != domain.PlatformWechat && platformName != domain.PlatformFeishu {
+		return domain.Discovery{}, apperror.New("unsupported_platform", "platform is not supported in this release", 400, false)
+	}
+	account, err := s.Repo.GetConnectorByID(ctx, strings.TrimSpace(connectorID))
+	if err != nil {
+		return domain.Discovery{}, err
+	}
+	if account.Platform != platformName {
+		return domain.Discovery{}, apperror.New("connector_platform_mismatch", "connector belongs to another platform", 409, false)
+	}
+	conversations := dedupeConversations(items)
+	if err := s.annotateAttachedConversations(ctx, account.OwnerUserID, account, conversations); err != nil {
+		return domain.Discovery{}, err
+	}
+	for _, candidate := range conversations {
+		if candidate.AttachedConversationID == "" || len(candidate.Members) == 0 {
+			continue
+		}
+		if err := s.Repo.UpsertConversationMemberships(ctx, candidate.AttachedConversationID, candidate.Members); err != nil {
+			return domain.Discovery{}, err
+		}
+	}
+	discovery := domain.Discovery{ID: uuid.NewString(), OwnerUserID: account.OwnerUserID, ConnectorID: account.ID, Platform: platformName, ExpiresAt: s.Now().Add(5 * time.Minute), Conversations: conversations}
+	if err := s.saveDiscovery(ctx, discovery); err != nil {
+		return domain.Discovery{}, apperror.Wrap("discovery_store_failed", "cannot save discovery result", 503, true, err)
+	}
+	return discovery, nil
+}
+
+// ProcessPrivacy scans protected pending message content and only then opens
+// the message.ready gate. Failures leave the resource pending for retry.
+func (s *Service) ProcessPrivacy(ctx context.Context) error {
+	pending, err := s.Repo.ListPendingMessages(ctx, 100)
+	if err != nil {
+		return err
+	}
+	for _, item := range pending {
+		sensitive, display := privacy.Scan(item.OriginalContent)
+		// Media payloads are stored in message_private_content for audit, but
+		// their provider XML is not message text. The attachment is the separate
+		// resource shown to users and processed by RAG; never promote the XML
+		// envelope back into normalized_content during the privacy pass.
+		if isMediaMessageEnvelope(item.Message.MessageType, item.OriginalContent) {
+			sensitive, display = false, ""
+		}
+		if err := s.Repo.CompleteMessageClassification(ctx, item.Message.ID, display, sensitive); err != nil {
+			return err
+		}
+		if knowledgeItem, lookupErr := s.Repo.GetKnowledgeItemByMessage(ctx, item.Message.ID); lookupErr == nil {
+			if _, readyErr := s.Repo.TryMarkKnowledgeReady(ctx, knowledgeItem.ID, trace.TraceID(ctx)); readyErr != nil {
+				return readyErr
+			}
+		}
+	}
 	return nil
+}
+
+func isMediaMessageEnvelope(messageType, content string) bool {
+	typ := strings.ToLower(strings.TrimSpace(messageType))
+	if typ != "image" && typ != "file" && typ != "video" && typ != "mixed" {
+		return false
+	}
+	value := strings.TrimSpace(content)
+	return strings.HasPrefix(value, "<?xml") || strings.HasPrefix(value, "<msg") || strings.HasPrefix(value, "{")
+}
+
+func (s *Service) ProcessPermissions(ctx context.Context) error {
+	pending, err := s.Repo.ListPendingKnowledgePermissions(ctx, 100)
+	if err != nil {
+		return err
+	}
+	var firstErr error
+	for _, item := range pending {
+		// Permission may already be synchronized (for example after a
+		// migration or a previous successful retry) while the ready gate was not
+		// evaluated. Reconcile that state without issuing a duplicate Core call.
+		if item.PermissionReady && item.ACLSyncStatus == "synced" {
+			if _, err := s.Repo.TryMarkKnowledgeReady(ctx, item.ID, trace.TraceID(ctx)); err != nil && firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		subjects, subjectErr := s.Repo.ListKnowledgePermissionSubjects(ctx, item.ID)
+		if subjectErr != nil {
+			if firstErr == nil {
+				firstErr = subjectErr
+			}
+			continue
+		}
+		if s.Core == nil {
+			_ = s.Repo.MarkKnowledgePermissionFailed(ctx, item.ID, "core_permission_unavailable")
+			slog.WarnContext(ctx, "knowledge permission sync skipped", "knowledge_item_id", item.ID, "reason", "core_permission_unavailable")
+			continue
+		}
+		result, syncErr := s.Core.SyncKnowledgePermissions(ctx, item, subjects)
+		if syncErr != nil {
+			_ = s.Repo.MarkKnowledgePermissionFailed(ctx, item.ID, "core_permission_sync_failed")
+			if firstErr == nil {
+				firstErr = syncErr
+			}
+			continue
+		}
+		if err := s.Repo.MarkKnowledgePermissionSynced(ctx, item.ID, result.ACLVersion); err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		if _, err := s.Repo.TryMarkKnowledgeReady(ctx, item.ID, trace.TraceID(ctx)); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
+}
+
+func (s *Service) GetKnowledgeForRAG(ctx context.Context, id string, contentVersion int, aclVersion int64) (*domain.KnowledgeItem, error) {
+	item, err := s.Repo.GetKnowledgeItem(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if item.ProcessingStatus != "published" && item.ProcessingStatus != "processing" && item.ProcessingStatus != "ready" {
+		return nil, apperror.New("knowledge_not_ready", "knowledge item is not ready", 409, true)
+	}
+	if contentVersion < 1 || item.ContentVersion != contentVersion {
+		return nil, apperror.New("knowledge_version_mismatch", "content version does not match", 409, false)
+	}
+	if aclVersion > 0 && item.ACLVersion != aclVersion {
+		return nil, apperror.New("knowledge_acl_version_mismatch", "ACL version does not match", 409, false)
+	}
+	return item, nil
+}
+
+func (s *Service) GetKnowledgeContentForRAG(ctx context.Context, id string, contentVersion int, aclVersion int64, variant string) (*domain.KnowledgeContent, error) {
+	item, err := s.GetKnowledgeForRAG(ctx, id, contentVersion, aclVersion)
+	if err != nil {
+		return nil, err
+	}
+	if variant == "original" && item.OriginalAccessRequired {
+		return nil, apperror.New("knowledge_content_restricted", "original content requires approval", 403, false)
+	}
+	content, err := s.Repo.GetKnowledgeContent(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	content.ContentVariant = "display"
+	return content, nil
+}
+
+func (s *Service) GetAttachmentForRAG(ctx context.Context, id string, contentVersion int, aclVersion int64) (*domain.Attachment, error) {
+	item, err := s.Repo.GetKnowledgeItemByAttachment(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if _, err = s.GetKnowledgeForRAG(ctx, item.ID, contentVersion, aclVersion); err != nil {
+		return nil, err
+	}
+	if item.ContentAccessRequired {
+		return nil, apperror.New("attachment_content_restricted", "attachment content requires approval", 403, false)
+	}
+	attachment, err := s.Repo.GetAttachment(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if attachment.ContentStatus != "ready" || attachment.ObjectRef == "" {
+		return nil, apperror.New("attachment_not_ready", "attachment content is not ready", 409, true)
+	}
+	return attachment, nil
 }
 
 func supportedPlatform(value string) bool {

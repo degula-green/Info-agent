@@ -38,21 +38,25 @@ type CollectorInput struct {
 }
 
 type IngestMessageInput struct {
-	CollectorID            string `json:"collector_id"`
-	ExternalConversationID string `json:"external_conversation_id"`
-	ExternalMessageID      string `json:"external_message_id"`
-	PayloadHash            string `json:"payload_hash"`
-	SenderExternalID       string `json:"sender_external_id"`
-	SenderDisplayName      string `json:"sender_display_name"`
-	MessageType            string `json:"message_type"`
-	Content                string `json:"content"`
-	// PrivateContentCiphertext is populated by the service for private chats.
-	// It is excluded from provider payload hashing and API JSON.
-	PrivateContentCiphertext string            `json:"-"`
-	ContentHash              string            `json:"content_hash"`
-	SentAt                   time.Time         `json:"sent_at"`
-	Cursor                   string            `json:"cursor"`
-	Attachments              []AttachmentInput `json:"attachments"`
+	CollectorID            string            `json:"collector_id"`
+	ExternalConversationID string            `json:"external_conversation_id"`
+	ExternalMessageID      string            `json:"external_message_id"`
+	PayloadHash            string            `json:"payload_hash"`
+	SourcePayloadHash      string            `json:"-"`
+	SenderExternalID       string            `json:"sender_external_id"`
+	SenderDisplayName      string            `json:"sender_display_name"`
+	MessageType            string            `json:"message_type"`
+	Content                string            `json:"content"`
+	ContentHash            string            `json:"content_hash"`
+	SentAt                 time.Time         `json:"sent_at"`
+	Cursor                 string            `json:"cursor"`
+	Attachments            []AttachmentInput `json:"attachments"`
+	Platform               string            `json:"-"`
+	AccountID              string            `json:"-"`
+	WorkspaceID            string            `json:"-"`
+	RawContent             string            `json:"-"`
+	CollectedAt            time.Time         `json:"-"`
+	SchemaVersion          int               `json:"-"`
 }
 
 type AttachmentInput struct {
@@ -61,6 +65,7 @@ type AttachmentInput struct {
 	MIMEType             string `json:"mime_type"`
 	SizeBytes            int64  `json:"size_bytes"`
 	ContentHash          string `json:"content_hash"`
+	DownloadRef          string `json:"download_ref,omitempty"`
 }
 
 func validateIngestInput(input IngestMessageInput) error {
@@ -88,7 +93,7 @@ func validateIngestInput(input IngestMessageInput) error {
 		return apperror.New("payload_hash_mismatch", "payload hash does not match the canonical message payload", 400, false)
 	}
 	switch input.MessageType {
-	case "text", "image", "file", "mixed", "system":
+	case "text", "image", "file", "video", "mixed", "system":
 	default:
 		return apperror.New("invalid_message_type", "message type is not supported", 400, false)
 	}
@@ -106,8 +111,175 @@ func validateIngestInput(input IngestMessageInput) error {
 	return nil
 }
 
-func discardMessage(input IngestMessageInput) bool {
-	return privacy.IsDiscardable(input.MessageType, input.Content, len(input.Attachments) > 0)
+func ValidateMessageCandidate(input IngestMessageInput) error {
+	return validateIngestInput(input)
+}
+
+// discardMessage is deliberately deterministic: platform notifications,
+// empty messages and unresolved placeholders never become business records.
+func FilterMessageCandidate(input IngestMessageInput) (IngestMessageInput, bool) {
+	if strings.EqualFold(strings.TrimSpace(input.MessageType), "system") {
+		return input, true
+	}
+	if strings.TrimSpace(input.Content) == "" && len(input.Attachments) == 0 {
+		return input, true
+	}
+	content := strings.TrimSpace(input.Content)
+	// Provider-generated attachment/forwarding labels are not user messages.
+	// Keep the actual attachment row, but never persist these labels as text.
+	switch strings.ToLower(content) {
+	case "merged and forwarded message", "forwarded message", "file name", "filename":
+		if len(input.Attachments) == 0 {
+			return input, true
+		}
+		input.Content = ""
+	}
+	if isAttachmentMetadataJSON(content) {
+		if len(input.Attachments) == 0 {
+			return input, true
+		}
+		input.Content = ""
+	}
+	// Media XML is a provider envelope, not user-authored text. If attachment
+	// extraction failed there is nothing useful to retain; with attachments the
+	// attachment rows are the authoritative resource and the body stays empty.
+	if isLegacyMediaEnvelope(input.MessageType, content) {
+		if len(input.Attachments) == 0 {
+			return input, true
+		}
+		input.Content = ""
+	}
+	if content == "[无法解析]" || content == "[表情]" || content == "[动画表情]" || content == "<msg>" {
+		if len(input.Attachments) == 0 {
+			return input, true
+		}
+		input.Content = ""
+	}
+	if isCallRecord(content) {
+		if len(input.Attachments) == 0 {
+			return input, true
+		}
+		input.Content = ""
+	}
+	return input, false
+}
+
+func ShouldDiscardMessage(input IngestMessageInput) bool {
+	_, discard := FilterMessageCandidate(input)
+	return discard
+}
+
+func PrepareRepositoryInput(input IngestMessageInput) (IngestMessageInput, bool, error) {
+	if err := validateIngestInput(input); err != nil {
+		return input, false, err
+	}
+	filtered, discard := FilterMessageCandidate(input)
+	if discard {
+		return filtered, true, nil
+	}
+	if filtered.Content != input.Content {
+		filtered.SourcePayloadHash = input.PayloadHash
+		contentSum := sha256.Sum256([]byte(filtered.Content))
+		filtered.ContentHash = hex.EncodeToString(contentSum[:])
+		payloadHash, err := CalculatePayloadHash(filtered)
+		if err != nil {
+			return input, false, err
+		}
+		filtered.PayloadHash = payloadHash
+	}
+	return filtered, false, nil
+}
+
+func SourcePayloadHash(input IngestMessageInput) string {
+	if strings.TrimSpace(input.SourcePayloadHash) != "" {
+		return input.SourcePayloadHash
+	}
+	return input.PayloadHash
+}
+
+func isCallRecord(content string) bool {
+	value := strings.ToLower(strings.TrimSpace(content))
+	if strings.Contains(value, "<voipmsg") || strings.Contains(value, "voipinvitemsg") {
+		return true
+	}
+	for _, marker := range []string{"[语音通话]", "[视频通话]", "通话时长", "语音通话已结束", "视频通话已结束", "voice call duration", "video call duration"} {
+		if strings.Contains(value, strings.ToLower(marker)) {
+			return true
+		}
+	}
+	return false
+}
+
+func isAttachmentMetadataJSON(content string) bool {
+	var payload map[string]any
+	if json.Unmarshal([]byte(content), &payload) != nil || len(payload) == 0 {
+		return false
+	}
+	for key := range payload {
+		switch strings.ToLower(strings.TrimSpace(key)) {
+		case "file_key", "file_token", "image_key", "image_token", "file_name", "filename":
+			return true
+		}
+	}
+	return false
+}
+
+func isMediaMessageType(messageType string) bool {
+	switch strings.ToLower(strings.TrimSpace(messageType)) {
+	case "image", "file", "video", "mixed":
+		return true
+	default:
+		return false
+	}
+}
+
+// isLegacyMediaEnvelope identifies provider XML/metadata that older collector
+// versions incorrectly persisted as the message body. It is intentionally
+// narrow so a real text payload can never be overwritten during replay.
+func isLegacyMediaEnvelope(messageType, content string) bool {
+	if !isMediaMessageType(messageType) {
+		return false
+	}
+	value := strings.ToLower(strings.TrimSpace(content))
+	if value == "" {
+		return false
+	}
+	if isAttachmentMetadataJSON(value) {
+		return true
+	}
+	return (strings.HasPrefix(value, "<?xml") || strings.HasPrefix(value, "<msg") || strings.HasPrefix(value, "<appmsg")) &&
+		(strings.Contains(value, "<msg") || strings.Contains(value, "<appmsg") || strings.Contains(value, "<emoji"))
+}
+
+// A provider-aware classifier may correct an older file/link classification
+// without changing the message identity. Only these exact transitions are
+// safe to reconcile; other type or content changes remain conflicts.
+func canReclassifyLegacyFile(existingType, nextType, existingContent, nextContent string, attachments []AttachmentInput) bool {
+	// Older WeChat rows were ingested as text when media was nested inside a
+	// forwarded type=57 payload. A later provider replay may safely promote
+	// that exact row to a media type once verified attachment metadata is
+	// available. This covers files, images, and videos without allowing a
+	// content-only type change to rewrite a real text message.
+	if strings.EqualFold(existingType, "text") &&
+		(strings.EqualFold(nextType, "file") || strings.EqualFold(nextType, "image") || strings.EqualFold(nextType, "video")) {
+		return len(attachments) > 0
+	}
+	if strings.EqualFold(existingType, "file") && strings.EqualFold(nextType, "text") && len(attachments) == 0 {
+		return true
+	}
+	// Historical media rows may contain only an XML/metadata envelope. A
+	// replay with the same media type, verified attachments, and an empty body
+	// is a safe normalization update.
+	return strings.EqualFold(existingType, nextType) && isMediaMessageType(nextType) &&
+		len(attachments) > 0 && strings.TrimSpace(nextContent) == "" &&
+		isLegacyMediaEnvelope(existingType, existingContent)
+}
+
+func classifyMessage(input IngestMessageInput) (bool, string) { return privacy.Scan(input.Content) }
+
+type PendingMessage struct {
+	Message         domain.Message
+	OriginalContent string
 }
 
 // CalculatePayloadHash defines the cross-language business payload contract.
@@ -209,43 +381,6 @@ type IngestResult struct {
 	Discarded     bool                   `json:"discarded"`
 }
 
-type PendingMessage struct {
-	Message         domain.Message
-	OriginalContent string
-}
-
-type PrivateShareInput struct {
-	RequesterUserID       string
-	RequestID             string
-	TraceID               string
-	PrivateConversationID string
-	OrganizationID        string
-	MessageIDs            []string
-	AttachmentIDs         []string
-	Now                   time.Time
-}
-
-type PrivateShareResult struct {
-	RequestID             string `json:"request_id"`
-	ShareBatchID          string `json:"share_batch_id"`
-	PrivateConversationID string `json:"private_conversation_id"`
-	OrganizationID        string `json:"organization_id"`
-	Status                string `json:"status"`
-	SharedMessageCount    int    `json:"shared_message_count"`
-	SharedAttachmentCount int    `json:"shared_attachment_count"`
-}
-
-type PrivateAccessRequestInput struct {
-	RequesterUserID  string    `json:"-"`
-	ShareReferenceID string    `json:"share_reference_id"`
-	ResourceID       string    `json:"resource_id"`
-	ResourceType     string    `json:"resource_type"`
-	RequestedAction  string    `json:"requested_action"`
-	Reason           string    `json:"reason,omitempty"`
-	TraceID          string    `json:"trace_id,omitempty"`
-	Now              time.Time `json:"-"`
-}
-
 type AgentPairingInput struct {
 	PairingID       string
 	CodeHash        string
@@ -269,6 +404,7 @@ type Repository interface {
 
 	ListConnectorViews(ctx context.Context, userID string) ([]domain.ConnectorView, error)
 	GetConnector(ctx context.Context, userID, platform string) (*domain.ConnectorAccount, error)
+	GetConnectorForOAuth(ctx context.Context, userID, platform string) (*domain.ConnectorAccount, error)
 	GetConnectorByID(ctx context.Context, connectorID string) (*domain.ConnectorAccount, error)
 	FindConnectorByExternal(ctx context.Context, platform, workspaceKey, externalAccountID string) (*domain.ConnectorAccount, error)
 	ListConnectorAccounts(ctx context.Context, platform string) ([]domain.ConnectorAccount, error)
@@ -280,6 +416,7 @@ type Repository interface {
 	UpdateWechatRuntime(ctx context.Context, connectorID, status, lastError string, heartbeat, collectedAt *time.Time) error
 	ReplaceConnector(ctx context.Context, previousConnectorID string, account domain.ConnectorAccount) (*domain.ConnectorAccount, error)
 	BindConnector(ctx context.Context, previousConnectorID string, account domain.ConnectorAccount, identity ExternalIdentityInput, now time.Time) (*domain.ConnectorAccount, error)
+	SetConnectorDefaultOrganization(ctx context.Context, connectorID, ownerUserID, organizationID string) (*domain.ConnectorAccount, error)
 	UpdateConnectorStatus(ctx context.Context, connectorID, status, lastError string) error
 	RestoreAuthorizationCollectors(ctx context.Context, connectorID string, now time.Time) error
 	RevokeConnector(ctx context.Context, userID, platform string) error
@@ -297,6 +434,12 @@ type Repository interface {
 	RevokeDevice(ctx context.Context, connectorID, deviceID string) error
 	TouchDevice(ctx context.Context, deviceID, agentVersion string, now time.Time) error
 	UpsertExternalIdentity(ctx context.Context, identity ExternalIdentityInput) (string, error)
+	GetExternalIdentity(ctx context.Context, platform, workspaceKey, externalUserID string) (*ExternalIdentity, error)
+	ListContactRelations(ctx context.Context, userID, platform string) ([]ContactRelation, error)
+	UpsertContactRelation(ctx context.Context, relation ContactRelationInput) (*ContactRelation, error)
+	DeleteContactRelation(ctx context.Context, userID, relationID string) error
+	ListContactIdentities(ctx context.Context, userID, platform string) ([]ExternalIdentity, error)
+	ListContactMemberships(ctx context.Context, userID string) ([]ContactMembership, error)
 	UpsertConversationMemberships(ctx context.Context, conversationID string, members []domain.AvailableMember) error
 	ListConversationMemberships(ctx context.Context, conversationID string) ([]domain.ConversationMembership, error)
 	CheckConversationMembership(ctx context.Context, conversationID, platform, workspaceKey, userID string) (known bool, member bool, err error)
@@ -319,9 +462,15 @@ type Repository interface {
 	IngestMessage(ctx context.Context, input IngestMessageInput) (*IngestResult, error)
 	ListPendingMessages(ctx context.Context, limit int) ([]PendingMessage, error)
 	CompleteMessageClassification(ctx context.Context, messageID, displayContent string, sensitive bool) error
-	SharePrivateResources(ctx context.Context, input PrivateShareInput) (*PrivateShareResult, error)
-	CreatePrivateAccessRequest(ctx context.Context, input PrivateAccessRequestInput) (*domain.PrivateAccessRequest, error)
-	ReviewPrivateAccessRequest(ctx context.Context, requestID, reviewerUserID, status, note string, now time.Time) (*domain.PrivateAccessRequest, error)
+	ListPendingKnowledgePermissions(ctx context.Context, limit int) ([]domain.KnowledgeItem, error)
+	ListKnowledgePermissionSubjects(ctx context.Context, knowledgeItemID string) ([]string, error)
+	MarkKnowledgePermissionSynced(ctx context.Context, knowledgeItemID string, aclVersion int64) error
+	MarkKnowledgePermissionFailed(ctx context.Context, knowledgeItemID, failure string) error
+	TryMarkKnowledgeReady(ctx context.Context, knowledgeItemID, traceID string) (bool, error)
+	GetKnowledgeItem(ctx context.Context, knowledgeItemID string) (*domain.KnowledgeItem, error)
+	GetKnowledgeItemByMessage(ctx context.Context, messageID string) (*domain.KnowledgeItem, error)
+	GetKnowledgeItemByAttachment(ctx context.Context, attachmentID string) (*domain.KnowledgeItem, error)
+	GetKnowledgeContent(ctx context.Context, knowledgeItemID string) (*domain.KnowledgeContent, error)
 	Heartbeat(ctx context.Context, collectorID string, now time.Time) (*domain.Collector, error)
 	RecordCollectorFailure(ctx context.Context, collectorID, lastError string, nextPollAt, now time.Time) error
 	RecordCursorReceipt(ctx context.Context, collectorID, cursor string, now time.Time) error
@@ -333,6 +482,7 @@ type Repository interface {
 	ListAttachments(ctx context.Context, conversationID string) ([]domain.Attachment, error)
 	GetOutbox(ctx context.Context, limit int) ([]domain.OutboxEvent, error)
 	MarkOutboxPublished(ctx context.Context, id string, publishedAt time.Time) error
+	MarkOutboxFailed(ctx context.Context, id, failure string, availableAt time.Time) error
 }
 
 type ExternalIdentityInput struct {
@@ -340,5 +490,31 @@ type ExternalIdentityInput struct {
 	WorkspaceKey   string
 	ExternalUserID string
 	DisplayName    string
+	AvatarURL      string
 	MappedUserID   string
+}
+
+type ExternalIdentity struct {
+	ID, Platform, WorkspaceKey, ExternalUserID, DisplayName, AvatarURL, MappedUserID, MappingStatus string
+}
+
+type ContactMembership struct {
+	Identity       ExternalIdentity
+	ConversationID string
+}
+
+type ContactRelationInput struct {
+	OwnerUserID        string
+	ConnectorID        string
+	ExternalIdentityID string
+}
+
+type ContactRelation struct {
+	ID               string
+	OwnerUserID      string
+	ConnectorID      string
+	ExternalIdentity ExternalIdentity
+	Status           string
+	CreatedAt        time.Time
+	UpdatedAt        time.Time
 }

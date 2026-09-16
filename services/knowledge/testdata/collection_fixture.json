@@ -1,0 +1,86 @@
+{
+  "messages": [
+    {
+      "external_id": "fixture-old-001",
+      "sender_external_id": "user-old",
+      "sender_name": "历史成员",
+      "message_type": "text",
+      "content": "这条消息应被七天时间范围过滤",
+      "sent_at": "2026-09-03T09:00:00Z",
+      "cursor": "1"
+    },
+    {
+      "external_id": "fixture-message-001",
+      "sender_external_id": "user-alice",
+      "sender_name": "Alice",
+      "message_type": "text",
+      "content": "fixture 七天采集消息：本周完成群聊采集链路验收。",
+      "sent_at": "2026-09-10T09:00:00Z",
+      "cursor": "2"
+    },
+    {
+      "external_id": "fixture-message-002",
+      "sender_external_id": "user-bob",
+      "sender_name": "Bob",
+      "message_type": "file",
+      "content": "这是测试附件，请在知识库中展示文件信息。",
+      "sent_at": "2026-09-10T10:00:00Z",
+      "cursor": "3",
+      "attachments": [
+        {
+          "external_id": "fixture-attachment-001",
+          "file_name": "采集验收说明.txt",
+          "mime_type": "text/plain",
+          "content": "Zml4dHVyZSBhdHRhY2htZW50IGNvbnRlbnQ="
+        }
+      ]
+    }
+  ],
+  "pages": [
+    {
+      "cursor": "2",
+      "messages": [
+        {
+          "external_id": "fixture-old-001",
+          "sender_external_id": "user-old",
+          "sender_name": "历史成员",
+          "message_type": "text",
+          "content": "这条消息应被七天时间范围过滤",
+          "sent_at": "2026-09-03T09:00:00Z",
+          "cursor": "1"
+        },
+        {
+          "external_id": "fixture-message-001",
+          "sender_external_id": "user-alice",
+          "sender_name": "Alice",
+          "message_type": "text",
+          "content": "fixture 七天采集消息：本周完成群聊采集链路验收。",
+          "sent_at": "2026-09-10T09:00:00Z",
+          "cursor": "2"
+        }
+      ]
+    },
+    {
+      "cursor": "3",
+      "messages": [
+        {
+          "external_id": "fixture-message-002",
+          "sender_external_id": "user-bob",
+          "sender_name": "Bob",
+          "message_type": "file",
+          "content": "这是测试附件，请在知识库中展示文件信息。",
+          "sent_at": "2026-09-10T10:00:00Z",
+          "cursor": "3",
+          "attachments": [
+            {
+              "external_id": "fixture-attachment-001",
+              "file_name": "采集验收说明.txt",
+              "mime_type": "text/plain",
+              "content": "Zml4dHVyZSBhdHRhY2htZW50IGNvbnRlbnQ="
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

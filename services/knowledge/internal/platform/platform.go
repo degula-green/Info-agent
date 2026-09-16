@@ -126,6 +126,9 @@ func (p *HTTPFeishu) Refresh(ctx context.Context, token vault.TokenSet) (vault.T
 }
 
 func (p *HTTPFeishu) tokenEndpoint() string {
+	// Feishu's hosted OAuth domain uses the v3 token endpoint. Keep the
+	// open.feishu.cn v2 endpoint for self-hosted/test providers and older
+	// configurations so local fakes remain compatible.
 	if parsed, err := url.Parse(p.authURL); err == nil && strings.EqualFold(parsed.Hostname(), "accounts.feishu.cn") {
 		return "https://accounts.feishu.cn/oauth/v3/token"
 	}
@@ -309,6 +312,52 @@ func (p *HTTPFeishu) Discover(ctx context.Context, token vault.TokenSet) ([]doma
 	return items, nil
 }
 
+// DiscoverContacts returns provider profile data for an explicit contact
+// picker. It never writes identities; selection is persisted by module two.
+func (p *HTTPFeishu) DiscoverContacts(ctx context.Context, token vault.TokenSet, keyword string) ([]domain.AvailableContact, error) {
+	query := url.Values{"page_size": {"100"}, "user_id_type": {"open_id"}}
+	if strings.TrimSpace(keyword) != "" {
+		query.Set("page_token", "")
+		query.Set("department_id", "")
+	}
+	var body struct {
+		Code int `json:"code"`
+		Data struct {
+			Items []struct {
+				OpenID string `json:"open_id"`
+				Name   string `json:"name"`
+				Avatar struct {
+					AvatarOrigin string `json:"avatar_origin"`
+				} `json:"avatar"`
+				Email         string   `json:"email"`
+				DepartmentIDs []string `json:"department_ids"`
+				JobTitle      string   `json:"job_title"`
+			} `json:"items"`
+			HasMore   bool   `json:"has_more"`
+			PageToken string `json:"page_token"`
+		} `json:"data"`
+	}
+	endpoint := "/open-apis/contact/v3/users?" + query.Encode()
+	if err := p.getJSON(ctx, endpoint, token, &body); err != nil {
+		return nil, err
+	}
+	if body.Code != 0 {
+		return nil, fmt.Errorf("feishu contact discovery failed: code=%d", body.Code)
+	}
+	out := make([]domain.AvailableContact, 0, len(body.Data.Items))
+	for _, item := range body.Data.Items {
+		if strings.TrimSpace(keyword) != "" && !strings.Contains(strings.ToLower(item.Name), strings.ToLower(strings.TrimSpace(keyword))) && !strings.Contains(strings.ToLower(item.Email), strings.ToLower(strings.TrimSpace(keyword))) {
+			continue
+		}
+		department := ""
+		if len(item.DepartmentIDs) > 0 {
+			department = item.DepartmentIDs[0]
+		}
+		out = append(out, domain.AvailableContact{ExternalUserID: item.OpenID, DisplayName: item.Name, AvatarURL: item.Avatar.AvatarOrigin, Email: item.Email, Department: department, JobTitle: item.JobTitle})
+	}
+	return out, nil
+}
+
 func (p *HTTPFeishu) discoverChatMembers(ctx context.Context, token vault.TokenSet, chatID, ownerID string) ([]domain.AvailableMember, error) {
 	members := make([]domain.AvailableMember, 0)
 	seen := map[string]struct{}{}
@@ -466,8 +515,10 @@ func parseFeishuMessage(apiURL, messageID, messageType, raw string) (string, []A
 	attachments := []Attachment{}
 	var payload map[string]any
 	if json.Unmarshal([]byte(raw), &payload) == nil {
-		if textValue, ok := payload["text"].(string); ok && strings.TrimSpace(textValue) != "" {
-			content = textValue
+		extractedText := extractFeishuText(payload, messageType)
+		hasText := strings.TrimSpace(extractedText) != ""
+		if hasText {
+			content = extractedText
 		}
 		key := firstString(payload, "file_key", "file_token", "image_key", "image_token")
 		if key != "" {
@@ -489,7 +540,20 @@ func parseFeishuMessage(apiURL, messageID, messageType, raw string) (string, []A
 			}
 			resourceURL := apiURL + "/open-apis/im/v1/messages/" + url.PathEscape(messageID) + "/resources/" + url.PathEscape(key) + "?type=" + resourceType
 			attachments = append(attachments, Attachment{ExternalAttachmentID: messageID + ":" + key, FileName: name, MIMEType: mimeType, SizeBytes: int64(firstNumber(payload, "size", "size_bytes")), ContentHash: firstString(payload, "content_hash", "hash"), DownloadURL: resourceURL})
+			if !hasText {
+				// Attachment metadata is persisted with the attachment row. Do not
+				// index or display the provider's JSON envelope as message text.
+				content = ""
+			}
 		}
+		// Feishu forwarding/file envelopes can contain only metadata. They are
+		// represented by the attachment record and must not leak as JSON text.
+		if !hasText && len(attachments) == 0 && hasProviderMetadata(payload) {
+			content = ""
+		}
+	}
+	if isFeishuSystemLabel(content) {
+		content = ""
 	}
 	if strings.EqualFold(messageType, "text") || strings.EqualFold(messageType, "post") {
 		messageType = "text"
@@ -501,6 +565,69 @@ func parseFeishuMessage(apiURL, messageID, messageType, raw string) (string, []A
 		return content, attachments
 	}
 	return content, nil
+}
+
+// extractFeishuText converts text/post/rich_text bodies to plain user text.
+// Feishu post payloads are commonly nested under a locale key and contain
+// arrays of tagged text nodes; walking only known text-bearing keys prevents
+// file/image metadata (file_key, file_name, etc.) from leaking into content.
+func extractFeishuText(payload map[string]any, messageType string) string {
+	var parts []string
+	var walk func(any, string)
+	walk = func(value any, key string) {
+		switch current := value.(type) {
+		case string:
+			if (key == "text" || key == "title" || key == "content") && strings.TrimSpace(current) != "" {
+				parts = append(parts, strings.TrimSpace(current))
+			}
+		case []any:
+			for _, item := range current {
+				walk(item, key)
+			}
+		case map[string]any:
+			if text, ok := current["text"].(string); ok && strings.TrimSpace(text) != "" {
+				parts = append(parts, strings.TrimSpace(text))
+			}
+			if strings.EqualFold(messageType, "post") || strings.EqualFold(messageType, "rich_text") || strings.EqualFold(messageType, "text") {
+				if title, ok := current["title"].(string); ok && strings.TrimSpace(title) != "" {
+					parts = append(parts, strings.TrimSpace(title))
+				}
+			}
+			if nested, ok := current["content"]; ok {
+				walk(nested, "content")
+			}
+			for locale, nested := range current {
+				if locale == "text" || locale == "title" || locale == "content" || locale == "tag" {
+					continue
+				}
+				walk(nested, locale)
+			}
+		}
+	}
+	walk(payload, "")
+	if len(parts) == 0 {
+		return ""
+	}
+	return strings.Join(parts, "\n")
+}
+
+func hasProviderMetadata(payload map[string]any) bool {
+	for key := range payload {
+		key = strings.ToLower(strings.TrimSpace(key))
+		if key == "file_key" || key == "file_token" || key == "image_key" || key == "image_token" || key == "file_name" || key == "filename" {
+			return true
+		}
+	}
+	return false
+}
+
+func isFeishuSystemLabel(value string) bool {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "merged and forwarded message", "forwarded message", "file name", "filename":
+		return true
+	default:
+		return false
+	}
 }
 
 func normalizeFeishuMessageType(value string) string {

@@ -71,7 +71,104 @@ func NewRouterWithApp(app *App) *gin.Engine {
 	registerUserRoutes(r, app, "/api/knowledge/v1")
 	registerInternalRoutes(r, app, "/v1")
 	registerInternalRoutes(r, app, "/api/knowledge/v1")
+	registerRAGSourceRoutes(r, app)
 	return r
+}
+
+func registerRAGSourceRoutes(r *gin.Engine, app *App) {
+	g := r.Group("/internal", ragServiceMiddleware(app))
+	g.GET("/knowledge/:knowledge_item_id", func(c *gin.Context) {
+		contentVersion, aclVersion, ok := sourceVersions(c)
+		if !ok {
+			return
+		}
+		item, err := app.Service.GetKnowledgeForRAG(c, c.Param("knowledge_item_id"), contentVersion, aclVersion)
+		if err != nil {
+			writeError(c, err)
+			return
+		}
+		response := gin.H{
+			"knowledge_item_id": item.ID, "resource_type": "knowledge_item",
+			"knowledge_base_id": item.KnowledgeBaseID, "knowledge_scope": item.KnowledgeScope,
+			"access_scope": item.AccessScope, "owner_user_id": item.OwnerUserID,
+			"organization_id": item.OrganizationID, "conversation_ingestion_id": item.ConversationID,
+			"external_conversation_id": item.ExternalConversationID,
+			"source_message_id":        item.SourceMessageID, "source_attachment_id": item.SourceAttachmentID,
+			"content_type": item.ContentType, "content_hash": item.ContentHash,
+			"content_version": item.ContentVersion, "acl_version": item.ACLVersion,
+			"content_variant": "display", "content_access_required": item.ContentAccessRequired,
+			"lifecycle_status": item.LifecycleStatus,
+		}
+		if item.Message != nil {
+			response["message_id"] = item.Message.ID
+			response["external_message_id"] = item.Message.ExternalMessageID
+			response["sender_identity_id"] = item.Message.SenderIdentityID
+			response["sender_display_name"] = item.Message.SenderDisplayName
+			response["sent_at"] = item.Message.SentAt
+			response["collected_at"] = item.Message.CollectedAt
+		}
+		if item.Attachment != nil {
+			attachment := *item.Attachment
+			if item.ContentAccessRequired {
+				attachment.ObjectRef = ""
+			}
+			response["attachments"] = []domain.Attachment{attachment}
+		}
+		c.JSON(http.StatusOK, response)
+	})
+	g.GET("/knowledge/:knowledge_item_id/content", func(c *gin.Context) {
+		contentVersion, aclVersion, ok := sourceVersions(c)
+		if !ok {
+			return
+		}
+		content, err := app.Service.GetKnowledgeContentForRAG(c, c.Param("knowledge_item_id"), contentVersion, aclVersion, strings.TrimSpace(c.Query("content_variant")))
+		if err != nil {
+			writeError(c, err)
+			return
+		}
+		c.JSON(http.StatusOK, content)
+	})
+	g.GET("/attachments/:attachment_id", func(c *gin.Context) {
+		contentVersion, aclVersion, ok := sourceVersions(c)
+		if !ok {
+			return
+		}
+		attachment, err := app.Service.GetAttachmentForRAG(c, c.Param("attachment_id"), contentVersion, aclVersion)
+		if err != nil {
+			writeError(c, err)
+			return
+		}
+		c.JSON(http.StatusOK, attachment)
+	})
+}
+
+func ragServiceMiddleware(app *App) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		parts := strings.Fields(c.GetHeader("Authorization"))
+		if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") || app.Config.InternalServiceToken == "" || !hmac.Equal([]byte(parts[1]), []byte(app.Config.InternalServiceToken)) {
+			writeError(c, apperror.Clone(apperror.ErrUnauthorized))
+			c.Abort()
+			return
+		}
+		c.Next()
+	}
+}
+
+func sourceVersions(c *gin.Context) (int, int64, bool) {
+	contentVersion, err := strconv.Atoi(strings.TrimSpace(c.Query("content_version")))
+	if err != nil || contentVersion < 1 {
+		writeError(c, apperror.New("invalid_content_version", "content_version is required and must be positive", 400, false))
+		return 0, 0, false
+	}
+	aclVersion := int64(0)
+	if raw := strings.TrimSpace(c.Query("acl_version")); raw != "" {
+		aclVersion, err = strconv.ParseInt(raw, 10, 64)
+		if err != nil || aclVersion < 1 {
+			writeError(c, apperror.New("invalid_acl_version", "acl_version must be positive", 400, false))
+			return 0, 0, false
+		}
+	}
+	return contentVersion, aclVersion, true
 }
 
 func requestLogger() gin.HandlerFunc {
@@ -166,7 +263,7 @@ func newApp(cfg config.Config) *App {
 		recordStartup(errors.New("knowledge database is required when jwt authentication is enabled"))
 	}
 	core := coreclient.New(cfg.CoreURL, cfg.CoreServiceToken)
-	app := &App{Service: service.NewWithKeyring(repo, store, vault.New(store, keyring), objects, feishu, core, cfg, keyring), Auth: validator, Config: cfg, StartupError: startupErr}
+	app := &App{Service: service.New(repo, store, vault.New(store, keyring), objects, feishu, core, cfg), Auth: validator, Config: cfg, StartupError: startupErr}
 	if startupErr == nil {
 		app.worker = service.NewWorker(app.Service, cfg.WorkerInterval)
 	}
@@ -226,6 +323,66 @@ func registerUserRoutes(r *gin.Engine, app *App, prefix string) {
 		}
 		c.JSON(http.StatusOK, gin.H{"items": items})
 	})
+	g.GET("/contacts", func(c *gin.Context) {
+		p := principal(c)
+		out, err := app.Service.ListContacts(c, p.UserID, strings.TrimSpace(c.Query("platform")))
+		if err != nil {
+			writeError(c, err)
+			return
+		}
+		items := make([]publicContact, 0, len(out))
+		for _, value := range out {
+			items = append(items, publicContact{ID: value.ID, Kind: value.Kind, InternalUserID: value.InternalUserID, DisplayName: value.DisplayName, Identities: value.Identities, ConversationIDs: value.ConversationIDs, MessageCount: value.MessageCount, AttachmentCount: value.AttachmentCount})
+		}
+		c.JSON(http.StatusOK, gin.H{"items": items})
+	})
+	g.GET("/contacts/discover", func(c *gin.Context) {
+		p := principal(c)
+		out, err := app.Service.DiscoverContacts(c, p.UserID, strings.TrimSpace(c.Query("platform")), strings.TrimSpace(c.Query("q")))
+		if err != nil {
+			writeError(c, err)
+			return
+		}
+		items := make([]publicAvailableContact, 0, len(out))
+		for _, value := range out {
+			items = append(items, publicAvailableContact{ExternalUserID: value.ExternalUserID, DisplayName: value.DisplayName, AvatarURL: value.AvatarURL, Email: value.Email, Department: value.Department, JobTitle: value.JobTitle, Selected: value.Selected})
+		}
+		c.JSON(http.StatusOK, gin.H{"items": items})
+	})
+	g.POST("/contacts", func(c *gin.Context) {
+		p := principal(c)
+		var body struct {
+			Platform       string `json:"platform"`
+			ExternalUserID string `json:"external_user_id"`
+			DisplayName    string `json:"display_name"`
+			AvatarURL      string `json:"avatar_url"`
+		}
+		if err := c.ShouldBindJSON(&body); err != nil {
+			writeError(c, apperror.New("invalid_request", "invalid contact request", 400, false))
+			return
+		}
+		out, err := app.Service.AttachContact(c, p.UserID, body.Platform, body.ExternalUserID, body.DisplayName, body.AvatarURL)
+		if err != nil {
+			writeError(c, err)
+			return
+		}
+		c.JSON(http.StatusCreated, publicContact{ID: out.ID, Kind: out.Kind, InternalUserID: out.InternalUserID, DisplayName: out.DisplayName, Identities: out.Identities, ConversationIDs: out.ConversationIDs})
+	})
+	g.DELETE("/contacts/:contact_id", func(c *gin.Context) {
+		if err := app.Service.RemoveContact(c, principal(c).UserID, c.Param("contact_id")); err != nil {
+			writeError(c, err)
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"status": "removed"})
+	})
+	g.GET("/contacts/:contact_id", func(c *gin.Context) {
+		out, err := app.Service.GetContact(c, principal(c).UserID, c.Param("contact_id"))
+		if err != nil {
+			writeError(c, err)
+			return
+		}
+		c.JSON(http.StatusOK, out)
+	})
 	g.POST("/connectors/feishu/authorize", func(c *gin.Context) {
 		var body struct {
 			Intent string `json:"intent"`
@@ -235,7 +392,12 @@ func registerUserRoutes(r *gin.Engine, app *App, prefix string) {
 			return
 		}
 		p := principal(c)
-		out, err := app.Service.StartFeishuOAuth(c, p.UserID, body.Intent, p.OrganizationID)
+		organizationID, err := app.Service.ResolveCurrentOrganization(c, p.UserID, p.OrganizationID, c.GetHeader("Authorization"))
+		if err != nil {
+			writeError(c, err)
+			return
+		}
+		out, err := app.Service.StartFeishuOAuth(c, p.UserID, body.Intent, organizationID)
 		if err != nil {
 			writeError(c, err)
 			return
@@ -269,7 +431,12 @@ func registerUserRoutes(r *gin.Engine, app *App, prefix string) {
 			writeError(c, apperror.New("invalid_request", "invalid wechat bind request", 400, false))
 			return
 		}
-		out, err := app.Service.BindWechat(c, p.UserID, body.WXID, body.DBDir, false)
+		organizationID, err := app.Service.ResolveCurrentOrganization(c, p.UserID, p.OrganizationID, c.GetHeader("Authorization"))
+		if err != nil {
+			writeError(c, err)
+			return
+		}
+		out, err := app.Service.BindWechat(c, p.UserID, body.WXID, body.DBDir, organizationID, false)
 		if err != nil {
 			writeError(c, err)
 			return
@@ -286,7 +453,12 @@ func registerUserRoutes(r *gin.Engine, app *App, prefix string) {
 			writeError(c, apperror.New("invalid_request", "invalid wechat bind request", 400, false))
 			return
 		}
-		out, err := app.Service.BindWechat(c, p.UserID, body.WXID, body.DBDir, true)
+		organizationID, err := app.Service.ResolveCurrentOrganization(c, p.UserID, p.OrganizationID, c.GetHeader("Authorization"))
+		if err != nil {
+			writeError(c, err)
+			return
+		}
+		out, err := app.Service.BindWechat(c, p.UserID, body.WXID, body.DBDir, organizationID, true)
 		if err != nil {
 			writeError(c, err)
 			return
@@ -308,7 +480,7 @@ func registerUserRoutes(r *gin.Engine, app *App, prefix string) {
 		}
 		c.JSON(http.StatusOK, gin.H{"status": "stopped"})
 	})
-	g.GET("/connectors/wechat/conversations", func(c *gin.Context) {
+	g.GET("/connectors/wechat/local-conversations", func(c *gin.Context) {
 		out, err := app.Service.WechatConversations(c)
 		if err != nil {
 			writeError(c, err)
@@ -346,7 +518,12 @@ func registerUserRoutes(r *gin.Engine, app *App, prefix string) {
 			writeError(c, apperror.New("invalid_request", "invalid pairing request", 400, false))
 			return
 		}
-		out, err := app.Service.CreatePairingForWXID(c, p.UserID, body.WXID, p.OrganizationID)
+		organizationID, err := app.Service.ResolveCurrentOrganization(c, p.UserID, p.OrganizationID, c.GetHeader("Authorization"))
+		if err != nil {
+			writeError(c, err)
+			return
+		}
+		out, err := app.Service.CreatePairingForWXID(c, p.UserID, body.WXID, organizationID)
 		if err != nil {
 			writeError(c, err)
 			return
@@ -424,87 +601,13 @@ func registerUserRoutes(r *gin.Engine, app *App, prefix string) {
 			writeError(c, apperror.New("invalid_request", "invalid requested_start_at", 400, false))
 			return
 		}
-		out, err := app.Service.Attach(c, repository.AttachInput{UserID: p.UserID, Platform: body.Platform, WorkspaceKey: body.WorkspaceKey, ExternalConversationID: body.ExternalConversationID, ConversationType: body.ConversationType, Name: body.Name, AvatarURL: body.AvatarURL, DiscoveryID: body.DiscoveryID, OrganizationID: body.OrganizationID, RequestedStartAt: start})
+		out, err := app.Service.Attach(c, repository.AttachInput{UserID: p.UserID, Platform: body.Platform, WorkspaceKey: body.WorkspaceKey, ExternalConversationID: body.ExternalConversationID, ConversationType: body.ConversationType, Name: body.Name, AvatarURL: body.AvatarURL, DiscoveryID: body.DiscoveryID, OrganizationID: body.OrganizationID, RequestedStartAt: start}, c.GetHeader("Authorization"))
 		if err != nil {
 			writeError(c, err)
 			return
 		}
 		c.JSON(http.StatusCreated, publicConversationFromDomain(*out))
 	})
-	shareHandler := func(c *gin.Context) {
-		p := principal(c)
-		var body struct {
-			RequestID             string   `json:"request_id"`
-			TraceID               string   `json:"trace_id"`
-			PrivateConversationID string   `json:"private_conversation_id"`
-			MessageIDs            []string `json:"message_ids"`
-			AttachmentIDs         []string `json:"attachment_ids"`
-		}
-		if err := c.ShouldBindJSON(&body); err != nil {
-			writeError(c, apperror.New("invalid_request", "invalid private share request", 400, false))
-			return
-		}
-		if strings.TrimSpace(body.RequestID) == "" || strings.TrimSpace(body.TraceID) == "" || strings.TrimSpace(body.PrivateConversationID) == "" || (len(body.MessageIDs) == 0 && len(body.AttachmentIDs) == 0) {
-			writeError(c, apperror.New("invalid_request", "request_id, trace_id, conversation and selected resources are required", 400, false))
-			return
-		}
-		out, err := app.Service.SharePrivateResources(c, p.UserID, repository.PrivateShareInput{RequestID: body.RequestID, TraceID: body.TraceID, PrivateConversationID: body.PrivateConversationID, MessageIDs: body.MessageIDs, AttachmentIDs: body.AttachmentIDs})
-		if err != nil {
-			writeError(c, err)
-			return
-		}
-		c.JSON(http.StatusOK, out)
-	}
-	g.POST("/private-share-requests", shareHandler)
-	g.POST("/private/shares", shareHandler)
-	g.POST("/private-share-requests/:id/approve", func(c *gin.Context) {
-		p := principal(c)
-		var body struct {
-			Note string `json:"note"`
-		}
-		if err := c.ShouldBindJSON(&body); err != nil && err != io.EOF {
-			writeError(c, apperror.New("invalid_request", "invalid approval request", 400, false))
-			return
-		}
-		out, err := app.Service.ReviewPrivateAccessRequest(c, p.UserID, c.Param("id"), "approved", body.Note)
-		if err != nil {
-			writeError(c, err)
-			return
-		}
-		c.JSON(http.StatusOK, out)
-	})
-	g.POST("/private-share-requests/:id/reject", func(c *gin.Context) {
-		p := principal(c)
-		var body struct {
-			Note string `json:"note"`
-		}
-		if err := c.ShouldBindJSON(&body); err != nil && err != io.EOF {
-			writeError(c, apperror.New("invalid_request", "invalid rejection request", 400, false))
-			return
-		}
-		out, err := app.Service.ReviewPrivateAccessRequest(c, p.UserID, c.Param("id"), "rejected", body.Note)
-		if err != nil {
-			writeError(c, err)
-			return
-		}
-		c.JSON(http.StatusOK, out)
-	})
-	accessHandler := func(c *gin.Context) {
-		p := principal(c)
-		var body repository.PrivateAccessRequestInput
-		if err := c.ShouldBindJSON(&body); err != nil {
-			writeError(c, apperror.New("invalid_request", "invalid private access request", 400, false))
-			return
-		}
-		out, err := app.Service.CreatePrivateAccessRequest(c, p.UserID, body)
-		if err != nil {
-			writeError(c, err)
-			return
-		}
-		c.JSON(http.StatusCreated, out)
-	}
-	g.POST("/private-access-requests", accessHandler)
-	g.POST("/private-share-requests/access", accessHandler)
 	g.GET("/conversations/:conversation_id", func(c *gin.Context) {
 		p := principal(c)
 		out, err := app.Service.GetConversation(c, p.UserID, c.Param("conversation_id"))
@@ -516,7 +619,7 @@ func registerUserRoutes(r *gin.Engine, app *App, prefix string) {
 	})
 	g.POST("/conversations/:conversation_id/collectors", func(c *gin.Context) {
 		p := principal(c)
-		out, err := app.Service.AddCollector(c, p.UserID, c.Param("conversation_id"))
+		out, err := app.Service.AddCollector(c, p.UserID, c.Param("conversation_id"), c.GetHeader("Authorization"))
 		if err != nil {
 			writeError(c, err)
 			return
@@ -590,8 +693,12 @@ func registerUserRoutes(r *gin.Engine, app *App, prefix string) {
 			return
 		}
 		defer reader.Close()
-		c.Header("Content-Type", attachment.MIMEType)
-		c.Header("Content-Disposition", `inline; filename="`+safeHeaderName(attachment.FileName)+`"`)
+		fileName, contentType := normalizedAttachmentMetadata(attachment.FileName, attachment.MIMEType)
+		if contentType == "" {
+			contentType = "application/octet-stream"
+		}
+		c.Header("Content-Type", contentType)
+		c.Header("Content-Disposition", `inline; filename="`+safeHeaderName(fileName)+`"`)
 		if attachment.SizeBytes > 0 {
 			c.Header("Content-Length", strconv.FormatInt(attachment.SizeBytes, 10))
 		}
@@ -664,6 +771,57 @@ func registerInternalRoutes(r *gin.Engine, app *App, prefix string) {
 			return
 		}
 		c.JSON(http.StatusOK, out)
+	})
+	g.POST("/wechat/discovery", func(c *gin.Context) {
+		if !serviceAuthorized(c) {
+			writeError(c, apperror.Clone(apperror.ErrUnauthorized))
+			return
+		}
+		var body struct {
+			ConnectorID   string                         `json:"connector_id"`
+			Conversations []domain.AvailableConversation `json:"conversations"`
+			Items         []domain.AvailableConversation `json:"items"`
+		}
+		if err := c.ShouldBindJSON(&body); err != nil || strings.TrimSpace(body.ConnectorID) == "" {
+			writeError(c, apperror.New("invalid_request", "invalid discovery payload", 400, false))
+			return
+		}
+		items := body.Conversations
+		if len(items) == 0 {
+			items = body.Items
+		}
+		out, err := app.Service.ReportManagedWechatDiscovery(c, body.ConnectorID, items)
+		if err != nil {
+			writeError(c, err)
+			return
+		}
+		c.JSON(http.StatusOK, publicDiscoveryFromDomain(out))
+	})
+	g.POST("/:platform/discovery", func(c *gin.Context) {
+		if !serviceAuthorized(c) {
+			writeError(c, apperror.Clone(apperror.ErrUnauthorized))
+			return
+		}
+		platformName := strings.TrimSpace(c.Param("platform"))
+		var body struct {
+			ConnectorID   string                         `json:"connector_id"`
+			Conversations []domain.AvailableConversation `json:"conversations"`
+			Items         []domain.AvailableConversation `json:"items"`
+		}
+		if err := c.ShouldBindJSON(&body); err != nil || strings.TrimSpace(body.ConnectorID) == "" {
+			writeError(c, apperror.New("invalid_request", "invalid discovery payload", 400, false))
+			return
+		}
+		items := body.Conversations
+		if len(items) == 0 {
+			items = body.Items
+		}
+		out, err := app.Service.ReportManagedDiscovery(c, body.ConnectorID, platformName, items)
+		if err != nil {
+			writeError(c, err)
+			return
+		}
+		c.JSON(http.StatusOK, publicDiscoveryFromDomain(out))
 	})
 	g.GET("/devices/:device_id/collectors", func(c *gin.Context) {
 		device := agentDevice(c)
@@ -738,6 +896,31 @@ func registerInternalRoutes(r *gin.Engine, app *App, prefix string) {
 			return
 		}
 		c.JSON(http.StatusOK, publicIngestResultFromDomain(out))
+	})
+	g.POST("/collectors/:collector_id/cursor-receipt", func(c *gin.Context) {
+		device := agentDevice(c)
+		collectorID := c.Param("collector_id")
+		collector, err := app.Service.Repo.GetCollector(c, collectorID)
+		if err != nil {
+			writeError(c, err)
+			return
+		}
+		if device != nil && collector.ConnectorAccountID != device.ConnectorID && !serviceAuthorized(c) {
+			writeError(c, apperror.Clone(apperror.ErrForbidden))
+			return
+		}
+		var body struct {
+			Cursor string `json:"cursor"`
+		}
+		if err := c.ShouldBindJSON(&body); err != nil {
+			writeError(c, apperror.New("invalid_cursor", "invalid cursor payload", 400, false))
+			return
+		}
+		if err := app.Service.Repo.RecordCursorReceipt(c, collectorID, body.Cursor, app.Service.Now().UTC()); err != nil {
+			writeError(c, err)
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"status": "recorded", "cursor": body.Cursor})
 	})
 	g.POST("/collectors/:collector_id/cursor", func(c *gin.Context) {
 		device := agentDevice(c)
@@ -873,6 +1056,27 @@ func registerInternalRoutes(r *gin.Engine, app *App, prefix string) {
 			return
 		}
 		c.JSON(http.StatusOK, gin.H{"status": "published"})
+	})
+	g.POST("/fixtures/replay", func(c *gin.Context) {
+		if !serviceAuthorized(c) {
+			writeError(c, apperror.Clone(apperror.ErrUnauthorized))
+			return
+		}
+		if !app.Config.FixtureReplayEnabled {
+			writeError(c, apperror.New("fixture_replay_disabled", "fixture replay is disabled", 404, false))
+			return
+		}
+		var input service.FixtureReplayInput
+		if err := c.ShouldBindJSON(&input); err != nil {
+			writeError(c, apperror.New("invalid_fixture", "invalid fixture replay payload", 400, false))
+			return
+		}
+		result, err := app.Service.ReplayFixture(c, input)
+		if err != nil {
+			writeError(c, err)
+			return
+		}
+		c.JSON(http.StatusOK, result)
 	})
 }
 
@@ -1080,13 +1284,13 @@ func internalMiddleware(app *App) gin.HandlerFunc {
 }
 
 func serviceTokenPathAllowed(path string) bool {
-	if strings.HasSuffix(path, "/internal/worker/publish") || strings.HasSuffix(path, "/internal/wechat/assignments") || strings.HasSuffix(path, "/internal/wechat/bootstrap") {
+	if strings.HasSuffix(path, "/internal/worker/publish") || strings.HasSuffix(path, "/internal/fixtures/replay") || strings.HasSuffix(path, "/internal/wechat/assignments") || strings.HasSuffix(path, "/internal/wechat/bootstrap") || strings.HasSuffix(path, "/internal/wechat/discovery") || strings.HasSuffix(path, "/internal/feishu/discovery") {
 		return true
 	}
 	if !strings.Contains(path, "/internal/collectors/") {
 		return false
 	}
-	for _, operation := range []string{"/messages", "/cursor", "/attachments", "/heartbeat", "/failure"} {
+	for _, operation := range []string{"/messages", "/cursor-receipt", "/cursor", "/attachments", "/heartbeat", "/failure"} {
 		if strings.HasSuffix(path, operation) {
 			return true
 		}
