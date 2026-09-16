@@ -1642,22 +1642,22 @@ func (s *MemoryStore) addPrivateShareLocked(ctx context.Context, conversation do
 }
 
 func (s *MemoryStore) privateShareBaseKeyLocked(org string, conversation domain.ConversationIngestion) string {
-	subjects := []string{conversation.OwnerUserID}
+	participants := []string{conversation.OwnerUserID}
 	for _, membership := range s.memberships {
 		if membership.ConversationID != conversation.ID || membership.Status != "active" {
 			continue
 		}
 		identity := s.identityByIDLocked(membership.ExternalIdentityID)
 		if identity.MappingStatus == "mapped" && identity.MappedUserID != "" {
-			subjects = append(subjects, identity.MappedUserID)
+			participants = append(participants, identity.MappedUserID)
 		}
 	}
-	subjects = uniqueIDs(subjects)
-	key := conversation.ID
-	if len(subjects) >= 2 {
-		key = "pair:" + hashText(strings.Join(subjects, "|"))
+	participants = uniqueIDs(participants)
+	if len(participants) >= 2 {
+		return "shared-private:" + org + ":participants:" + hashText(strings.Join(participants, "\x00"))
 	}
-	return "shared-private:" + org + ":" + key
+	identity := strings.Join([]string{conversation.Platform, conversation.WorkspaceKey, conversation.ExternalConversationID}, "\x00")
+	return "shared-private:" + org + ":external:" + hashText(identity)
 }
 
 func uniqueIDs(values []string) []string {
@@ -1787,6 +1787,17 @@ func (s *MemoryStore) ListKnowledgePermissionSubjects(_ context.Context, id stri
 		return nil, apperror.New("knowledge_not_found", "knowledge item not found", 404, false)
 	}
 	seen := map[string]struct{}{}
+	if item.KnowledgeScope == "private" {
+		if item.OwnerUserID != "" {
+			seen[item.OwnerUserID] = struct{}{}
+		}
+		out := make([]string, 0, len(seen))
+		for userID := range seen {
+			out = append(out, userID)
+		}
+		sort.Strings(out)
+		return out, nil
+	}
 	if item.SharedByUserID != "" {
 		seen[item.SharedByUserID] = struct{}{}
 	}
@@ -1869,10 +1880,6 @@ func (s *MemoryStore) TryMarkKnowledgeReady(ctx context.Context, id, traceID str
 	}
 	if traceID == "" {
 		traceID = uuid.NewString()
-	}
-	resourceType := "message"
-	if item.SourceAttachmentID != "" {
-		resourceType = "attachment"
 	}
 	event := domain.OutboxEvent{
 		ID: uuid.NewString(), EventType: "knowledge.ready", SchemaVersion: 1,

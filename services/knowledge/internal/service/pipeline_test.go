@@ -185,6 +185,21 @@ func TestLegacyMediaEnvelopeReplayIsNormalizedInsteadOfConflicting(t *testing.T)
 	}
 }
 
+func TestServiceMediaEnvelopeReplayUsesFilteredRedisIdentity(t *testing.T) {
+	f := newPipelineFixture(t, domain.PlatformWechat)
+	attachment := repository.AttachmentInput{ExternalAttachmentID: "service-legacy-file", FileName: "report.docx", MIMEType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document"}
+	legacy := pipelineInput(f, "service-legacy-media", "file", `<?xml version="1.0"?><msg><appmsg><type>6</type></appmsg></msg>`, attachment)
+	first, err := f.service.IngestMessage(context.Background(), legacy)
+	if err != nil || first.Discarded || first.Duplicate {
+		t.Fatalf("legacy media service ingest failed: result=%+v err=%v", first, err)
+	}
+	clean := pipelineInput(f, "service-legacy-media", "file", "", attachment)
+	second, err := f.service.IngestMessage(context.Background(), clean)
+	if err != nil || !second.Duplicate {
+		t.Fatalf("normalized media replay was not deduplicated: result=%+v err=%v", second, err)
+	}
+}
+
 func TestMediaXMLWithoutAttachmentIsFiltered(t *testing.T) {
 	f := newPipelineFixture(t, domain.PlatformWechat)
 	input := pipelineInput(f, "media-without-attachment", "file", `<?xml version="1.0"?><msg><appmsg><type>6</type></appmsg></msg>`)
@@ -259,7 +274,7 @@ func TestPrivacyPermissionAndReadyOutboxContract(t *testing.T) {
 	if err != nil || len(events) != 1 || events[0].EventType != "knowledge.ready" || events[0].SchemaVersion != 1 || events[0].Producer != "module-2" {
 		t.Fatalf("unexpected ready event contract: events=%+v err=%v", events, err)
 	}
-	if events[0].Payload["resource_type"] != "message" || events[0].Payload["knowledge_item_id"] != item.ID || events[0].Payload["acl_version"] != int64(3) {
+	if events[0].Payload["resource_type"] != "knowledge_item" || events[0].Payload["knowledge_item_id"] != item.ID || events[0].Payload["acl_version"] != int64(3) {
 		t.Fatalf("unexpected ready payload: %+v", events[0].Payload)
 	}
 	if err := f.service.PublishOutbox(context.Background()); err != nil {
