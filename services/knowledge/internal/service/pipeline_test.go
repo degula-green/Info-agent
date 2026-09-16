@@ -260,6 +260,32 @@ func TestPrivacyPermissionAndReadyOutboxContract(t *testing.T) {
 	}
 }
 
+func TestProcessPermissionsReconcilesAlreadySyncedGate(t *testing.T) {
+	f := newPipelineFixture(t, domain.PlatformWechat)
+	result, err := f.service.IngestMessage(context.Background(), pipelineInput(f, "already-synced", "text", "hello"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.service.ProcessPrivacy(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	item, err := f.repo.GetKnowledgeItemByMessage(context.Background(), result.Message.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.repo.MarkKnowledgePermissionSynced(context.Background(), item.ID, 7); err != nil {
+		t.Fatal(err)
+	}
+	// Simulate a restart after ACL persistence but before the ready-gate pass.
+	if err := f.service.ProcessPermissions(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	item, _ = f.repo.GetKnowledgeItem(context.Background(), item.ID)
+	if item.ProcessingStatus != "ready" || item.ACLVersion != 7 {
+		t.Fatalf("already-synced permission was not reconciled: %+v", item)
+	}
+}
+
 func TestOpenFGAFailureKeepsKnowledgePending(t *testing.T) {
 	f := newPipelineFixture(t, domain.PlatformFeishu)
 	core := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

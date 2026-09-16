@@ -1835,6 +1835,15 @@ func (s *Service) ProcessPermissions(ctx context.Context) error {
 	}
 	var firstErr error
 	for _, item := range pending {
+		// Permission may already be synchronized (for example after a
+		// migration or a previous successful retry) while the ready gate was not
+		// evaluated. Reconcile that state without issuing a duplicate Core call.
+		if item.PermissionReady && item.ACLSyncStatus == "synced" {
+			if _, err := s.Repo.TryMarkKnowledgeReady(ctx, item.ID, trace.TraceID(ctx)); err != nil && firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
 		subjects, subjectErr := s.Repo.ListKnowledgePermissionSubjects(ctx, item.ID)
 		if subjectErr != nil {
 			if firstErr == nil {

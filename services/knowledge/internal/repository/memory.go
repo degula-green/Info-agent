@@ -1461,7 +1461,7 @@ func (s *MemoryStore) ListPendingKnowledgePermissions(_ context.Context, limit i
 	defer s.mu.RUnlock()
 	out := make([]domain.KnowledgeItem, 0)
 	for _, item := range s.knowledgeItems {
-		if item.LifecycleStatus == "active" && !item.PermissionReady && (item.ACLSyncStatus == "pending" || item.ACLSyncStatus == "failed") {
+		if item.LifecycleStatus == "active" && ((!item.PermissionReady && (item.ACLSyncStatus == "pending" || item.ACLSyncStatus == "failed")) || (item.PermissionReady && item.ACLSyncStatus == "synced" && item.ProcessingStatus == "pending")) {
 			out = append(out, cloneKnowledgeItem(item))
 		}
 	}

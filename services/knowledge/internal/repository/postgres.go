@@ -1678,7 +1678,7 @@ func (s *PostgresStore) ListPendingKnowledgePermissions(ctx context.Context, lim
 	if limit <= 0 || limit > 200 {
 		limit = 200
 	}
-	rows, err := s.pool.Query(ctx, `SELECT `+knowledgeItemColumns+` FROM knowledge.knowledge_items ki LEFT JOIN knowledge.conversation_ingestions ci ON ci.id=ki.conversation_ingestion_id WHERE ki.lifecycle_status='active' AND ki.permission_ready=FALSE AND ki.acl_sync_status IN ('pending','failed') ORDER BY ki.updated_at LIMIT $1`, limit)
+	rows, err := s.pool.Query(ctx, `SELECT `+knowledgeItemColumns+` FROM knowledge.knowledge_items ki LEFT JOIN knowledge.conversation_ingestions ci ON ci.id=ki.conversation_ingestion_id WHERE ki.lifecycle_status='active' AND ((ki.permission_ready=FALSE AND ki.acl_sync_status IN ('pending','failed')) OR (ki.permission_ready=TRUE AND ki.acl_sync_status='synced' AND ki.processing_status='pending')) ORDER BY ki.updated_at LIMIT $1`, limit)
 	if err != nil {
 		return nil, dbError(err)
 	}
