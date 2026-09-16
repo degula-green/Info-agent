@@ -333,6 +333,11 @@ type KnowledgeItem struct {
 	SourceType             string      `json:"source_type"`
 	SourceMessageID        string      `json:"source_message_id,omitempty"`
 	SourceAttachmentID     string      `json:"source_attachment_id,omitempty"`
+	SourcePrivateItemID    string      `json:"source_private_item_id,omitempty"`
+	ShareRequestID         string      `json:"share_request_id,omitempty"`
+	ShareBatchID           string      `json:"share_batch_id,omitempty"`
+	SharedByUserID         string      `json:"shared_by_user_id,omitempty"`
+	SharedAt               *time.Time  `json:"shared_at,omitempty"`
 	ContentType            string      `json:"content_type"`
 	ContentRef             string      `json:"content_ref"`
 	OriginalContentRef     string      `json:"original_content_ref,omitempty"`
@@ -364,6 +369,53 @@ type KnowledgeContent struct {
 	ContentVariant  string `json:"content_variant"`
 	ContentHash     string `json:"content_hash"`
 	Text            string `json:"text"`
+}
+
+type PrivateShareReference struct {
+	ID                      string    `json:"share_reference_id"`
+	OrganizationID          string    `json:"organization_id"`
+	SourcePrivateResourceID string    `json:"source_private_resource_id"`
+	SourceResourceType      string    `json:"source_resource_type"`
+	SourceContentVersion    int       `json:"source_content_version"`
+	ShareBatchID            string    `json:"share_batch_id"`
+	ShareRequestID          string    `json:"share_request_id"`
+	CreatedByUserID         string    `json:"created_by_user_id"`
+	Status                  string    `json:"status"`
+	Sensitive               bool      `json:"sensitive"`
+	ContentAccessRequired   bool      `json:"content_access_required"`
+	CreatedAt               time.Time `json:"created_at"`
+}
+
+type PrivateShareRequest struct {
+	ID                    string     `json:"id"`
+	RequesterUserID       string     `json:"requester_user_id"`
+	RequestID             string     `json:"request_id"`
+	RequestFingerprint    string     `json:"request_fingerprint"`
+	PrivateConversationID string     `json:"private_conversation_id"`
+	OrganizationID        string     `json:"organization_id"`
+	ShareBatchID          string     `json:"share_batch_id"`
+	Status                string     `json:"status"`
+	SharedMessageCount    int        `json:"shared_message_count"`
+	SharedAttachmentCount int        `json:"shared_attachment_count"`
+	LastError             string     `json:"last_error,omitempty"`
+	CreatedAt             time.Time  `json:"created_at"`
+	UpdatedAt             time.Time  `json:"updated_at"`
+	CompletedAt           *time.Time `json:"completed_at,omitempty"`
+}
+
+type PrivateAccessRequest struct {
+	ID               string     `json:"id"`
+	RequesterUserID  string     `json:"requester_user_id"`
+	ShareReferenceID string     `json:"share_reference_id"`
+	ResourceID       string     `json:"resource_id"`
+	ResourceType     string     `json:"resource_type"`
+	RequestedAction  string     `json:"requested_action"`
+	Reason           string     `json:"reason,omitempty"`
+	Status           string     `json:"status"`
+	ReviewedByUserID string     `json:"reviewed_by_user_id,omitempty"`
+	ReviewNote       string     `json:"review_note,omitempty"`
+	CreatedAt        time.Time  `json:"created_at"`
+	ReviewedAt       *time.Time `json:"reviewed_at,omitempty"`
 }
 
 type MessageSource struct {

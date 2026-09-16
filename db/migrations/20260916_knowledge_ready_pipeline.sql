@@ -71,6 +71,11 @@ ALTER TABLE knowledge.knowledge_items ADD COLUMN IF NOT EXISTS conversation_inge
 ALTER TABLE knowledge.knowledge_items ADD COLUMN IF NOT EXISTS source_type VARCHAR(32) NOT NULL DEFAULT 'platform_conversation';
 ALTER TABLE knowledge.knowledge_items ADD COLUMN IF NOT EXISTS source_message_id UUID REFERENCES knowledge.messages(id);
 ALTER TABLE knowledge.knowledge_items ADD COLUMN IF NOT EXISTS source_attachment_id UUID REFERENCES knowledge.attachments(id);
+ALTER TABLE knowledge.knowledge_items ADD COLUMN IF NOT EXISTS source_private_item_id UUID REFERENCES knowledge.knowledge_items(id);
+ALTER TABLE knowledge.knowledge_items ADD COLUMN IF NOT EXISTS share_request_id VARCHAR(100);
+ALTER TABLE knowledge.knowledge_items ADD COLUMN IF NOT EXISTS share_batch_id UUID;
+ALTER TABLE knowledge.knowledge_items ADD COLUMN IF NOT EXISTS shared_by_user_id UUID;
+ALTER TABLE knowledge.knowledge_items ADD COLUMN IF NOT EXISTS shared_at TIMESTAMPTZ;
 ALTER TABLE knowledge.knowledge_items ADD COLUMN IF NOT EXISTS content_type VARCHAR(32) NOT NULL DEFAULT 'text';
 ALTER TABLE knowledge.knowledge_items ADD COLUMN IF NOT EXISTS content_ref VARCHAR(512) NOT NULL DEFAULT '';
 ALTER TABLE knowledge.knowledge_items ADD COLUMN IF NOT EXISTS original_content_ref VARCHAR(512);
@@ -92,11 +97,15 @@ ALTER TABLE knowledge.knowledge_items ADD COLUMN IF NOT EXISTS last_error TEXT;
 ALTER TABLE knowledge.knowledge_items ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP;
 ALTER TABLE knowledge.knowledge_items ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP;
 
-CREATE UNIQUE INDEX IF NOT EXISTS knowledge_items_source_message_runtime_uq
+DROP INDEX IF EXISTS knowledge.knowledge_items_source_message_runtime_uq;
+DROP INDEX IF EXISTS knowledge.knowledge_items_source_attachment_runtime_uq;
+CREATE UNIQUE INDEX knowledge_items_source_message_runtime_uq
     ON knowledge.knowledge_items(source_message_id)
-    WHERE source_message_id IS NOT NULL AND source_attachment_id IS NULL;
-CREATE UNIQUE INDEX IF NOT EXISTS knowledge_items_source_attachment_runtime_uq
-    ON knowledge.knowledge_items(source_attachment_id) WHERE source_attachment_id IS NOT NULL;
+    WHERE source_message_id IS NOT NULL AND source_attachment_id IS NULL
+      AND source_type <> 'shared_private_item';
+CREATE UNIQUE INDEX knowledge_items_source_attachment_runtime_uq
+    ON knowledge.knowledge_items(source_attachment_id)
+    WHERE source_attachment_id IS NOT NULL AND source_type <> 'shared_private_item';
 CREATE INDEX IF NOT EXISTS knowledge_items_permission_pending_runtime_idx
     ON knowledge.knowledge_items(acl_sync_status, updated_at)
     WHERE lifecycle_status = 'active' AND permission_ready = FALSE;

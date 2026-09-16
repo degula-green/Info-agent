@@ -1488,8 +1488,57 @@ func (s *Service) IngestMessage(ctx context.Context, input repository.IngestMess
 		if cacheErr := s.KV.Set(ctx, dedupeKey, messageDedupeRecord{PayloadHash: input.PayloadHash, Result: *result}, 7*24*time.Hour); cacheErr != nil {
 			slog.WarnContext(ctx, "knowledge message dedupe cache write failed", "error", cacheErr)
 		}
+		for _, attachment := range input.Attachments {
+			attachmentID := strings.TrimSpace(attachment.ExternalAttachmentID)
+			if attachmentID == "" {
+				continue
+			}
+			attachmentKey := attachmentDedupeKey(account.Platform, accountID, input.ExternalConversationID, attachmentID)
+			if cacheErr := s.KV.Set(ctx, attachmentKey, input.PayloadHash, 7*24*time.Hour); cacheErr != nil {
+				slog.WarnContext(ctx, "knowledge attachment dedupe cache write failed", "error", cacheErr)
+			}
+		}
 	}
 	return result, nil
+}
+
+// SharePrivateResources creates organization-side references for selected
+// private resources. The source message/attachment is never reprocessed or
+// copied; the repository transaction creates the shared KnowledgeItem and its
+// ready outbox event atomically.
+func (s *Service) SharePrivateResources(ctx context.Context, userID string, input repository.PrivateShareInput) (*repository.PrivateShareResult, error) {
+	input.RequesterUserID = userID
+	conversation, err := s.Repo.GetConversation(ctx, input.PrivateConversationID)
+	if err != nil {
+		return nil, err
+	}
+	if conversation.ConversationType != "private" || conversation.OwnerUserID != userID {
+		return nil, apperror.Clone(apperror.ErrForbidden)
+	}
+	account, err := s.GetConnector(ctx, userID, domain.PlatformWechat)
+	if err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(account.DefaultOrganizationID) == "" {
+		return nil, apperror.New("organization_required", "a bound organization is required to share private resources", 400, false)
+	}
+	if err := s.requireOrganizationMember(ctx, userID, account.DefaultOrganizationID); err != nil {
+		return nil, err
+	}
+	input.OrganizationID = account.DefaultOrganizationID
+	input.TraceID = trace.TraceID(ctx)
+	input.Now = s.Now()
+	return s.Repo.SharePrivateResources(ctx, input)
+}
+
+func (s *Service) CreatePrivateAccessRequest(ctx context.Context, userID string, input repository.PrivateAccessRequestInput) (*domain.PrivateAccessRequest, error) {
+	input.RequesterUserID = userID
+	input.Now = s.Now()
+	return s.Repo.CreatePrivateAccessRequest(ctx, input)
+}
+
+func (s *Service) ReviewPrivateAccessRequest(ctx context.Context, userID, requestID, status, note string) (*domain.PrivateAccessRequest, error) {
+	return s.Repo.ReviewPrivateAccessRequest(ctx, requestID, userID, status, note, s.Now())
 }
 
 func normalizeMessageCandidate(input repository.IngestMessageInput, rawContent, sourcePayloadHash string, account domain.ConnectorAccount, collectedAt time.Time) (domain.UnifiedMessage, error) {
@@ -1557,6 +1606,11 @@ func repositoryInputFromUnified(input domain.UnifiedMessage) repository.IngestMe
 func messageDedupeKey(platformName, accountID, conversationID, messageID string) string {
 	sum := sha256.Sum256([]byte(strings.Join([]string{platformName, accountID, conversationID, messageID}, "\x00")))
 	return "knowledge:dedupe:" + hex.EncodeToString(sum[:])
+}
+
+func attachmentDedupeKey(platformName, accountID, conversationID, attachmentID string) string {
+	sum := sha256.Sum256([]byte(strings.Join([]string{platformName, accountID, conversationID, attachmentID}, "\x00")))
+	return "knowledge:dedupe:attachment:" + hex.EncodeToString(sum[:])
 }
 func (s *Service) Heartbeat(ctx context.Context, collectorID, version string) (*domain.Collector, error) {
 	now := s.Now()
@@ -1899,7 +1953,7 @@ func (s *Service) GetKnowledgeContentForRAG(ctx context.Context, id string, cont
 	if err != nil {
 		return nil, err
 	}
-	if variant == "original" && item.OriginalAccessRequired {
+	if variant == "original" && item.OriginalAccessRequired && item.SourceType != "shared_private_item" {
 		return nil, apperror.New("knowledge_content_restricted", "original content requires approval", 403, false)
 	}
 	content, err := s.Repo.GetKnowledgeContent(ctx, id)
@@ -1918,7 +1972,7 @@ func (s *Service) GetAttachmentForRAG(ctx context.Context, id string, contentVer
 	if _, err = s.GetKnowledgeForRAG(ctx, item.ID, contentVersion, aclVersion); err != nil {
 		return nil, err
 	}
-	if item.ContentAccessRequired {
+	if item.ContentAccessRequired && item.SourceType != "shared_private_item" {
 		return nil, apperror.New("attachment_content_restricted", "attachment content requires approval", 403, false)
 	}
 	attachment, err := s.Repo.GetAttachment(ctx, id)

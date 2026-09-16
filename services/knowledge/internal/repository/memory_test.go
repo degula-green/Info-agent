@@ -225,6 +225,80 @@ func TestMemoryMessageAttachmentIdempotenceAndCursorMonotonicity(t *testing.T) {
 	}
 }
 
+func TestMemoryPrivateShareCreatesReferencesAndUsesReadyGate(t *testing.T) {
+	repo := NewMemoryStore()
+	ctx := trace.WithIDs(context.Background(), "share-request", "share-trace")
+	now := time.Now().UTC()
+	if _, err := repo.SaveConnector(ctx, domain.ConnectorAccount{ID: "private-account", OwnerUserID: "owner", Platform: domain.PlatformWechat, ExternalAccountID: "owner-wxid", Status: domain.ConnectorActive}); err != nil {
+		t.Fatal(err)
+	}
+	conversation, err := repo.AttachConversation(ctx, AttachInput{UserID: "owner", Platform: domain.PlatformWechat, ExternalConversationID: "private-peer", ConversationType: "private", RequestedStartAt: &now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	collector, err := repo.AddCollector(ctx, CollectorInput{ConversationID: conversation.ID, ConnectorAccountID: "private-account", CollectorUserID: "owner", Role: domain.CollectorPrimary})
+	if err != nil {
+		t.Fatal(err)
+	}
+	messageInput := IngestMessageInput{CollectorID: collector.ID, ExternalConversationID: conversation.ExternalConversationID, ExternalMessageID: "private-message", SenderExternalID: "peer-wxid", MessageType: "text", Content: "share this", ContentHash: hashForTest("share this"), SentAt: now}
+	messageInput.PayloadHash, _ = CalculatePayloadHash(messageInput)
+	ingested, err := repo.IngestMessage(ctx, messageInput)
+	if err != nil {
+		t.Fatal(err)
+	}
+	shared, err := repo.SharePrivateResources(ctx, PrivateShareInput{RequesterUserID: "owner", RequestID: "share-1", TraceID: "share-trace", PrivateConversationID: conversation.ID, OrganizationID: "organization", MessageIDs: []string{ingested.Message.ID}, Now: now})
+	if err != nil || shared.SharedMessageCount != 1 {
+		t.Fatalf("share failed: result=%+v err=%v", shared, err)
+	}
+	var sharedItem domain.KnowledgeItem
+	for _, item := range repo.knowledgeItems {
+		if item.SourceType == "shared_private_item" {
+			sharedItem = item
+			break
+		}
+	}
+	if sharedItem.ID == "" || sharedItem.SourcePrivateItemID == "" || sharedItem.PermissionReady || sharedItem.ProcessingStatus != "pending" || !sharedItem.ContentAccessRequired {
+		t.Fatalf("shared knowledge item did not enter the permission gate: %+v", sharedItem)
+	}
+	appendInput := IngestMessageInput{CollectorID: collector.ID, ExternalConversationID: conversation.ExternalConversationID, ExternalMessageID: "private-message-2", SenderExternalID: "peer-wxid", MessageType: "text", Content: "append this", ContentHash: hashForTest("append this"), SentAt: now.Add(time.Second)}
+	appendInput.PayloadHash, _ = CalculatePayloadHash(appendInput)
+	appended, err := repo.IngestMessage(ctx, appendInput)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repo.SharePrivateResources(ctx, PrivateShareInput{RequesterUserID: "owner", RequestID: "share-2", PrivateConversationID: conversation.ID, OrganizationID: "organization", MessageIDs: []string{appended.Message.ID}, Now: now}); err != nil {
+		t.Fatalf("original sharer could not append to the shared conversation: %v", err)
+	}
+	sharedCount := 0
+	for _, item := range repo.knowledgeItems {
+		if item.SourceType == "shared_private_item" && item.KnowledgeBaseID == sharedItem.KnowledgeBaseID {
+			sharedCount++
+		}
+	}
+	if sharedCount != 2 {
+		t.Fatalf("expected two references in one shared entry, got %d", sharedCount)
+	}
+	if err := repo.MarkKnowledgePermissionSynced(ctx, sharedItem.ID, 7); err != nil {
+		t.Fatal(err)
+	}
+	created, err := repo.TryMarkKnowledgeReady(ctx, sharedItem.ID, "ready-trace")
+	if err != nil || !created {
+		t.Fatalf("ready gate failed: created=%v err=%v", created, err)
+	}
+	ready := 0
+	for _, event := range repo.outbox {
+		if event.EventType == "knowledge.ready" && event.Payload["knowledge_item_id"] == sharedItem.ID {
+			ready++
+			if event.Payload["acl_version"] != int64(7) || event.Payload["content_access_required"] != true {
+				t.Fatalf("invalid shared ready payload: %+v", event.Payload)
+			}
+		}
+	}
+	if ready != 1 {
+		t.Fatalf("expected one shared knowledge.ready event, got %d", ready)
+	}
+}
+
 func TestMemoryRejectsIngestIntoPausedConversation(t *testing.T) {
 	repo := NewMemoryStore()
 	ctx := context.Background()
@@ -559,7 +633,7 @@ func TestMemoryFiltersSystemAndRedactsSensitiveContent(t *testing.T) {
 		t.Fatalf("ready gate was not idempotent: created=%v err=%v", again, err)
 	}
 	events, _ := repo.GetOutbox(ctx, 10)
-	if len(events) != 1 || events[0].EventType != "knowledge.ready" || events[0].Payload["knowledge_item_id"] != item.ID {
+	if len(events) != 1 || events[0].EventType != "knowledge.ready" || events[0].Payload["knowledge_item_id"] != item.ID || events[0].Payload["resource_type"] != "message" {
 		t.Fatalf("unexpected ready events: %+v", events)
 	}
 }
