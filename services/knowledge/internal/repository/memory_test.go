@@ -232,7 +232,13 @@ func TestMemoryPrivateShareCreatesReferencesAndUsesReadyGate(t *testing.T) {
 	if _, err := repo.SaveConnector(ctx, domain.ConnectorAccount{ID: "private-account", OwnerUserID: "owner", Platform: domain.PlatformWechat, ExternalAccountID: "owner-wxid", Status: domain.ConnectorActive}); err != nil {
 		t.Fatal(err)
 	}
-	conversation, err := repo.AttachConversation(ctx, AttachInput{UserID: "owner", Platform: domain.PlatformWechat, ExternalConversationID: "private-peer", ConversationType: "private", RequestedStartAt: &now})
+	for externalID, userID := range map[string]string{"owner-wxid": "owner", "peer-owner-wxid": "peer-owner"} {
+		if _, err := repo.UpsertExternalIdentity(ctx, ExternalIdentityInput{Platform: domain.PlatformWechat, ExternalUserID: externalID, MappedUserID: userID}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	members := []domain.AvailableMember{{ExternalUserID: "owner-wxid"}, {ExternalUserID: "peer-owner-wxid"}}
+	conversation, err := repo.AttachConversation(ctx, AttachInput{UserID: "owner", Platform: domain.PlatformWechat, ExternalConversationID: "private-peer", ConversationType: "private", RequestedStartAt: &now, Members: members})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -259,6 +265,26 @@ func TestMemoryPrivateShareCreatesReferencesAndUsesReadyGate(t *testing.T) {
 	}
 	if sharedItem.ID == "" || sharedItem.SourcePrivateItemID == "" || sharedItem.PermissionReady || sharedItem.ProcessingStatus != "pending" || !sharedItem.ContentAccessRequired {
 		t.Fatalf("shared knowledge item did not enter the permission gate: %+v", sharedItem)
+	}
+	if _, err := repo.SaveConnector(ctx, domain.ConnectorAccount{ID: "private-account-peer", OwnerUserID: "peer-owner", Platform: domain.PlatformWechat, ExternalAccountID: "peer-owner-wxid", Status: domain.ConnectorActive}); err != nil {
+		t.Fatal(err)
+	}
+	peerConversation, err := repo.AttachConversation(ctx, AttachInput{UserID: "peer-owner", Platform: domain.PlatformWechat, ExternalConversationID: "private-owner", ConversationType: "private", RequestedStartAt: &now, Members: members})
+	if err != nil {
+		t.Fatal(err)
+	}
+	peerCollector, err := repo.AddCollector(ctx, CollectorInput{ConversationID: peerConversation.ID, ConnectorAccountID: "private-account-peer", CollectorUserID: "peer-owner", Role: domain.CollectorPrimary})
+	if err != nil {
+		t.Fatal(err)
+	}
+	peerInput := IngestMessageInput{CollectorID: peerCollector.ID, ExternalConversationID: peerConversation.ExternalConversationID, ExternalMessageID: "peer-private-message", SenderExternalID: "owner-wxid", MessageType: "text", Content: "peer copy", ContentHash: hashForTest("peer copy"), SentAt: now}
+	peerInput.PayloadHash, _ = CalculatePayloadHash(peerInput)
+	peerMessage, err := repo.IngestMessage(ctx, peerInput)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repo.SharePrivateResources(ctx, PrivateShareInput{RequesterUserID: "peer-owner", RequestID: "peer-share-1", PrivateConversationID: peerConversation.ID, OrganizationID: "organization", MessageIDs: []string{peerMessage.Message.ID}, Now: now}); apperror.From(err).Code != "private_conversation_already_shared" {
+		t.Fatalf("expected duplicate private conversation share to be rejected, got %v", err)
 	}
 	appendInput := IngestMessageInput{CollectorID: collector.ID, ExternalConversationID: conversation.ExternalConversationID, ExternalMessageID: "private-message-2", SenderExternalID: "peer-wxid", MessageType: "text", Content: "append this", ContentHash: hashForTest("append this"), SentAt: now.Add(time.Second)}
 	appendInput.PayloadHash, _ = CalculatePayloadHash(appendInput)
@@ -633,7 +659,7 @@ func TestMemoryFiltersSystemAndRedactsSensitiveContent(t *testing.T) {
 		t.Fatalf("ready gate was not idempotent: created=%v err=%v", again, err)
 	}
 	events, _ := repo.GetOutbox(ctx, 10)
-	if len(events) != 1 || events[0].EventType != "knowledge.ready" || events[0].Payload["knowledge_item_id"] != item.ID || events[0].Payload["resource_type"] != "message" {
+	if len(events) != 1 || events[0].EventType != "knowledge.ready" || events[0].Payload["knowledge_item_id"] != item.ID || events[0].Payload["resource_type"] != "knowledge_item" {
 		t.Fatalf("unexpected ready events: %+v", events)
 	}
 }

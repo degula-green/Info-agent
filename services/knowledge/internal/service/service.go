@@ -1443,6 +1443,17 @@ func (s *Service) IngestMessage(ctx context.Context, input repository.IngestMess
 	if err := repository.ValidateMessageCandidate(input); err != nil {
 		return nil, err
 	}
+	// The provider payload remains available as SourcePayloadHash, but cache
+	// identity must use the post-filter canonical payload. This lets a replay
+	// replace a provider media envelope with its extracted attachment without
+	// being rejected as a conflicting message.
+	dedupeInput := filtered
+	contentSum := sha256.Sum256([]byte(dedupeInput.Content))
+	dedupeInput.ContentHash = hex.EncodeToString(contentSum[:])
+	canonicalPayloadHash, canonicalErr := repository.CalculatePayloadHash(dedupeInput)
+	if canonicalErr != nil {
+		return nil, apperror.Wrap("invalid_message", "message payload cannot be canonicalized", 400, false, canonicalErr)
+	}
 	collector, err := s.Repo.GetCollector(ctx, input.CollectorID)
 	if err != nil {
 		return nil, err
@@ -1468,7 +1479,7 @@ func (s *Service) IngestMessage(ctx context.Context, input repository.IngestMess
 		if found, cacheErr := s.KV.Get(ctx, dedupeKey, &cached); cacheErr != nil {
 			slog.WarnContext(ctx, "knowledge message dedupe cache unavailable", "error", cacheErr)
 		} else if found {
-			if !strings.EqualFold(cached.PayloadHash, input.PayloadHash) {
+			if !strings.EqualFold(cached.PayloadHash, canonicalPayloadHash) {
 				return nil, apperror.New("external_id_conflict", "external message id has conflicting payload", 409, false)
 			}
 			result := cached.Result
@@ -1485,7 +1496,7 @@ func (s *Service) IngestMessage(ctx context.Context, input repository.IngestMess
 		return nil, err
 	}
 	if s.KV != nil {
-		if cacheErr := s.KV.Set(ctx, dedupeKey, messageDedupeRecord{PayloadHash: input.PayloadHash, Result: *result}, 7*24*time.Hour); cacheErr != nil {
+		if cacheErr := s.KV.Set(ctx, dedupeKey, messageDedupeRecord{PayloadHash: canonicalPayloadHash, Result: *result}, 7*24*time.Hour); cacheErr != nil {
 			slog.WarnContext(ctx, "knowledge message dedupe cache write failed", "error", cacheErr)
 		}
 		for _, attachment := range input.Attachments {
@@ -1494,7 +1505,7 @@ func (s *Service) IngestMessage(ctx context.Context, input repository.IngestMess
 				continue
 			}
 			attachmentKey := attachmentDedupeKey(account.Platform, accountID, input.ExternalConversationID, attachmentID)
-			if cacheErr := s.KV.Set(ctx, attachmentKey, input.PayloadHash, 7*24*time.Hour); cacheErr != nil {
+			if cacheErr := s.KV.Set(ctx, attachmentKey, canonicalPayloadHash, 7*24*time.Hour); cacheErr != nil {
 				slog.WarnContext(ctx, "knowledge attachment dedupe cache write failed", "error", cacheErr)
 			}
 		}
