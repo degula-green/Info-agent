@@ -571,7 +571,7 @@ func TestMemoryFiltersSystemAndRedactsSensitiveContent(t *testing.T) {
 		t.Fatalf("ready gate was not idempotent: created=%v err=%v", again, err)
 	}
 	events, _ := repo.GetOutbox(ctx, 10)
-	if len(events) != 1 || events[0].EventType != "knowledge.ready" || events[0].Payload["knowledge_item_id"] != item.ID {
+	if len(events) != 1 || events[0].EventType != "knowledge.ready" || events[0].Payload["knowledge_item_id"] != item.ID || events[0].Payload["resource_type"] != "message" {
 		t.Fatalf("unexpected ready events: %+v", events)
 	}
 }

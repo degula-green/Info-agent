@@ -611,6 +611,15 @@ func TestFixtureReplayHTTPRoundTripPersistsAndDeduplicates(t *testing.T) {
 	if err := json.Unmarshal(fixtureRaw, &fixture); err != nil {
 		t.Fatal(err)
 	}
+	// Keep this regression fixture independent of the wall clock while still
+	// exercising the seven-day history boundary enforced by Attach.
+	fixtureAnchor := time.Date(2026, time.September, 10, 9, 0, 0, 0, time.UTC)
+	fixtureShift := now.Add(-24 * time.Hour).Sub(fixtureAnchor)
+	for pageIndex := range fixture.Pages {
+		for messageIndex := range fixture.Pages[pageIndex].Messages {
+			fixture.Pages[pageIndex].Messages[messageIndex].SentAt = fixture.Pages[pageIndex].Messages[messageIndex].SentAt.Add(fixtureShift)
+		}
+	}
 	payload, err := json.Marshal(service.FixtureReplayInput{
 		ConversationID: conversation.ID, CollectorID: conversation.Collectors[0].ID,
 		StartAt: start, EndAt: now, Pages: fixture.Pages,

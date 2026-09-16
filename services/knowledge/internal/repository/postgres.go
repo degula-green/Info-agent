@@ -40,6 +40,32 @@ func NewPostgresStore(ctx context.Context, databaseURL string) (*PostgresStore, 
 
 func (s *PostgresStore) Close() error { s.pool.Close(); return nil }
 
+func uniqueSorted(values []string) []string {
+	seen := make(map[string]struct{}, len(values))
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value != "" {
+			if _, ok := seen[value]; !ok {
+				seen[value] = struct{}{}
+				out = append(out, value)
+			}
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+func shareFingerprint(conversationID string, messageIDs, attachmentIDs []string) string {
+	raw, _ := json.Marshal(struct {
+		ConversationID string   `json:"private_conversation_id"`
+		MessageIDs     []string `json:"message_ids"`
+		AttachmentIDs  []string `json:"attachment_ids"`
+	}{conversationID, messageIDs, attachmentIDs})
+	sum := sha256.Sum256(raw)
+	return hex.EncodeToString(sum[:])
+}
+
 const connectorColumns = `id::text, owner_user_id::text, platform, platform_workspace_key, external_account_id,
 COALESCE(display_name,''), credential_ref, COALESCE(database_ref,''), token_expires_at, COALESCE(default_organization_id::text,''),
 status, COALESCE(last_error,''), created_at, updated_at`
@@ -1278,6 +1304,216 @@ func (s *PostgresStore) IngestMessage(ctx context.Context, input IngestMessageIn
 	return &IngestResult{Message: message, Attachments: attachments, Duplicate: duplicate, CursorUpdated: false}, nil
 }
 
+func (s *PostgresStore) SharePrivateResources(ctx context.Context, input PrivateShareInput) (*PrivateShareResult, error) {
+	messageIDs, attachmentIDs := uniqueSorted(input.MessageIDs), uniqueSorted(input.AttachmentIDs)
+	if strings.TrimSpace(input.RequestID) == "" || strings.TrimSpace(input.RequesterUserID) == "" || strings.TrimSpace(input.PrivateConversationID) == "" || strings.TrimSpace(input.OrganizationID) == "" {
+		return nil, apperror.New("invalid_request", "request, conversation and organization are required", 400, false)
+	}
+	if len(messageIDs) == 0 && len(attachmentIDs) == 0 {
+		return nil, apperror.New("invalid_request", "at least one message or attachment is required", 400, false)
+	}
+	fingerprint := shareFingerprint(input.PrivateConversationID, messageIDs, attachmentIDs)
+	traceID := strings.TrimSpace(input.TraceID)
+	if traceID == "" {
+		traceID = trace.TraceID(ctx)
+	}
+	if traceID == "" {
+		traceID = uuid.NewString()
+	}
+	now := input.Now.UTC()
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, dbError(err)
+	}
+	defer tx.Rollback(ctx)
+	var owner, conversationType string
+	if err = tx.QueryRow(ctx, `SELECT COALESCE(owner_user_id::text,''),conversation_type FROM knowledge.conversation_ingestions WHERE id=$1 AND status<>'detached' FOR UPDATE`, input.PrivateConversationID).Scan(&owner, &conversationType); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, apperror.New("conversation_not_found", "private conversation not found", 404, false)
+		}
+		return nil, dbError(err)
+	}
+	if conversationType != "private" || owner != input.RequesterUserID {
+		return nil, apperror.Clone(apperror.ErrForbidden)
+	}
+	var priorFingerprint, priorBatch, priorStatus, priorConversation, priorOrganization string
+	var priorMessages, priorAttachments int
+	priorErr := tx.QueryRow(ctx, `SELECT request_fingerprint,share_batch_id::text,status,shared_message_count,shared_attachment_count,private_conversation_id::text,organization_id::text FROM knowledge.private_share_requests WHERE requester_user_id=$1 AND request_id=$2`, input.RequesterUserID, input.RequestID).Scan(&priorFingerprint, &priorBatch, &priorStatus, &priorMessages, &priorAttachments, &priorConversation, &priorOrganization)
+	if priorErr == nil {
+		if priorFingerprint != fingerprint {
+			return nil, apperror.New("idempotency_conflict", "request_id was already used with a different selection", 409, false)
+		}
+		status := "already_processed"
+		if priorStatus != "completed" {
+			status = "accepted"
+		}
+		return &PrivateShareResult{RequestID: input.RequestID, ShareBatchID: priorBatch, PrivateConversationID: priorConversation, OrganizationID: priorOrganization, Status: status, SharedMessageCount: priorMessages, SharedAttachmentCount: priorAttachments}, nil
+	}
+	if !errors.Is(priorErr, pgx.ErrNoRows) {
+		return nil, dbError(priorErr)
+	}
+	var req domain.PrivateShareRequest
+	err = tx.QueryRow(ctx, `INSERT INTO knowledge.private_share_requests (id,requester_user_id,request_id,request_fingerprint,private_conversation_id,organization_id,share_batch_id,status) VALUES ($1,$2,$3,$4,$5,$6,$7,'processing') ON CONFLICT (requester_user_id,request_id) DO NOTHING RETURNING id::text,requester_user_id::text,request_id,request_fingerprint,private_conversation_id::text,organization_id::text,share_batch_id::text,status,shared_message_count,shared_attachment_count,COALESCE(last_error,''),created_at,updated_at,completed_at`, uuid.NewString(), input.RequesterUserID, input.RequestID, fingerprint, input.PrivateConversationID, input.OrganizationID, uuid.NewString()).Scan(&req.ID, &req.RequesterUserID, &req.RequestID, &req.RequestFingerprint, &req.PrivateConversationID, &req.OrganizationID, &req.ShareBatchID, &req.Status, &req.SharedMessageCount, &req.SharedAttachmentCount, &req.LastError, &req.CreatedAt, &req.UpdatedAt, &req.CompletedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		if err = tx.QueryRow(ctx, `SELECT request_fingerprint,share_batch_id::text,status,shared_message_count,shared_attachment_count,private_conversation_id::text,organization_id::text FROM knowledge.private_share_requests WHERE requester_user_id=$1 AND request_id=$2`, input.RequesterUserID, input.RequestID).Scan(&req.RequestFingerprint, &req.ShareBatchID, &req.Status, &req.SharedMessageCount, &req.SharedAttachmentCount, &req.PrivateConversationID, &req.OrganizationID); err != nil {
+			return nil, dbError(err)
+		}
+		if req.RequestFingerprint != fingerprint {
+			return nil, apperror.New("idempotency_conflict", "request_id was already used with a different selection", 409, false)
+		}
+		status := "already_processed"
+		if req.Status != "completed" {
+			status = "accepted"
+		}
+		return &PrivateShareResult{RequestID: input.RequestID, ShareBatchID: req.ShareBatchID, PrivateConversationID: req.PrivateConversationID, OrganizationID: req.OrganizationID, Status: status, SharedMessageCount: req.SharedMessageCount, SharedAttachmentCount: req.SharedAttachmentCount}, nil
+	}
+	if err != nil {
+		return nil, dbError(err)
+	}
+	participants := []string{owner}
+	participantRows, participantErr := tx.Query(ctx, `SELECT DISTINCT ei.mapped_user_id::text FROM knowledge.conversation_memberships cm JOIN knowledge.external_identities ei ON ei.id=cm.external_identity_id WHERE cm.conversation_ingestion_id=$1 AND cm.status='active' AND ei.mapping_status='mapped' AND ei.mapped_user_id IS NOT NULL`, input.PrivateConversationID)
+	if participantErr != nil {
+		return nil, dbError(participantErr)
+	}
+	for participantRows.Next() {
+		var participant string
+		if scanErr := participantRows.Scan(&participant); scanErr != nil {
+			participantRows.Close()
+			return nil, dbError(scanErr)
+		}
+		participants = append(participants, participant)
+	}
+	if participantErr = participantRows.Err(); participantErr != nil {
+		participantRows.Close()
+		return nil, dbError(participantErr)
+	}
+	participantRows.Close()
+	participants = uniqueSorted(participants)
+	shareKey := input.PrivateConversationID
+	if len(participants) >= 2 {
+		shareKey = "pair:" + hashText(strings.Join(participants, "|"))
+	}
+	baseID := ""
+	if err = tx.QueryRow(ctx, `WITH inserted AS (INSERT INTO knowledge.knowledge_bases (knowledge_scope,base_type,name,owner_user_id,organization_id,source_key,status) VALUES ('organization','organization_conversation',$1,NULL,$2::uuid,$3,'active') ON CONFLICT DO NOTHING RETURNING id::text) SELECT id FROM inserted UNION ALL SELECT id::text FROM knowledge.knowledge_bases WHERE knowledge_scope='organization' AND base_type='organization_conversation' AND organization_id=$2::uuid AND source_key=$3 AND status='active' LIMIT 1`, "Shared private conversation", input.OrganizationID, "shared_private:"+shareKey).Scan(&baseID); err != nil {
+		return nil, dbError(err)
+	}
+	if err = tx.QueryRow(ctx, `SELECT id::text FROM knowledge.knowledge_bases WHERE id=$1 FOR UPDATE`, baseID).Scan(&baseID); err != nil {
+		return nil, dbError(err)
+	}
+	var existingSharer string
+	err = tx.QueryRow(ctx, `SELECT COALESCE(shared_by_user_id::text,'') FROM knowledge.knowledge_items WHERE knowledge_base_id=$1 AND source_type='shared_private_item' AND lifecycle_status='active' LIMIT 1`, baseID).Scan(&existingSharer)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return nil, dbError(err)
+	}
+	if err == nil && existingSharer != input.RequesterUserID {
+		return nil, apperror.New("private_conversation_already_shared", "private conversation has already been shared", 409, false)
+	}
+	createShared := func(resourceType, resourceID string) error {
+		var sourceItemID, sourceMessageID, sourceAttachmentID, contentType, contentRef, originalRef, contentHash, contentVisibility, securityStatus, sensitivity string
+		var version int
+		var originalAccess, contentSaved, securityReady bool
+		if resourceType == "message" {
+			err = tx.QueryRow(ctx, `SELECT ki.id::text,COALESCE(ki.source_message_id::text,''),COALESCE(ki.source_attachment_id::text,''),ki.content_type,ki.content_ref,COALESCE(ki.original_content_ref,''),ki.content_hash,ki.content_version,ki.content_visibility,ki.original_access_required,ki.security_status,COALESCE(ki.sensitivity,''),ki.content_saved,ki.security_ready FROM knowledge.knowledge_items ki JOIN knowledge.messages m ON m.id=ki.source_message_id WHERE m.id=$1 AND ki.conversation_ingestion_id=$2 AND ki.source_type='private_conversation' AND ki.source_attachment_id IS NULL`, resourceID, input.PrivateConversationID).Scan(&sourceItemID, &sourceMessageID, &sourceAttachmentID, &contentType, &contentRef, &originalRef, &contentHash, &version, &contentVisibility, &originalAccess, &securityStatus, &sensitivity, &contentSaved, &securityReady)
+		} else {
+			err = tx.QueryRow(ctx, `SELECT ki.id::text,COALESCE(ki.source_message_id::text,''),COALESCE(ki.source_attachment_id::text,''),ki.content_type,ki.content_ref,COALESCE(ki.original_content_ref,''),ki.content_hash,ki.content_version,ki.content_visibility,ki.original_access_required,ki.security_status,COALESCE(ki.sensitivity,''),ki.content_saved,ki.security_ready FROM knowledge.knowledge_items ki JOIN knowledge.attachments a ON a.id=ki.source_attachment_id WHERE a.id=$1 AND ki.conversation_ingestion_id=$2 AND ki.source_type='private_conversation'`, resourceID, input.PrivateConversationID).Scan(&sourceItemID, &sourceMessageID, &sourceAttachmentID, &contentType, &contentRef, &originalRef, &contentHash, &version, &contentVisibility, &originalAccess, &securityStatus, &sensitivity, &contentSaved, &securityReady)
+		}
+		if errors.Is(err, pgx.ErrNoRows) {
+			return apperror.New("resource_not_found", "selected resource is not part of the private conversation", 404, false)
+		}
+		if err != nil {
+			return dbError(err)
+		}
+		if !contentSaved || !securityReady {
+			return apperror.New("resource_not_ready", "selected resource is not ready", 409, true)
+		}
+		var refID string
+		err = tx.QueryRow(ctx, `INSERT INTO knowledge.private_share_references (id,organization_id,source_private_resource_id,source_resource_type,source_content_version,share_batch_id,share_request_id,created_by_user_id,status,sensitive,content_access_required) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'ready',$9,TRUE) ON CONFLICT (organization_id,source_private_resource_id,source_resource_type,source_content_version) DO NOTHING RETURNING id::text`, uuid.NewString(), input.OrganizationID, resourceID, resourceType, version, req.ShareBatchID, input.RequestID, input.RequesterUserID, originalAccess).Scan(&refID)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return apperror.New("private_conversation_already_shared", "private resource has already been shared", 409, false)
+		}
+		if err != nil {
+			return dbError(err)
+		}
+		sharedID := uuid.NewString()
+		sharedAt := now
+		_, err = tx.Exec(ctx, `INSERT INTO knowledge.knowledge_items (id,knowledge_base_id,knowledge_scope,access_scope,owner_user_id,organization_id,conversation_ingestion_id,source_type,source_message_id,source_attachment_id,source_private_item_id,share_request_id,share_batch_id,shared_by_user_id,shared_at,content_type,content_ref,original_content_ref,content_hash,content_version,content_visibility,original_access_required,security_status,sensitivity,content_saved,ownership_ready,security_ready,permission_ready,acl_version,acl_sync_status,processing_status,lifecycle_status) VALUES ($1,$2,'organization','organization_members',NULL,$3,$4,'shared_private_item',NULLIF($5,''),NULLIF($6,''),$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,'not_required',COALESCE(NULLIF($19,''),'internal'),TRUE,TRUE,TRUE,FALSE,0,'pending','pending','active')`, sharedID, baseID, input.OrganizationID, input.PrivateConversationID, sourceMessageID, sourceAttachmentID, sourceItemID, input.RequestID, req.ShareBatchID, input.RequesterUserID, sharedAt, contentType, contentRef, originalRef, contentHash, version, contentVisibility, originalAccess, sensitivity)
+		if err != nil {
+			return dbError(err)
+		}
+		payload, _ := json.Marshal(map[string]any{"knowledge_item_id": sharedID, "content_version": version})
+		_, err = tx.Exec(ctx, `INSERT INTO knowledge.outbox_events (id,aggregate_type,aggregate_id,event_type,event_version,schema_version,organization_id,trace_id,payload,status,retry_count,available_at) VALUES ($1,'knowledge_item',$2,'permission.sync.requested',$3,1,$4,$5,$6,'pending',0,now()) ON CONFLICT DO NOTHING`, uuid.NewString(), sharedID, version, input.OrganizationID, traceID, payload)
+		return dbError(err)
+	}
+	for _, id := range messageIDs {
+		if err = createShared("message", id); err != nil {
+			return nil, err
+		}
+	}
+	for _, id := range attachmentIDs {
+		if err = createShared("attachment", id); err != nil {
+			return nil, err
+		}
+	}
+	if _, err = tx.Exec(ctx, `UPDATE knowledge.private_share_requests SET status='completed',shared_message_count=$2,shared_attachment_count=$3,updated_at=$4,completed_at=$4 WHERE id=$1`, req.ID, len(messageIDs), len(attachmentIDs), now); err != nil {
+		return nil, dbError(err)
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return nil, dbError(err)
+	}
+	return &PrivateShareResult{RequestID: input.RequestID, ShareBatchID: req.ShareBatchID, PrivateConversationID: input.PrivateConversationID, OrganizationID: input.OrganizationID, Status: "accepted", SharedMessageCount: len(messageIDs), SharedAttachmentCount: len(attachmentIDs)}, nil
+}
+
+func (s *PostgresStore) CreatePrivateAccessRequest(ctx context.Context, input PrivateAccessRequestInput) (*domain.PrivateAccessRequest, error) {
+	if strings.TrimSpace(input.RequesterUserID) == "" || strings.TrimSpace(input.ShareReferenceID) == "" || strings.TrimSpace(input.ResourceID) == "" {
+		return nil, apperror.New("invalid_request", "resource and share reference are required", 400, false)
+	}
+	if input.RequestedAction != "view" && input.RequestedAction != "download" {
+		return nil, apperror.New("invalid_request", "requested_action must be view or download", 400, false)
+	}
+	var sourceID, sourceType, status string
+	var required bool
+	if err := s.pool.QueryRow(ctx, `SELECT source_private_resource_id::text,source_resource_type,status,content_access_required FROM knowledge.private_share_references WHERE id=$1`, input.ShareReferenceID).Scan(&sourceID, &sourceType, &status, &required); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, apperror.New("resource_not_found", "share reference not found", 404, false)
+		}
+		return nil, dbError(err)
+	}
+	if status != "ready" || sourceID != input.ResourceID || sourceType != input.ResourceType {
+		return nil, apperror.New("resource_mismatch", "share reference does not match resource", 409, false)
+	}
+	if !required {
+		return nil, apperror.New("approval_not_required", "resource does not require approval", 400, false)
+	}
+	var out domain.PrivateAccessRequest
+	err := s.pool.QueryRow(ctx, `INSERT INTO knowledge.private_access_requests (id,requester_user_id,share_reference_id,resource_id,resource_type,requested_action,reason,status) VALUES ($1,$2,$3,$4,$5,$6,$7,'pending') ON CONFLICT (requester_user_id,share_reference_id,resource_id,requested_action) WHERE status='pending' DO UPDATE SET reason=EXCLUDED.reason RETURNING id::text,requester_user_id::text,share_reference_id::text,resource_id::text,resource_type,requested_action,COALESCE(reason,''),status,COALESCE(reviewed_by_user_id::text,''),COALESCE(review_note,''),created_at,reviewed_at`, uuid.NewString(), input.RequesterUserID, input.ShareReferenceID, input.ResourceID, input.ResourceType, input.RequestedAction, nilString(input.Reason)).Scan(&out.ID, &out.RequesterUserID, &out.ShareReferenceID, &out.ResourceID, &out.ResourceType, &out.RequestedAction, &out.Reason, &out.Status, &out.ReviewedByUserID, &out.ReviewNote, &out.CreatedAt, &out.ReviewedAt)
+	return &out, dbError(err)
+}
+
+func (s *PostgresStore) ReviewPrivateAccessRequest(ctx context.Context, requestID, reviewerUserID, status, note string, now time.Time) (*domain.PrivateAccessRequest, error) {
+	if status != "approved" && status != "rejected" {
+		return nil, apperror.New("invalid_request", "review status must be approved or rejected", 400, false)
+	}
+	var owner string
+	if err := s.pool.QueryRow(ctx, `SELECT ci.owner_user_id::text FROM knowledge.private_access_requests r JOIN knowledge.messages m ON r.resource_type='message' AND m.id=r.resource_id JOIN knowledge.conversation_ingestions ci ON ci.id=m.conversation_ingestion_id WHERE r.id=$1 UNION ALL SELECT ci.owner_user_id::text FROM knowledge.private_access_requests r JOIN knowledge.attachments a ON r.resource_type='attachment' AND a.id=r.resource_id JOIN knowledge.conversation_ingestions ci ON ci.id=a.conversation_ingestion_id WHERE r.id=$1`, requestID).Scan(&owner); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, apperror.New("request_not_found", "access request not found", 404, false)
+		}
+		return nil, dbError(err)
+	}
+	if owner != reviewerUserID {
+		return nil, apperror.Clone(apperror.ErrForbidden)
+	}
+	var out domain.PrivateAccessRequest
+	err := s.pool.QueryRow(ctx, `UPDATE knowledge.private_access_requests SET status=$2,reviewed_by_user_id=$3,review_note=$4,reviewed_at=$5 WHERE id=$1 AND status='pending' RETURNING id::text,requester_user_id::text,share_reference_id::text,resource_id::text,resource_type,requested_action,COALESCE(reason,''),status,COALESCE(reviewed_by_user_id::text,''),COALESCE(review_note,''),created_at,reviewed_at`, requestID, status, reviewerUserID, nilString(note), now).Scan(&out.ID, &out.RequesterUserID, &out.ShareReferenceID, &out.ResourceID, &out.ResourceType, &out.RequestedAction, &out.Reason, &out.Status, &out.ReviewedByUserID, &out.ReviewNote, &out.CreatedAt, &out.ReviewedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, apperror.New("request_not_found", "access request is not pending", 404, false)
+	}
+	return &out, dbError(err)
+}
+
 type knowledgeItemSource struct {
 	ConversationID         string
 	ExternalConversationID string
@@ -1296,7 +1532,7 @@ func knowledgeItemOwnership(source knowledgeItemSource) (scope, access, sourceTy
 
 func ensureMessageKnowledgeItem(ctx context.Context, tx pgx.Tx, source knowledgeItemSource, messageID string, input IngestMessageInput, traceID string) (string, error) {
 	var existing string
-	err := tx.QueryRow(ctx, `SELECT id::text FROM knowledge.knowledge_items WHERE source_message_id=$1 AND source_attachment_id IS NULL`, messageID).Scan(&existing)
+	err := tx.QueryRow(ctx, `SELECT id::text FROM knowledge.knowledge_items WHERE source_message_id=$1 AND source_attachment_id IS NULL AND source_type<>'shared_private_item'`, messageID).Scan(&existing)
 	if err == nil {
 		return existing, nil
 	}
@@ -1326,7 +1562,7 @@ func ensureMessageKnowledgeItem(ctx context.Context, tx pgx.Tx, source knowledge
 		ON CONFLICT DO NOTHING RETURNING id::text`, itemID, nilString(source.KnowledgeBaseID), scope, access, owner, organization, source.ConversationID, sourceType, messageID, "message:"+messageID+":display", "message:"+messageID+":original", input.ContentHash, visibility, sensitive, securityStatus, sensitivity, classified).Scan(&itemID)
 	inserted := err == nil
 	if errors.Is(err, pgx.ErrNoRows) {
-		err = tx.QueryRow(ctx, `SELECT id::text FROM knowledge.knowledge_items WHERE source_message_id=$1 AND source_attachment_id IS NULL`, messageID).Scan(&itemID)
+		err = tx.QueryRow(ctx, `SELECT id::text FROM knowledge.knowledge_items WHERE source_message_id=$1 AND source_attachment_id IS NULL AND source_type<>'shared_private_item'`, messageID).Scan(&itemID)
 	}
 	if err != nil {
 		return "", dbError(err)
@@ -1342,7 +1578,7 @@ func ensureMessageKnowledgeItem(ctx context.Context, tx pgx.Tx, source knowledge
 
 func ensureAttachmentKnowledgeItem(ctx context.Context, tx pgx.Tx, source knowledgeItemSource, messageID string, attachment domain.Attachment, traceID string) (string, error) {
 	var existing string
-	err := tx.QueryRow(ctx, `SELECT id::text FROM knowledge.knowledge_items WHERE source_attachment_id=$1`, attachment.ID).Scan(&existing)
+	err := tx.QueryRow(ctx, `SELECT id::text FROM knowledge.knowledge_items WHERE source_attachment_id=$1 AND source_type<>'shared_private_item'`, attachment.ID).Scan(&existing)
 	if err == nil {
 		return existing, nil
 	}
@@ -1377,7 +1613,7 @@ func ensureAttachmentKnowledgeItem(ctx context.Context, tx pgx.Tx, source knowle
 		ON CONFLICT DO NOTHING RETURNING id::text`, itemID, nilString(source.KnowledgeBaseID), scope, access, owner, organization, source.ConversationID, sourceType, messageID, attachment.ID, contentType, contentRef, contentHash, attachment.ContentVersion, visibility, attachment.Sensitive, securityStatus, sensitivity, attachment.ContentStatus == "ready").Scan(&itemID)
 	inserted := err == nil
 	if errors.Is(err, pgx.ErrNoRows) {
-		err = tx.QueryRow(ctx, `SELECT id::text FROM knowledge.knowledge_items WHERE source_attachment_id=$1`, attachment.ID).Scan(&itemID)
+		err = tx.QueryRow(ctx, `SELECT id::text FROM knowledge.knowledge_items WHERE source_attachment_id=$1 AND source_type<>'shared_private_item'`, attachment.ID).Scan(&itemID)
 	}
 	if err != nil {
 		return "", dbError(err)
@@ -1731,11 +1967,11 @@ func (s *PostgresStore) ListContactMemberships(ctx context.Context, userID strin
 	return out, dbError(rows.Err())
 }
 
-const knowledgeItemColumns = `ki.id::text,COALESCE(ki.knowledge_base_id::text,''),ki.knowledge_scope,ki.access_scope,COALESCE(ki.owner_user_id::text,''),COALESCE(ki.organization_id::text,''),COALESCE(ki.conversation_ingestion_id::text,''),COALESCE(ci.external_conversation_id,''),ki.source_type,COALESCE(ki.source_message_id::text,''),COALESCE(ki.source_attachment_id::text,''),ki.content_type,ki.content_ref,COALESCE(ki.original_content_ref,''),ki.content_hash,ki.content_version,ki.content_visibility,ki.original_access_required,ki.security_status,COALESCE(ki.sensitivity,''),ki.content_saved,ki.ownership_ready,ki.security_ready,ki.permission_ready,ki.acl_version,ki.acl_sync_status,ki.processing_status,ki.lifecycle_status,ki.original_access_required,COALESCE(ki.last_error,''),ki.created_at,ki.updated_at`
+const knowledgeItemColumns = `ki.id::text,COALESCE(ki.knowledge_base_id::text,''),ki.knowledge_scope,ki.access_scope,COALESCE(ki.owner_user_id::text,''),COALESCE(ki.organization_id::text,''),COALESCE(ki.conversation_ingestion_id::text,''),COALESCE(ci.external_conversation_id,''),ki.source_type,COALESCE(ki.source_message_id::text,''),COALESCE(ki.source_attachment_id::text,''),COALESCE(ki.source_private_item_id::text,''),COALESCE(ki.share_request_id,''),COALESCE(ki.share_batch_id::text,''),COALESCE(ki.shared_by_user_id::text,''),ki.shared_at,ki.content_type,ki.content_ref,COALESCE(ki.original_content_ref,''),ki.content_hash,ki.content_version,ki.content_visibility,ki.original_access_required,ki.security_status,COALESCE(ki.sensitivity,''),ki.content_saved,ki.ownership_ready,ki.security_ready,ki.permission_ready,ki.acl_version,ki.acl_sync_status,ki.processing_status,ki.lifecycle_status,ki.original_access_required,COALESCE(ki.last_error,''),ki.created_at,ki.updated_at`
 
 func scanKnowledgeItem(row rowScanner) (*domain.KnowledgeItem, error) {
 	var item domain.KnowledgeItem
-	err := row.Scan(&item.ID, &item.KnowledgeBaseID, &item.KnowledgeScope, &item.AccessScope, &item.OwnerUserID, &item.OrganizationID, &item.ConversationID, &item.ExternalConversationID, &item.SourceType, &item.SourceMessageID, &item.SourceAttachmentID, &item.ContentType, &item.ContentRef, &item.OriginalContentRef, &item.ContentHash, &item.ContentVersion, &item.ContentVisibility, &item.OriginalAccessRequired, &item.SecurityStatus, &item.Sensitivity, &item.ContentSaved, &item.OwnershipReady, &item.SecurityReady, &item.PermissionReady, &item.ACLVersion, &item.ACLSyncStatus, &item.ProcessingStatus, &item.LifecycleStatus, &item.ContentAccessRequired, &item.LastError, &item.CreatedAt, &item.UpdatedAt)
+	err := row.Scan(&item.ID, &item.KnowledgeBaseID, &item.KnowledgeScope, &item.AccessScope, &item.OwnerUserID, &item.OrganizationID, &item.ConversationID, &item.ExternalConversationID, &item.SourceType, &item.SourceMessageID, &item.SourceAttachmentID, &item.SourcePrivateItemID, &item.ShareRequestID, &item.ShareBatchID, &item.SharedByUserID, &item.SharedAt, &item.ContentType, &item.ContentRef, &item.OriginalContentRef, &item.ContentHash, &item.ContentVersion, &item.ContentVisibility, &item.OriginalAccessRequired, &item.SecurityStatus, &item.Sensitivity, &item.ContentSaved, &item.OwnershipReady, &item.SecurityReady, &item.PermissionReady, &item.ACLVersion, &item.ACLSyncStatus, &item.ProcessingStatus, &item.LifecycleStatus, &item.ContentAccessRequired, &item.LastError, &item.CreatedAt, &item.UpdatedAt)
 	return &item, err
 }
 
@@ -1760,7 +1996,7 @@ func (s *PostgresStore) ListPendingKnowledgePermissions(ctx context.Context, lim
 }
 
 func (s *PostgresStore) ListKnowledgePermissionSubjects(ctx context.Context, id string) ([]string, error) {
-	rows, err := s.pool.Query(ctx, `SELECT DISTINCT ei.mapped_user_id::text FROM knowledge.knowledge_items ki JOIN knowledge.conversation_memberships cm ON cm.conversation_ingestion_id=ki.conversation_ingestion_id AND cm.status='active' JOIN knowledge.external_identities ei ON ei.id=cm.external_identity_id AND ei.mapping_status='mapped' AND ei.mapped_user_id IS NOT NULL WHERE ki.id=$1 ORDER BY ei.mapped_user_id::text`, id)
+	rows, err := s.pool.Query(ctx, `SELECT DISTINCT subject FROM (SELECT ei.mapped_user_id::text AS subject FROM knowledge.knowledge_items ki JOIN knowledge.conversation_memberships cm ON cm.conversation_ingestion_id=ki.conversation_ingestion_id AND cm.status='active' JOIN knowledge.external_identities ei ON ei.id=cm.external_identity_id AND ei.mapping_status='mapped' AND ei.mapped_user_id IS NOT NULL WHERE ki.id=$1 UNION ALL SELECT ci.owner_user_id::text FROM knowledge.knowledge_items ki JOIN knowledge.conversation_ingestions ci ON ci.id=ki.conversation_ingestion_id WHERE ki.id=$1 AND ci.owner_user_id IS NOT NULL UNION ALL SELECT shared_by_user_id::text FROM knowledge.knowledge_items WHERE id=$1 AND shared_by_user_id IS NOT NULL) subjects ORDER BY subject`, id)
 	if err != nil {
 		return nil, dbError(err)
 	}
@@ -1842,6 +2078,10 @@ func (s *PostgresStore) TryMarkKnowledgeReady(ctx context.Context, id, traceID s
 	if !item.ContentSaved || !item.OwnershipReady || !item.SecurityReady || !item.PermissionReady || item.ACLSyncStatus != "synced" {
 		return false, nil
 	}
+	resourceType := "message"
+	if item.SourceAttachmentID != "" {
+		resourceType = "attachment"
+	}
 	payload, _ := json.Marshal(map[string]any{
 		"resource_type": "knowledge_item", "resource_id": item.ID, "knowledge_item_id": item.ID,
 		"source_message_id": item.SourceMessageID, "source_attachment_id": item.SourceAttachmentID, "attachment_id": item.SourceAttachmentID,
@@ -1891,7 +2131,7 @@ func (s *PostgresStore) GetKnowledgeItem(ctx context.Context, id string) (*domai
 
 func (s *PostgresStore) GetKnowledgeItemByMessage(ctx context.Context, messageID string) (*domain.KnowledgeItem, error) {
 	var id string
-	err := s.pool.QueryRow(ctx, `SELECT id::text FROM knowledge.knowledge_items WHERE source_message_id=$1 AND source_attachment_id IS NULL`, messageID).Scan(&id)
+	err := s.pool.QueryRow(ctx, `SELECT id::text FROM knowledge.knowledge_items WHERE source_message_id=$1 AND source_attachment_id IS NULL AND source_type<>'shared_private_item'`, messageID).Scan(&id)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, apperror.New("knowledge_not_found", "knowledge item not found", 404, false)
 	}
@@ -1903,7 +2143,7 @@ func (s *PostgresStore) GetKnowledgeItemByMessage(ctx context.Context, messageID
 
 func (s *PostgresStore) GetKnowledgeItemByAttachment(ctx context.Context, attachmentID string) (*domain.KnowledgeItem, error) {
 	var id string
-	err := s.pool.QueryRow(ctx, `SELECT id::text FROM knowledge.knowledge_items WHERE source_attachment_id=$1`, attachmentID).Scan(&id)
+	err := s.pool.QueryRow(ctx, `SELECT id::text FROM knowledge.knowledge_items WHERE source_attachment_id=$1 ORDER BY CASE WHEN source_type='shared_private_item' THEN 0 ELSE 1 END LIMIT 1`, attachmentID).Scan(&id)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, apperror.New("knowledge_not_found", "knowledge item not found", 404, false)
 	}

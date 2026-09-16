@@ -94,6 +94,8 @@ func registerRAGSourceRoutes(r *gin.Engine, app *App) {
 			"organization_id": item.OrganizationID, "conversation_ingestion_id": item.ConversationID,
 			"external_conversation_id": item.ExternalConversationID,
 			"source_message_id":        item.SourceMessageID, "source_attachment_id": item.SourceAttachmentID,
+			"source_private_item_id": item.SourcePrivateItemID, "share_request_id": item.ShareRequestID,
+			"share_batch_id": item.ShareBatchID, "shared_by_user_id": item.SharedByUserID,
 			"content_type": item.ContentType, "content_hash": item.ContentHash,
 			"content_version": item.ContentVersion, "acl_version": item.ACLVersion,
 			"content_variant": "display", "content_access_required": item.ContentAccessRequired,
@@ -651,6 +653,80 @@ func registerUserRoutes(r *gin.Engine, app *App, prefix string) {
 		}
 		c.JSON(http.StatusCreated, publicConversationFromDomain(*out))
 	})
+	shareHandler := func(c *gin.Context) {
+		p := principal(c)
+		var body struct {
+			RequestID             string   `json:"request_id"`
+			TraceID               string   `json:"trace_id"`
+			PrivateConversationID string   `json:"private_conversation_id"`
+			MessageIDs            []string `json:"message_ids"`
+			AttachmentIDs         []string `json:"attachment_ids"`
+		}
+		if err := c.ShouldBindJSON(&body); err != nil {
+			writeError(c, apperror.New("invalid_request", "invalid private share request", 400, false))
+			return
+		}
+		if strings.TrimSpace(body.RequestID) == "" || strings.TrimSpace(body.PrivateConversationID) == "" || (len(body.MessageIDs) == 0 && len(body.AttachmentIDs) == 0) {
+			writeError(c, apperror.New("invalid_request", "request_id, conversation and selected resources are required", 400, false))
+			return
+		}
+		out, err := app.Service.SharePrivateResources(c, p.UserID, repository.PrivateShareInput{RequestID: body.RequestID, TraceID: body.TraceID, PrivateConversationID: body.PrivateConversationID, MessageIDs: body.MessageIDs, AttachmentIDs: body.AttachmentIDs})
+		if err != nil {
+			writeError(c, err)
+			return
+		}
+		c.JSON(http.StatusOK, out)
+	}
+	g.POST("/private-share-requests", shareHandler)
+	g.POST("/private/shares", shareHandler)
+	g.POST("/private-share-requests/:id/approve", func(c *gin.Context) {
+		p := principal(c)
+		var body struct {
+			Note string `json:"note"`
+		}
+		if err := c.ShouldBindJSON(&body); err != nil && err != io.EOF {
+			writeError(c, apperror.New("invalid_request", "invalid approval request", 400, false))
+			return
+		}
+		out, err := app.Service.ReviewPrivateAccessRequest(c, p.UserID, c.Param("id"), "approved", body.Note)
+		if err != nil {
+			writeError(c, err)
+			return
+		}
+		c.JSON(http.StatusOK, out)
+	})
+	g.POST("/private-share-requests/:id/reject", func(c *gin.Context) {
+		p := principal(c)
+		var body struct {
+			Note string `json:"note"`
+		}
+		if err := c.ShouldBindJSON(&body); err != nil && err != io.EOF {
+			writeError(c, apperror.New("invalid_request", "invalid rejection request", 400, false))
+			return
+		}
+		out, err := app.Service.ReviewPrivateAccessRequest(c, p.UserID, c.Param("id"), "rejected", body.Note)
+		if err != nil {
+			writeError(c, err)
+			return
+		}
+		c.JSON(http.StatusOK, out)
+	})
+	accessHandler := func(c *gin.Context) {
+		p := principal(c)
+		var body repository.PrivateAccessRequestInput
+		if err := c.ShouldBindJSON(&body); err != nil {
+			writeError(c, apperror.New("invalid_request", "invalid private access request", 400, false))
+			return
+		}
+		out, err := app.Service.CreatePrivateAccessRequest(c, p.UserID, body)
+		if err != nil {
+			writeError(c, err)
+			return
+		}
+		c.JSON(http.StatusCreated, out)
+	}
+	g.POST("/private-access-requests", accessHandler)
+	g.POST("/private-share-requests/access", accessHandler)
 	g.GET("/conversations/:conversation_id", func(c *gin.Context) {
 		p := principal(c)
 		out, err := app.Service.GetConversation(c, p.UserID, c.Param("conversation_id"))

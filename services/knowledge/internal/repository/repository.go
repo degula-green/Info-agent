@@ -381,6 +381,39 @@ type IngestResult struct {
 	Discarded     bool                   `json:"discarded"`
 }
 
+type PrivateShareInput struct {
+	RequesterUserID       string
+	RequestID             string
+	TraceID               string
+	PrivateConversationID string
+	OrganizationID        string
+	MessageIDs            []string
+	AttachmentIDs         []string
+	Now                   time.Time
+}
+
+type PrivateShareResult struct {
+	RequestID             string `json:"request_id"`
+	ShareBatchID          string `json:"share_batch_id"`
+	PrivateConversationID string `json:"private_conversation_id"`
+	OrganizationID        string `json:"organization_id"`
+	Status                string `json:"status"`
+	SharedMessageCount    int    `json:"shared_message_count"`
+	SharedAttachmentCount int    `json:"shared_attachment_count"`
+	ShareAlreadyExists    bool   `json:"share_already_exists,omitempty"`
+}
+
+type PrivateAccessRequestInput struct {
+	RequesterUserID  string    `json:"-"`
+	ShareReferenceID string    `json:"share_reference_id"`
+	ResourceID       string    `json:"resource_id"`
+	ResourceType     string    `json:"resource_type"`
+	RequestedAction  string    `json:"requested_action"`
+	Reason           string    `json:"reason,omitempty"`
+	TraceID          string    `json:"trace_id,omitempty"`
+	Now              time.Time `json:"-"`
+}
+
 type AgentPairingInput struct {
 	PairingID       string
 	CodeHash        string
@@ -463,6 +496,9 @@ type Repository interface {
 	IngestMessage(ctx context.Context, input IngestMessageInput) (*IngestResult, error)
 	ListPendingMessages(ctx context.Context, limit int) ([]PendingMessage, error)
 	CompleteMessageClassification(ctx context.Context, messageID, displayContent string, sensitive bool) error
+	SharePrivateResources(ctx context.Context, input PrivateShareInput) (*PrivateShareResult, error)
+	CreatePrivateAccessRequest(ctx context.Context, input PrivateAccessRequestInput) (*domain.PrivateAccessRequest, error)
+	ReviewPrivateAccessRequest(ctx context.Context, requestID, reviewerUserID, status, note string, now time.Time) (*domain.PrivateAccessRequest, error)
 	ListPendingKnowledgePermissions(ctx context.Context, limit int) ([]domain.KnowledgeItem, error)
 	ListKnowledgePermissionSubjects(ctx context.Context, knowledgeItemID string) ([]string, error)
 	MarkKnowledgePermissionSynced(ctx context.Context, knowledgeItemID string, aclVersion int64) error
