@@ -515,10 +515,10 @@ func parseFeishuMessage(apiURL, messageID, messageType, raw string) (string, []A
 	attachments := []Attachment{}
 	var payload map[string]any
 	if json.Unmarshal([]byte(raw), &payload) == nil {
-		hasText := false
-		if textValue, ok := payload["text"].(string); ok && strings.TrimSpace(textValue) != "" {
-			content = textValue
-			hasText = true
+		extractedText := extractFeishuText(payload, messageType)
+		hasText := strings.TrimSpace(extractedText) != ""
+		if hasText {
+			content = extractedText
 		}
 		key := firstString(payload, "file_key", "file_token", "image_key", "image_token")
 		if key != "" {
@@ -565,6 +565,50 @@ func parseFeishuMessage(apiURL, messageID, messageType, raw string) (string, []A
 		return content, attachments
 	}
 	return content, nil
+}
+
+// extractFeishuText converts text/post/rich_text bodies to plain user text.
+// Feishu post payloads are commonly nested under a locale key and contain
+// arrays of tagged text nodes; walking only known text-bearing keys prevents
+// file/image metadata (file_key, file_name, etc.) from leaking into content.
+func extractFeishuText(payload map[string]any, messageType string) string {
+	var parts []string
+	var walk func(any, string)
+	walk = func(value any, key string) {
+		switch current := value.(type) {
+		case string:
+			if (key == "text" || key == "title" || key == "content") && strings.TrimSpace(current) != "" {
+				parts = append(parts, strings.TrimSpace(current))
+			}
+		case []any:
+			for _, item := range current {
+				walk(item, key)
+			}
+		case map[string]any:
+			if text, ok := current["text"].(string); ok && strings.TrimSpace(text) != "" {
+				parts = append(parts, strings.TrimSpace(text))
+			}
+			if strings.EqualFold(messageType, "post") || strings.EqualFold(messageType, "rich_text") || strings.EqualFold(messageType, "text") {
+				if title, ok := current["title"].(string); ok && strings.TrimSpace(title) != "" {
+					parts = append(parts, strings.TrimSpace(title))
+				}
+			}
+			if nested, ok := current["content"]; ok {
+				walk(nested, "content")
+			}
+			for locale, nested := range current {
+				if locale == "text" || locale == "title" || locale == "content" || locale == "tag" {
+					continue
+				}
+				walk(nested, locale)
+			}
+		}
+	}
+	walk(payload, "")
+	if len(parts) == 0 {
+		return ""
+	}
+	return strings.Join(parts, "\n")
 }
 
 func hasProviderMetadata(payload map[string]any) bool {

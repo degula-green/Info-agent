@@ -145,6 +145,14 @@ func TestParseFeishuMessageKeepsAttachmentSeparateFromMessageText(t *testing.T) 
 	}
 }
 
+func TestParseFeishuPostExtractsNestedText(t *testing.T) {
+	raw := `{"zh_cn":{"title":"周会纪要","content":[[{"tag":"text","text":"本周完成消息采集。"}],[{"tag":"a","text":"查看详情"}]]}}`
+	content, attachments := parseFeishuMessage("https://open.feishu.cn", "m-post", "text", raw)
+	if len(attachments) != 0 || content != "周会纪要\n本周完成消息采集。\n查看详情" {
+		t.Fatalf("nested post content was not normalized: content=%q attachments=%+v", content, attachments)
+	}
+}
+
 func TestParseFeishuMessageDropsForwardingSystemLabel(t *testing.T) {
 	content, attachments := parseFeishuMessage("https://open.feishu.cn", "m-forward", "text", `Merged and Forwarded Message`)
 	if content != "" || len(attachments) != 0 {
