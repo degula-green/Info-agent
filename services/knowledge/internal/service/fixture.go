@@ -28,9 +28,8 @@ type FixtureReplayInput struct {
 	FailureCode    string           `json:"failure_code,omitempty"`
 }
 
-// FixturePage models one provider page. Cursor commits happen after the page
-// has fully passed ingestion and attachment storage, matching the worker's
-// checkpoint boundary.
+// FixturePage models one provider page. For private WeChat collection, cursor
+// commits also wait for privacy, permission, ready-gate and Outbox delivery.
 type FixturePage struct {
 	Cursor   string           `json:"cursor"`
 	Messages []FixtureMessage `json:"messages"`
@@ -70,8 +69,8 @@ type FixtureReplayResult struct {
 
 // ReplayFixture feeds deterministic provider-shaped data through the same
 // ingestion and attachment transaction boundaries used by real collectors.
-// It intentionally does not publish or call RAG; fixture verification stops at
-// Knowledge persistence and the public conversation read APIs.
+// It does not call RAG; private WeChat replay does publish the same ready event
+// required before the collector checkpoint can advance.
 func (s *Service) ReplayFixture(ctx context.Context, input FixtureReplayInput) (FixtureReplayResult, error) {
 	conversation, err := s.Repo.GetConversation(ctx, strings.TrimSpace(input.ConversationID))
 	if err != nil {
@@ -184,6 +183,17 @@ func (s *Service) ReplayFixture(ctx context.Context, input FixtureReplayInput) (
 			cursor = strings.TrimSpace(page.Messages[len(page.Messages)-1].Cursor)
 		}
 		if cursor != "" {
+			if conversation.Platform == domain.PlatformWechat && conversation.IngestionScope == "private" {
+				if err := s.ProcessPrivacy(ctx); err != nil {
+					return result, apperror.Wrap("fixture_privacy_failed", "fixture privacy processing failed", 503, true, err)
+				}
+				if err := s.ProcessPermissions(ctx); err != nil {
+					return result, apperror.Wrap("fixture_permission_failed", "fixture permission processing failed", 503, true, err)
+				}
+				if err := s.PublishOutbox(ctx); err != nil {
+					return result, apperror.Wrap("fixture_publish_failed", "fixture ready event publishing failed", 503, true, err)
+				}
+			}
 			if err := s.Repo.RecordCursorReceipt(ctx, collector.ID, cursor, s.Now().UTC()); err != nil {
 				return result, apperror.Wrap("cursor_commit_failed", "cannot record fixture cursor receipt", 503, true, err)
 			}
@@ -194,8 +204,10 @@ func (s *Service) ReplayFixture(ctx context.Context, input FixtureReplayInput) (
 		}
 		result.PagesCompleted++
 	}
-	if err := s.ProcessPrivacy(ctx); err != nil {
-		return result, apperror.Wrap("fixture_privacy_failed", "fixture privacy processing failed", 503, true, err)
+	if conversation.Platform != domain.PlatformWechat || conversation.IngestionScope != "private" {
+		if err := s.ProcessPrivacy(ctx); err != nil {
+			return result, apperror.Wrap("fixture_privacy_failed", "fixture privacy processing failed", 503, true, err)
+		}
 	}
 	return result, nil
 }

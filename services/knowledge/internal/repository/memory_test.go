@@ -14,6 +14,75 @@ import (
 	"info-agent/knowledge/internal/trace"
 )
 
+func completeMemoryPrivateReady(t *testing.T, repo *MemoryStore, ctx context.Context, messageID string, attachmentIDs ...string) {
+	t.Helper()
+	pending, err := repo.ListPendingMessages(ctx, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, candidate := range pending {
+		if candidate.Message.ID == messageID {
+			if err := repo.CompleteMessageClassification(ctx, messageID, candidate.OriginalContent, false); err != nil {
+				t.Fatal(err)
+			}
+			break
+		}
+	}
+	for _, attachmentID := range attachmentIDs {
+		attachment, err := repo.GetAttachment(ctx, attachmentID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := repo.CompleteAttachment(ctx, attachmentID, "object:"+attachmentID, attachment.ContentHash, attachment.SizeBytes, "ready"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	item, err := repo.GetKnowledgeItemByMessage(ctx, messageID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.MarkKnowledgePermissionSynced(ctx, item.ID, 1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repo.TryMarkKnowledgeReady(ctx, item.ID, "test-ready"); err != nil {
+		t.Fatal(err)
+	}
+	readyEvents, err := repo.GetOutbox(ctx, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range readyEvents {
+		if event.EventType == "knowledge.ready" && event.Payload["knowledge_item_id"] == item.ID {
+			if err := repo.MarkOutboxPublished(ctx, event.ID, time.Now().UTC()); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	for _, attachmentID := range attachmentIDs {
+		attachmentItem, err := repo.GetKnowledgeItemByAttachment(ctx, attachmentID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := repo.MarkKnowledgePermissionSynced(ctx, attachmentItem.ID, 1); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := repo.TryMarkKnowledgeReady(ctx, attachmentItem.ID, "test-ready"); err != nil {
+			t.Fatal(err)
+		}
+		readyEvents, err := repo.GetOutbox(ctx, 100)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, event := range readyEvents {
+			if event.EventType == "knowledge.ready" && event.Payload["knowledge_item_id"] == attachmentItem.ID {
+				if err := repo.MarkOutboxPublished(ctx, event.ID, time.Now().UTC()); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+	}
+}
+
 func TestIngestMessageInputUsesSnakeCaseProtocolFields(t *testing.T) {
 	var input IngestMessageInput
 	if err := json.Unmarshal([]byte(`{"collector_id":"collector-1","external_conversation_id":"chat-1","external_message_id":"message-1","payload_hash":"payload-hash","sender_external_id":"sender-1","sender_display_name":"Sender","message_type":"text","content":"hello","content_hash":"content-hash","sent_at":"2026-09-05T00:00:00Z","cursor":"3","attachments":[{"external_attachment_id":"attachment-1","file_name":"note.txt","mime_type":"text/plain","size_bytes":12,"content_hash":"attachment-hash"}]}`), &input); err != nil {
@@ -192,13 +261,16 @@ func TestMemoryMessageAttachmentIdempotenceAndCursorMonotonicity(t *testing.T) {
 	if _, err := repo.CompleteAttachment(ctx, first.Attachments[0].ID, "object", attachmentHash, 10, "ready"); err != nil {
 		t.Fatal(err)
 	}
+	completeMemoryPrivateReady(t, repo, ctx, first.Message.ID, first.Attachments[0].ID)
 	input.ExternalMessageID = "m2"
 	input.Cursor = "90"
 	input.Attachments = nil
 	input.PayloadHash, _ = CalculatePayloadHash(input)
-	if _, err := repo.IngestMessage(ctx, input); err != nil {
+	secondMessage, err := repo.IngestMessage(ctx, input)
+	if err != nil {
 		t.Fatal(err)
 	}
+	completeMemoryPrivateReady(t, repo, ctx, secondMessage.Message.ID)
 	current, err := repo.GetCollector(ctx, collector.ID)
 	if err != nil {
 		t.Fatal(err)
@@ -252,6 +324,7 @@ func TestMemoryPrivateShareCreatesReferencesAndUsesReadyGate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	completeMemoryPrivateReady(t, repo, ctx, ingested.Message.ID)
 	shared, err := repo.SharePrivateResources(ctx, PrivateShareInput{RequesterUserID: "owner", RequestID: "share-1", TraceID: "share-trace", PrivateConversationID: conversation.ID, OrganizationID: "organization", MessageIDs: []string{ingested.Message.ID}, Now: now})
 	if err != nil || shared.SharedMessageCount != 1 {
 		t.Fatalf("share failed: result=%+v err=%v", shared, err)
@@ -263,7 +336,7 @@ func TestMemoryPrivateShareCreatesReferencesAndUsesReadyGate(t *testing.T) {
 			break
 		}
 	}
-	if sharedItem.ID == "" || sharedItem.SourcePrivateItemID == "" || sharedItem.PermissionReady || sharedItem.ProcessingStatus != "pending" || !sharedItem.ContentAccessRequired {
+	if sharedItem.ID == "" || sharedItem.SourcePrivateItemID == "" || sharedItem.PermissionReady || sharedItem.ProcessingStatus != "ready" || !sharedItem.ContentAccessRequired {
 		t.Fatalf("shared knowledge item did not enter the permission gate: %+v", sharedItem)
 	}
 	if _, err := repo.SaveConnector(ctx, domain.ConnectorAccount{ID: "private-account-peer", OwnerUserID: "peer-owner", Platform: domain.PlatformWechat, ExternalAccountID: "peer-owner-wxid", Status: domain.ConnectorActive}); err != nil {
@@ -283,6 +356,7 @@ func TestMemoryPrivateShareCreatesReferencesAndUsesReadyGate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	completeMemoryPrivateReady(t, repo, ctx, peerMessage.Message.ID)
 	if _, err := repo.SharePrivateResources(ctx, PrivateShareInput{RequesterUserID: "peer-owner", RequestID: "peer-share-1", PrivateConversationID: peerConversation.ID, OrganizationID: "organization", MessageIDs: []string{peerMessage.Message.ID}, Now: now}); apperror.From(err).Code != "private_conversation_already_shared" {
 		t.Fatalf("expected duplicate private conversation share to be rejected, got %v", err)
 	}
@@ -292,6 +366,7 @@ func TestMemoryPrivateShareCreatesReferencesAndUsesReadyGate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	completeMemoryPrivateReady(t, repo, ctx, appended.Message.ID)
 	if _, err := repo.SharePrivateResources(ctx, PrivateShareInput{RequesterUserID: "owner", RequestID: "share-2", PrivateConversationID: conversation.ID, OrganizationID: "organization", MessageIDs: []string{appended.Message.ID}, Now: now}); err != nil {
 		t.Fatalf("original sharer could not append to the shared conversation: %v", err)
 	}
@@ -304,24 +379,60 @@ func TestMemoryPrivateShareCreatesReferencesAndUsesReadyGate(t *testing.T) {
 	if sharedCount != 2 {
 		t.Fatalf("expected two references in one shared entry, got %d", sharedCount)
 	}
+	var shareReferenceID string
+	for _, ref := range repo.shareRefs {
+		if ref.SourcePrivateResourceID == ingested.Message.ID {
+			shareReferenceID = ref.ID
+			break
+		}
+	}
+	accessRequest, err := repo.CreatePrivateAccessRequest(ctx, PrivateAccessRequestInput{
+		RequesterUserID: "approved-user", ShareReferenceID: shareReferenceID,
+		ResourceID: ingested.Message.ID, ResourceType: "message", RequestedAction: "view", Now: now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repo.ReviewPrivateAccessRequest(ctx, accessRequest.ID, "owner", "approved", "approved", now); err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range repo.knowledgeItems {
+		if item.SourceType != "shared_private_item" || item.KnowledgeBaseID != sharedItem.KnowledgeBaseID {
+			continue
+		}
+		if item.PermissionReady || item.ACLSyncStatus != "pending" || item.ProcessingStatus != "ready" {
+			t.Fatalf("approval reopened or skipped the wrong gate: %+v", item)
+		}
+		subjects, err := repo.ListKnowledgePermissionSubjects(ctx, item.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		approved := false
+		for _, subject := range subjects {
+			if subject == "approved-user" {
+				approved = true
+				break
+			}
+		}
+		if !approved {
+			t.Fatalf("approved requester was not added to collection subjects: %v", subjects)
+		}
+	}
 	if err := repo.MarkKnowledgePermissionSynced(ctx, sharedItem.ID, 7); err != nil {
 		t.Fatal(err)
 	}
 	created, err := repo.TryMarkKnowledgeReady(ctx, sharedItem.ID, "ready-trace")
-	if err != nil || !created {
-		t.Fatalf("ready gate failed: created=%v err=%v", created, err)
+	if err != nil || created {
+		t.Fatalf("shared reference unexpectedly entered RAG ready gate: created=%v err=%v", created, err)
 	}
 	ready := 0
 	for _, event := range repo.outbox {
 		if event.EventType == "knowledge.ready" && event.Payload["knowledge_item_id"] == sharedItem.ID {
 			ready++
-			if event.Payload["acl_version"] != int64(7) || event.Payload["content_access_required"] != true {
-				t.Fatalf("invalid shared ready payload: %+v", event.Payload)
-			}
 		}
 	}
-	if ready != 1 {
-		t.Fatalf("expected one shared knowledge.ready event, got %d", ready)
+	if ready != 0 {
+		t.Fatalf("expected no shared knowledge.ready event because the source was already processed, got %d", ready)
 	}
 }
 

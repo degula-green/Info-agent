@@ -1513,6 +1513,21 @@ func (s *MemoryStore) SharePrivateResources(ctx context.Context, input PrivateSh
 		if m.ClassificationStatus != "succeeded" {
 			return nil, apperror.New("resource_not_ready", "selected message is not ready", 409, true)
 		}
+		ready := false
+		for _, item := range s.knowledgeItems {
+			if item.SourceType == "private_conversation" && item.SourceMessageID == id && item.SourceAttachmentID == "" && item.ContentSaved && item.SecurityReady && item.PermissionReady && item.ACLSyncStatus == "synced" && item.ProcessingStatus == "ready" {
+				for _, event := range s.outbox {
+					if event.EventType == "knowledge.ready" && event.Payload["knowledge_item_id"] == item.ID && event.PublishedAt != nil {
+						ready = true
+						break
+					}
+				}
+				break
+			}
+		}
+		if !ready {
+			return nil, apperror.New("resource_not_ready", "selected message is not ready", 409, true)
+		}
 	}
 	for _, id := range attachments {
 		a, found := s.attachmentByIDLocked(id)
@@ -1520,6 +1535,21 @@ func (s *MemoryStore) SharePrivateResources(ctx context.Context, input PrivateSh
 			return nil, apperror.New("resource_not_found", "selected attachment does not belong to the private conversation", 404, false)
 		}
 		if a.ContentStatus != "ready" || a.ClassificationStatus != "succeeded" {
+			return nil, apperror.New("resource_not_ready", "selected attachment is not ready", 409, true)
+		}
+		ready := false
+		for _, item := range s.knowledgeItems {
+			if item.SourceType == "private_conversation" && item.SourceAttachmentID == id && item.ContentSaved && item.SecurityReady && item.PermissionReady && item.ACLSyncStatus == "synced" && item.ProcessingStatus == "ready" {
+				for _, event := range s.outbox {
+					if event.EventType == "knowledge.ready" && event.Payload["knowledge_item_id"] == item.ID && event.PublishedAt != nil {
+						ready = true
+						break
+					}
+				}
+				break
+			}
+		}
+		if !ready {
 			return nil, apperror.New("resource_not_ready", "selected attachment is not ready", 409, true)
 		}
 	}
@@ -1578,7 +1608,9 @@ func (s *MemoryStore) addPrivateShareLocked(ctx context.Context, conversation do
 			shared.PermissionReady = false
 			shared.ACLSyncStatus = "pending"
 			shared.ACLVersion = 0
-			shared.ProcessingStatus = "pending"
+			// The shared item is a logical reference to the already processed
+			// private item; sharing must not enqueue a second RAG job.
+			shared.ProcessingStatus = "ready"
 			shared.ContentSaved = true
 			shared.OwnershipReady = true
 			shared.SecurityReady = true
@@ -1665,7 +1697,7 @@ func (s *MemoryStore) CreatePrivateAccessRequest(_ context.Context, input Privat
 	return &request, nil
 }
 
-func (s *MemoryStore) ReviewPrivateAccessRequest(_ context.Context, requestID, reviewerUserID, status, note string, now time.Time) (*domain.PrivateAccessRequest, error) {
+func (s *MemoryStore) ReviewPrivateAccessRequest(ctx context.Context, requestID, reviewerUserID, status, note string, now time.Time) (*domain.PrivateAccessRequest, error) {
 	if status != "approved" && status != "rejected" {
 		return nil, apperror.New("invalid_request", "review status must be approved or rejected", 400, false)
 	}
@@ -1704,6 +1736,43 @@ func (s *MemoryStore) ReviewPrivateAccessRequest(_ context.Context, requestID, r
 		request.ReviewNote = safeError(note)
 		request.ReviewedAt = &now
 		s.accessRequests[requestID] = request
+		if status == "approved" {
+			// Approval applies to the whole shared private-conversation entry,
+			// not only the resource used to submit the request. Re-run ACL sync
+			// for every existing reference without reopening the RAG gate.
+			baseID := ""
+			var sourceItemID string
+			for id, item := range s.knowledgeItems {
+				if item.SourceType != "private_conversation" {
+					continue
+				}
+				if (request.ResourceType == "message" && item.SourceMessageID == request.ResourceID && item.SourceAttachmentID == "") || (request.ResourceType == "attachment" && item.SourceAttachmentID == request.ResourceID) {
+					sourceItemID = id
+					break
+				}
+			}
+			if sourceItemID != "" {
+				for _, item := range s.knowledgeItems {
+					if item.SourceType == "shared_private_item" && item.SourcePrivateItemID == sourceItemID {
+						baseID = item.KnowledgeBaseID
+						break
+					}
+				}
+			}
+			if baseID != "" {
+				for id, item := range s.knowledgeItems {
+					if item.SourceType != "shared_private_item" || item.KnowledgeBaseID != baseID || item.LifecycleStatus != "active" {
+						continue
+					}
+					item.PermissionReady = false
+					item.ACLSyncStatus = "pending"
+					item.LastError = ""
+					item.UpdatedAt = now
+					s.knowledgeItems[id] = item
+					s.ensurePermissionEventLocked(ctx, item, now)
+				}
+			}
+		}
 	}
 	out := request
 	return &out, nil
@@ -1749,6 +1818,27 @@ func (s *MemoryStore) ListKnowledgePermissionSubjects(_ context.Context, id stri
 	}
 	if item.SharedByUserID != "" {
 		seen[item.SharedByUserID] = struct{}{}
+	}
+	if item.SourceType == "shared_private_item" && item.SourcePrivateItemID != "" {
+		for _, request := range s.accessRequests {
+			if request.Status != "approved" {
+				continue
+			}
+			for _, ref := range s.shareRefs {
+				if ref.ID != request.ShareReferenceID || ref.OrganizationID != item.OrganizationID {
+					continue
+				}
+				for _, shared := range s.knowledgeItems {
+					if shared.SourceType != "shared_private_item" || shared.KnowledgeBaseID != item.KnowledgeBaseID {
+						continue
+					}
+					source, ok := s.knowledgeItems[shared.SourcePrivateItemID]
+					if ok && ((ref.SourceResourceType == "message" && ref.SourcePrivateResourceID == source.SourceMessageID) || (ref.SourceResourceType == "attachment" && ref.SourcePrivateResourceID == source.SourceAttachmentID)) {
+						seen[request.RequesterUserID] = struct{}{}
+					}
+				}
+			}
+		}
 	}
 	if conversation, ok := s.conversations[item.ConversationID]; ok && conversation.OwnerUserID != "" {
 		seen[conversation.OwnerUserID] = struct{}{}
@@ -2005,8 +2095,12 @@ func (s *MemoryStore) AdvanceCursor(_ context.Context, collectorID, cursor strin
 }
 
 func (s *MemoryStore) cursorReceiptReadyLocked(collectorID, cursor string) bool {
-	if _, ok := s.cursorReceipts[collectorID+"|"+cursor]; ok {
-		return true
+	_, explicitReceipt := s.cursorReceipts[collectorID+"|"+cursor]
+	requirePublished := false
+	if collector, ok := s.collectors[collectorID]; ok {
+		if conversation, found := s.conversations[collector.ConversationID]; found {
+			requirePublished = conversation.Platform == domain.PlatformWechat && conversation.IngestionScope == "private"
+		}
 	}
 	found := false
 	for _, source := range s.sources {
@@ -2019,8 +2113,31 @@ func (s *MemoryStore) cursorReceiptReadyLocked(collectorID, cursor string) bool 
 				return false
 			}
 		}
+		if !requirePublished {
+			continue
+		}
+		knowledgeFound := false
+		for _, item := range s.knowledgeItems {
+			if item.SourceType == "shared_private_item" || item.SourceMessageID != source.MessageID {
+				continue
+			}
+			knowledgeFound = true
+			published := false
+			for _, event := range s.outbox {
+				if event.EventType == "knowledge.ready" && event.Payload["knowledge_item_id"] == item.ID && event.Payload["content_version"] == item.ContentVersion && event.PublishedAt != nil {
+					published = true
+					break
+				}
+			}
+			if !published {
+				return false
+			}
+		}
+		if !knowledgeFound {
+			return false
+		}
 	}
-	return found
+	return found || explicitReceipt
 }
 
 func (s *MemoryStore) GetAttachment(_ context.Context, id string) (*domain.Attachment, error) {
@@ -2297,6 +2414,20 @@ func (s *MemoryStore) addEventLocked(ctx context.Context, eventType string, c do
 		event.OrganizationID = c.OrganizationID
 	}
 	s.outbox[event.ID] = event
+}
+
+func (s *MemoryStore) ensurePermissionEventLocked(ctx context.Context, item domain.KnowledgeItem, now time.Time) {
+	for id, event := range s.outbox {
+		if event.EventType == "permission.sync.requested" && event.Payload["knowledge_item_id"] == item.ID {
+			event.PublishedAt = nil
+			event.RetryCount = 0
+			event.LastError = ""
+			event.AvailableAt = now
+			s.outbox[id] = event
+			return
+		}
+	}
+	s.addEventLocked(ctx, "permission.sync.requested", domain.ConversationIngestion{OrganizationID: item.OrganizationID}, map[string]any{"knowledge_item_id": item.ID, "content_version": item.ContentVersion})
 }
 
 func (s *MemoryStore) ensureMessageKnowledgeItemLocked(ctx context.Context, conversation domain.ConversationIngestion, message domain.Message) string {
