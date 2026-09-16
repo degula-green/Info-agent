@@ -64,7 +64,7 @@
           <span class="conversation-cell conversation-cell--muted" data-label="大小">{{ item.size }}</span>
           <span class="conversation-cell" data-label="类型"><em class="conversation-type">{{ item.type }}</em></span>
           <span class="conversation-cell" data-label="来源">{{ item.source }}</span>
-          <span class="conversation-cell conversation-cell--muted" data-label="更新时间">{{ item.updatedAt }}</span>
+          <span class="conversation-cell conversation-cell--muted" data-label="采集时间">{{ item.updatedAt }}</span>
         </button>
       </div>
       <div v-else class="wk-empty-inline">还没有采集到消息或文件</div>
