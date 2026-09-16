@@ -133,7 +133,7 @@
               <span><t-icon name="file" />{{ fileTypeLabel(activeFile) }}</span>
               <span><t-icon name="data" />{{ activeFile.size }}</span>
               <span><t-icon name="user" />{{ activeFile.uploader || '未知发送人' }} · {{ activeFile.sentAt || '发送时间未知' }}</span>
-              <span><t-icon name="time" />采集于 {{ activeFile.uploadedAt || activeFile.collectedAt || '尚未同步' }}</span>
+              <span><t-icon name="time" />采集于 {{ activeFile.collectedAt || activeFile.uploadedAt || '尚未同步' }}</span>
             </div>
           </div>
           <button type="button" class="detail-modal__close" aria-label="关闭文档预览" @click="fileDialogVisible = false">
@@ -218,7 +218,7 @@ const items = computed<ConversationItem[]>(() => [
       size: file.size,
       type: file.type,
       source: sourceName(chat.value.source),
-    updatedAt: file.uploadedAt || file.collectedAt || '尚未同步',
+    updatedAt: file.collectedAt || file.uploadedAt || '尚未同步',
     file,
   })),
 ].sort((a, b) => {
