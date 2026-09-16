@@ -118,7 +118,7 @@ func ValidateMessageCandidate(input IngestMessageInput) error {
 // discardMessage is deliberately deterministic: platform notifications,
 // empty messages and unresolved placeholders never become business records.
 func FilterMessageCandidate(input IngestMessageInput) (IngestMessageInput, bool) {
-	if input.MessageType == "system" {
+	if strings.EqualFold(strings.TrimSpace(input.MessageType), "system") {
 		return input, true
 	}
 	if strings.TrimSpace(input.Content) == "" && len(input.Attachments) == 0 {
@@ -149,8 +149,11 @@ func FilterMessageCandidate(input IngestMessageInput) (IngestMessageInput, bool)
 		}
 		input.Content = ""
 	}
-	if len(input.Attachments) == 0 && (content == "[无法解析]" || content == "[表情]" || content == "[动画表情]" || content == "<msg>") {
-		return input, true
+	if content == "[无法解析]" || content == "[表情]" || content == "[动画表情]" || content == "<msg>" {
+		if len(input.Attachments) == 0 {
+			return input, true
+		}
+		input.Content = ""
 	}
 	if isCallRecord(content) {
 		if len(input.Attachments) == 0 {

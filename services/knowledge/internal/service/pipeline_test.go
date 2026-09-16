@@ -173,6 +173,19 @@ func TestMediaXMLWithoutAttachmentIsFiltered(t *testing.T) {
 	}
 }
 
+func TestPlaceholderWithAttachmentKeepsOnlyAttachment(t *testing.T) {
+	f := newPipelineFixture(t, domain.PlatformWechat)
+	input := pipelineInput(f, "placeholder-with-attachment", "image", "[无法解析]", repository.AttachmentInput{ExternalAttachmentID: "placeholder-image", FileName: "image.jpg", MIMEType: "image/jpeg"})
+	result, err := f.service.IngestMessage(context.Background(), input)
+	if err != nil || result.Discarded || len(result.Attachments) != 1 {
+		t.Fatalf("placeholder attachment should be retained: result=%+v err=%v", result, err)
+	}
+	messages, err := f.repo.ListMessages(context.Background(), f.conversation.ID, 10, "")
+	if err != nil || len(messages) != 1 || messages[0].Content != "" {
+		t.Fatalf("placeholder body was not cleared while preserving attachment link: messages=%+v err=%v", messages, err)
+	}
+}
+
 func TestMediaPrivacyDoesNotPromoteProviderEnvelopeToMessageText(t *testing.T) {
 	if !isMediaMessageEnvelope("file", `<?xml version="1.0"?><msg><appmsg><type>6</type></appmsg></msg>`) {
 		t.Fatal("file XML should be recognized as a media envelope")
