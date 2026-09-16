@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"info-agent/knowledge/internal/apperror"
 	"info-agent/knowledge/internal/domain"
@@ -155,6 +156,12 @@ func FilterMessageCandidate(input IngestMessageInput) (IngestMessageInput, bool)
 		}
 		input.Content = ""
 	}
+	if isOnlyEmoji(content) || isRobotHeartbeat(content) {
+		if len(input.Attachments) == 0 {
+			return input, true
+		}
+		input.Content = ""
+	}
 	if isCallRecord(content) {
 		if len(input.Attachments) == 0 {
 			return input, true
@@ -208,6 +215,65 @@ func isCallRecord(content string) bool {
 		}
 	}
 	return false
+}
+
+func isRobotHeartbeat(content string) bool {
+	value := strings.ToLower(strings.TrimSpace(content))
+	if value == "" {
+		return false
+	}
+	switch value {
+	case "heartbeat", "robot heartbeat", "bot heartbeat", "心跳", "机器人心跳", "机器人心跳消息", "[heartbeat]", "<heartbeat/>", "<heartbeat />":
+		return true
+	default:
+		return strings.HasPrefix(value, "<heartbeat ") || strings.HasPrefix(value, "<robot-heartbeat")
+	}
+}
+
+func isOnlyEmoji(content string) bool {
+	hasEmoji := false
+	runes := []rune(strings.TrimSpace(content))
+	for index := 0; index < len(runes); index++ {
+		r := runes[index]
+		if unicode.IsSpace(r) || r == '\u200d' || r == '\ufe0e' || r == '\ufe0f' || r == '\u20e3' || (r >= '\U000e0020' && r <= '\U000e007f') {
+			continue
+		}
+		if isKeycapBase(r) {
+			keycapEnd := index + 1
+			if keycapEnd < len(runes) && runes[keycapEnd] == '\ufe0f' {
+				keycapEnd++
+			}
+			if keycapEnd < len(runes) && runes[keycapEnd] == '\u20e3' {
+				hasEmoji = true
+				index = keycapEnd
+				continue
+			}
+		}
+		if !isEmojiRune(r) {
+			return false
+		}
+		hasEmoji = true
+	}
+	return hasEmoji
+}
+
+func isKeycapBase(r rune) bool {
+	return r == '#' || r == '*' || (r >= '0' && r <= '9')
+}
+
+func isEmojiRune(r rune) bool {
+	if (r >= 0x1f000 && r <= 0x1faff) || (r >= 0x2600 && r <= 0x27ff) ||
+		(r >= 0x2190 && r <= 0x21ff) || (r >= 0x2300 && r <= 0x23ff) ||
+		(r >= 0x2b00 && r <= 0x2bff) || (r >= 0x3030 && r <= 0x303d) ||
+		(r >= 0x3297 && r <= 0x3299) {
+		return true
+	}
+	switch r {
+	case 0x00a9, 0x00ae, 0x203c, 0x2049, 0x2122, 0x2139:
+		return true
+	default:
+		return false
+	}
 }
 
 func isAttachmentMetadataJSON(content string) bool {

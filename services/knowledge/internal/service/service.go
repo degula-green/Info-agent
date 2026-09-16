@@ -1527,8 +1527,9 @@ func (s *Service) IngestMessage(ctx context.Context, input repository.IngestMess
 	}
 	dedupeKey := messageDedupeKey(account.Platform, accountID, input.ExternalConversationID, input.ExternalMessageID)
 	if s.KV != nil {
-		var cached messageDedupeRecord
-		if found, cacheErr := s.KV.Get(ctx, dedupeKey, &cached); cacheErr != nil {
+		if cachedResult, found, cacheErr := s.getMessageDedupe(ctx, dedupeKey, canonicalPayloadHash); found {
+			return cachedResult, cacheErr
+		} else if cacheErr != nil {
 			slog.WarnContext(ctx, "knowledge message dedupe cache unavailable", "error", cacheErr)
 		} else if found {
 			if strings.EqualFold(cached.PayloadHash, input.PayloadHash) {
@@ -1673,6 +1674,24 @@ func repositoryInputFromUnified(input domain.UnifiedMessage) repository.IngestMe
 func messageDedupeKey(platformName, accountID, conversationID, messageID string) string {
 	sum := sha256.Sum256([]byte(strings.Join([]string{platformName, accountID, conversationID, messageID}, "\x00")))
 	return "knowledge:dedupe:" + hex.EncodeToString(sum[:])
+}
+
+func (s *Service) getMessageDedupe(ctx context.Context, key, payloadHash string) (*repository.IngestResult, bool, error) {
+	var cached messageDedupeRecord
+	found, err := s.KV.Get(ctx, key, &cached)
+	if err != nil || !found {
+		return nil, false, err
+	}
+	if !strings.EqualFold(cached.PayloadHash, payloadHash) {
+		return nil, true, apperror.New("external_id_conflict", "external message id has conflicting payload", 409, false)
+	}
+	result := cached.Result
+	result.Duplicate = true
+	return &result, true, nil
+}
+
+func messageDedupeLockKey(dedupeKey string) string {
+	return dedupeKey + ":lock"
 }
 
 func attachmentDedupeKey(platformName, accountID, conversationID, attachmentID string) string {
