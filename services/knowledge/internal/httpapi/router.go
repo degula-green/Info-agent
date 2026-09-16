@@ -610,6 +610,88 @@ func registerInternalRoutes(r *gin.Engine, app *App, prefix string) {
 		c.JSON(http.StatusOK, out)
 	})
 	g.Use(internalMiddleware(app))
+	g.GET("/knowledge/:knowledge_item_id", func(c *gin.Context) {
+		if !ragAuthorized(c) {
+			writeError(c, apperror.Clone(apperror.ErrForbidden))
+			return
+		}
+		contentVersion, aclVersion, err := internalVersions(c)
+		if err != nil {
+			writeError(c, err)
+			return
+		}
+		item, attachment, err := app.Service.InternalKnowledge(c, c.Param("knowledge_item_id"), contentVersion, aclVersion)
+		if err != nil {
+			writeError(c, err)
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"knowledge_item_id": item.ID, "resource_type": "knowledge_item", "knowledge_base_id": item.KnowledgeBaseID, "knowledge_scope": item.KnowledgeScope, "access_scope": item.AccessScope, "owner_user_id": nullableString(item.OwnerUserID), "organization_id": nullableString(item.OrganizationID), "source_type": item.SourceType, "source_attachment_id": attachment.ID, "content_type": "file", "content_hash": item.ContentHash, "content_version": item.ContentVersion, "acl_version": item.ACLVersion, "content_variant": "display", "content_access_required": false, "lifecycle_status": item.LifecycleStatus, "attachments": []gin.H{{"attachment_id": attachment.ID, "file_name": attachment.FileName, "mime_type": attachment.MIMEType, "size_bytes": attachment.SizeBytes, "content_hash": attachment.ContentHash, "content_version": attachment.ContentVersion, "content_status": attachment.ContentStatus, "access_scope": attachment.AccessScope, "content_access_required": attachment.ContentAccessRequired}}})
+	})
+	g.GET("/knowledge/:knowledge_item_id/content", func(c *gin.Context) {
+		if !ragAuthorized(c) {
+			writeError(c, apperror.Clone(apperror.ErrForbidden))
+			return
+		}
+		contentVersion, aclVersion, err := internalVersions(c)
+		if err != nil {
+			writeError(c, err)
+			return
+		}
+		item, _, err := app.Service.InternalKnowledge(c, c.Param("knowledge_item_id"), contentVersion, aclVersion)
+		if err != nil {
+			writeError(c, err)
+			return
+		}
+		if item.ContentType == "file" {
+			writeError(c, apperror.New("knowledge_content_is_attachment", "knowledge content is an attachment", http.StatusConflict, false))
+			return
+		}
+		writeError(c, apperror.New("knowledge_content_unavailable", "knowledge content is unavailable", http.StatusNotFound, false))
+	})
+	g.GET("/attachments/:attachment_id", func(c *gin.Context) {
+		if !ragAuthorized(c) {
+			writeError(c, apperror.Clone(apperror.ErrForbidden))
+			return
+		}
+		contentVersion, aclVersion, err := internalVersions(c)
+		if err != nil {
+			writeError(c, err)
+			return
+		}
+		item, attachment, err := app.Service.InternalAttachment(c, c.Param("attachment_id"), contentVersion, aclVersion)
+		if err != nil {
+			writeError(c, err)
+			return
+		}
+		contentURL := c.Request.URL.Path + "/content?content_version=" + strconv.Itoa(item.ContentVersion) + "&acl_version=" + strconv.Itoa(item.ACLVersion)
+		c.JSON(http.StatusOK, gin.H{"attachment_id": attachment.ID, "knowledge_item_id": item.ID, "resource_type": "attachment", "file_name": attachment.FileName, "mime_type": attachment.MIMEType, "size_bytes": attachment.SizeBytes, "content_hash": attachment.ContentHash, "content_version": attachment.ContentVersion, "acl_version": item.ACLVersion, "content_status": attachment.ContentStatus, "access_scope": attachment.AccessScope, "organization_id": nullableString(attachment.OrganizationID), "content_access_required": attachment.ContentAccessRequired, "content_url": contentURL})
+	})
+	g.GET("/attachments/:attachment_id/content", func(c *gin.Context) {
+		if !ragAuthorized(c) {
+			writeError(c, apperror.Clone(apperror.ErrForbidden))
+			return
+		}
+		contentVersion, aclVersion, err := internalVersions(c)
+		if err != nil {
+			writeError(c, err)
+			return
+		}
+		attachment, reader, err := app.Service.OpenInternalAttachment(c, c.Param("attachment_id"), contentVersion, aclVersion)
+		if err != nil {
+			writeError(c, err)
+			return
+		}
+		defer reader.Close()
+		c.Header("Content-Type", attachment.MIMEType)
+		c.Header("Content-Disposition", `attachment; filename="`+safeHeaderName(attachment.FileName)+`"`)
+		c.Header("X-Content-Version", strconv.Itoa(contentVersion))
+		c.Header("X-ACL-Version", strconv.Itoa(aclVersion))
+		c.Header("ETag", attachment.ContentHash)
+		if attachment.SizeBytes > 0 {
+			c.Header("Content-Length", strconv.FormatInt(attachment.SizeBytes, 10))
+		}
+		_, _ = io.Copy(c.Writer, reader)
+	})
 	g.GET("/wechat/assignments", func(c *gin.Context) {
 		if !serviceAuthorized(c) {
 			writeError(c, apperror.Clone(apperror.ErrUnauthorized))
@@ -1008,7 +1090,11 @@ func userMiddleware(app *App) gin.HandlerFunc {
 }
 func internalMiddleware(app *App) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		if token := strings.TrimSpace(c.GetHeader("X-Service-Token")); token != "" && app.Config.InternalServiceToken != "" && hmac.Equal([]byte(token), []byte(app.Config.InternalServiceToken)) {
+		token := strings.TrimSpace(c.GetHeader("X-Service-Token"))
+		if token == "" {
+			token = strings.TrimSpace(strings.TrimPrefix(c.GetHeader("Authorization"), "Bearer "))
+		}
+		if token != "" && app.Config.InternalServiceToken != "" && hmac.Equal([]byte(token), []byte(app.Config.InternalServiceToken)) {
 			if serviceTokenPathAllowed(c.Request.URL.Path) {
 				c.Set("service-authorized", true)
 				c.Next()
@@ -1100,6 +1186,9 @@ func internalMiddleware(app *App) gin.HandlerFunc {
 }
 
 func serviceTokenPathAllowed(path string) bool {
+	if strings.Contains(path, "/internal/knowledge/") || strings.Contains(path, "/internal/attachments/") {
+		return true
+	}
 	if strings.HasSuffix(path, "/internal/worker/publish") || strings.HasSuffix(path, "/internal/wechat/assignments") || strings.HasSuffix(path, "/internal/wechat/bootstrap") {
 		return true
 	}
@@ -1112,6 +1201,20 @@ func serviceTokenPathAllowed(path string) bool {
 		}
 	}
 	return false
+}
+func ragAuthorized(c *gin.Context) bool {
+	return serviceAuthorized(c) && strings.EqualFold(strings.TrimSpace(c.GetHeader("X-Caller-Service")), "rag")
+}
+func internalVersions(c *gin.Context) (int, int, error) {
+	contentVersion, contentErr := strconv.Atoi(strings.TrimSpace(c.Query("content_version")))
+	if contentErr != nil || contentVersion < 1 {
+		return 0, 0, apperror.New("invalid_content_version", "content_version is required", 400, false)
+	}
+	aclVersion, aclErr := strconv.Atoi(strings.TrimSpace(c.Query("acl_version")))
+	if aclErr != nil || aclVersion < 1 {
+		return 0, 0, apperror.New("invalid_acl_version", "acl_version is required", 400, false)
+	}
+	return contentVersion, aclVersion, nil
 }
 func requestContext() gin.HandlerFunc {
 	return func(c *gin.Context) {

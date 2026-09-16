@@ -1183,7 +1183,7 @@ func (s *PostgresStore) GetOutbox(ctx context.Context, limit int) ([]domain.Outb
 	if limit <= 0 || limit > 100 {
 		limit = 100
 	}
-	rows, err := s.pool.Query(ctx, `SELECT id::text,event_type,schema_version,occurred_at,COALESCE(trace_id,''),COALESCE(organization_id::text,''),producer,payload,published_at FROM knowledge.outbox_events WHERE published_at IS NULL ORDER BY occurred_at LIMIT $1`, limit)
+	rows, err := s.pool.Query(ctx, `SELECT id::text,event_type,schema_version,occurred_at,COALESCE(trace_id,''),COALESCE(organization_id::text,''),producer,payload,published_at,retry_count,COALESCE(last_error,''),available_at FROM knowledge.outbox_events WHERE event_type='knowledge.ready' AND published_at IS NULL AND status IN ('pending','failed') AND available_at<=now() ORDER BY occurred_at LIMIT $1`, limit)
 	if err != nil {
 		return nil, dbError(err)
 	}
@@ -1192,7 +1192,7 @@ func (s *PostgresStore) GetOutbox(ctx context.Context, limit int) ([]domain.Outb
 	for rows.Next() {
 		var e domain.OutboxEvent
 		var raw []byte
-		if err := rows.Scan(&e.ID, &e.EventType, &e.SchemaVersion, &e.OccurredAt, &e.TraceID, &e.OrganizationID, &e.Producer, &raw, &e.PublishedAt); err != nil {
+		if err := rows.Scan(&e.ID, &e.EventType, &e.SchemaVersion, &e.OccurredAt, &e.TraceID, &e.OrganizationID, &e.Producer, &raw, &e.PublishedAt, &e.RetryCount, &e.LastError, &e.AvailableAt); err != nil {
 			return nil, dbError(err)
 		}
 		_ = json.Unmarshal(raw, &e.Payload)
@@ -1202,8 +1202,36 @@ func (s *PostgresStore) GetOutbox(ctx context.Context, limit int) ([]domain.Outb
 	return out, dbError(rows.Err())
 }
 func (s *PostgresStore) MarkOutboxPublished(ctx context.Context, id string, publishedAt time.Time) error {
-	_, err := s.pool.Exec(ctx, `UPDATE knowledge.outbox_events SET published_at=$2 WHERE id=$1`, id, publishedAt)
+	_, err := s.pool.Exec(ctx, `UPDATE knowledge.outbox_events SET published_at=$2,status='published',last_error=NULL WHERE id=$1`, id, publishedAt)
 	return dbError(err)
+}
+func (s *PostgresStore) MarkOutboxFailed(ctx context.Context, id, message string, availableAt time.Time) error {
+	_, err := s.pool.Exec(ctx, `UPDATE knowledge.outbox_events SET status='failed',retry_count=retry_count+1,last_error=$2,available_at=$3 WHERE id=$1`, id, message, availableAt)
+	return dbError(err)
+}
+
+func (s *PostgresStore) GetKnowledgeItem(ctx context.Context, id string) (*domain.KnowledgeItem, error) {
+	item := &domain.KnowledgeItem{}
+	err := s.pool.QueryRow(ctx, `SELECT id::text,knowledge_base_id::text,knowledge_scope,access_scope,COALESCE(owner_user_id::text,''),COALESCE(organization_id::text,''),source_type,source_attachment_id::text,content_type,COALESCE(content_ref,''),COALESCE(content_hash,''),content_version,security_status,content_saved,ownership_ready,security_ready,permission_ready,acl_version,acl_sync_status,processing_status,lifecycle_status,COALESCE(last_error,''),created_at,updated_at FROM knowledge.knowledge_items WHERE id=$1`, id).Scan(&item.ID, &item.KnowledgeBaseID, &item.KnowledgeScope, &item.AccessScope, &item.OwnerUserID, &item.OrganizationID, &item.SourceType, &item.SourceAttachmentID, &item.ContentType, &item.ContentRef, &item.ContentHash, &item.ContentVersion, &item.SecurityStatus, &item.ContentSaved, &item.OwnershipReady, &item.SecurityReady, &item.PermissionReady, &item.ACLVersion, &item.ACLSyncStatus, &item.ProcessingStatus, &item.LifecycleStatus, &item.LastError, &item.CreatedAt, &item.UpdatedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, apperror.New("knowledge_not_found", "knowledge item not found", 404, false)
+	}
+	if err != nil {
+		return nil, dbError(err)
+	}
+	item.ContentVisibility = "display"
+	return item, nil
+}
+func (s *PostgresStore) GetKnowledgeItemByAttachment(ctx context.Context, attachmentID string) (*domain.KnowledgeItem, error) {
+	var id string
+	err := s.pool.QueryRow(ctx, `SELECT id::text FROM knowledge.knowledge_items WHERE source_attachment_id=$1`, attachmentID).Scan(&id)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, apperror.New("knowledge_not_found", "knowledge item not found", 404, false)
+	}
+	if err != nil {
+		return nil, dbError(err)
+	}
+	return s.GetKnowledgeItem(ctx, id)
 }
 
 func localAttachmentQuery() string {
@@ -1256,7 +1284,7 @@ func (s *PostgresStore) CreateLocalUploadTask(ctx context.Context, input domain.
 	}
 	existing.AccessScope = existing.ContentAccessScope
 	existing.ResourceID = resourceID
-	if _, err = tx.Exec(ctx, `INSERT INTO knowledge.knowledge_items (id,knowledge_base_id,knowledge_scope,access_scope,owner_user_id,organization_id,source_type,source_attachment_id,content_type,content_ref,content_hash,content_version,content_visibility,security_status,content_saved,ownership_ready,security_ready,permission_ready,acl_sync_status,processing_status) VALUES ($1,$2,$3,$4,$5,$6,'local_upload',$7,'file',$8,$9,1,'original','not_required',false,true,true,true,'not_required','pending')`, resourceID, baseID, scope, access, owner, org, existing.ID, placeholder, input.ContentHash); err != nil {
+	if _, err = tx.Exec(ctx, `INSERT INTO knowledge.knowledge_items (id,knowledge_base_id,knowledge_scope,access_scope,owner_user_id,organization_id,source_type,source_attachment_id,content_type,content_ref,content_hash,content_version,content_visibility,security_status,content_saved,ownership_ready,security_ready,permission_ready,acl_version,acl_sync_status,processing_status,lifecycle_status) VALUES ($1,$2,$3,$4,$5,$6,'local_upload',$7,'file',$8,$9,1,'display','not_required',false,true,true,true,1,'synced','pending','pending')`, resourceID, baseID, scope, access, owner, org, existing.ID, placeholder, input.ContentHash); err != nil {
 		return nil, dbError(err)
 	}
 	if err = tx.Commit(ctx); err != nil {
@@ -1311,22 +1339,30 @@ func (s *PostgresStore) FinalizeLocalUpload(ctx context.Context, requestID, obje
 	}
 	a = *scanned
 	a.AccessScope = a.ContentAccessScope
-	if _, err = tx.Exec(ctx, `UPDATE knowledge.knowledge_items SET content_ref=$2,content_hash=$3,content_saved=true,updated_at=now() WHERE source_attachment_id=$1`, a.ID, objectRef, contentHash); err != nil {
+	if _, err = tx.Exec(ctx, `UPDATE knowledge.knowledge_items SET content_ref=$2,content_hash=$3,content_saved=true,processing_status='ready',lifecycle_status='ready',updated_at=now() WHERE source_attachment_id=$1 AND ownership_ready AND security_ready AND permission_ready AND acl_sync_status='synced' AND acl_version>0`, a.ID, objectRef, contentHash); err != nil {
 		return nil, dbError(err)
 	}
 	var resourceID string
 	_ = tx.QueryRow(ctx, `SELECT id::text FROM knowledge.knowledge_items WHERE source_attachment_id=$1`, a.ID).Scan(&resourceID)
 	a.ResourceID = resourceID
-	payload := map[string]any{"event_type": "document.processing.requested", "request_id": a.RequestID, "resource_id": resourceID, "attachment_id": a.ID, "upload_destination": a.UploadDestination, "owner_user_id": a.UploadedByUserID, "organization_id": nil, "object_ref": objectRef, "file_name": a.FileName, "mime_type": a.MIMEType, "size_bytes": size, "content_hash": "sha256:" + contentHash, "content_access_scope": a.ContentAccessScope, "sensitivity": nil, "content_version": a.ContentVersion}
-	if a.OrganizationID != "" {
-		payload["organization_id"] = a.OrganizationID
+	var aclVersion int
+	var lifecycle string
+	if err = tx.QueryRow(ctx, `SELECT acl_version,lifecycle_status FROM knowledge.knowledge_items WHERE id=$1`, resourceID).Scan(&aclVersion, &lifecycle); err != nil {
+		return nil, dbError(err)
 	}
+	if lifecycle != "ready" {
+		if err = tx.Commit(ctx); err != nil {
+			return nil, dbError(err)
+		}
+		return &a, nil
+	}
+	payload := map[string]any{"resource_type": "knowledge_item", "resource_id": resourceID, "knowledge_item_id": resourceID, "source_message_id": nil, "source_attachment_id": a.ID, "attachment_id": a.ID, "content_version": a.ContentVersion, "acl_version": aclVersion, "content_variant": "display", "content_access_required": false}
 	raw, _ := json.Marshal(payload)
 	traceID := trace.TraceID(ctx)
 	if traceID == "" {
 		traceID = uuid.NewString()
 	}
-	if _, err = tx.Exec(ctx, `INSERT INTO knowledge.outbox_events (id,aggregate_type,aggregate_id,event_type,event_version,trace_id,organization_id,payload) VALUES ($1,'attachment',$2,'document.processing.requested',1,$3,$4,$5) ON CONFLICT DO NOTHING`, uuid.NewString(), a.ID, traceID, nilString(a.OrganizationID), raw); err != nil {
+	if _, err = tx.Exec(ctx, `INSERT INTO knowledge.outbox_events (id,aggregate_type,aggregate_id,event_type,event_version,trace_id,organization_id,payload,status,available_at) VALUES ($1,'knowledge_item',$2,'knowledge.ready',1,$3,$4,$5,'pending',now()) ON CONFLICT DO NOTHING`, uuid.NewString(), resourceID, traceID, nilString(a.OrganizationID), raw); err != nil {
 		return nil, dbError(err)
 	}
 	if err = tx.Commit(ctx); err != nil {

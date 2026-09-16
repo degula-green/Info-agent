@@ -1430,13 +1430,96 @@ func (s *Service) OpenAttachment(ctx context.Context, userID, id string) (*domai
 	return attachment, reader, nil
 }
 
+// InternalKnowledge returns only the RAG-facing resource contract. Storage
+// references remain private to the knowledge service.
+func (s *Service) InternalKnowledge(ctx context.Context, id string, contentVersion, aclVersion int) (*domain.KnowledgeItem, *domain.Attachment, error) {
+	if contentVersion < 1 {
+		return nil, nil, apperror.New("invalid_content_version", "content_version is required", 400, false)
+	}
+	if aclVersion < 1 {
+		return nil, nil, apperror.New("invalid_acl_version", "acl_version is required", 400, false)
+	}
+	item, err := s.Repo.GetKnowledgeItem(ctx, id)
+	if err != nil {
+		return nil, nil, err
+	}
+	if item.LifecycleStatus != "ready" {
+		return nil, nil, apperror.New("knowledge_not_ready", "knowledge item is not ready", 409, true)
+	}
+	if item.ContentVersion != contentVersion {
+		return nil, nil, apperror.New("knowledge_version_mismatch", "knowledge content version does not match", 409, false)
+	}
+	if item.ACLVersion != aclVersion {
+		return nil, nil, apperror.New("knowledge_acl_version_mismatch", "knowledge ACL version does not match", 409, false)
+	}
+	attachment, err := s.Repo.GetAttachment(ctx, item.SourceAttachmentID)
+	if err != nil {
+		return nil, nil, err
+	}
+	return item, attachment, nil
+}
+
+func (s *Service) InternalAttachment(ctx context.Context, id string, contentVersion, aclVersion int) (*domain.KnowledgeItem, *domain.Attachment, error) {
+	if contentVersion < 1 {
+		return nil, nil, apperror.New("invalid_content_version", "content_version is required", 400, false)
+	}
+	if aclVersion < 1 {
+		return nil, nil, apperror.New("invalid_acl_version", "acl_version is required", 400, false)
+	}
+	attachment, err := s.Repo.GetAttachment(ctx, id)
+	if err != nil {
+		return nil, nil, err
+	}
+	item, err := s.Repo.GetKnowledgeItemByAttachment(ctx, id)
+	if err != nil {
+		return nil, nil, err
+	}
+	if item.LifecycleStatus != "ready" {
+		return nil, nil, apperror.New("knowledge_not_ready", "knowledge item is not ready", 409, true)
+	}
+	if item.ContentVersion != contentVersion || attachment.ContentVersion != contentVersion {
+		return nil, nil, apperror.New("knowledge_version_mismatch", "knowledge content version does not match", 409, false)
+	}
+	if item.ACLVersion != aclVersion {
+		return nil, nil, apperror.New("knowledge_acl_version_mismatch", "knowledge ACL version does not match", 409, false)
+	}
+	if attachment.ContentStatus != "ready" {
+		return nil, nil, apperror.New("attachment_not_ready", "attachment content is not ready", 409, true)
+	}
+	return item, attachment, nil
+}
+
+func (s *Service) OpenInternalAttachment(ctx context.Context, id string, contentVersion, aclVersion int) (*domain.Attachment, io.ReadCloser, error) {
+	_, attachment, err := s.InternalAttachment(ctx, id, contentVersion, aclVersion)
+	if err != nil {
+		return nil, nil, err
+	}
+	if attachment.ContentAccessRequired {
+		return nil, nil, apperror.New("attachment_content_restricted", "attachment content requires approval", 403, false)
+	}
+	reader, err := s.Objects.Open(ctx, attachment.ObjectRef)
+	if err != nil {
+		return nil, nil, apperror.New("attachment_content_unavailable", "attachment content is unavailable", 503, true)
+	}
+	return attachment, reader, nil
+}
+
 func (s *Service) PublishOutbox(ctx context.Context) error {
 	events, err := s.Repo.GetOutbox(ctx, 100)
 	if err != nil {
 		return err
 	}
 	for _, event := range events {
-		if err := s.KV.Publish(ctx, "knowledge:events", event); err != nil {
+		stream := s.Config.RedisOutboundStream
+		if stream == "" {
+			stream = "knowledge:ready"
+		}
+		if err := s.KV.Publish(ctx, stream, event.Envelope()); err != nil {
+			shift := event.RetryCount
+			if shift > 6 {
+				shift = 6
+			}
+			_ = s.Repo.MarkOutboxFailed(ctx, event.ID, "redis_publish_failed", s.Now().UTC().Add(time.Second*time.Duration(1<<shift)))
 			return err
 		}
 		now := s.Now()

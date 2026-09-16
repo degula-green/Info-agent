@@ -123,6 +123,9 @@ func TestLocalUploadLifecycleAndIdempotency(t *testing.T) {
 	if err != nil || len(events) != 1 {
 		t.Fatalf("duplicate upload published extra event: count=%d err=%v", len(events), err)
 	}
+	if events[0].EventType != "knowledge.ready" || events[0].Payload["knowledge_item_id"] != resourceID || events[0].Payload["attachment_id"] != attachmentID {
+		t.Fatalf("ready event does not follow the knowledge contract: %+v", events[0])
+	}
 	// A different user cannot inspect the private task.
 	other := httptest.NewRequest(http.MethodGet, "/api/knowledge/v1/attachments/upload-tasks/req-local-1", nil)
 	other.Header.Set("X-User-ID", "u2")
@@ -130,6 +133,49 @@ func TestLocalUploadLifecycleAndIdempotency(t *testing.T) {
 	NewRouterWithApp(app).ServeHTTP(otherRecorder, other)
 	if otherRecorder.Code != http.StatusForbidden {
 		t.Fatalf("private task leaked to another user: %d %s", otherRecorder.Code, otherRecorder.Body.String())
+	}
+}
+
+func TestInternalLocalAttachmentContract(t *testing.T) {
+	cfg := config.Config{AllowDevAuth: true, DevUserID: "u1", MaxAttachmentBytes: 1024, InternalServiceToken: "internal-token"}
+	app := newApp(cfg)
+	body := []byte("internal attachment")
+	digest := sha256Hex(body)
+	create := `{"request_id":"req-internal","trace_id":"trace-internal","upload_destination":"private_local_library","file_name":"note.txt","mime_type":"text/plain","size_bytes":19,"content_hash":"sha256:` + digest + `"}`
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/api/knowledge/v1/attachments/upload-tasks", strings.NewReader(create))
+	request.Header.Set("Content-Type", "application/json")
+	NewRouterWithApp(app).ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusCreated {
+		t.Fatalf("create: %d %s", recorder.Code, recorder.Body.String())
+	}
+	var task map[string]any
+	_ = json.Unmarshal(recorder.Body.Bytes(), &task)
+	request = httptest.NewRequest(http.MethodPut, "/api/knowledge/v1/attachments/upload-tasks/req-internal/content", bytes.NewReader(body))
+	request.Header.Set("Content-Type", "application/octet-stream")
+	recorder = httptest.NewRecorder()
+	NewRouterWithApp(app).ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("upload: %d %s", recorder.Code, recorder.Body.String())
+	}
+	_ = json.Unmarshal(recorder.Body.Bytes(), &task)
+	resourceID, attachmentID := task["resource_id"].(string), task["attachment_id"].(string)
+	url := "/api/knowledge/v1/internal/knowledge/" + resourceID + "?content_version=1&acl_version=1"
+	request = httptest.NewRequest(http.MethodGet, url, nil)
+	request.Header.Set("Authorization", "Bearer internal-token")
+	request.Header.Set("X-Caller-Service", "rag")
+	recorder = httptest.NewRecorder()
+	NewRouterWithApp(app).ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK || strings.Contains(recorder.Body.String(), "object_ref") {
+		t.Fatalf("metadata contract: %d %s", recorder.Code, recorder.Body.String())
+	}
+	request = httptest.NewRequest(http.MethodGet, "/api/knowledge/v1/internal/attachments/"+attachmentID+"/content?content_version=1&acl_version=1", nil)
+	request.Header.Set("Authorization", "Bearer internal-token")
+	request.Header.Set("X-Caller-Service", "rag")
+	recorder = httptest.NewRecorder()
+	NewRouterWithApp(app).ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK || recorder.Body.String() != string(body) {
+		t.Fatalf("content proxy: %d %s", recorder.Code, recorder.Body.String())
 	}
 }
 

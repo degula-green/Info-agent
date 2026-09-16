@@ -29,6 +29,7 @@ type MemoryStore struct {
 	messages       map[string]domain.Message
 	sources        map[string]domain.MessageSource
 	attachments    map[string]domain.Attachment
+	knowledgeItems map[string]domain.KnowledgeItem
 	cursorReceipts map[string]time.Time
 	identities     map[string]ExternalIdentity
 	memberships    map[string]domain.ConversationMembership
@@ -50,6 +51,7 @@ func NewMemoryStore() *MemoryStore {
 		conversations: map[string]domain.ConversationIngestion{}, collectors: map[string]domain.Collector{},
 		messages: map[string]domain.Message{}, sources: map[string]domain.MessageSource{},
 		attachments: map[string]domain.Attachment{}, identities: map[string]ExternalIdentity{},
+		knowledgeItems: map[string]domain.KnowledgeItem{},
 		cursorReceipts: map[string]time.Time{},
 		memberships:    map[string]domain.ConversationMembership{},
 		outbox:         map[string]domain.OutboxEvent{},
@@ -1341,7 +1343,7 @@ func (s *MemoryStore) GetOutbox(_ context.Context, limit int) ([]domain.OutboxEv
 	defer s.mu.RUnlock()
 	out := []domain.OutboxEvent{}
 	for _, e := range s.outbox {
-		if e.PublishedAt == nil {
+		if e.PublishedAt == nil && !e.AvailableAt.After(time.Now().UTC()) {
 			out = append(out, cloneEvent(e))
 		}
 	}
@@ -1363,6 +1365,20 @@ func (s *MemoryStore) MarkOutboxPublished(_ context.Context, id string, publishe
 		return apperror.New("event_not_found", "event not found", 404, false)
 	}
 	e.PublishedAt = &publishedAt
+	s.outbox[id] = e
+	return nil
+}
+
+func (s *MemoryStore) MarkOutboxFailed(_ context.Context, id, message string, availableAt time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	e, ok := s.outbox[id]
+	if !ok {
+		return apperror.New("event_not_found", "event not found", 404, false)
+	}
+	e.RetryCount++
+	e.LastError = safeError(message)
+	e.AvailableAt = availableAt.UTC()
 	s.outbox[id] = e
 	return nil
 }
@@ -1393,6 +1409,11 @@ func (s *MemoryStore) CreateLocalUploadTask(_ context.Context, input domain.Loca
 		a.MetadataAccessScope, a.ContentAccessScope, a.AccessScope = "organization_members", "organization_members", "organization_members"
 	}
 	s.attachments[a.ID] = a
+	scope, owner, baseID := "private", input.UserID, uuid.NewString()
+	if input.UploadDestination == "organization_file_library" {
+		scope, owner = "organization", ""
+	}
+	s.knowledgeItems[a.ResourceID] = domain.KnowledgeItem{ID: a.ResourceID, KnowledgeBaseID: baseID, KnowledgeScope: scope, AccessScope: a.AccessScope, OwnerUserID: owner, OrganizationID: a.OrganizationID, SourceType: "local_upload", SourceAttachmentID: a.ID, ContentType: "file", ContentRef: "pending/" + a.ID, ContentHash: a.ContentHash, ContentVersion: 1, ContentVisibility: "display", SecurityStatus: "not_required", OwnershipReady: true, SecurityReady: true, PermissionReady: true, ACLVersion: 1, ACLSyncStatus: "synced", ProcessingStatus: "pending", LifecycleStatus: "pending", CreatedAt: now, UpdatedAt: now}
 	out := cloneAttachment(a)
 	return &out, nil
 }
@@ -1443,19 +1464,42 @@ func (s *MemoryStore) FinalizeLocalUpload(_ context.Context, requestID, objectRe
 			return nil, apperror.New("attachment_hash_mismatch", "attachment hash does not match metadata", 400, false)
 		}
 		a.ObjectRef, a.ContentHash, a.SizeBytes = objectRef, contentHash, size
-		a.ContentStatus, a.UploadStatus, a.ProcessingStatus, a.UploadError = "ready", "uploaded", "pending", ""
+		a.ContentStatus, a.UploadStatus, a.ProcessingStatus, a.UploadError = "ready", "uploaded", "ready", ""
 		a.UpdatedAt = time.Now().UTC()
+		item := s.knowledgeItems[a.ResourceID]
+		item.ContentRef, item.ContentHash, item.ContentSaved = objectRef, contentHash, true
+		item.ProcessingStatus, item.LifecycleStatus, item.UpdatedAt = "ready", "ready", a.UpdatedAt
+		s.knowledgeItems[item.ID] = item
 		eventID := uuid.NewString()
-		payload := map[string]any{"event_id": eventID, "event_type": "document.processing.requested", "request_id": a.RequestID, "trace_id": a.TraceID, "resource_id": a.ResourceID, "attachment_id": a.ID, "upload_destination": a.UploadDestination, "owner_user_id": a.UploadedByUserID, "organization_id": nil, "object_ref": a.ObjectRef, "file_name": a.FileName, "mime_type": a.MIMEType, "size_bytes": a.SizeBytes, "content_hash": "sha256:" + a.ContentHash, "content_access_scope": a.ContentAccessScope, "sensitivity": nil, "content_version": a.ContentVersion}
-		if a.OrganizationID != "" {
-			payload["organization_id"] = a.OrganizationID
-		}
-		s.outbox[eventID] = domain.OutboxEvent{ID: eventID, EventType: "document.processing.requested", SchemaVersion: 1, OccurredAt: time.Now().UTC(), TraceID: a.TraceID, OrganizationID: a.OrganizationID, Producer: "module-2", Payload: payload}
+		payload := map[string]any{"resource_type": "knowledge_item", "resource_id": item.ID, "knowledge_item_id": item.ID, "source_message_id": nil, "source_attachment_id": a.ID, "attachment_id": a.ID, "content_version": item.ContentVersion, "acl_version": item.ACLVersion, "content_variant": "display", "content_access_required": false}
+		s.outbox[eventID] = domain.OutboxEvent{ID: eventID, EventType: "knowledge.ready", SchemaVersion: 1, OccurredAt: a.UpdatedAt, TraceID: a.TraceID, OrganizationID: a.OrganizationID, Producer: "module-2", Payload: payload, AvailableAt: a.UpdatedAt}
 		s.attachments[key] = a
 		out := cloneAttachment(a)
 		return &out, nil
 	}
 	return nil, apperror.New("upload_task_not_found", "upload task not found", 404, false)
+}
+
+func (s *MemoryStore) GetKnowledgeItem(_ context.Context, id string) (*domain.KnowledgeItem, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	item, ok := s.knowledgeItems[id]
+	if !ok {
+		return nil, apperror.New("knowledge_not_found", "knowledge item not found", 404, false)
+	}
+	return &item, nil
+}
+
+func (s *MemoryStore) GetKnowledgeItemByAttachment(_ context.Context, attachmentID string) (*domain.KnowledgeItem, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, item := range s.knowledgeItems {
+		if item.SourceAttachmentID == attachmentID {
+			copy := item
+			return &copy, nil
+		}
+	}
+	return nil, apperror.New("knowledge_not_found", "knowledge item not found", 404, false)
 }
 
 func (s *MemoryStore) FailLocalUpload(_ context.Context, requestID, message string) error {
@@ -1668,10 +1712,11 @@ func cloneMessage(m domain.Message) domain.Message {
 func cloneAttachment(a domain.Attachment) domain.Attachment { return a }
 func cloneEvent(e domain.OutboxEvent) domain.OutboxEvent {
 	if e.Payload != nil {
-		e.Payload = map[string]any{}
+		payload := make(map[string]any, len(e.Payload))
 		for k, v := range e.Payload {
-			e.Payload[k] = v
+			payload[k] = v
 		}
+		e.Payload = payload
 	}
 	return e
 }

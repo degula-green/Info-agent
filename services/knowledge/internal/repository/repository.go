@@ -282,6 +282,7 @@ type Repository interface {
 	ListAttachments(ctx context.Context, conversationID string) ([]domain.Attachment, error)
 	GetOutbox(ctx context.Context, limit int) ([]domain.OutboxEvent, error)
 	MarkOutboxPublished(ctx context.Context, id string, publishedAt time.Time) error
+	MarkOutboxFailed(ctx context.Context, id, message string, availableAt time.Time) error
 
 	CreateLocalUploadTask(ctx context.Context, input domain.LocalUploadTaskInput) (*domain.Attachment, error)
 	GetLocalUploadTask(ctx context.Context, requestID string) (*domain.Attachment, error)
@@ -289,6 +290,8 @@ type Repository interface {
 	FinalizeLocalUpload(ctx context.Context, requestID, objectRef, contentHash string, size int64) (*domain.Attachment, error)
 	MarkLocalDuplicate(ctx context.Context, requestID string, existing *domain.Attachment) (*domain.Attachment, error)
 	FailLocalUpload(ctx context.Context, requestID, message string) error
+	GetKnowledgeItem(ctx context.Context, id string) (*domain.KnowledgeItem, error)
+	GetKnowledgeItemByAttachment(ctx context.Context, attachmentID string) (*domain.KnowledgeItem, error)
 }
 
 type ExternalIdentityInput struct {

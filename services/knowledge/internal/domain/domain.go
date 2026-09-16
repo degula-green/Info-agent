@@ -292,12 +292,17 @@ type KnowledgeItem struct {
 	ContentRef         string    `json:"content_ref"`
 	ContentHash        string    `json:"content_hash"`
 	ContentVersion     int       `json:"content_version"`
+	ContentVisibility  string    `json:"content_visibility,omitempty"`
 	SecurityStatus     string    `json:"security_status"`
 	ContentSaved       bool      `json:"content_saved"`
 	OwnershipReady     bool      `json:"ownership_ready"`
 	SecurityReady      bool      `json:"security_ready"`
 	PermissionReady    bool      `json:"permission_ready"`
+	ACLVersion         int       `json:"acl_version"`
+	ACLSyncStatus      string    `json:"acl_sync_status"`
 	ProcessingStatus   string    `json:"processing_status"`
+	LifecycleStatus    string    `json:"lifecycle_status"`
+	LastError          string    `json:"last_error,omitempty"`
 	CreatedAt          time.Time `json:"created_at"`
 	UpdatedAt          time.Time `json:"updated_at"`
 }
@@ -312,6 +317,31 @@ type OutboxEvent struct {
 	Producer       string         `json:"producer"`
 	Payload        map[string]any `json:"payload"`
 	PublishedAt    *time.Time     `json:"published_at,omitempty"`
+	RetryCount     int            `json:"-"`
+	LastError      string         `json:"-"`
+	AvailableAt    time.Time      `json:"-"`
+}
+
+// EventEnvelope is the only representation delivered to Redis. Operational
+// Outbox fields intentionally never cross the service boundary.
+type EventEnvelope struct {
+	EventID        string         `json:"event_id"`
+	EventType      string         `json:"event_type"`
+	SchemaVersion  int            `json:"schema_version"`
+	OccurredAt     time.Time      `json:"occurred_at"`
+	TraceID        string         `json:"trace_id"`
+	OrganizationID *string        `json:"organization_id"`
+	Producer       string         `json:"producer"`
+	Payload        map[string]any `json:"payload"`
+}
+
+func (e OutboxEvent) Envelope() EventEnvelope {
+	var organizationID *string
+	if e.OrganizationID != "" {
+		value := e.OrganizationID
+		organizationID = &value
+	}
+	return EventEnvelope{EventID: e.ID, EventType: e.EventType, SchemaVersion: e.SchemaVersion, OccurredAt: e.OccurredAt.UTC(), TraceID: e.TraceID, OrganizationID: organizationID, Producer: e.Producer, Payload: e.Payload}
 }
 
 func IsPlatform(value string) bool {

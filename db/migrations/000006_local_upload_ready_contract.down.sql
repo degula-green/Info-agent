@@ -1,0 +1,15 @@
+DROP INDEX IF EXISTS knowledge.outbox_ready_relay;
+DROP INDEX IF EXISTS knowledge.outbox_local_ready_once;
+ALTER TABLE knowledge.outbox_events DROP COLUMN IF EXISTS event_version;
+ALTER TABLE knowledge.outbox_events DROP COLUMN IF EXISTS aggregate_id;
+ALTER TABLE knowledge.outbox_events DROP COLUMN IF EXISTS aggregate_type;
+ALTER TABLE knowledge.outbox_events DROP COLUMN IF EXISTS available_at;
+ALTER TABLE knowledge.outbox_events DROP COLUMN IF EXISTS retry_count;
+ALTER TABLE knowledge.outbox_events DROP COLUMN IF EXISTS status;
+ALTER TABLE knowledge.knowledge_items DROP COLUMN IF EXISTS content_visibility;
+ALTER TABLE knowledge.knowledge_items DROP COLUMN IF EXISTS last_error;
+ALTER TABLE knowledge.knowledge_items DROP COLUMN IF EXISTS lifecycle_status;
+ALTER TABLE knowledge.knowledge_items DROP COLUMN IF EXISTS acl_version;
+DROP INDEX IF EXISTS knowledge.attachments_organization_hash_unique;
+DROP INDEX IF EXISTS knowledge.attachments_private_hash_unique;
+DROP INDEX IF EXISTS knowledge.attachments_request_id_unique;
