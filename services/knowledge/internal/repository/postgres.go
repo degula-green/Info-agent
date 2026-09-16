@@ -1091,9 +1091,9 @@ func (s *PostgresStore) IngestMessage(ctx context.Context, input IngestMessageIn
 	if input.ExternalConversationID != externalConversationID {
 		return nil, apperror.New("conversation_mismatch", "external conversation does not match collector", 409, false)
 	}
-	var existingSourceHash, existingSourceContentHash, existingSourceType string
-	sourceErr := tx.QueryRow(ctx, `SELECT ms.payload_hash,m.content_hash,m.message_type FROM knowledge.message_sources ms JOIN knowledge.messages m ON m.id=ms.message_id WHERE ms.collector_id=$1 AND ms.external_message_id=$2`, input.CollectorID, input.ExternalMessageID).Scan(&existingSourceHash, &existingSourceContentHash, &existingSourceType)
-	if sourceErr == nil && !strings.EqualFold(existingSourceHash, SourcePayloadHash(input)) && !strings.EqualFold(existingSourceContentHash, input.ContentHash) && !canReclassifyLegacyFile(existingSourceType, input.MessageType, input.Attachments) {
+	var existingSourceHash, existingSourceContentHash, existingSourceType, existingSourceContent string
+	sourceErr := tx.QueryRow(ctx, `SELECT ms.payload_hash,m.content_hash,m.message_type,COALESCE(m.normalized_content,'') FROM knowledge.message_sources ms JOIN knowledge.messages m ON m.id=ms.message_id WHERE ms.collector_id=$1 AND ms.external_message_id=$2`, input.CollectorID, input.ExternalMessageID).Scan(&existingSourceHash, &existingSourceContentHash, &existingSourceType, &existingSourceContent)
+	if sourceErr == nil && !strings.EqualFold(existingSourceHash, SourcePayloadHash(input)) && !strings.EqualFold(existingSourceContentHash, input.ContentHash) && !canReclassifyLegacyFile(existingSourceType, input.MessageType, existingSourceContent, input.Content, input.Attachments) {
 		return nil, apperror.New("external_id_conflict", "external message id has conflicting payload", 409, false)
 	}
 	if sourceErr != nil && !errors.Is(sourceErr, pgx.ErrNoRows) {
@@ -1124,8 +1124,8 @@ func (s *PostgresStore) IngestMessage(ctx context.Context, input IngestMessageIn
 	legacyTypeCorrection := false
 	legacyAttachmentCleanup := false
 	if duplicate {
-		var existingHash, existingType string
-		err = tx.QueryRow(ctx, `SELECT id::text,content_hash,message_type FROM knowledge.messages WHERE conversation_ingestion_id=$1 AND external_message_id=$2`, conversationID, input.ExternalMessageID).Scan(&messageID, &existingHash, &existingType)
+		var existingHash, existingType, existingContent string
+		err = tx.QueryRow(ctx, `SELECT id::text,content_hash,message_type,COALESCE(normalized_content,'') FROM knowledge.messages WHERE conversation_ingestion_id=$1 AND external_message_id=$2`, conversationID, input.ExternalMessageID).Scan(&messageID, &existingHash, &existingType, &existingContent)
 		if err != nil {
 			return nil, dbError(err)
 		}
@@ -1138,10 +1138,16 @@ func (s *PostgresStore) IngestMessage(ctx context.Context, input IngestMessageIn
 		// message identity. Preserve the original body in that case, but allow
 		// its verified sender identity to be corrected during replay.
 		if !strings.EqualFold(existingHash, input.ContentHash) {
-			return nil, apperror.New("external_id_conflict", "external message id has conflicting content", 409, false)
-		}
-		if existingType != input.MessageType {
-			if !canReclassifyLegacyFile(existingType, input.MessageType, input.Attachments) {
+			if !canReclassifyLegacyFile(existingType, input.MessageType, existingContent, input.Content, input.Attachments) {
+				return nil, apperror.New("external_id_conflict", "external message id has conflicting content", 409, false)
+			}
+			legacyTypeCorrection = true
+			legacyAttachmentCleanup = strings.EqualFold(existingType, "file") && strings.EqualFold(input.MessageType, "text")
+			if _, err = tx.Exec(ctx, `UPDATE knowledge.messages SET message_type=$2,normalized_content=$3,content_hash=$4 WHERE id=$1`, messageID, input.MessageType, nilString(input.Content), input.ContentHash); err != nil {
+				return nil, dbError(err)
+			}
+		} else if existingType != input.MessageType {
+			if !canReclassifyLegacyFile(existingType, input.MessageType, existingContent, input.Content, input.Attachments) {
 				return nil, apperror.New("external_id_conflict", "external message id has conflicting content", 409, false)
 			}
 			legacyTypeCorrection = true

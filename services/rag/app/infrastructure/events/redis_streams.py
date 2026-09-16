@@ -107,6 +107,13 @@ def _build_redis() -> Any:
     connection_url = settings.redis_url
     if settings.redis_tls and connection_url.startswith("redis://"):
         connection_url = "rediss://" + connection_url[len("redis://"):]
+    # XREADGROUP may block for redis_block_ms; the socket timeout must exceed
+    # that wait or an idle stream is reported as a transport failure.
+    read_timeout = max(
+        0.1,
+        settings.authz_timeout_seconds,
+        getattr(settings, "redis_block_ms", 0) / 1000 + 1,
+    )
     return redis.Redis.from_url(
         connection_url,
         db=settings.redis_database,
@@ -114,5 +121,5 @@ def _build_redis() -> Any:
         password=settings.redis_password or None,
         decode_responses=False,
         socket_connect_timeout=max(0.1, settings.authz_connect_timeout_seconds),
-        socket_timeout=max(0.1, settings.authz_timeout_seconds),
+        socket_timeout=read_timeout,
     )

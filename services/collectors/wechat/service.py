@@ -210,6 +210,10 @@ def display_name(identifier: Any, names: dict[str, str] | None = None) -> str:
     names = names if names is not None else nickname_index()
     return names.get(value) or value
 
+def is_raw_wechat_id(value: Any) -> bool:
+    text = str(value or "").strip()
+    return bool(re.fullmatch(r"(?:wxid_[A-Za-z0-9_-]+|[A-Za-z0-9_-]+@chatroom)", text, re.I))
+
 def strip_sender_prefix(content: Any, sender_external_id: Any = "") -> str:
     """Remove the sender marker that some WeChat DB readers prepend to content."""
     value = str(content or "").strip()
@@ -221,7 +225,13 @@ def strip_sender_prefix(content: Any, sender_external_id: Any = "") -> str:
     # is not changed, while wxid/chatroom markers from historical rows are fixed.
     return re.sub(r"^(?:wxid_[A-Za-z0-9_-]+(?:@chatroom)?|[A-Za-z0-9_-]+@chatroom)\s*:\s*", "", value, count=1, flags=re.I)
 
-def resolve_sender(raw: dict[str, Any], names: dict[str, str]) -> tuple[str, str]:
+def resolve_sender(
+    raw: dict[str, Any],
+    names: dict[str, str],
+    *,
+    conversation_type: str = "group",
+    conversation_name: str = "",
+) -> tuple[str, str]:
     """Resolve the actual group sender before trusting DB's resource sender.
 
     WeChat 4.x stores the message resource sender separately from the sender
@@ -238,7 +248,49 @@ def resolve_sender(raw: dict[str, Any], names: dict[str, str]) -> tuple[str, str
         sender = match.group(1).strip() if match else ""
     if not sender:
         sender = str(raw.get("sender_username") or raw.get("sender_id") or binding.get("wxid", ""))
-    return sender, display_name(sender, names)
+    resolved = display_name(sender, names)
+    # In a private chat the provider sometimes exposes the other party's
+    # wxid even though the conversation/contact row has a usable nickname.
+    # Keep group-member resolution strict: a group name must never replace the
+    # actual sender.  For private chats the conversation display name is the
+    # last safe fallback when the contact database has no nickname.
+    if (
+        str(conversation_type).lower() == "private"
+        and is_raw_wechat_id(resolved)
+        and str(conversation_name or "").strip()
+        and not is_raw_wechat_id(conversation_name)
+        and str(sender).strip().lower() != str(binding.get("wxid") or "").strip().lower()
+    ):
+        resolved = str(conversation_name).strip()
+    return sender, resolved
+
+def message_content(raw: dict[str, Any], attachments: list[dict[str, Any]], sender_external_id: str = "") -> str:
+    """Return user-authored text without provider media envelopes.
+
+    WeChat stores images/files as XML in the same column used for text.  The
+    attachment metadata is persisted separately, so the XML envelope (and its
+    filename/title) must never become a visible message body.  Plain captions
+    remain intact.
+    """
+    value = strip_sender_prefix(raw.get("content"), sender_external_id).strip()
+    if not value or not attachments:
+        return value
+    if re.match(r"^\s*(?:<\?xml\b[\s\S]*?\?>\s*)?<msg\b", value, re.I):
+        return ""
+    if re.match(r"^\s*\{[\s\S]*\}\s*$", value):
+        try:
+            payload = json.loads(value)
+            if isinstance(payload, dict) and any(
+                re.fullmatch(r"(?:file|image)_(?:key|token|name)|filename", str(key), re.I)
+                for key in payload
+            ):
+                return ""
+        except (TypeError, ValueError):
+            pass
+    attachment_names = {str(item.get("file_name") or "").strip().casefold() for item in attachments}
+    if value.casefold() in attachment_names or value.casefold() in {"filename", "file name"}:
+        return ""
+    return value
 
 def attachment_metadata(chat_id: str, raw: dict[str, Any]) -> list[dict[str, Any]]:
     kind = media_type(raw)
@@ -393,8 +445,17 @@ def collect_once() -> None:
                 local_id = str(raw.get("local_id") or raw.get("server_id") or raw.get("sort_seq") or "0")
                 cursor = str(raw.get("sort_seq") or raw.get("local_id") or "")
                 attachments = attachment_metadata(chat_id, raw)
-                sender_external_id, sender_display_name = resolve_sender(raw, names)
-                content = strip_sender_prefix(raw.get("content"), sender_external_id)
+                conversation_type = str(
+                    conversation.get("conversation_type")
+                    or ("group" if chat_id.endswith("@chatroom") else "private")
+                )
+                sender_external_id, sender_display_name = resolve_sender(
+                    raw,
+                    names,
+                    conversation_type=conversation_type,
+                    conversation_name=str(conversation.get("name") or ""),
+                )
+                content = message_content(raw, attachments, sender_external_id)
                 value = {
                     "collector_id": collector_id,
                     "external_conversation_id": chat_id,

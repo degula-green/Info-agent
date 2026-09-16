@@ -141,6 +141,7 @@ class Module2ReadyContractTests(unittest.TestCase):
             "redis_password": "",
             "authz_connect_timeout_seconds": 0.2,
             "authz_timeout_seconds": 0.8,
+            "redis_block_ms": 5000,
         }
 
         for tls, expected_url in (
@@ -158,6 +159,7 @@ class Module2ReadyContractTests(unittest.TestCase):
             args, kwargs = factory.call_args
             self.assertEqual(args[0], expected_url)
             self.assertNotIn("ssl", kwargs)
+            self.assertEqual(kwargs["socket_timeout"], 6.0)
 
     def test_client_sends_content_and_acl_versions_on_every_source_call(self):
         http = _Http()

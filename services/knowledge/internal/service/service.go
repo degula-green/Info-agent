@@ -1800,6 +1800,13 @@ func (s *Service) ProcessPrivacy(ctx context.Context) error {
 	}
 	for _, item := range pending {
 		sensitive, display := privacy.Scan(item.OriginalContent)
+		// Media payloads are stored in message_private_content for audit, but
+		// their provider XML is not message text. The attachment is the separate
+		// resource shown to users and processed by RAG; never promote the XML
+		// envelope back into normalized_content during the privacy pass.
+		if isMediaMessageEnvelope(item.Message.MessageType, item.OriginalContent) {
+			sensitive, display = false, ""
+		}
 		if err := s.Repo.CompleteMessageClassification(ctx, item.Message.ID, display, sensitive); err != nil {
 			return err
 		}
@@ -1810,6 +1817,15 @@ func (s *Service) ProcessPrivacy(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+func isMediaMessageEnvelope(messageType, content string) bool {
+	typ := strings.ToLower(strings.TrimSpace(messageType))
+	if typ != "image" && typ != "file" && typ != "video" && typ != "mixed" {
+		return false
+	}
+	value := strings.TrimSpace(content)
+	return strings.HasPrefix(value, "<?xml") || strings.HasPrefix(value, "<msg") || strings.HasPrefix(value, "{")
 }
 
 func (s *Service) ProcessPermissions(ctx context.Context) error {

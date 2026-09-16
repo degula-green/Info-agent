@@ -212,10 +212,37 @@ func isAttachmentMetadataJSON(content string) bool {
 	return false
 }
 
+func isMediaMessageType(messageType string) bool {
+	switch strings.ToLower(strings.TrimSpace(messageType)) {
+	case "image", "file", "video", "mixed":
+		return true
+	default:
+		return false
+	}
+}
+
+// isLegacyMediaEnvelope identifies provider XML/metadata that older collector
+// versions incorrectly persisted as the message body. It is intentionally
+// narrow so a real text payload can never be overwritten during replay.
+func isLegacyMediaEnvelope(messageType, content string) bool {
+	if !isMediaMessageType(messageType) {
+		return false
+	}
+	value := strings.ToLower(strings.TrimSpace(content))
+	if value == "" {
+		return false
+	}
+	if isAttachmentMetadataJSON(value) {
+		return true
+	}
+	return (strings.HasPrefix(value, "<?xml") || strings.HasPrefix(value, "<msg") || strings.HasPrefix(value, "<appmsg")) &&
+		(strings.Contains(value, "<msg") || strings.Contains(value, "<appmsg") || strings.Contains(value, "<emoji"))
+}
+
 // A provider-aware classifier may correct an older file/link classification
-// without changing the message body. Only this exact transition is safe to
-// reconcile; other type or content changes remain conflicts.
-func canReclassifyLegacyFile(existingType, nextType string, attachments []AttachmentInput) bool {
+// without changing the message identity. Only these exact transitions are
+// safe to reconcile; other type or content changes remain conflicts.
+func canReclassifyLegacyFile(existingType, nextType, existingContent, nextContent string, attachments []AttachmentInput) bool {
 	// Older WeChat rows were ingested as text when media was nested inside a
 	// forwarded type=57 payload. A later provider replay may safely promote
 	// that exact row to a media type once verified attachment metadata is
@@ -225,7 +252,15 @@ func canReclassifyLegacyFile(existingType, nextType string, attachments []Attach
 		(strings.EqualFold(nextType, "file") || strings.EqualFold(nextType, "image") || strings.EqualFold(nextType, "video")) {
 		return len(attachments) > 0
 	}
-	return strings.EqualFold(existingType, "file") && strings.EqualFold(nextType, "text") && len(attachments) == 0
+	if strings.EqualFold(existingType, "file") && strings.EqualFold(nextType, "text") && len(attachments) == 0 {
+		return true
+	}
+	// Historical media rows may contain only an XML/metadata envelope. A
+	// replay with the same media type, verified attachments, and an empty body
+	// is a safe normalization update.
+	return strings.EqualFold(existingType, nextType) && isMediaMessageType(nextType) &&
+		len(attachments) > 0 && strings.TrimSpace(nextContent) == "" &&
+		isLegacyMediaEnvelope(existingType, existingContent)
 }
 
 func classifyMessage(input IngestMessageInput) (bool, string) { return privacy.Scan(input.Content) }

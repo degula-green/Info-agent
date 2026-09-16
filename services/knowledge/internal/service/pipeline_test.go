@@ -143,6 +143,36 @@ func TestAttachmentMetadataBodyIsRemovedButAttachmentIsKept(t *testing.T) {
 	}
 }
 
+func TestLegacyMediaEnvelopeReplayIsNormalizedInsteadOfConflicting(t *testing.T) {
+	f := newPipelineFixture(t, domain.PlatformWechat)
+	attachment := repository.AttachmentInput{ExternalAttachmentID: "legacy-file", FileName: "report.docx", MIMEType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document"}
+	legacy := pipelineInput(f, "legacy-media", "file", `<?xml version="1.0"?><msg><appmsg><type>6</type></appmsg></msg>`, attachment)
+	if _, err := f.repo.IngestMessage(context.Background(), legacy); err != nil {
+		t.Fatalf("legacy media ingest failed: %v", err)
+	}
+	clean := pipelineInput(f, "legacy-media", "file", "", attachment)
+	result, err := f.repo.IngestMessage(context.Background(), clean)
+	if err != nil {
+		t.Fatalf("normalized replay should not conflict: %v", err)
+	}
+	if !result.Duplicate {
+		t.Fatalf("expected replay to be treated as duplicate: %+v", result)
+	}
+	messages, err := f.repo.ListMessages(context.Background(), f.conversation.ID, 10, "")
+	if err != nil || len(messages) != 1 || messages[0].Content != "" {
+		t.Fatalf("legacy media body was not cleared: messages=%+v err=%v", messages, err)
+	}
+}
+
+func TestMediaPrivacyDoesNotPromoteProviderEnvelopeToMessageText(t *testing.T) {
+	if !isMediaMessageEnvelope("file", `<?xml version="1.0"?><msg><appmsg><type>6</type></appmsg></msg>`) {
+		t.Fatal("file XML should be recognized as a media envelope")
+	}
+	if isMediaMessageEnvelope("text", `<?xml version="1.0"?><msg>text</msg>`) {
+		t.Fatal("text messages must not be treated as media envelopes")
+	}
+}
+
 func TestPrivacyPermissionAndReadyOutboxContract(t *testing.T) {
 	f := newPipelineFixture(t, domain.PlatformWechat)
 	core := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

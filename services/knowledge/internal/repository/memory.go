@@ -1276,12 +1276,19 @@ func (s *MemoryStore) IngestMessage(ctx context.Context, input IngestMessageInpu
 	}
 	key := conversation.ID + "|" + input.ExternalMessageID
 	message, exists := s.messages[key]
+	existingContent := ""
+	if exists {
+		existingContent = message.Content
+		if original := s.privateContent[message.ID]; original != "" {
+			existingContent = original
+		}
+	}
 	sourceCorrection := false
 	for _, source := range s.sources {
 		if source.CollectorID != input.CollectorID || source.ExternalMessageID != input.ExternalMessageID || strings.EqualFold(source.PayloadHash, SourcePayloadHash(input)) {
 			continue
 		}
-		if !exists || (!strings.EqualFold(message.ContentHash, input.ContentHash) && !canReclassifyLegacyFile(message.MessageType, input.MessageType, input.Attachments)) {
+		if !exists || (!strings.EqualFold(message.ContentHash, input.ContentHash) && !canReclassifyLegacyFile(message.MessageType, input.MessageType, existingContent, input.Content, input.Attachments)) {
 			return nil, apperror.New("external_id_conflict", "external message id has conflicting payload", 409, false)
 		}
 		sourceCorrection = true
@@ -1294,10 +1301,20 @@ func (s *MemoryStore) IngestMessage(ctx context.Context, input IngestMessageInpu
 	legacyAttachmentCleanup := false
 	if exists {
 		if !strings.EqualFold(message.ContentHash, input.ContentHash) {
-			return nil, apperror.New("external_id_conflict", "external message id has conflicting content", 409, false)
+			if !canReclassifyLegacyFile(message.MessageType, input.MessageType, existingContent, input.Content, input.Attachments) {
+				return nil, apperror.New("external_id_conflict", "external message id has conflicting content", 409, false)
+			}
+			legacyTypeCorrection = true
+			legacyAttachmentCleanup = strings.EqualFold(message.MessageType, "file") && strings.EqualFold(input.MessageType, "text")
+			message.ContentHash = input.ContentHash
+			if conversation.IngestionScope == "private" {
+				message.Content = input.Content
+			}
+			s.privateContent[message.ID] = input.Content
+			s.messages[key] = message
 		}
 		if message.MessageType != input.MessageType {
-			if !canReclassifyLegacyFile(message.MessageType, input.MessageType, input.Attachments) {
+			if !canReclassifyLegacyFile(message.MessageType, input.MessageType, message.Content, input.Content, input.Attachments) {
 				return nil, apperror.New("external_id_conflict", "external message id has conflicting content", 409, false)
 			}
 			legacyTypeCorrection = true

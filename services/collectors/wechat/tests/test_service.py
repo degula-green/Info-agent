@@ -121,6 +121,35 @@ class CollectorServiceTest(unittest.TestCase):
         sender, display = service.resolve_sender({"sender_username": "wxid_wrong", "content": "<fromusername>wxid_xml</fromusername>"}, names)
         self.assertEqual((sender, display), ("wxid_xml", "XML成员"))
 
+    def test_private_sender_falls_back_to_conversation_nickname(self):
+        original = dict(service.binding)
+        try:
+            service.binding["wxid"] = "wxid_me"
+            sender, display = service.resolve_sender(
+                {"sender_username": "wxid_other", "content": "hello"},
+                {},
+                conversation_type="private",
+                conversation_name="霜序十四寒",
+            )
+            self.assertEqual((sender, display), ("wxid_other", "霜序十四寒"))
+            sender, display = service.resolve_sender(
+                {"sender_username": "wxid_other", "content": "hello"},
+                {},
+                conversation_type="group",
+                conversation_name="数据252",
+            )
+            self.assertEqual((sender, display), ("wxid_other", "wxid_other"))
+        finally:
+            service.binding.clear()
+            service.binding.update(original)
+
+    def test_media_xml_and_attachment_metadata_are_not_message_text(self):
+        xml = '<msg><appmsg><type>6</type><title>安排.docx</title></appmsg></msg>'
+        attachment = [{"file_name": "安排.docx"}]
+        self.assertEqual(service.message_content({"content": xml}, attachment), "")
+        self.assertEqual(service.message_content({"content": '{"file_key":"k","file_name":"安排.docx"}'}, attachment), "")
+        self.assertEqual(service.message_content({"content": "请查收"}, attachment), "请查收")
+
     def test_local_file_fallback_matches_wechat_duplicate_name(self):
         with tempfile.TemporaryDirectory() as directory:
             account = Path(directory) / "account"
