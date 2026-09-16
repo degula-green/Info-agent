@@ -111,7 +111,7 @@ function displayKnowledgeError(error: any, fallback: string) {
   return fallback
 }
 
-function mapAttachment(value: AttachmentDTO, uploader = '', sentAt = ''): InfoFile {
+function mapAttachment(value: AttachmentDTO, uploader = '', sentAt = '', collectionTimestamp = ''): InfoFile {
   const name = friendlyAttachmentName(value.file_name, value.mime_type)
   const extension = name.includes('.') ? name.split('.').pop() || '' : ''
   return {
@@ -124,8 +124,8 @@ function mapAttachment(value: AttachmentDTO, uploader = '', sentAt = ''): InfoFi
     uploadedAt: displayTime(value.created_at),
     timestamp: value.created_at,
     sentAt,
-    collectedAt: displayTime(value.created_at),
-    collectionTimestamp: value.created_at,
+    collectedAt: displayTime(collectionTimestamp || value.created_at),
+    collectionTimestamp: collectionTimestamp || value.created_at,
     uploader,
     content: '',
     documentStatus: mapAttachmentStatus(value.content_status),
@@ -182,7 +182,7 @@ function mapConversation(value: ConversationDTO, messages: MessageDTO[] = [], at
   const messageById = new Map(allMappedMessages.map((message) => [message.id, message]))
   const mappedFiles = attachments.map((item) => {
     const message = item.message_id ? messageById.get(item.message_id) : undefined
-    return mapAttachment(item, message?.sender || '', message?.time || '')
+    return mapAttachment(item, message?.sender || '', message?.time || '', message?.collectionTimestamp || '')
   })
   const hasUnavailableCollector = (value.collectors || []).some((collector) => collector.status === 'unavailable')
   const hasActiveCollector = (value.collectors || []).some((collector) => collector.status === 'active')

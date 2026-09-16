@@ -105,6 +105,7 @@ type publicMessage struct {
 	ID                   string             `json:"id"`
 	ConversationID       string             `json:"conversation_id"`
 	ExternalMessageID    string             `json:"external_message_id"`
+	SenderIdentityID     string             `json:"sender_identity_id,omitempty"`
 	SenderDisplayName    string             `json:"sender_display_name,omitempty"`
 	MessageType          string             `json:"message_type"`
 	Content              string             `json:"content,omitempty"`
@@ -268,6 +269,7 @@ func publicMessageFromDomain(value domain.Message) publicMessage {
 	}
 	return publicMessage{
 		ID: value.ID, ConversationID: value.ConversationID, ExternalMessageID: value.ExternalMessageID,
+		SenderIdentityID:  value.SenderIdentityID,
 		SenderDisplayName: value.SenderDisplayName, MessageType: value.MessageType, Content: value.Content,
 		Sensitive: value.Sensitive, ClassificationStatus: value.ClassificationStatus,
 		ContentHash: value.ContentHash, ContentVersion: value.ContentVersion, SentAt: value.SentAt,
