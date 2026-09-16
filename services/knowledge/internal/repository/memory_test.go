@@ -14,6 +14,75 @@ import (
 	"info-agent/knowledge/internal/trace"
 )
 
+func completeMemoryPrivateReady(t *testing.T, repo *MemoryStore, ctx context.Context, messageID string, attachmentIDs ...string) {
+	t.Helper()
+	pending, err := repo.ListPendingMessages(ctx, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, candidate := range pending {
+		if candidate.Message.ID == messageID {
+			if err := repo.CompleteMessageClassification(ctx, messageID, candidate.OriginalContent, false); err != nil {
+				t.Fatal(err)
+			}
+			break
+		}
+	}
+	for _, attachmentID := range attachmentIDs {
+		attachment, err := repo.GetAttachment(ctx, attachmentID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := repo.CompleteAttachment(ctx, attachmentID, "object:"+attachmentID, attachment.ContentHash, attachment.SizeBytes, "ready"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	item, err := repo.GetKnowledgeItemByMessage(ctx, messageID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.MarkKnowledgePermissionSynced(ctx, item.ID, 1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repo.TryMarkKnowledgeReady(ctx, item.ID, "test-ready"); err != nil {
+		t.Fatal(err)
+	}
+	readyEvents, err := repo.GetOutbox(ctx, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range readyEvents {
+		if event.EventType == "knowledge.ready" && event.Payload["knowledge_item_id"] == item.ID {
+			if err := repo.MarkOutboxPublished(ctx, event.ID, time.Now().UTC()); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	for _, attachmentID := range attachmentIDs {
+		attachmentItem, err := repo.GetKnowledgeItemByAttachment(ctx, attachmentID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := repo.MarkKnowledgePermissionSynced(ctx, attachmentItem.ID, 1); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := repo.TryMarkKnowledgeReady(ctx, attachmentItem.ID, "test-ready"); err != nil {
+			t.Fatal(err)
+		}
+		readyEvents, err := repo.GetOutbox(ctx, 100)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, event := range readyEvents {
+			if event.EventType == "knowledge.ready" && event.Payload["knowledge_item_id"] == attachmentItem.ID {
+				if err := repo.MarkOutboxPublished(ctx, event.ID, time.Now().UTC()); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+	}
+}
+
 func TestIngestMessageInputUsesSnakeCaseProtocolFields(t *testing.T) {
 	var input IngestMessageInput
 	if err := json.Unmarshal([]byte(`{"collector_id":"collector-1","external_conversation_id":"chat-1","external_message_id":"message-1","payload_hash":"payload-hash","sender_external_id":"sender-1","sender_display_name":"Sender","message_type":"text","content":"hello","content_hash":"content-hash","sent_at":"2026-09-05T00:00:00Z","cursor":"3","attachments":[{"external_attachment_id":"attachment-1","file_name":"note.txt","mime_type":"text/plain","size_bytes":12,"content_hash":"attachment-hash"}]}`), &input); err != nil {
@@ -192,13 +261,16 @@ func TestMemoryMessageAttachmentIdempotenceAndCursorMonotonicity(t *testing.T) {
 	if _, err := repo.CompleteAttachment(ctx, first.Attachments[0].ID, "object", attachmentHash, 10, "ready"); err != nil {
 		t.Fatal(err)
 	}
+	completeMemoryPrivateReady(t, repo, ctx, first.Message.ID, first.Attachments[0].ID)
 	input.ExternalMessageID = "m2"
 	input.Cursor = "90"
 	input.Attachments = nil
 	input.PayloadHash, _ = CalculatePayloadHash(input)
-	if _, err := repo.IngestMessage(ctx, input); err != nil {
+	secondMessage, err := repo.IngestMessage(ctx, input)
+	if err != nil {
 		t.Fatal(err)
 	}
+	completeMemoryPrivateReady(t, repo, ctx, secondMessage.Message.ID)
 	current, err := repo.GetCollector(ctx, collector.ID)
 	if err != nil {
 		t.Fatal(err)
