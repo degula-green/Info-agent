@@ -2130,6 +2130,7 @@ func (s *PostgresStore) TryMarkKnowledgeReady(ctx context.Context, id, traceID s
 	payload, _ := json.Marshal(map[string]any{
 		"resource_type": "knowledge_item", "resource_id": item.ID, "knowledge_item_id": item.ID,
 		"source_message_id": item.SourceMessageID, "source_attachment_id": item.SourceAttachmentID,
+		"organization_id": item.OrganizationID,
 		"attachment_ids": func() []string {
 			if item.SourceAttachmentID == "" {
 				return []string{}

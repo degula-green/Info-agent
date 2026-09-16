@@ -1475,16 +1475,75 @@ func (s *Service) IngestMessage(ctx context.Context, input repository.IngestMess
 	}
 	dedupeKey := messageDedupeKey(account.Platform, accountID, input.ExternalConversationID, input.ExternalMessageID)
 	if s.KV != nil {
-		var cached messageDedupeRecord
-		if found, cacheErr := s.KV.Get(ctx, dedupeKey, &cached); cacheErr != nil {
+		if cachedResult, found, cacheErr := s.getMessageDedupe(ctx, dedupeKey, canonicalPayloadHash); found {
+			return cachedResult, cacheErr
+		} else if cacheErr != nil {
 			slog.WarnContext(ctx, "knowledge message dedupe cache unavailable", "error", cacheErr)
-		} else if found {
-			if !strings.EqualFold(cached.PayloadHash, canonicalPayloadHash) {
-				return nil, apperror.New("external_id_conflict", "external message id has conflicting payload", 409, false)
+		}
+
+		// SETNX serializes the common concurrent replay path. The database
+		// unique key remains the final idempotency guarantee, so a lock miss or
+		// Redis outage never causes a valid message to be dropped.
+		lockKey := messageDedupeLockKey(dedupeKey)
+		lockValue := randomToken(16)
+		acquired, lockErr := s.KV.Acquire(ctx, lockKey, lockValue, 30*time.Second)
+		if lockErr != nil {
+			slog.WarnContext(ctx, "knowledge message dedupe lock unavailable", "error", lockErr)
+		} else if !acquired {
+			// The current lock holder normally stores the result before release.
+			// Poll briefly and attempt to take over if it exits without a cache
+			// record. The bounded wait prevents Redis from becoming a hard
+			// dependency; the database unique key remains the final guard.
+			deadline := time.NewTimer(2 * time.Second)
+			ticker := time.NewTicker(10 * time.Millisecond)
+		waitForOwner:
+			for {
+				select {
+				case <-ctx.Done():
+					deadline.Stop()
+					ticker.Stop()
+					return nil, ctx.Err()
+				case <-deadline.C:
+					ticker.Stop()
+					break waitForOwner
+				case <-ticker.C:
+					if cachedResult, found, cacheErr := s.getMessageDedupe(ctx, dedupeKey, canonicalPayloadHash); found {
+						deadline.Stop()
+						ticker.Stop()
+						return cachedResult, cacheErr
+					} else if cacheErr != nil {
+						deadline.Stop()
+						ticker.Stop()
+						slog.WarnContext(ctx, "knowledge message dedupe cache unavailable", "error", cacheErr)
+						break waitForOwner
+					}
+					acquired, lockErr = s.KV.Acquire(ctx, lockKey, lockValue, 30*time.Second)
+					if lockErr != nil {
+						deadline.Stop()
+						ticker.Stop()
+						slog.WarnContext(ctx, "knowledge message dedupe lock unavailable", "error", lockErr)
+						break waitForOwner
+					}
+					if acquired {
+						deadline.Stop()
+						ticker.Stop()
+						break waitForOwner
+					}
+				}
 			}
-			result := cached.Result
-			result.Duplicate = true
-			return &result, nil
+		}
+		if acquired {
+			defer func() {
+				if releaseErr := s.KV.Release(ctx, lockKey, lockValue); releaseErr != nil {
+					slog.WarnContext(ctx, "knowledge message dedupe lock release failed", "error", releaseErr)
+				}
+			}()
+			// Close the race between the initial lookup and SETNX acquisition.
+			if cachedResult, found, cacheErr := s.getMessageDedupe(ctx, dedupeKey, canonicalPayloadHash); found {
+				return cachedResult, cacheErr
+			} else if cacheErr != nil {
+				slog.WarnContext(ctx, "knowledge message dedupe cache unavailable", "error", cacheErr)
+			}
 		}
 	}
 	normalized, err := normalizeMessageCandidate(filtered, input.Content, input.PayloadHash, *account, s.Now())
@@ -1617,6 +1676,24 @@ func repositoryInputFromUnified(input domain.UnifiedMessage) repository.IngestMe
 func messageDedupeKey(platformName, accountID, conversationID, messageID string) string {
 	sum := sha256.Sum256([]byte(strings.Join([]string{platformName, accountID, conversationID, messageID}, "\x00")))
 	return "knowledge:dedupe:" + hex.EncodeToString(sum[:])
+}
+
+func (s *Service) getMessageDedupe(ctx context.Context, key, payloadHash string) (*repository.IngestResult, bool, error) {
+	var cached messageDedupeRecord
+	found, err := s.KV.Get(ctx, key, &cached)
+	if err != nil || !found {
+		return nil, false, err
+	}
+	if !strings.EqualFold(cached.PayloadHash, payloadHash) {
+		return nil, true, apperror.New("external_id_conflict", "external message id has conflicting payload", 409, false)
+	}
+	result := cached.Result
+	result.Duplicate = true
+	return &result, true, nil
+}
+
+func messageDedupeLockKey(dedupeKey string) string {
+	return dedupeKey + ":lock"
 }
 
 func attachmentDedupeKey(platformName, accountID, conversationID, attachmentID string) string {
