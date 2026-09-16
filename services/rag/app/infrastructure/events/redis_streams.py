@@ -73,16 +73,47 @@ class RedisStreamWorker:
 
     def run_once(self) -> int:
         self.ensure_group()
-        rows = self.client.xreadgroup(self.group, self.consumer, {self.stream: ">"}, count=settings.redis_batch_size, block=settings.redis_block_ms)
+        rows = []
+        # Reclaim entries left pending by a crashed/previous consumer. This is
+        # deliberately best-effort so Redis versions without XAUTOCLAIM still
+        # work; new entries are read below regardless.
+        xautoclaim = getattr(self.client, "xautoclaim", None)
+        if callable(xautoclaim):
+            try:
+                claimed = xautoclaim(
+                    self.stream,
+                    self.group,
+                    self.consumer,
+                    min_idle_time=settings.redis_claim_idle_ms,
+                    start_id="0-0",
+                    count=settings.redis_batch_size,
+                )
+                if isinstance(claimed, tuple) and len(claimed) >= 2 and claimed[1]:
+                    rows.append((self.stream, claimed[1]))
+            except Exception:
+                pass
+        rows.extend(self.client.xreadgroup(self.group, self.consumer, {self.stream: ">"}, count=settings.redis_batch_size, block=settings.redis_block_ms) or [])
         handled = 0
-        for _, messages in rows or []:
+        for _, messages in rows:
             for message_id, fields in messages:
                 mid = message_id.decode() if isinstance(message_id, bytes) else str(message_id)
                 try:
                     raw = (fields.get("event") or fields.get(b"event")) if isinstance(fields, dict) else None
                     if isinstance(raw, bytes):
                         raw = raw.decode("utf-8")
-                    envelope = validate_envelope(json.loads(raw or "{}"))
+                    # Old module-2 internal events used a `payload` field and
+                    # are not part of the service-three contract. ACK these
+                    # poison entries rather than leaving them pending forever.
+                    if not raw:
+                        self.client.xack(self.stream, self.group, message_id)
+                        handled += 1
+                        continue
+                    try:
+                        envelope = validate_envelope(json.loads(raw))
+                    except (TypeError, ValueError, json.JSONDecodeError):
+                        self.client.xack(self.stream, self.group, message_id)
+                        handled += 1
+                        continue
                     self.handler(envelope)
                     self.client.xack(self.stream, self.group, message_id)
                     handled += 1

@@ -127,6 +127,9 @@ class _Redis:
         envelope, self.envelope = self.envelope, None
         return [(b"knowledge:ready", [(b"1-0", {b"event": json.dumps(envelope).encode()})])]
 
+    def xautoclaim(self, *_args, **_kwargs):
+        return (b"0-0", [])
+
     def xack(self, stream, group, message_id):
         self.acked.append((stream, group, message_id))
 
@@ -213,6 +216,18 @@ class Module2ReadyContractTests(unittest.TestCase):
         worker.handler = lambda _event: (_ for _ in ()).throw(RuntimeError("failed"))
         self.assertEqual(worker.run_once(), 0)
         self.assertEqual(failed_client.acked, [])
+
+    def test_redis_stream_acks_legacy_payload_entries(self):
+        class LegacyRedis(_Redis):
+            def xreadgroup(self, *_args, **_kwargs):
+                return [(b"knowledge:ready", [(b"2-0", {b"payload": b"{}"})])]
+
+        client = LegacyRedis()
+        worker = RedisStreamWorker.__new__(RedisStreamWorker)
+        worker.client, worker.handler = client, lambda _event: (_ for _ in ()).throw(AssertionError("legacy event was dispatched"))
+        worker.stream, worker.group, worker.consumer = "knowledge:ready", "rag-workers", "test"
+        self.assertEqual(worker.run_once(), 1)
+        self.assertEqual(len(client.acked), 1)
 
 
 if __name__ == "__main__":
