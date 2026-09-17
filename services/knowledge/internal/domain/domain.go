@@ -378,8 +378,14 @@ type MessageSource struct {
 
 type Attachment struct {
 	ID                    string    `json:"id"`
+	RequestID             string    `json:"request_id,omitempty"`
+	TraceID               string    `json:"trace_id,omitempty"`
+	ResourceID            string    `json:"resource_id,omitempty"`
 	ConversationID        string    `json:"conversation_id"`
 	MessageID             string    `json:"message_id,omitempty"`
+	UploadedByUserID      string    `json:"uploaded_by_user_id,omitempty"`
+	UploadDestination     string    `json:"upload_destination,omitempty"`
+	OrganizationID        string    `json:"organization_id,omitempty"`
 	ExternalAttachmentID  string    `json:"external_attachment_id"`
 	FileName              string    `json:"file_name"`
 	MIMEType              string    `json:"mime_type"`
@@ -389,13 +395,30 @@ type Attachment struct {
 	ContentVersion        int       `json:"content_version"`
 	ContentStatus         string    `json:"content_status"`
 	AccessScope           string    `json:"access_scope"`
+	MetadataAccessScope   string    `json:"metadata_access_scope,omitempty"`
+	ContentAccessScope    string    `json:"content_access_scope,omitempty"`
 	ContentAccessRequired bool      `json:"content_access_required"`
 	Sensitive             bool      `json:"sensitive"`
 	ClassificationStatus  string    `json:"classification_status,omitempty"`
+	UploadStatus          string    `json:"upload_status,omitempty"`
+	UploadError           string    `json:"upload_error,omitempty"`
+	ProcessingStatus      string    `json:"processing_status,omitempty"`
 	PreviewCapability     string    `json:"preview_capability,omitempty"`
 	LastError             string    `json:"last_error,omitempty"`
 	CreatedAt             time.Time `json:"created_at"`
 	UpdatedAt             time.Time `json:"updated_at"`
+}
+
+type LocalUploadTaskInput struct {
+	RequestID         string
+	TraceID           string
+	UserID            string
+	UploadDestination string
+	FileName          string
+	MIMEType          string
+	SizeBytes         int64
+	ContentHash       string
+	OrganizationID    string
 }
 
 type OutboxEvent struct {

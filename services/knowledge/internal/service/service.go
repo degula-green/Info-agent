@@ -1687,6 +1687,187 @@ type UploadResult struct {
 	Attachment domain.Attachment `json:"attachment"`
 }
 
+type LocalUploadTaskInput struct {
+	RequestID         string `json:"request_id"`
+	TraceID           string `json:"trace_id"`
+	UploadDestination string `json:"upload_destination"`
+	FileName          string `json:"file_name"`
+	MIMEType          string `json:"mime_type"`
+	SizeBytes         int64  `json:"size_bytes"`
+	ContentHash       string `json:"content_hash"`
+	OrganizationID    string `json:"organization_id,omitempty"`
+}
+
+func (s *Service) CreateLocalUploadTask(ctx context.Context, userID, organizationHint string, input LocalUploadTaskInput) (*domain.Attachment, error) {
+	input.RequestID, input.TraceID, input.UploadDestination = strings.TrimSpace(input.RequestID), strings.TrimSpace(input.TraceID), strings.TrimSpace(input.UploadDestination)
+	input.FileName, input.MIMEType, input.ContentHash = strings.TrimSpace(input.FileName), strings.TrimSpace(input.MIMEType), strings.TrimSpace(input.ContentHash)
+	if input.RequestID == "" || input.TraceID == "" || input.FileName == "" || input.MIMEType == "" || input.ContentHash == "" || input.SizeBytes < 0 {
+		return nil, apperror.New("invalid_request", "request_id, trace_id, file metadata and content_hash are required", 400, false)
+	}
+	if !validSHA256WithPrefix(input.ContentHash) {
+		return nil, apperror.New("invalid_request", "content_hash must use sha256:<digest>", 400, false)
+	}
+	if parsed, _, parseErr := mime.ParseMediaType(input.MIMEType); parseErr == nil {
+		input.MIMEType = parsed
+	}
+	input.FileName = safeFileName(input.FileName)
+	if input.SizeBytes > s.Config.MaxAttachmentBytes {
+		return nil, apperror.New("attachment_too_large", "attachment exceeds the configured size limit", 413, false)
+	}
+	if !allowedUploadType(input.FileName, input.MIMEType) {
+		return nil, apperror.New("unsupported_file_type", "file type is not supported", 415, false)
+	}
+	org := ""
+	if input.UploadDestination == "organization_file_library" {
+		if s.Core != nil {
+			resolved, err := s.Core.CurrentOrganization(ctx, userID)
+			if err == nil {
+				org = resolved
+			} else if s.Config.AllowDevAuth && strings.TrimSpace(organizationHint) != "" {
+				org = strings.TrimSpace(organizationHint)
+			} else {
+				return nil, apperror.Wrap("organization_required", "current organization could not be resolved", 409, false, err)
+			}
+		} else if s.Config.AllowDevAuth {
+			org = strings.TrimSpace(organizationHint)
+		}
+		if org == "" {
+			return nil, apperror.New("organization_required", "current organization is required", 409, false)
+		}
+	} else if input.UploadDestination != "private_local_library" {
+		return nil, apperror.New("invalid_upload_destination", "upload_destination is not supported", 400, false)
+	}
+	if strings.TrimSpace(input.OrganizationID) != "" && input.UploadDestination == "private_local_library" {
+		return nil, apperror.New("organization_not_allowed", "private uploads cannot specify an organization", 400, false)
+	}
+	// The organization_id supplied by a client is deliberately ignored for
+	// organization uploads. The resolved organization is authoritative.
+	hash := strings.TrimPrefix(strings.ToLower(input.ContentHash), "sha256:")
+	r := s.Repo
+	task, err := r.CreateLocalUploadTask(ctx, domain.LocalUploadTaskInput{RequestID: input.RequestID, TraceID: input.TraceID, UserID: userID, UploadDestination: input.UploadDestination, FileName: input.FileName, MIMEType: input.MIMEType, SizeBytes: input.SizeBytes, ContentHash: hash, OrganizationID: org})
+	if err != nil {
+		return nil, err
+	}
+	return task, nil
+}
+
+func (s *Service) GetLocalUploadTask(ctx context.Context, userID, requestID string) (*domain.Attachment, error) {
+	task, err := s.Repo.GetLocalUploadTask(ctx, strings.TrimSpace(requestID))
+	if err != nil {
+		return nil, err
+	}
+	if task.UploadDestination == "private_local_library" {
+		if task.UploadedByUserID != userID {
+			return nil, apperror.Clone(apperror.ErrForbidden)
+		}
+	} else if task.UploadDestination == "organization_file_library" {
+		allowed := false
+		if s.Core != nil && task.OrganizationID != "" {
+			member, checkErr := s.Core.CheckOrganizationMember(ctx, userID, task.OrganizationID)
+			if checkErr != nil {
+				return nil, apperror.Wrap("core_dependency_unavailable", "organization membership service is unavailable", 503, true, checkErr)
+			}
+			allowed = allowed || member
+		}
+		if !allowed {
+			return nil, apperror.Clone(apperror.ErrForbidden)
+		}
+	}
+	return task, nil
+}
+
+func (s *Service) UploadLocalContent(ctx context.Context, userID, requestID string, reader io.Reader) (*domain.Attachment, error) {
+	task, err := s.GetLocalUploadTask(ctx, userID, requestID)
+	if err != nil {
+		return nil, err
+	}
+	if task.UploadStatus == "uploaded" || task.UploadStatus == "duplicate" {
+		return task, nil
+	}
+	temp, err := os.CreateTemp("", "knowledge-local-upload-*")
+	if err != nil {
+		return nil, apperror.New("attachment_upload_failed", "cannot create upload buffer", 503, true)
+	}
+	tempName := temp.Name()
+	defer os.Remove(tempName)
+	defer temp.Close()
+	hashing := sha256.New()
+	written, copyErr := io.Copy(io.MultiWriter(temp, hashing), io.LimitReader(reader, s.Config.MaxAttachmentBytes+1))
+	if copyErr != nil || written > s.Config.MaxAttachmentBytes {
+		_ = s.Repo.FailLocalUpload(ctx, requestID, "size_limit_exceeded")
+		return nil, apperror.New("attachment_too_large", "attachment exceeds the configured size limit", 413, false)
+	}
+	if written != task.SizeBytes {
+		_ = s.Repo.FailLocalUpload(ctx, requestID, "size_mismatch")
+		return nil, apperror.New("attachment_size_mismatch", "attachment size does not match metadata", 400, false)
+	}
+	actual := hex.EncodeToString(hashing.Sum(nil))
+	expected := strings.TrimPrefix(strings.ToLower(task.ContentHash), "sha256:")
+	if actual != expected {
+		_ = s.Repo.FailLocalUpload(ctx, requestID, "hash_mismatch")
+		return nil, apperror.New("attachment_hash_mismatch", "attachment hash does not match metadata", 400, false)
+	}
+	if s.KV != nil {
+		var cachedID string
+		if found, cacheErr := s.KV.Get(ctx, localDedupKey(task), &cachedID); cacheErr == nil && found && cachedID != "" {
+			if duplicate, getErr := s.Repo.GetAttachment(ctx, cachedID); getErr == nil && duplicate.UploadStatus == "uploaded" {
+				return s.Repo.MarkLocalDuplicate(ctx, requestID, duplicate)
+			}
+		}
+	}
+	if duplicate, dupErr := s.Repo.FindLocalDuplicate(ctx, task.UploadedByUserID, task.OrganizationID, actual); dupErr == nil && duplicate.ID != task.ID {
+		return s.Repo.MarkLocalDuplicate(ctx, requestID, duplicate)
+	}
+	if _, err = temp.Seek(0, io.SeekStart); err != nil {
+		return nil, apperror.New("attachment_upload_failed", "attachment upload failed", 503, true)
+	}
+	key := filepath.ToSlash(filepath.Join("attachments", "local", task.UploadDestination, actual, safeFileName(task.FileName)))
+	if err = s.Objects.Put(ctx, key, temp, written, task.MIMEType); err != nil {
+		_ = s.Repo.FailLocalUpload(ctx, requestID, "object_store_failed")
+		return nil, apperror.New("attachment_upload_failed", "attachment upload failed", 503, true)
+	}
+	saved, err := s.Repo.FinalizeLocalUpload(ctx, requestID, key, actual, written)
+	if err != nil {
+		_ = s.Objects.Delete(ctx, key)
+		return nil, err
+	}
+	// The content write is durable. Permission synchronization is retried by
+	// the worker; an unavailable Core must not make the upload non-idempotent.
+	_ = s.ProcessPermissions(ctx)
+	if s.KV != nil {
+		_ = s.KV.Set(ctx, localDedupKey(saved), saved.ID, 24*time.Hour)
+	}
+	return saved, nil
+}
+
+func localDedupKey(task *domain.Attachment) string {
+	scope := task.UploadedByUserID
+	if task.OrganizationID != "" {
+		scope = task.OrganizationID
+	}
+	return "knowledge:upload:dedup:" + task.UploadDestination + ":" + scope + ":" + task.ContentHash
+}
+
+func validSHA256WithPrefix(value string) bool {
+	value = strings.TrimSpace(strings.ToLower(value))
+	return strings.HasPrefix(value, "sha256:") && validSHA256(strings.TrimPrefix(value, "sha256:"))
+}
+
+func validSHA256(value string) bool {
+	value = strings.TrimSpace(value)
+	if len(value) != sha256.Size*2 {
+		return false
+	}
+	_, err := hex.DecodeString(value)
+	return err == nil
+}
+func allowedUploadType(name, mimeType string) bool {
+	mimeType = strings.ToLower(strings.TrimSpace(strings.Split(mimeType, ";")[0]))
+	ext := strings.ToLower(filepath.Ext(name))
+	allowed := map[string]map[string]bool{"application/pdf": {".pdf": true}, "text/plain": {".txt": true}, "text/markdown": {".md": true}, "application/json": {".json": true}, "application/zip": {".zip": true}, "application/vnd.openxmlformats-officedocument.wordprocessingml.document": {".docx": true}, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": {".xlsx": true}, "application/vnd.openxmlformats-officedocument.presentationml.presentation": {".pptx": true}, "image/png": {".png": true}, "image/jpeg": {".jpg": true, ".jpeg": true}}
+	return allowed[mimeType][ext]
+}
+
 func (s *Service) UploadAttachment(ctx context.Context, collectorID, attachmentID, fileName, mimeType, declaredHash string, reader io.Reader, declaredSize int64) (UploadResult, error) {
 	if declaredSize > s.Config.MaxAttachmentBytes {
 		return UploadResult{}, apperror.New("attachment_too_large", "attachment exceeds the configured size limit", 413, false)
@@ -1769,12 +1950,32 @@ func (s *Service) OpenAttachment(ctx context.Context, userID, id string) (*domai
 	if err != nil {
 		return nil, nil, err
 	}
-	conversation, err := s.Repo.GetConversation(ctx, attachment.ConversationID)
-	if err != nil {
-		return nil, nil, err
-	}
-	if _, err := s.GetConversation(ctx, userID, conversation.ID); err != nil {
-		return nil, nil, err
+	if attachment.UploadDestination != "" {
+		if attachment.UploadDestination == "private_local_library" {
+			if attachment.UploadedByUserID != userID {
+				return nil, nil, apperror.Clone(apperror.ErrForbidden)
+			}
+		} else if attachment.UploadDestination == "organization_file_library" {
+			allowed := false
+			if s.Core != nil && attachment.OrganizationID != "" {
+				member, checkErr := s.Core.CheckOrganizationMember(ctx, userID, attachment.OrganizationID)
+				if checkErr != nil {
+					return nil, nil, apperror.Wrap("core_dependency_unavailable", "organization membership service is unavailable", 503, true, checkErr)
+				}
+				allowed = allowed || member
+			}
+			if !allowed {
+				return nil, nil, apperror.Clone(apperror.ErrForbidden)
+			}
+		}
+	} else {
+		conversation, err := s.Repo.GetConversation(ctx, attachment.ConversationID)
+		if err != nil {
+			return nil, nil, err
+		}
+		if _, err := s.GetConversation(ctx, userID, conversation.ID); err != nil {
+			return nil, nil, err
+		}
 	}
 	if attachment.Sensitive && attachment.ContentAccessRequired {
 		return nil, nil, apperror.New("attachment_content_restricted", "attachment content requires approval", 403, false)
@@ -1785,6 +1986,80 @@ func (s *Service) OpenAttachment(ctx context.Context, userID, id string) (*domai
 	reader, err := s.Objects.Open(ctx, attachment.ObjectRef)
 	if err != nil {
 		return nil, nil, apperror.New("attachment_not_ready", "attachment content is unavailable", 503, true)
+	}
+	return attachment, reader, nil
+}
+
+// InternalKnowledge returns only the RAG-facing resource contract. Storage
+// references remain private to the knowledge service.
+func (s *Service) InternalKnowledge(ctx context.Context, id string, contentVersion, aclVersion int) (*domain.KnowledgeItem, *domain.Attachment, error) {
+	if contentVersion < 1 {
+		return nil, nil, apperror.New("invalid_content_version", "content_version is required", 400, false)
+	}
+	if aclVersion < 1 {
+		return nil, nil, apperror.New("invalid_acl_version", "acl_version is required", 400, false)
+	}
+	item, err := s.Repo.GetKnowledgeItem(ctx, id)
+	if err != nil {
+		return nil, nil, err
+	}
+	if item.LifecycleStatus != "ready" {
+		return nil, nil, apperror.New("knowledge_not_ready", "knowledge item is not ready", 409, true)
+	}
+	if item.ContentVersion != contentVersion {
+		return nil, nil, apperror.New("knowledge_version_mismatch", "knowledge content version does not match", 409, false)
+	}
+	if item.ACLVersion != int64(aclVersion) {
+		return nil, nil, apperror.New("knowledge_acl_version_mismatch", "knowledge ACL version does not match", 409, false)
+	}
+	attachment, err := s.Repo.GetAttachment(ctx, item.SourceAttachmentID)
+	if err != nil {
+		return nil, nil, err
+	}
+	return item, attachment, nil
+}
+
+func (s *Service) InternalAttachment(ctx context.Context, id string, contentVersion, aclVersion int) (*domain.KnowledgeItem, *domain.Attachment, error) {
+	if contentVersion < 1 {
+		return nil, nil, apperror.New("invalid_content_version", "content_version is required", 400, false)
+	}
+	if aclVersion < 1 {
+		return nil, nil, apperror.New("invalid_acl_version", "acl_version is required", 400, false)
+	}
+	attachment, err := s.Repo.GetAttachment(ctx, id)
+	if err != nil {
+		return nil, nil, err
+	}
+	item, err := s.Repo.GetKnowledgeItemByAttachment(ctx, id)
+	if err != nil {
+		return nil, nil, err
+	}
+	if item.LifecycleStatus != "ready" {
+		return nil, nil, apperror.New("knowledge_not_ready", "knowledge item is not ready", 409, true)
+	}
+	if item.ContentVersion != contentVersion || attachment.ContentVersion != contentVersion {
+		return nil, nil, apperror.New("knowledge_version_mismatch", "knowledge content version does not match", 409, false)
+	}
+	if item.ACLVersion != int64(aclVersion) {
+		return nil, nil, apperror.New("knowledge_acl_version_mismatch", "knowledge ACL version does not match", 409, false)
+	}
+	if attachment.ContentStatus != "ready" {
+		return nil, nil, apperror.New("attachment_not_ready", "attachment content is not ready", 409, true)
+	}
+	return item, attachment, nil
+}
+
+func (s *Service) OpenInternalAttachment(ctx context.Context, id string, contentVersion, aclVersion int) (*domain.Attachment, io.ReadCloser, error) {
+	_, attachment, err := s.InternalAttachment(ctx, id, contentVersion, aclVersion)
+	if err != nil {
+		return nil, nil, err
+	}
+	if attachment.ContentAccessRequired {
+		return nil, nil, apperror.New("attachment_content_restricted", "attachment content requires approval", 403, false)
+	}
+	reader, err := s.Objects.Open(ctx, attachment.ObjectRef)
+	if err != nil {
+		return nil, nil, apperror.New("attachment_content_unavailable", "attachment content is unavailable", 503, true)
 	}
 	return attachment, reader, nil
 }

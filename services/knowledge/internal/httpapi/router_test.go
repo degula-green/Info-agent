@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"info-agent/knowledge/internal/config"
+	"info-agent/knowledge/internal/coreclient"
 	"info-agent/knowledge/internal/domain"
 	"info-agent/knowledge/internal/repository"
 	"info-agent/knowledge/internal/service"
@@ -39,6 +40,266 @@ func TestHealth(t *testing.T) {
 	}
 	if recorder.Header().Get("X-Request-ID") != "req-health" || recorder.Header().Get("X-Trace-ID") != "trace-health" {
 		t.Fatalf("request tracing headers were not preserved: request=%q trace=%q", recorder.Header().Get("X-Request-ID"), recorder.Header().Get("X-Trace-ID"))
+	}
+}
+
+func TestLocalUploadLifecycleAndIdempotency(t *testing.T) {
+	cfg := config.Config{AllowDevAuth: true, DevUserID: "u1", DevOrganizationID: "org-1", MaxAttachmentBytes: 1024}
+	app := newApp(cfg)
+	permissionServer := newPermissionSyncServer(t)
+	defer permissionServer.Close()
+	app.Service.Core = coreclient.New(permissionServer.URL, "test-token")
+	body := []byte("hello local upload")
+	digest := sha256Hex(body)
+	createBody := `{"request_id":"req-local-1","trace_id":"trace-local-1","upload_destination":"private_local_library","file_name":"note.txt","mime_type":"text/plain","size_bytes":18,"content_hash":"sha256:` + digest + `"}`
+	request := httptest.NewRequest(http.MethodPost, "/api/knowledge/v1/attachments/upload-tasks", strings.NewReader(createBody))
+	request.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+	NewRouterWithApp(app).ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusCreated {
+		t.Fatalf("create task failed: %d %s", recorder.Code, recorder.Body.String())
+	}
+	var task map[string]any
+	if err := json.Unmarshal(recorder.Body.Bytes(), &task); err != nil {
+		t.Fatal(err)
+	}
+	if task["upload_status"] != "pending" || task["processing_status"] != "pending" {
+		t.Fatalf("unexpected initial task: %s", recorder.Body.String())
+	}
+	request = httptest.NewRequest(http.MethodPut, "/api/knowledge/v1/attachments/upload-tasks/req-local-1/content", bytes.NewReader(body))
+	request.Header.Set("Content-Type", "application/octet-stream")
+	recorder = httptest.NewRecorder()
+	NewRouterWithApp(app).ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("content upload failed: %d %s", recorder.Code, recorder.Body.String())
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &task); err != nil {
+		t.Fatal(err)
+	}
+	if task["upload_status"] != "uploaded" || task["content_hash"] != "sha256:"+digest {
+		t.Fatalf("unexpected uploaded task: %s", recorder.Body.String())
+	}
+	resourceID, _ := task["resource_id"].(string)
+	attachmentID, _ := task["attachment_id"].(string)
+	if resourceID == "" || attachmentID == "" || task["object_ref"] == nil {
+		t.Fatalf("missing resource references: %s", recorder.Body.String())
+	}
+	contentReq := httptest.NewRequest(http.MethodGet, "/api/knowledge/v1/attachments/"+attachmentID+"/content", nil)
+	contentRec := httptest.NewRecorder()
+	NewRouterWithApp(app).ServeHTTP(contentRec, contentReq)
+	if contentRec.Code != http.StatusOK || contentRec.Body.String() != string(body) {
+		t.Fatalf("uploaded content could not be read: %d %s", contentRec.Code, contentRec.Body.String())
+	}
+	// Replaying creation is idempotent and returns the same attachment.
+	retry := httptest.NewRequest(http.MethodPost, "/api/knowledge/v1/attachments/upload-tasks", strings.NewReader(createBody))
+	retry.Header.Set("Content-Type", "application/json")
+	retryRecorder := httptest.NewRecorder()
+	NewRouterWithApp(app).ServeHTTP(retryRecorder, retry)
+	if retryRecorder.Code != http.StatusCreated {
+		t.Fatalf("idempotent create failed: %d %s", retryRecorder.Code, retryRecorder.Body.String())
+	}
+	var retryTask map[string]any
+	_ = json.Unmarshal(retryRecorder.Body.Bytes(), &retryTask)
+	if retryTask["attachment_id"] != attachmentID {
+		t.Fatalf("idempotent create changed attachment: first=%v retry=%v", attachmentID, retryTask["attachment_id"])
+	}
+	conflictBody := strings.Replace(createBody, `"file_name":"note.txt"`, `"file_name":"other.txt"`, 1)
+	conflictReq := httptest.NewRequest(http.MethodPost, "/api/knowledge/v1/attachments/upload-tasks", strings.NewReader(conflictBody))
+	conflictReq.Header.Set("Content-Type", "application/json")
+	conflictRec := httptest.NewRecorder()
+	NewRouterWithApp(app).ServeHTTP(conflictRec, conflictReq)
+	if conflictRec.Code != http.StatusConflict {
+		t.Fatalf("request id metadata conflict was accepted: %d %s", conflictRec.Code, conflictRec.Body.String())
+	}
+	duplicateCreate := strings.Replace(createBody, "req-local-1", "req-local-duplicate", 1)
+	dupReq := httptest.NewRequest(http.MethodPost, "/api/knowledge/v1/attachments/upload-tasks", strings.NewReader(duplicateCreate))
+	dupReq.Header.Set("Content-Type", "application/json")
+	dupRec := httptest.NewRecorder()
+	NewRouterWithApp(app).ServeHTTP(dupRec, dupReq)
+	if dupRec.Code != http.StatusCreated {
+		t.Fatalf("duplicate task creation failed: %d %s", dupRec.Code, dupRec.Body.String())
+	}
+	dupContent := httptest.NewRequest(http.MethodPut, "/api/knowledge/v1/attachments/upload-tasks/req-local-duplicate/content", bytes.NewReader(body))
+	dupContent.Header.Set("Content-Type", "application/octet-stream")
+	dupUpload := httptest.NewRecorder()
+	NewRouterWithApp(app).ServeHTTP(dupUpload, dupContent)
+	if dupUpload.Code != http.StatusOK || !strings.Contains(dupUpload.Body.String(), `"upload_status":"duplicate"`) {
+		t.Fatalf("duplicate content was not marked duplicate: %d %s", dupUpload.Code, dupUpload.Body.String())
+	}
+	events, err := app.Service.Repo.GetOutbox(context.Background(), 100)
+	if err != nil || len(events) != 1 {
+		t.Fatalf("duplicate upload published extra event: count=%d err=%v", len(events), err)
+	}
+	if events[0].EventType != "knowledge.ready" || events[0].Payload["knowledge_item_id"] != resourceID || events[0].Payload["attachment_id"] != attachmentID {
+		t.Fatalf("ready event does not follow the knowledge contract: %+v", events[0])
+	}
+	// A different user cannot inspect the private task.
+	other := httptest.NewRequest(http.MethodGet, "/api/knowledge/v1/attachments/upload-tasks/req-local-1", nil)
+	other.Header.Set("X-User-ID", "u2")
+	otherRecorder := httptest.NewRecorder()
+	NewRouterWithApp(app).ServeHTTP(otherRecorder, other)
+	if otherRecorder.Code != http.StatusForbidden {
+		t.Fatalf("private task leaked to another user: %d %s", otherRecorder.Code, otherRecorder.Body.String())
+	}
+}
+
+func TestInternalLocalAttachmentContract(t *testing.T) {
+	cfg := config.Config{AllowDevAuth: true, DevUserID: "u1", MaxAttachmentBytes: 1024, InternalServiceToken: "internal-token"}
+	app := newApp(cfg)
+	permissionServer := newPermissionSyncServer(t)
+	defer permissionServer.Close()
+	app.Service.Core = coreclient.New(permissionServer.URL, "test-token")
+	body := []byte("internal attachment")
+	digest := sha256Hex(body)
+	create := `{"request_id":"req-internal","trace_id":"trace-internal","upload_destination":"private_local_library","file_name":"note.txt","mime_type":"text/plain","size_bytes":19,"content_hash":"sha256:` + digest + `"}`
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/api/knowledge/v1/attachments/upload-tasks", strings.NewReader(create))
+	request.Header.Set("Content-Type", "application/json")
+	NewRouterWithApp(app).ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusCreated {
+		t.Fatalf("create: %d %s", recorder.Code, recorder.Body.String())
+	}
+	var task map[string]any
+	_ = json.Unmarshal(recorder.Body.Bytes(), &task)
+	request = httptest.NewRequest(http.MethodPut, "/api/knowledge/v1/attachments/upload-tasks/req-internal/content", bytes.NewReader(body))
+	request.Header.Set("Content-Type", "application/octet-stream")
+	recorder = httptest.NewRecorder()
+	NewRouterWithApp(app).ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("upload: %d %s", recorder.Code, recorder.Body.String())
+	}
+	_ = json.Unmarshal(recorder.Body.Bytes(), &task)
+	resourceID, attachmentID := task["resource_id"].(string), task["attachment_id"].(string)
+	url := "/api/knowledge/v1/internal/knowledge/" + resourceID + "?content_version=1&acl_version=1"
+	request = httptest.NewRequest(http.MethodGet, url, nil)
+	request.Header.Set("Authorization", "Bearer internal-token")
+	request.Header.Set("X-Caller-Service", "rag")
+	recorder = httptest.NewRecorder()
+	NewRouterWithApp(app).ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK || strings.Contains(recorder.Body.String(), "object_ref") {
+		t.Fatalf("metadata contract: %d %s", recorder.Code, recorder.Body.String())
+	}
+	request = httptest.NewRequest(http.MethodGet, "/api/knowledge/v1/internal/attachments/"+attachmentID+"/content?content_version=1&acl_version=1", nil)
+	request.Header.Set("Authorization", "Bearer internal-token")
+	request.Header.Set("X-Caller-Service", "rag")
+	recorder = httptest.NewRecorder()
+	NewRouterWithApp(app).ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK || recorder.Body.String() != string(body) {
+		t.Fatalf("content proxy: %d %s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func newPermissionSyncServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/internal/v1/authorization/resource-relations/sync" || r.Header.Get("Authorization") != "Bearer test-token" {
+			t.Fatalf("unexpected permission sync request: %s %s", r.Method, r.URL.Path)
+		}
+		var payload struct {
+			KnowledgeItemID string `json:"knowledge_item_id"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil || payload.KnowledgeItemID == "" {
+			t.Fatalf("invalid permission sync payload: %v", err)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"knowledge_item_id": payload.KnowledgeItemID, "acl_version": 1, "status": "synced"})
+	}))
+}
+
+func TestLocalUploadRejectsHashAndClientOrganization(t *testing.T) {
+	app := newApp(config.Config{AllowDevAuth: true, DevUserID: "u1", DevOrganizationID: "org-1", MaxAttachmentBytes: 1024})
+	bad := `{"request_id":"req-bad","trace_id":"trace-bad","upload_destination":"private_local_library","organization_id":"attacker-org","file_name":"note.txt","mime_type":"text/plain","size_bytes":3,"content_hash":"sha256:0000000000000000000000000000000000000000000000000000000000000000"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/knowledge/v1/attachments/upload-tasks", strings.NewReader(bad))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	NewRouterWithApp(app).ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("client organization accepted for private upload: %d %s", rec.Code, rec.Body.String())
+	}
+	good := `{"request_id":"req-org","trace_id":"trace-org","upload_destination":"organization_file_library","organization_id":"attacker-org","file_name":"note.txt","mime_type":"text/plain","size_bytes":3,"content_hash":"sha256:ca978112ca1bbdcafac231b39a23dc4da786eff8147c4e72b9807785afee48bb"}`
+	req = httptest.NewRequest(http.MethodPost, "/api/knowledge/v1/attachments/upload-tasks", strings.NewReader(good))
+	req.Header.Set("Content-Type", "application/json")
+	rec = httptest.NewRecorder()
+	NewRouterWithApp(app).ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated || !strings.Contains(rec.Body.String(), `"organization_id":"org-1"`) {
+		t.Fatalf("resolved organization was not used: %d %s", rec.Code, rec.Body.String())
+	}
+	// Hash mismatch after task creation marks it failed and never writes an object.
+	valid := `{"request_id":"req-fail","trace_id":"trace-fail","upload_destination":"private_local_library","file_name":"note.txt","mime_type":"text/plain","size_bytes":3,"content_hash":"sha256:ca978112ca1bbdcafac231b39a23dc4da786eff8147c4e72b9807785afee48bb"}`
+	req = httptest.NewRequest(http.MethodPost, "/api/knowledge/v1/attachments/upload-tasks", strings.NewReader(valid))
+	req.Header.Set("Content-Type", "application/json")
+	rec = httptest.NewRecorder()
+	NewRouterWithApp(app).ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatal(rec.Body.String())
+	}
+	req = httptest.NewRequest(http.MethodPut, "/api/knowledge/v1/attachments/upload-tasks/req-fail/content", strings.NewReader("bad"))
+	req.Header.Set("Content-Type", "application/octet-stream")
+	rec = httptest.NewRecorder()
+	NewRouterWithApp(app).ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("hash mismatch was accepted: %d %s", rec.Code, rec.Body.String())
+	}
+	status := httptest.NewRecorder()
+	get := httptest.NewRequest(http.MethodGet, "/api/knowledge/v1/attachments/upload-tasks/req-fail", nil)
+	NewRouterWithApp(app).ServeHTTP(status, get)
+	if !strings.Contains(status.Body.String(), `"upload_status":"failed"`) {
+		t.Fatalf("failed task state not persisted: %s", status.Body.String())
+	}
+}
+
+func TestOrganizationUploadChecksCoreMembershipOnRead(t *testing.T) {
+	core := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/organizations/current" {
+			_, _ = w.Write([]byte(`{"organization":{"id":"org-1"}}`))
+			return
+		}
+		if strings.HasPrefix(r.URL.Path, "/internal/organizations/org-1/members/") {
+			if strings.HasSuffix(r.URL.Path, "/u-owner/check") || strings.HasSuffix(r.URL.Path, "/u-member/check") {
+				_, _ = w.Write([]byte(`{"allowed":true}`))
+				return
+			}
+			_, _ = w.Write([]byte(`{"allowed":false}`))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer core.Close()
+	app := newApp(config.Config{AllowDevAuth: true, DevUserID: "u-owner", CoreURL: core.URL, CoreServiceToken: "core-token", MaxAttachmentBytes: 1024})
+	content := []byte("hello")
+	digest := sha256Hex(content)
+	create := `{"request_id":"org-read","trace_id":"trace-org-read","upload_destination":"organization_file_library","organization_id":"attacker-org","file_name":"org.txt","mime_type":"text/plain","size_bytes":5,"content_hash":"sha256:` + digest + `"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/knowledge/v1/attachments/upload-tasks", strings.NewReader(create))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	NewRouterWithApp(app).ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated || !strings.Contains(rec.Body.String(), `"organization_id":"org-1"`) {
+		t.Fatalf("organization task creation failed: %d %s", rec.Code, rec.Body.String())
+	}
+	req = httptest.NewRequest(http.MethodPut, "/api/knowledge/v1/attachments/upload-tasks/org-read/content", bytes.NewReader(content))
+	req.Header.Set("Content-Type", "application/octet-stream")
+	rec = httptest.NewRecorder()
+	NewRouterWithApp(app).ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("organization upload failed: %d %s", rec.Code, rec.Body.String())
+	}
+	var uploaded map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &uploaded); err != nil {
+		t.Fatal(err)
+	}
+	attachmentID, _ := uploaded["attachment_id"].(string)
+	memberReq := httptest.NewRequest(http.MethodGet, "/api/knowledge/v1/attachments/"+attachmentID+"/content", nil)
+	memberReq.Header.Set("X-User-ID", "u-member")
+	memberRec := httptest.NewRecorder()
+	NewRouterWithApp(app).ServeHTTP(memberRec, memberReq)
+	if memberRec.Code != http.StatusOK || memberRec.Body.String() != string(content) {
+		t.Fatalf("organization member could not read: %d %s", memberRec.Code, memberRec.Body.String())
+	}
+	nonMemberReq := httptest.NewRequest(http.MethodGet, "/api/knowledge/v1/attachments/"+attachmentID+"/content", nil)
+	nonMemberReq.Header.Set("X-User-ID", "u-non-member")
+	nonMemberRec := httptest.NewRecorder()
+	NewRouterWithApp(app).ServeHTTP(nonMemberRec, nonMemberReq)
+	if nonMemberRec.Code != http.StatusForbidden {
+		t.Fatalf("non-member could read organization content: %d %s", nonMemberRec.Code, nonMemberRec.Body.String())
 	}
 }
 

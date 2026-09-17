@@ -1461,7 +1461,7 @@ func (s *MemoryStore) ListPendingKnowledgePermissions(_ context.Context, limit i
 	defer s.mu.RUnlock()
 	out := make([]domain.KnowledgeItem, 0)
 	for _, item := range s.knowledgeItems {
-		if item.LifecycleStatus == "active" && ((!item.PermissionReady && (item.ACLSyncStatus == "pending" || item.ACLSyncStatus == "failed")) || (item.PermissionReady && item.ACLSyncStatus == "synced" && item.ProcessingStatus == "pending")) {
+		if (item.LifecycleStatus == "active" || item.SourceType == "local_upload") && ((!item.PermissionReady && (item.ACLSyncStatus == "pending" || item.ACLSyncStatus == "failed")) || (item.PermissionReady && item.ACLSyncStatus == "synced" && item.ProcessingStatus == "pending")) {
 			out = append(out, cloneKnowledgeItem(item))
 		}
 	}
@@ -1550,6 +1550,9 @@ func (s *MemoryStore) TryMarkKnowledgeReady(ctx context.Context, id, traceID str
 		}
 	}
 	item.ProcessingStatus, item.LastError, item.UpdatedAt = "ready", "", time.Now().UTC()
+	if item.SourceType == "local_upload" {
+		item.LifecycleStatus = "ready"
+	}
 	s.knowledgeItems[id] = item
 	if traceID == "" {
 		traceID = trace.TraceID(ctx)
@@ -1563,7 +1566,7 @@ func (s *MemoryStore) TryMarkKnowledgeReady(ctx context.Context, id, traceID str
 		Producer: "module-2", AvailableAt: time.Now().UTC(),
 		Payload: map[string]any{
 			"resource_type": "knowledge_item", "resource_id": item.ID, "knowledge_item_id": item.ID,
-			"source_message_id": item.SourceMessageID, "source_attachment_id": item.SourceAttachmentID,
+			"source_message_id": item.SourceMessageID, "source_attachment_id": item.SourceAttachmentID, "attachment_id": item.SourceAttachmentID,
 			"content_version": item.ContentVersion, "acl_version": item.ACLVersion,
 			"content_variant": "display", "content_access_required": item.ContentAccessRequired,
 		},
@@ -1921,6 +1924,131 @@ func (s *MemoryStore) MarkOutboxFailed(_ context.Context, id, failure string, av
 	e.AvailableAt = availableAt.UTC()
 	s.outbox[id] = e
 	return nil
+}
+
+func (s *MemoryStore) CreateLocalUploadTask(_ context.Context, input domain.LocalUploadTaskInput) (*domain.Attachment, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, existing := range s.attachments {
+		if existing.RequestID == input.RequestID {
+			if existing.UploadedByUserID != input.UserID || existing.UploadDestination != input.UploadDestination || existing.FileName != input.FileName || existing.MIMEType != input.MIMEType || existing.SizeBytes != input.SizeBytes || !strings.EqualFold(existing.ContentHash, input.ContentHash) {
+				return nil, apperror.New("idempotency_conflict", "request_id was used with different upload metadata", 409, false)
+			}
+			out := cloneAttachment(existing)
+			return &out, nil
+		}
+	}
+	now := time.Now().UTC()
+	a := domain.Attachment{
+		ID: uuid.NewString(), RequestID: input.RequestID, TraceID: input.TraceID, ResourceID: uuid.NewString(),
+		UploadedByUserID: input.UserID, UploadDestination: input.UploadDestination,
+		OrganizationID: input.OrganizationID, FileName: input.FileName, MIMEType: input.MIMEType,
+		SizeBytes: input.SizeBytes, ContentHash: input.ContentHash, ContentVersion: 1,
+		MetadataAccessScope: "owner_only", ContentAccessScope: "owner_only", AccessScope: "owner_only",
+		ContentStatus: "pending", UploadStatus: "pending", ProcessingStatus: "pending",
+		CreatedAt: now, UpdatedAt: now,
+	}
+	if input.UploadDestination == "organization_file_library" {
+		a.MetadataAccessScope, a.ContentAccessScope, a.AccessScope = "organization_members", "organization_members", "organization_members"
+	}
+	s.attachments[a.ID] = a
+	scope, owner, baseID := "private", input.UserID, uuid.NewString()
+	if input.UploadDestination == "organization_file_library" {
+		scope, owner = "organization", ""
+	}
+	s.knowledgeItems[a.ResourceID] = domain.KnowledgeItem{ID: a.ResourceID, KnowledgeBaseID: baseID, KnowledgeScope: scope, AccessScope: a.AccessScope, OwnerUserID: owner, OrganizationID: a.OrganizationID, SourceType: "local_upload", SourceAttachmentID: a.ID, ContentType: "file", ContentRef: "pending/" + a.ID, ContentHash: a.ContentHash, ContentVersion: 1, ContentVisibility: "display", SecurityStatus: "not_required", OwnershipReady: true, SecurityReady: true, PermissionReady: false, ACLVersion: 0, ACLSyncStatus: "pending", ProcessingStatus: "pending", LifecycleStatus: "pending", CreatedAt: now, UpdatedAt: now}
+	out := cloneAttachment(a)
+	return &out, nil
+}
+
+func (s *MemoryStore) GetLocalUploadTask(_ context.Context, requestID string) (*domain.Attachment, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, a := range s.attachments {
+		if a.RequestID == requestID {
+			out := cloneAttachment(a)
+			return &out, nil
+		}
+	}
+	return nil, apperror.New("upload_task_not_found", "upload task not found", 404, false)
+}
+
+func (s *MemoryStore) FindLocalDuplicate(_ context.Context, userID, organizationID, contentHash string) (*domain.Attachment, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, a := range s.attachments {
+		if a.UploadStatus != "uploaded" && a.UploadStatus != "duplicate" {
+			continue
+		}
+		if !strings.EqualFold(a.ContentHash, contentHash) {
+			continue
+		}
+		if organizationID != "" {
+			if a.OrganizationID != organizationID || a.UploadDestination != "organization_file_library" {
+				continue
+			}
+		} else if a.UploadedByUserID != userID || a.UploadDestination != "private_local_library" {
+			continue
+		}
+		out := cloneAttachment(a)
+		return &out, nil
+	}
+	return nil, apperror.New("upload_duplicate_not_found", "no duplicate upload found", 404, false)
+}
+
+func (s *MemoryStore) FinalizeLocalUpload(_ context.Context, requestID, objectRef, contentHash string, size int64) (*domain.Attachment, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for key, a := range s.attachments {
+		if a.RequestID != requestID {
+			continue
+		}
+		if a.ContentHash != "" && !strings.EqualFold(a.ContentHash, contentHash) {
+			return nil, apperror.New("attachment_hash_mismatch", "attachment hash does not match metadata", 400, false)
+		}
+		a.ObjectRef, a.ContentHash, a.SizeBytes = objectRef, contentHash, size
+		a.ContentStatus, a.UploadStatus, a.ProcessingStatus, a.UploadError = "ready", "uploaded", "ready", ""
+		a.UpdatedAt = time.Now().UTC()
+		item := s.knowledgeItems[a.ResourceID]
+		item.ContentRef, item.ContentHash, item.ContentSaved = objectRef, contentHash, true
+		item.UpdatedAt = a.UpdatedAt
+		s.knowledgeItems[item.ID] = item
+		s.attachments[key] = a
+		out := cloneAttachment(a)
+		return &out, nil
+	}
+	return nil, apperror.New("upload_task_not_found", "upload task not found", 404, false)
+}
+
+func (s *MemoryStore) FailLocalUpload(_ context.Context, requestID, message string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for key, a := range s.attachments {
+		if a.RequestID == requestID {
+			a.UploadStatus, a.ContentStatus, a.UploadError, a.LastError = "failed", "failed", safeError(message), safeError(message)
+			a.UpdatedAt = time.Now().UTC()
+			s.attachments[key] = a
+			return nil
+		}
+	}
+	return apperror.New("upload_task_not_found", "upload task not found", 404, false)
+}
+
+func (s *MemoryStore) MarkLocalDuplicate(_ context.Context, requestID string, existing *domain.Attachment) (*domain.Attachment, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for key, a := range s.attachments {
+		if a.RequestID != requestID {
+			continue
+		}
+		a.UploadStatus, a.ContentStatus, a.ProcessingStatus = "duplicate", "ready", "pending"
+		a.ObjectRef, a.ResourceID = existing.ObjectRef, existing.ResourceID
+		a.UpdatedAt = time.Now().UTC()
+		s.attachments[key] = a
+		out := cloneAttachment(a)
+		return &out, nil
+	}
+	return nil, apperror.New("upload_task_not_found", "upload task not found", 404, false)
 }
 
 const domainConversationActive = "active"

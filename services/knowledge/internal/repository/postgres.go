@@ -1450,7 +1450,7 @@ func (s *PostgresStore) AdvanceCursor(ctx context.Context, collectorID, cursor s
 	return dbError(tx.Commit(ctx))
 }
 
-const attachmentColumns = `id::text,conversation_ingestion_id::text,COALESCE(message_id::text,''),external_attachment_id,file_name,COALESCE(mime_type,''),size_bytes,COALESCE(object_ref,''),COALESCE(content_hash,''),content_version,content_status,access_scope,content_access_required,COALESCE(preview_capability,''),COALESCE(last_error,''),created_at,updated_at,sensitive,classification_status`
+const attachmentColumns = `id::text,COALESCE(conversation_ingestion_id::text,''),COALESCE(message_id::text,''),COALESCE(external_attachment_id,''),file_name,COALESCE(mime_type,''),size_bytes,COALESCE(object_ref,''),COALESCE(content_hash,''),content_version,content_status,access_scope,content_access_required,COALESCE(preview_capability,''),COALESCE(last_error,''),created_at,updated_at,sensitive,classification_status`
 
 func scanAttachment(row rowScanner) (*domain.Attachment, error) {
 	var a domain.Attachment
@@ -1688,7 +1688,7 @@ func (s *PostgresStore) ListPendingKnowledgePermissions(ctx context.Context, lim
 	if limit <= 0 || limit > 200 {
 		limit = 200
 	}
-	rows, err := s.pool.Query(ctx, `SELECT `+knowledgeItemColumns+` FROM knowledge.knowledge_items ki LEFT JOIN knowledge.conversation_ingestions ci ON ci.id=ki.conversation_ingestion_id WHERE ki.lifecycle_status='active' AND ((ki.permission_ready=FALSE AND ki.acl_sync_status IN ('pending','failed')) OR (ki.permission_ready=TRUE AND ki.acl_sync_status='synced' AND ki.processing_status='pending')) ORDER BY ki.updated_at LIMIT $1`, limit)
+	rows, err := s.pool.Query(ctx, `SELECT `+knowledgeItemColumns+` FROM knowledge.knowledge_items ki LEFT JOIN knowledge.conversation_ingestions ci ON ci.id=ki.conversation_ingestion_id WHERE (ki.lifecycle_status='active' OR ki.source_type='local_upload') AND ((ki.permission_ready=FALSE AND ki.acl_sync_status IN ('pending','failed')) OR (ki.permission_ready=TRUE AND ki.acl_sync_status='synced' AND ki.processing_status='pending')) ORDER BY ki.updated_at LIMIT $1`, limit)
 	if err != nil {
 		return nil, dbError(err)
 	}
@@ -1789,11 +1789,11 @@ func (s *PostgresStore) TryMarkKnowledgeReady(ctx context.Context, id, traceID s
 	}
 	payload, _ := json.Marshal(map[string]any{
 		"resource_type": "knowledge_item", "resource_id": item.ID, "knowledge_item_id": item.ID,
-		"source_message_id": item.SourceMessageID, "source_attachment_id": item.SourceAttachmentID,
+		"source_message_id": item.SourceMessageID, "source_attachment_id": item.SourceAttachmentID, "attachment_id": item.SourceAttachmentID,
 		"content_version": item.ContentVersion, "acl_version": item.ACLVersion,
 		"content_variant": "display", "content_access_required": item.ContentAccessRequired,
 	})
-	if _, err = tx.Exec(ctx, `UPDATE knowledge.knowledge_items SET processing_status='ready',last_error=NULL,updated_at=now() WHERE id=$1`, id); err != nil {
+	if _, err = tx.Exec(ctx, `UPDATE knowledge.knowledge_items SET processing_status='ready',lifecycle_status=CASE WHEN source_type='local_upload' THEN 'ready' ELSE lifecycle_status END,last_error=NULL,updated_at=now() WHERE id=$1`, id); err != nil {
 		return false, dbError(err)
 	}
 	tag, err := tx.Exec(ctx, `INSERT INTO knowledge.outbox_events (id,aggregate_type,aggregate_id,event_type,event_version,schema_version,organization_id,trace_id,payload,status,retry_count,available_at) VALUES ($1,'knowledge_item',$2,'knowledge.ready',$3,1,$4,$5,$6,'pending',0,now()) ON CONFLICT DO NOTHING`, uuid.NewString(), id, item.ContentVersion, nilString(item.OrganizationID), traceID, payload)
@@ -1896,6 +1896,160 @@ func (s *PostgresStore) MarkOutboxPublished(ctx context.Context, id string, publ
 
 func (s *PostgresStore) MarkOutboxFailed(ctx context.Context, id, failure string, availableAt time.Time) error {
 	_, err := s.pool.Exec(ctx, `UPDATE knowledge.outbox_events SET status='failed',retry_count=retry_count+1,publish_attempts=COALESCE(publish_attempts,0)+1,last_error=$2,available_at=$3 WHERE id=$1 AND event_type='knowledge.ready' AND published_at IS NULL`, id, safeError(failure), availableAt.UTC())
+	return dbError(err)
+}
+func localAttachmentQuery() string {
+	return `id::text,COALESCE(request_id,''),COALESCE(uploaded_by_user_id::text,''),COALESCE(upload_destination,''),COALESCE(organization_id::text,''),file_name,mime_type,size_bytes,COALESCE(object_ref,''),COALESCE(content_hash,''),content_version,metadata_access_scope,content_access_scope,content_access_required,upload_status,COALESCE(upload_error,''),processing_status,created_at,updated_at`
+}
+
+func scanLocalAttachment(row rowScanner) (*domain.Attachment, error) {
+	var a domain.Attachment
+	err := row.Scan(&a.ID, &a.RequestID, &a.UploadedByUserID, &a.UploadDestination, &a.OrganizationID, &a.FileName, &a.MIMEType, &a.SizeBytes, &a.ObjectRef, &a.ContentHash, &a.ContentVersion, &a.MetadataAccessScope, &a.ContentAccessScope, &a.ContentAccessRequired, &a.UploadStatus, &a.UploadError, &a.ProcessingStatus, &a.CreatedAt, &a.UpdatedAt)
+	a.AccessScope = a.ContentAccessScope
+	return &a, err
+}
+
+func (s *PostgresStore) CreateLocalUploadTask(ctx context.Context, input domain.LocalUploadTaskInput) (*domain.Attachment, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, dbError(err)
+	}
+	defer tx.Rollback(ctx)
+	var existing domain.Attachment
+	var scanned *domain.Attachment
+	scanned, err = scanLocalAttachment(tx.QueryRow(ctx, `SELECT `+localAttachmentQuery()+` FROM knowledge.attachments WHERE request_id=$1`, input.RequestID))
+	if err == nil {
+		existing = *scanned
+		_ = tx.QueryRow(ctx, `SELECT id::text FROM knowledge.knowledge_items WHERE source_attachment_id=$1 LIMIT 1`, existing.ID).Scan(&existing.ResourceID)
+		if existing.RequestID == input.RequestID && (existing.UploadedByUserID != input.UserID || existing.UploadDestination != input.UploadDestination || existing.FileName != input.FileName || existing.MIMEType != input.MIMEType || existing.SizeBytes != input.SizeBytes || !strings.EqualFold(strings.TrimSpace(existing.ContentHash), strings.TrimSpace(input.ContentHash))) {
+			return nil, apperror.New("idempotency_conflict", "request_id was used with different upload metadata", 409, false)
+		}
+		return &existing, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return nil, dbError(err)
+	}
+	id, resourceID, baseID := uuid.NewString(), uuid.NewString(), uuid.NewString()
+	scope, access, baseType, baseScope := "private", "owner_only", "private_local", "private"
+	var owner any = input.UserID
+	var org any
+	if input.UploadDestination == "organization_file_library" {
+		scope, access, baseType, baseScope, owner, org = "organization", "organization_members", "organization_files", "organization", nil, input.OrganizationID
+	}
+	if _, err = tx.Exec(ctx, `INSERT INTO knowledge.knowledge_bases (id,knowledge_scope,base_type,name,owner_user_id,organization_id) VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT DO NOTHING`, baseID, baseScope, baseType, baseType, owner, org); err != nil {
+		return nil, dbError(err)
+	}
+	if err = tx.QueryRow(ctx, `SELECT id::text FROM knowledge.knowledge_bases WHERE base_type=$1 AND ((owner_user_id=$2 AND $2 IS NOT NULL) OR (organization_id=$3 AND $3 IS NOT NULL)) LIMIT 1`, baseType, owner, org).Scan(&baseID); err != nil {
+		return nil, dbError(err)
+	}
+	placeholder := "pending/" + id
+	if err = tx.QueryRow(ctx, `INSERT INTO knowledge.attachments (id,request_id,uploaded_by_user_id,upload_destination,organization_id,file_name,mime_type,size_bytes,object_ref,content_hash,content_version,metadata_access_scope,content_access_scope,content_access_required,upload_status,processing_status) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,1,$11,$11,false,'pending','pending') RETURNING `+localAttachmentQuery(), id, input.RequestID, owner, input.UploadDestination, org, input.FileName, input.MIMEType, input.SizeBytes, placeholder, input.ContentHash, access).Scan(&existing.ID, &existing.RequestID, &existing.UploadedByUserID, &existing.UploadDestination, &existing.OrganizationID, &existing.FileName, &existing.MIMEType, &existing.SizeBytes, &existing.ObjectRef, &existing.ContentHash, &existing.ContentVersion, &existing.MetadataAccessScope, &existing.ContentAccessScope, &existing.ContentAccessRequired, &existing.UploadStatus, &existing.UploadError, &existing.ProcessingStatus, &existing.CreatedAt, &existing.UpdatedAt); err != nil {
+		return nil, dbError(err)
+	}
+	existing.AccessScope = existing.ContentAccessScope
+	existing.ResourceID = resourceID
+	if _, err = tx.Exec(ctx, `INSERT INTO knowledge.knowledge_items (id,knowledge_base_id,knowledge_scope,access_scope,owner_user_id,organization_id,source_type,source_attachment_id,content_type,content_ref,content_hash,content_version,content_visibility,security_status,content_saved,ownership_ready,security_ready,permission_ready,acl_version,acl_sync_status,processing_status,lifecycle_status) VALUES ($1,$2,$3,$4,$5,$6,'local_upload',$7,'file',$8,$9,1,'display','not_required',false,true,true,false,0,'pending','pending','pending')`, resourceID, baseID, scope, access, owner, org, existing.ID, placeholder, input.ContentHash); err != nil {
+		return nil, dbError(err)
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return nil, dbError(err)
+	}
+	return &existing, nil
+}
+
+func (s *PostgresStore) GetLocalUploadTask(ctx context.Context, requestID string) (*domain.Attachment, error) {
+	a, err := scanLocalAttachment(s.pool.QueryRow(ctx, `SELECT `+localAttachmentQuery()+` FROM knowledge.attachments WHERE request_id=$1`, requestID))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, apperror.New("upload_task_not_found", "upload task not found", 404, false)
+	}
+	if err == nil {
+		_ = s.pool.QueryRow(ctx, `SELECT id::text FROM knowledge.knowledge_items WHERE source_attachment_id=$1 LIMIT 1`, a.ID).Scan(&a.ResourceID)
+	}
+	return a, dbError(err)
+}
+
+func (s *PostgresStore) FindLocalDuplicate(ctx context.Context, userID, organizationID, contentHash string) (*domain.Attachment, error) {
+	destination := "private_local_library"
+	if organizationID != "" {
+		destination = "organization_file_library"
+	}
+	query := `SELECT ` + localAttachmentQuery() + ` FROM knowledge.attachments WHERE upload_status IN ('uploaded','duplicate') AND content_hash=$1 AND upload_destination=$2 AND `
+	args := []any{contentHash, destination}
+	if organizationID != "" {
+		query += `organization_id=$3 ORDER BY created_at LIMIT 1`
+		args = append(args, organizationID)
+	} else {
+		query += `uploaded_by_user_id=$3 ORDER BY created_at LIMIT 1`
+		args = append(args, userID)
+	}
+	a, err := scanLocalAttachment(s.pool.QueryRow(ctx, query, args...))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, apperror.New("upload_duplicate_not_found", "no duplicate upload found", 404, false)
+	}
+	return a, dbError(err)
+}
+
+func (s *PostgresStore) FinalizeLocalUpload(ctx context.Context, requestID, objectRef, contentHash string, size int64) (*domain.Attachment, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, dbError(err)
+	}
+	defer tx.Rollback(ctx)
+	var a domain.Attachment
+	var scanned *domain.Attachment
+	scanned, err = scanLocalAttachment(tx.QueryRow(ctx, `UPDATE knowledge.attachments SET object_ref=$2,content_hash=$3,size_bytes=$4,content_status='ready',upload_status='uploaded',processing_status='ready',upload_error=NULL,updated_at=now() WHERE request_id=$1 AND content_hash=$3 RETURNING `+localAttachmentQuery(), requestID, objectRef, contentHash, size))
+	if err != nil {
+		return nil, dbError(err)
+	}
+	a = *scanned
+	a.AccessScope = a.ContentAccessScope
+	if _, err = tx.Exec(ctx, `UPDATE knowledge.knowledge_items SET content_ref=$2,content_hash=$3,content_saved=true,processing_status='ready',lifecycle_status='ready',updated_at=now() WHERE source_attachment_id=$1 AND ownership_ready AND security_ready AND permission_ready AND acl_sync_status='synced' AND acl_version>0`, a.ID, objectRef, contentHash); err != nil {
+		return nil, dbError(err)
+	}
+	var resourceID string
+	_ = tx.QueryRow(ctx, `SELECT id::text FROM knowledge.knowledge_items WHERE source_attachment_id=$1`, a.ID).Scan(&resourceID)
+	a.ResourceID = resourceID
+	var aclVersion int
+	var lifecycle string
+	if err = tx.QueryRow(ctx, `SELECT acl_version,lifecycle_status FROM knowledge.knowledge_items WHERE id=$1`, resourceID).Scan(&aclVersion, &lifecycle); err != nil {
+		return nil, dbError(err)
+	}
+	if lifecycle != "ready" {
+		if err = tx.Commit(ctx); err != nil {
+			return nil, dbError(err)
+		}
+		return &a, nil
+	}
+	payload := map[string]any{"resource_type": "knowledge_item", "resource_id": resourceID, "knowledge_item_id": resourceID, "source_message_id": nil, "source_attachment_id": a.ID, "attachment_id": a.ID, "content_version": a.ContentVersion, "acl_version": aclVersion, "content_variant": "display", "content_access_required": false}
+	raw, _ := json.Marshal(payload)
+	traceID := trace.TraceID(ctx)
+	if traceID == "" {
+		traceID = uuid.NewString()
+	}
+	if _, err = tx.Exec(ctx, `INSERT INTO knowledge.outbox_events (id,aggregate_type,aggregate_id,event_type,event_version,trace_id,organization_id,payload,status,available_at) VALUES ($1,'knowledge_item',$2,'knowledge.ready',1,$3,$4,$5,'pending',now()) ON CONFLICT DO NOTHING`, uuid.NewString(), resourceID, traceID, nilString(a.OrganizationID), raw); err != nil {
+		return nil, dbError(err)
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return nil, dbError(err)
+	}
+	return &a, nil
+}
+
+func (s *PostgresStore) MarkLocalDuplicate(ctx context.Context, requestID string, existing *domain.Attachment) (*domain.Attachment, error) {
+	a, err := scanLocalAttachment(s.pool.QueryRow(ctx, `UPDATE knowledge.attachments SET object_ref=$2,content_hash=$3,size_bytes=$4,content_status='ready',upload_status='duplicate',processing_status='ready',updated_at=now() WHERE request_id=$1 RETURNING `+localAttachmentQuery(), requestID, existing.ObjectRef, existing.ContentHash, existing.SizeBytes))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, apperror.New("upload_task_not_found", "upload task not found", 404, false)
+	}
+	if err != nil {
+		return nil, dbError(err)
+	}
+	a.AccessScope = a.ContentAccessScope
+	a.ResourceID = existing.ResourceID
+	return a, nil
+}
+
+func (s *PostgresStore) FailLocalUpload(ctx context.Context, requestID, message string) error {
+	_, err := s.pool.Exec(ctx, `UPDATE knowledge.attachments SET upload_status='failed',upload_error=$2,updated_at=now() WHERE request_id=$1`, requestID, message)
 	return dbError(err)
 }
 
