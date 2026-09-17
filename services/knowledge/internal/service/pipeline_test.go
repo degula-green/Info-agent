@@ -107,8 +107,29 @@ func TestIngestFiltersBeforeDedupeAndDedupeSkipsRepositoryNormalization(t *testi
 		t.Fatalf("Redis dedupe did not skip repository ingest: result=%+v calls=%d err=%v", second, counting.calls, err)
 	}
 	changed := pipelineInput(f, "dedupe-1", "text", "changed content")
-	if _, err := f.service.IngestMessage(context.Background(), changed); apperror.From(err).Code != "external_id_conflict" || counting.calls != 1 {
-		t.Fatalf("Redis dedupe did not reject conflicting payload: calls=%d err=%v", counting.calls, err)
+	if _, err := f.service.IngestMessage(context.Background(), changed); apperror.From(err).Code != "external_id_conflict" || counting.calls != 2 {
+		t.Fatalf("repository did not reject conflicting payload after cache mismatch: calls=%d err=%v", counting.calls, err)
+	}
+}
+
+func TestDedupeCacheAllowsSenderMetadataCorrection(t *testing.T) {
+	f := newPipelineFixture(t, domain.PlatformWechat)
+	counting := &ingestCountingRepository{Repository: f.repo}
+	f.service.Repo = counting
+	input := pipelineInput(f, "sender-correction", "text", "same content")
+	if _, err := f.service.IngestMessage(context.Background(), input); err != nil {
+		t.Fatalf("first ingest failed: %v", err)
+	}
+	corrected := input
+	corrected.SenderDisplayName = "Corrected Sender"
+	corrected.PayloadHash, _ = repository.CalculatePayloadHash(corrected)
+	result, err := f.service.IngestMessage(context.Background(), corrected)
+	if err != nil || !result.Duplicate || counting.calls != 2 {
+		t.Fatalf("sender correction was rejected before repository reconciliation: result=%+v calls=%d err=%v", result, counting.calls, err)
+	}
+	messages, err := f.repo.ListMessages(context.Background(), f.conversation.ID, 10, "")
+	if err != nil || len(messages) != 1 || messages[0].SenderDisplayName != "Corrected Sender" {
+		t.Fatalf("sender correction was not persisted: messages=%+v err=%v", messages, err)
 	}
 }
 
@@ -197,6 +218,7 @@ func TestMediaPrivacyDoesNotPromoteProviderEnvelopeToMessageText(t *testing.T) {
 
 func TestPrivacyPermissionAndReadyOutboxContract(t *testing.T) {
 	f := newPipelineFixture(t, domain.PlatformWechat)
+	f.service.Config.RedisOutboundStream = "test:knowledge:ready"
 	core := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/internal/v1/authorization/resource-relations/sync" || r.Header.Get("X-Caller-Service") != "knowledge" || r.Header.Get("Authorization") != "Bearer service-token" {
 			http.Error(w, "forbidden", http.StatusForbidden)
@@ -243,7 +265,7 @@ func TestPrivacyPermissionAndReadyOutboxContract(t *testing.T) {
 	if err := f.service.PublishOutbox(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if len(f.store.streams) != 1 || f.store.streams[0] != "knowledge:ready" || len(f.store.published) != 1 {
+	if len(f.store.streams) != 1 || f.store.streams[0] != "test:knowledge:ready" || len(f.store.published) != 1 {
 		t.Fatalf("ready event was published to wrong stream: streams=%+v events=%+v", f.store.streams, f.store.published)
 	}
 	raw, err := json.Marshal(f.store.published[0])

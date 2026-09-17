@@ -604,7 +604,10 @@ func (s *PostgresStore) UpsertContactRelation(ctx context.Context, input Contact
 	}
 	var relation *ContactRelation
 	err := func() error {
-		row := s.pool.QueryRow(ctx, `WITH upserted AS (INSERT INTO knowledge.contact_relations (owner_user_id,connector_account_id,external_identity_id,status) SELECT $1,ca.id,$3,'active' FROM knowledge.connector_accounts ca JOIN knowledge.external_identities ei ON ei.id=$3 WHERE ca.id=$2 AND ca.owner_user_id=$1 AND ca.status<>'revoked' AND ca.platform=ei.platform AND ca.platform_workspace_key IS NOT DISTINCT FROM ei.platform_workspace_key ON CONFLICT (owner_user_id,external_identity_id) DO UPDATE SET connector_account_id=EXCLUDED.connector_account_id,status='active',updated_at=now() RETURNING id) SELECT `+contactRelationColumns+` FROM knowledge.contact_relations cr JOIN knowledge.external_identities ei ON ei.id=cr.external_identity_id WHERE cr.id=(SELECT id FROM upserted)`, input.OwnerUserID, input.ConnectorID, input.ExternalIdentityID)
+		// Read the inserted row from the data-modifying CTE's RETURNING output.
+		// A same-statement SELECT from contact_relations uses the statement's
+		// original snapshot and cannot see a brand-new relation.
+		row := s.pool.QueryRow(ctx, `WITH upserted AS (INSERT INTO knowledge.contact_relations (owner_user_id,connector_account_id,external_identity_id,status) SELECT $1,ca.id,$3,'active' FROM knowledge.connector_accounts ca JOIN knowledge.external_identities ei ON ei.id=$3 WHERE ca.id=$2 AND ca.owner_user_id=$1 AND ca.status<>'revoked' AND ca.platform=ei.platform AND ca.platform_workspace_key IS NOT DISTINCT FROM ei.platform_workspace_key ON CONFLICT (owner_user_id,external_identity_id) DO UPDATE SET connector_account_id=EXCLUDED.connector_account_id,status='active',updated_at=now() RETURNING id,owner_user_id,connector_account_id,external_identity_id,status,created_at,updated_at) SELECT u.id::text,u.owner_user_id::text,u.connector_account_id::text,u.status,u.created_at,u.updated_at,ei.id::text,ei.platform,ei.platform_workspace_key,ei.external_user_id,COALESCE(ei.display_name,''),COALESCE(ei.avatar_url,''),COALESCE(ei.mapped_user_id::text,''),ei.mapping_status FROM upserted u JOIN knowledge.external_identities ei ON ei.id=u.external_identity_id`, input.OwnerUserID, input.ConnectorID, input.ExternalIdentityID)
 		var scanErr error
 		relation, scanErr = scanContactRelation(row)
 		return scanErr
@@ -1552,7 +1555,12 @@ func (s *PostgresStore) ListMessages(ctx context.Context, conversationID string,
 			return nil, dbError(lookupErr)
 		}
 	}
-	query := `SELECT m.id::text,m.conversation_ingestion_id::text,m.external_message_id,COALESCE(m.sender_identity_id::text,''),COALESCE(NULLIF(ei.display_name,''),NULLIF(m.sender_display_name,''),''),m.message_type,COALESCE(m.normalized_content_ref,''),COALESCE(m.normalized_content,''),m.content_hash,m.content_version,m.sent_at,COALESCE((SELECT MIN(ms.collected_at) FROM knowledge.message_sources ms WHERE ms.message_id=m.id),m.created_at),m.lifecycle_status,m.vector_status,m.created_at,m.sensitive,m.classification_status FROM knowledge.messages m LEFT JOIN knowledge.external_identities ei ON ei.id=m.sender_identity_id WHERE m.conversation_ingestion_id=$1`
+	var conversationType, conversationName, externalConversationID, accountExternalID string
+	metadataErr := s.pool.QueryRow(ctx, `SELECT ci.conversation_type,COALESCE(ci.name,''),COALESCE(ci.external_conversation_id,''),COALESCE(account.external_account_id,'') FROM knowledge.conversation_ingestions ci LEFT JOIN LATERAL (SELECT ca.external_account_id FROM knowledge.conversation_collectors cc JOIN knowledge.connector_accounts ca ON ca.id=cc.connector_account_id WHERE cc.conversation_ingestion_id=ci.id AND cc.status<>'removed' ORDER BY CASE WHEN cc.status='active' THEN 0 ELSE 1 END,cc.joined_at DESC LIMIT 1) account ON TRUE WHERE ci.id=$1`, conversationID).Scan(&conversationType, &conversationName, &externalConversationID, &accountExternalID)
+	if metadataErr != nil && !errors.Is(metadataErr, pgx.ErrNoRows) {
+		return nil, dbError(metadataErr)
+	}
+	query := `SELECT m.id::text,m.conversation_ingestion_id::text,m.external_message_id,COALESCE(m.sender_identity_id::text,''),COALESCE(ei.external_user_id,''),COALESCE(NULLIF(ei.display_name,''),NULLIF(m.sender_display_name,''),''),m.message_type,COALESCE(m.normalized_content_ref,''),COALESCE(m.normalized_content,''),m.content_hash,m.content_version,m.sent_at,COALESCE((SELECT MIN(ms.collected_at) FROM knowledge.message_sources ms WHERE ms.message_id=m.id),m.created_at),m.lifecycle_status,m.vector_status,m.created_at,m.sensitive,m.classification_status FROM knowledge.messages m LEFT JOIN knowledge.external_identities ei ON ei.id=m.sender_identity_id WHERE m.conversation_ingestion_id=$1`
 	args := []any{conversationID}
 	if !cutoff.IsZero() {
 		if cutoffID != "" {
@@ -1573,9 +1581,11 @@ func (s *PostgresStore) ListMessages(ctx context.Context, conversationID string,
 	out := []domain.Message{}
 	for rows.Next() {
 		var m domain.Message
-		if err := rows.Scan(&m.ID, &m.ConversationID, &m.ExternalMessageID, &m.SenderIdentityID, &m.SenderDisplayName, &m.MessageType, &m.NormalizedContentRef, &m.Content, &m.ContentHash, &m.ContentVersion, &m.SentAt, &m.CollectedAt, &m.LifecycleStatus, &m.VectorStatus, &m.CreatedAt, &m.Sensitive, &m.ClassificationStatus); err != nil {
+		var senderExternalID string
+		if err := rows.Scan(&m.ID, &m.ConversationID, &m.ExternalMessageID, &m.SenderIdentityID, &senderExternalID, &m.SenderDisplayName, &m.MessageType, &m.NormalizedContentRef, &m.Content, &m.ContentHash, &m.ContentVersion, &m.SentAt, &m.CollectedAt, &m.LifecycleStatus, &m.VectorStatus, &m.CreatedAt, &m.Sensitive, &m.ClassificationStatus); err != nil {
 			return nil, dbError(err)
 		}
+		m.SenderDisplayName = normalizePrivateWechatSender(conversationType, conversationName, externalConversationID, senderExternalID, accountExternalID, m.SenderDisplayName)
 		attachments, attachmentErr := s.ListAttachmentsForMessage(ctx, m.ID)
 		if attachmentErr != nil {
 			return nil, attachmentErr
@@ -1912,6 +1922,38 @@ func nilTime(value time.Time) any {
 		return nil
 	}
 	return value
+}
+
+func isRawWechatIdentifier(value string) bool {
+	text := strings.TrimSpace(value)
+	if text == "" {
+		return false
+	}
+	for _, prefix := range []string{"wxid_", "gh_"} {
+		if strings.HasPrefix(strings.ToLower(text), prefix) {
+			return true
+		}
+	}
+	return strings.HasSuffix(strings.ToLower(text), "@chatroom")
+}
+
+func sameWechatAccountID(left, right string) bool {
+	first := strings.ToLower(strings.TrimSpace(left))
+	second := strings.ToLower(strings.TrimSpace(right))
+	if first == "" || second == "" {
+		return false
+	}
+	return first == second || strings.HasPrefix(first, second+"_") || strings.HasPrefix(second, first+"_")
+}
+
+func normalizePrivateWechatSender(conversationType, conversationName, conversationID, senderID, accountID, current string) string {
+	if conversationType != "private" || !isRawWechatIdentifier(conversationID) || strings.TrimSpace(conversationName) == "" {
+		return current
+	}
+	if sameWechatAccountID(senderID, accountID) {
+		return current
+	}
+	return strings.TrimSpace(conversationName)
 }
 
 var _ = fmt.Sprintf

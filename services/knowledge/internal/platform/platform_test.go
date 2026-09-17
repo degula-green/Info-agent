@@ -306,3 +306,29 @@ func TestDiscoverRejectsInvalidChatPageToken(t *testing.T) {
 		t.Fatal("discovery should reject has_more responses without a next page token")
 	}
 }
+
+func TestDiscoverContactsPaginatesAndFiltersByExternalID(t *testing.T) {
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/open-apis/contact/v3/users" {
+			http.NotFound(w, r)
+			return
+		}
+		requests++
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Query().Get("page_token") == "" {
+			_, _ = w.Write([]byte(`{"code":0,"data":{"items":[{"open_id":"ou-first","name":"First"}],"has_more":true,"page_token":"contacts-2"}}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"code":0,"data":{"items":[{"open_id":"ou-target","name":"Second"}],"has_more":false}}`))
+	}))
+	defer server.Close()
+	provider := NewHTTPFeishu("app", "secret", "redirect", server.URL, server.URL, "")
+	contacts, err := provider.DiscoverContacts(context.Background(), vault.TokenSet{AccessToken: "access"}, "target")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if requests != 2 || len(contacts) != 1 || contacts[0].ExternalUserID != "ou-target" {
+		t.Fatalf("unexpected paginated contacts: requests=%d contacts=%+v", requests, contacts)
+	}
+}

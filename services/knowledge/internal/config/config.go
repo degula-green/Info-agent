@@ -12,17 +12,18 @@ import (
 // deliberately kept out of this package so the knowledge service cannot
 // accidentally become coupled to either service's private storage.
 type Config struct {
-	HTTPPort       string
-	RedisURL       string
-	RedisRequired  bool
-	DatabaseURL    string
-	DatabaseSchema string
-	MinioEndpoint  string
-	MinioAccessKey string
-	MinioSecretKey string
-	MinioBucket    string
-	MinioUseSSL    bool
-	ObjectDir      string
+	HTTPPort            string
+	RedisURL            string
+	RedisRequired       bool
+	RedisOutboundStream string
+	DatabaseURL         string
+	DatabaseSchema      string
+	MinioEndpoint       string
+	MinioAccessKey      string
+	MinioSecretKey      string
+	MinioBucket         string
+	MinioUseSSL         bool
+	ObjectDir           string
 
 	CoreURL              string
 	CoreServiceToken     string
@@ -59,17 +60,18 @@ type Config struct {
 func Load() Config {
 	loadLocalEnv()
 	return Config{
-		HTTPPort:       env("KNOWLEDGE_HTTP_PORT", "8090"),
-		RedisURL:       env("KNOWLEDGE_REDIS_URL", ""),
-		RedisRequired:  envBool("KNOWLEDGE_REDIS_REQUIRED", false),
-		DatabaseURL:    env("KNOWLEDGE_DATABASE_URL", ""),
-		DatabaseSchema: env("KNOWLEDGE_DATABASE_SCHEMA", "knowledge"),
-		MinioEndpoint:  env("KNOWLEDGE_MINIO_ENDPOINT", "127.0.0.1:9000"),
-		MinioAccessKey: env("KNOWLEDGE_MINIO_ACCESS_KEY", ""),
-		MinioSecretKey: env("KNOWLEDGE_MINIO_SECRET_KEY", ""),
-		MinioBucket:    env("KNOWLEDGE_MINIO_BUCKET", "info-agent"),
-		MinioUseSSL:    envBool("KNOWLEDGE_MINIO_USE_SSL", false),
-		ObjectDir:      env("KNOWLEDGE_OBJECT_DIR", ""),
+		HTTPPort:            env("KNOWLEDGE_HTTP_PORT", "8090"),
+		RedisURL:            env("KNOWLEDGE_REDIS_URL", ""),
+		RedisRequired:       envBool("KNOWLEDGE_REDIS_REQUIRED", false),
+		RedisOutboundStream: env("KNOWLEDGE_REDIS_OUTBOUND_STREAM", ""),
+		DatabaseURL:         env("KNOWLEDGE_DATABASE_URL", ""),
+		DatabaseSchema:      env("KNOWLEDGE_DATABASE_SCHEMA", "knowledge"),
+		MinioEndpoint:       env("KNOWLEDGE_MINIO_ENDPOINT", "127.0.0.1:9000"),
+		MinioAccessKey:      env("KNOWLEDGE_MINIO_ACCESS_KEY", ""),
+		MinioSecretKey:      env("KNOWLEDGE_MINIO_SECRET_KEY", ""),
+		MinioBucket:         env("KNOWLEDGE_MINIO_BUCKET", "info-agent"),
+		MinioUseSSL:         envBool("KNOWLEDGE_MINIO_USE_SSL", false),
+		ObjectDir:           env("KNOWLEDGE_OBJECT_DIR", ""),
 
 		CoreURL:              env("KNOWLEDGE_CORE_URL", "http://127.0.0.1:8080"),
 		CoreServiceToken:     env("KNOWLEDGE_CORE_SERVICE_TOKEN", ""),

@@ -315,45 +315,58 @@ func (p *HTTPFeishu) Discover(ctx context.Context, token vault.TokenSet) ([]doma
 // DiscoverContacts returns provider profile data for an explicit contact
 // picker. It never writes identities; selection is persisted by module two.
 func (p *HTTPFeishu) DiscoverContacts(ctx context.Context, token vault.TokenSet, keyword string) ([]domain.AvailableContact, error) {
-	query := url.Values{"page_size": {"100"}, "user_id_type": {"open_id"}}
-	if strings.TrimSpace(keyword) != "" {
-		query.Set("page_token", "")
-		query.Set("department_id", "")
-	}
-	var body struct {
-		Code int `json:"code"`
-		Data struct {
-			Items []struct {
-				OpenID string `json:"open_id"`
-				Name   string `json:"name"`
-				Avatar struct {
-					AvatarOrigin string `json:"avatar_origin"`
-				} `json:"avatar"`
-				Email         string   `json:"email"`
-				DepartmentIDs []string `json:"department_ids"`
-				JobTitle      string   `json:"job_title"`
-			} `json:"items"`
-			HasMore   bool   `json:"has_more"`
-			PageToken string `json:"page_token"`
-		} `json:"data"`
-	}
-	endpoint := "/open-apis/contact/v3/users?" + query.Encode()
-	if err := p.getJSON(ctx, endpoint, token, &body); err != nil {
-		return nil, err
-	}
-	if body.Code != 0 {
-		return nil, fmt.Errorf("feishu contact discovery failed: code=%d", body.Code)
-	}
-	out := make([]domain.AvailableContact, 0, len(body.Data.Items))
-	for _, item := range body.Data.Items {
-		if strings.TrimSpace(keyword) != "" && !strings.Contains(strings.ToLower(item.Name), strings.ToLower(strings.TrimSpace(keyword))) && !strings.Contains(strings.ToLower(item.Email), strings.ToLower(strings.TrimSpace(keyword))) {
-			continue
+	out := make([]domain.AvailableContact, 0)
+	pageToken := ""
+	needle := strings.ToLower(strings.TrimSpace(keyword))
+	for {
+		query := url.Values{"page_size": {"100"}, "user_id_type": {"open_id"}}
+		if pageToken != "" {
+			query.Set("page_token", pageToken)
 		}
-		department := ""
-		if len(item.DepartmentIDs) > 0 {
-			department = item.DepartmentIDs[0]
+		var body struct {
+			Code int `json:"code"`
+			Data struct {
+				Items []struct {
+					OpenID string `json:"open_id"`
+					Name   string `json:"name"`
+					Avatar struct {
+						AvatarOrigin string `json:"avatar_origin"`
+					} `json:"avatar"`
+					Email         string   `json:"email"`
+					DepartmentIDs []string `json:"department_ids"`
+					JobTitle      string   `json:"job_title"`
+				} `json:"items"`
+				HasMore   bool   `json:"has_more"`
+				PageToken string `json:"page_token"`
+			} `json:"data"`
 		}
-		out = append(out, domain.AvailableContact{ExternalUserID: item.OpenID, DisplayName: item.Name, AvatarURL: item.Avatar.AvatarOrigin, Email: item.Email, Department: department, JobTitle: item.JobTitle})
+		endpoint := "/open-apis/contact/v3/users?" + query.Encode()
+		if err := p.getJSON(ctx, endpoint, token, &body); err != nil {
+			return nil, err
+		}
+		if body.Code != 0 {
+			return nil, fmt.Errorf("feishu contact discovery failed: code=%d", body.Code)
+		}
+		for _, item := range body.Data.Items {
+			if strings.TrimSpace(item.OpenID) == "" {
+				continue
+			}
+			if needle != "" && !strings.Contains(strings.ToLower(item.Name), needle) && !strings.Contains(strings.ToLower(item.Email), needle) && !strings.Contains(strings.ToLower(item.OpenID), needle) {
+				continue
+			}
+			department := ""
+			if len(item.DepartmentIDs) > 0 {
+				department = item.DepartmentIDs[0]
+			}
+			out = append(out, domain.AvailableContact{ExternalUserID: item.OpenID, DisplayName: item.Name, AvatarURL: item.Avatar.AvatarOrigin, Email: item.Email, Department: department, JobTitle: item.JobTitle})
+		}
+		if !body.Data.HasMore {
+			break
+		}
+		if body.Data.PageToken == "" || body.Data.PageToken == pageToken {
+			return nil, errors.New("feishu contact discovery returned an invalid page token")
+		}
+		pageToken = body.Data.PageToken
 	}
 	return out, nil
 }

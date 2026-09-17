@@ -225,6 +225,18 @@ func TestMemoryMessageAttachmentIdempotenceAndCursorMonotonicity(t *testing.T) {
 	}
 }
 
+func TestNormalizePrivateWechatSenderUsesConversationNameForOtherParty(t *testing.T) {
+	if got := normalizePrivateWechatSender("private", "小呆呆仓鼠", "wxid_partner", "wxid_stale", "wxid_me_46ff", "错误联系人"); got != "小呆呆仓鼠" {
+		t.Fatalf("stale private sender was not normalized: %q", got)
+	}
+	if got := normalizePrivateWechatSender("private", "小呆呆仓鼠", "wxid_partner", "wxid_me", "wxid_me_46ff", "稻成"); got != "稻成" {
+		t.Fatalf("self sender was incorrectly normalized: %q", got)
+	}
+	if got := normalizePrivateWechatSender("group", "数据252", "44505237054@chatroom", "wxid_member", "wxid_me", "群成员"); got != "群成员" {
+		t.Fatalf("group sender was incorrectly normalized: %q", got)
+	}
+}
+
 func TestMemoryRejectsIngestIntoPausedConversation(t *testing.T) {
 	repo := NewMemoryStore()
 	ctx := context.Background()

@@ -1,5 +1,5 @@
 from __future__ import annotations
-import hashlib, html, json, mimetypes, os, re, shutil, tempfile, threading, time, urllib.request
+import hashlib, html, json, mimetypes, os, re, shutil, tempfile, threading, time, urllib.error, urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -10,7 +10,7 @@ from wechatauto import MediaDownloader, WeChatDB
 app = FastAPI(title="info-agent-wechat-collector")
 lock = threading.Lock(); binding: dict[str, Any] = {}; db: Any = None
 config: dict[str, Any] = {"selected_conversations": [], "history_start_at": None, "enabled": True, "listen_mode": "whitelist", "connector_id": ""}
-checkpoints: dict[str, int] = {}; worker_thread: threading.Thread | None = None; discovery_thread: threading.Thread | None = None
+checkpoints: dict[str, int] = {}; replayed_media: dict[str, set[str]] = {}; worker_thread: threading.Thread | None = None; discovery_thread: threading.Thread | None = None
 media: Any = None; bootstrap_error: str | None = None
 last_discovery_at = 0.0; last_bootstrap_at = 0.0
 discovery_lock = threading.Lock()
@@ -24,10 +24,11 @@ def auth(token: str | None) -> None:
 
 def state_path() -> Path: return Path(os.getenv("WECHAT_COLLECTOR_STATE_FILE", "./data/wechat-collector.json")).expanduser()
 def load_state() -> None:
-    global checkpoints
+    global checkpoints, replayed_media
     try:
         value = json.loads(state_path().read_text(encoding="utf-8"))
         checkpoints = {str(k): int(v) for k, v in (value.get("checkpoints") or {}).items()}
+        replayed_media = {str(k): {str(item) for item in (items or [])} for k, items in (value.get("replayed_media") or {}).items()}
     except (FileNotFoundError, ValueError, OSError): pass
 def bootstrap_from_knowledge() -> None:
     global binding, config, bootstrap_error
@@ -82,12 +83,29 @@ def ensure_bootstrap() -> bool:
 
 def save_state() -> None:
     path = state_path(); path.parent.mkdir(parents=True, exist_ok=True); temp = path.with_suffix(path.suffix + ".tmp")
-    temp.write_text(json.dumps({"checkpoints": checkpoints}, ensure_ascii=False), encoding="utf-8"); temp.replace(path)
+    temp.write_text(json.dumps({"checkpoints": checkpoints, "replayed_media": {key: sorted(values) for key, values in replayed_media.items()}}, ensure_ascii=False), encoding="utf-8"); temp.replace(path)
 def knowledge(path: str, method: str = "GET", payload: Any = None) -> dict[str, Any]:
     base = os.getenv("KNOWLEDGE_BASE_URL", "http://127.0.0.1:8090").rstrip("/"); body = None if payload is None else json.dumps(payload, ensure_ascii=False).encode("utf-8")
     token = os.getenv("KNOWLEDGE_INTERNAL_SERVICE_TOKEN", "local-development-only")
     req = urllib.request.Request(base + path, data=body, method=method, headers={"Accept": "application/json", "Content-Type": "application/json", "X-Service-Token": token})
     with urllib.request.urlopen(req, timeout=30) as response: return json.loads(response.read().decode("utf-8") or "{}")
+
+def ingest_message(collector_id: str, payload: dict[str, Any]) -> dict[str, Any] | None:
+    """Ingest one message without allowing an idempotency conflict to starve other chats."""
+    try:
+        return knowledge(f"/api/knowledge/v1/internal/collectors/{collector_id}/messages", "POST", payload)
+    except urllib.error.HTTPError as exc:
+        try:
+            body = exc.read().decode("utf-8", errors="replace")
+        finally:
+            exc.close()
+        try:
+            code = str((json.loads(body) or {}).get("code") or "")
+        except (TypeError, ValueError):
+            code = ""
+        if exc.code == 409 and code == "external_id_conflict":
+            return None
+        raise
 
 load_state()
 bootstrap_from_knowledge()
@@ -214,6 +232,14 @@ def is_raw_wechat_id(value: Any) -> bool:
     text = str(value or "").strip()
     return bool(re.fullmatch(r"(?:wxid_[A-Za-z0-9_-]+|[A-Za-z0-9_-]+@chatroom)", text, re.I))
 
+def same_wechat_account(left: Any, right: Any) -> bool:
+    """Compare WeChat account ids, including desktop account suffixes."""
+    first = str(left or "").strip().lower()
+    second = str(right or "").strip().lower()
+    if not first or not second:
+        return False
+    return first == second or first.startswith(second + "_") or second.startswith(first + "_")
+
 def strip_sender_prefix(content: Any, sender_external_id: Any = "") -> str:
     """Remove the sender marker that some WeChat DB readers prepend to content."""
     value = str(content or "").strip()
@@ -230,6 +256,7 @@ def resolve_sender(
     names: dict[str, str],
     *,
     conversation_type: str = "group",
+    conversation_id: str = "",
     conversation_name: str = "",
 ) -> tuple[str, str]:
     """Resolve the actual group sender before trusting DB's resource sender.
@@ -240,26 +267,38 @@ def resolve_sender(
     """
     content = str(raw.get("content") or "")
     prefix = re.match(r"^\s*(wxid_[A-Za-z0-9_-]+|[A-Za-z0-9_-]+@chatroom)\s*:\s*", content, re.I)
-    sender = prefix.group(1) if prefix else ""
-    if not sender:
+    parsed_sender = prefix.group(1) if prefix else ""
+    if not parsed_sender:
         match = re.search(r"<fromusername\b[^>]*>\s*(?:<!\[CDATA\[)?([^<\]]+)", content, re.I)
         if not match:
             match = re.search(r"<(?:emoji|img)\b[^>]*\bfromusername\s*=\s*[\"']([^\"']+)", content, re.I)
-        sender = match.group(1).strip() if match else ""
-    if not sender:
-        sender = str(raw.get("sender_username") or raw.get("sender_id") or binding.get("wxid", ""))
+        parsed_sender = match.group(1).strip() if match else ""
+    provider_sender = str(raw.get("sender_username") or raw.get("sender_id") or binding.get("wxid", "")).strip()
+    sender = parsed_sender or provider_sender
+
+    is_private = str(conversation_type).lower() == "private"
+    if is_private and str(conversation_id or "").strip():
+        # The WeChat 4.x reader can expose a stale sender_username for private
+        # rows. XML sender markers are authoritative; plain-text rows from the
+        # other party have no marker, so the conversation id is the only stable
+        # identity. Keep the local account id for messages sent by ourselves.
+        account_id = str(binding.get("wxid") or "").strip()
+        if parsed_sender:
+            sender = parsed_sender
+        elif provider_sender and same_wechat_account(provider_sender, account_id):
+            sender = provider_sender
+        else:
+            sender = str(conversation_id).strip()
+
     resolved = display_name(sender, names)
-    # In a private chat the provider sometimes exposes the other party's
-    # wxid even though the conversation/contact row has a usable nickname.
-    # Keep group-member resolution strict: a group name must never replace the
-    # actual sender.  For private chats the conversation display name is the
-    # last safe fallback when the contact database has no nickname.
+    # In a private chat every non-self message belongs to the conversation's
+    # counterpart, even when an old row contains a stale but human-looking
+    # sender display name. Group messages remain member-specific.
     if (
-        str(conversation_type).lower() == "private"
-        and is_raw_wechat_id(resolved)
+        is_private
+        and not same_wechat_account(sender, binding.get("wxid"))
         and str(conversation_name or "").strip()
         and not is_raw_wechat_id(conversation_name)
-        and str(sender).strip().lower() != str(binding.get("wxid") or "").strip().lower()
     ):
         resolved = str(conversation_name).strip()
     return sender, resolved
@@ -436,11 +475,15 @@ def collect_once() -> None:
             replay_ids: set[str] = set()
             if since:
                 seen_ids = {str(row.get("local_id") or row.get("server_id") or row.get("sort_seq") or "") for row in rows}
+                already_replayed = replayed_media.get(collector_id, set())
+                replay_limit = max(0, int(os.getenv("WECHAT_MEDIA_REPLAY_BATCH_SIZE", "10")))
                 for candidate in db.get_messages(chat_id, limit=1000, offset=0):
                     candidate_id = str(candidate.get("local_id") or candidate.get("server_id") or candidate.get("sort_seq") or "")
-                    if candidate_id and candidate_id not in seen_ids and media_type(candidate) in {"file", "image", "video"}:
+                    if candidate_id and candidate_id not in seen_ids and candidate_id not in already_replayed and media_type(candidate) in {"file", "image", "video"}:
                         rows.append(candidate)
                         replay_ids.add(candidate_id)
+                        if len(replay_ids) >= replay_limit:
+                            break
             for raw in rows:
                 local_id = str(raw.get("local_id") or raw.get("server_id") or raw.get("sort_seq") or "0")
                 cursor = str(raw.get("sort_seq") or raw.get("local_id") or "")
@@ -453,6 +496,7 @@ def collect_once() -> None:
                     raw,
                     names,
                     conversation_type=conversation_type,
+                    conversation_id=chat_id,
                     conversation_name=str(conversation.get("name") or ""),
                 )
                 content = message_content(raw, attachments, sender_external_id)
@@ -470,38 +514,41 @@ def collect_once() -> None:
                     "attachments": attachments,
                 }
                 value["payload_hash"] = payload_hash(value)
-                result = knowledge(f"/api/knowledge/v1/internal/collectors/{collector_id}/messages", "POST", value)
-                saved_attachments = result.get("attachments") or result.get("message", {}).get("attachments") or []
-                if len(saved_attachments) != len(attachments):
-                    raise RuntimeError("knowledge returned incomplete attachment metadata")
-                for attachment, saved in zip(attachments, saved_attachments):
-                    if str(saved.get("content_status") or "") == "ready":
-                        continue
-                    downloaded = download_attachment(chat_id, raw)
-                    # Metadata is still useful when WeChat no longer has the
-                    # local blob (common for old forwarded images). Keep the
-                    # message/cursor moving and let the attachment remain
-                    # pending for a later replay instead of wedging the whole
-                    # collector.
-                    if not downloaded:
-                        continue
-                    path, temp_root = downloaded
-                    try:
-                        digest = hashlib.sha256(path.read_bytes()).hexdigest()
-                        attachment["content_hash"] = digest
-                        upload_attachment(
-                            collector_id,
-                            str(saved.get("id") or attachment["external_attachment_id"]),
-                            path,
-                            attachment["file_name"],
-                            attachment["mime_type"],
-                            digest,
-                        )
-                    finally:
-                        shutil.rmtree(temp_root, ignore_errors=True)
+                result = ingest_message(collector_id, value)
+                if result is not None:
+                    saved_attachments = result.get("attachments") or result.get("message", {}).get("attachments") or []
+                    if len(saved_attachments) != len(attachments):
+                        raise RuntimeError("knowledge returned incomplete attachment metadata")
+                    for attachment, saved in zip(attachments, saved_attachments):
+                        if str(saved.get("content_status") or "") == "ready":
+                            continue
+                        downloaded = download_attachment(chat_id, raw)
+                        # Metadata is still useful when WeChat no longer has the
+                        # local blob (common for old forwarded images). Keep the
+                        # message/cursor moving and let the attachment remain
+                        # pending for a later replay instead of wedging the whole
+                        # collector.
+                        if not downloaded:
+                            continue
+                        path, temp_root = downloaded
+                        try:
+                            digest = hashlib.sha256(path.read_bytes()).hexdigest()
+                            attachment["content_hash"] = digest
+                            upload_attachment(
+                                collector_id,
+                                str(saved.get("id") or attachment["external_attachment_id"]),
+                                path,
+                                attachment["file_name"],
+                                attachment["mime_type"],
+                                digest,
+                            )
+                        finally:
+                            shutil.rmtree(temp_root, ignore_errors=True)
                 if local_id not in replay_ids:
                     knowledge(f"/api/knowledge/v1/internal/collectors/{collector_id}/cursor-receipt", "POST", {"cursor": cursor})
                     knowledge(f"/api/knowledge/v1/internal/collectors/{collector_id}/cursor", "POST", {"cursor": cursor})
+                else:
+                    replayed_media.setdefault(collector_id, set()).add(local_id)
                 try:
                     numeric_cursor = int(cursor or 0)
                 except ValueError:

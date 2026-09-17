@@ -1245,12 +1245,21 @@ func (s *Service) DiscoverContacts(ctx context.Context, userID, platformName, ke
 		}
 		items, _ := out["contacts"].([]any)
 		contacts := make([]domain.AvailableContact, 0, len(items))
+		seen := map[string]struct{}{}
 		for _, raw := range items {
 			value, ok := raw.(map[string]any)
 			if !ok {
 				continue
 			}
-			contacts = append(contacts, domain.AvailableContact{ExternalUserID: fmt.Sprint(value["username"]), DisplayName: firstNonEmptyString(fmt.Sprint(value["remark"]), fmt.Sprint(value["nick_name"]))})
+			externalID := firstNonEmptyString(fmt.Sprint(value["username"]), fmt.Sprint(value["user_name"]))
+			if externalID == "" || externalID == "<nil>" {
+				continue
+			}
+			if _, exists := seen[externalID]; exists {
+				continue
+			}
+			seen[externalID] = struct{}{}
+			contacts = append(contacts, domain.AvailableContact{ExternalUserID: externalID, DisplayName: firstNonEmptyString(fmt.Sprint(value["remark"]), fmt.Sprint(value["nick_name"]), externalID)})
 		}
 		relations, _ := s.Repo.ListContactRelations(ctx, userID, platformName)
 		selected := map[string]bool{}
@@ -1276,9 +1285,15 @@ func (s *Service) DiscoverContacts(ctx context.Context, userID, platformName, ke
 		return nil, err
 	}
 	contacts, err := provider.DiscoverContacts(ctx, token, keyword)
-	if err != nil {
+	memberships, membershipErr := s.Repo.ListContactMemberships(ctx, userID)
+	if membershipErr != nil {
+		return nil, membershipErr
+	}
+	fallback := availableContactsFromMemberships(memberships, platformName, keyword)
+	if err != nil && len(fallback) == 0 {
 		return nil, err
 	}
+	contacts = mergeAvailableContacts(contacts, fallback)
 	relations, _ := s.Repo.ListContactRelations(ctx, userID, platformName)
 	selected := map[string]bool{}
 	for _, relation := range relations {
@@ -1288,6 +1303,53 @@ func (s *Service) DiscoverContacts(ctx context.Context, userID, platformName, ke
 		contacts[index].Selected = selected[contacts[index].ExternalUserID]
 	}
 	return contacts, nil
+}
+
+func availableContactsFromMemberships(memberships []repository.ContactMembership, platformName, keyword string) []domain.AvailableContact {
+	needle := strings.ToLower(strings.TrimSpace(keyword))
+	seen := map[string]struct{}{}
+	out := make([]domain.AvailableContact, 0)
+	for _, membership := range memberships {
+		identity := membership.Identity
+		externalID := strings.TrimSpace(identity.ExternalUserID)
+		if identity.Platform != platformName || externalID == "" {
+			continue
+		}
+		if needle != "" && !strings.Contains(strings.ToLower(identity.DisplayName), needle) && !strings.Contains(strings.ToLower(externalID), needle) {
+			continue
+		}
+		if _, exists := seen[externalID]; exists {
+			continue
+		}
+		seen[externalID] = struct{}{}
+		out = append(out, domain.AvailableContact{ExternalUserID: externalID, DisplayName: firstNonEmptyString(identity.DisplayName, externalID), AvatarURL: identity.AvatarURL})
+	}
+	return out
+}
+
+func mergeAvailableContacts(primary, fallback []domain.AvailableContact) []domain.AvailableContact {
+	seen := make(map[string]int, len(primary)+len(fallback))
+	out := make([]domain.AvailableContact, 0, len(primary)+len(fallback))
+	for _, item := range append(primary, fallback...) {
+		externalID := strings.TrimSpace(item.ExternalUserID)
+		if externalID == "" {
+			continue
+		}
+		if index, exists := seen[externalID]; exists {
+			if out[index].DisplayName == "" {
+				out[index].DisplayName = item.DisplayName
+			}
+			if out[index].AvatarURL == "" {
+				out[index].AvatarURL = item.AvatarURL
+			}
+			continue
+		}
+		item.ExternalUserID = externalID
+		item.DisplayName = firstNonEmptyString(item.DisplayName, externalID)
+		seen[externalID] = len(out)
+		out = append(out, item)
+	}
+	return out
 }
 
 func firstNonEmptyString(values ...string) string {
@@ -1468,12 +1530,16 @@ func (s *Service) IngestMessage(ctx context.Context, input repository.IngestMess
 		if found, cacheErr := s.KV.Get(ctx, dedupeKey, &cached); cacheErr != nil {
 			slog.WarnContext(ctx, "knowledge message dedupe cache unavailable", "error", cacheErr)
 		} else if found {
-			if !strings.EqualFold(cached.PayloadHash, input.PayloadHash) {
-				return nil, apperror.New("external_id_conflict", "external message id has conflicting payload", 409, false)
+			if strings.EqualFold(cached.PayloadHash, input.PayloadHash) {
+				result := cached.Result
+				result.Duplicate = true
+				return &result, nil
 			}
-			result := cached.Result
-			result.Duplicate = true
-			return &result, nil
+			// Provider parsing can legitimately improve metadata for an already
+			// ingested message (for example a corrected WeChat sender nickname or
+			// recovered media metadata). Let the authoritative repository compare
+			// content and apply supported corrections instead of letting a stale
+			// cache entry reject the replay before it reaches that logic.
 		}
 	}
 	normalized, err := normalizeMessageCandidate(filtered, input.Content, input.PayloadHash, *account, s.Now())
@@ -1730,7 +1796,7 @@ func (s *Service) PublishOutbox(ctx context.Context) error {
 	}
 	var firstErr error
 	for _, event := range events {
-		if err := s.KV.Publish(ctx, "knowledge:ready", event.Envelope()); err != nil {
+		if err := s.KV.Publish(ctx, s.Config.RedisOutboundStream, event.Envelope()); err != nil {
 			shift := event.RetryCount
 			if shift > 6 {
 				shift = 6

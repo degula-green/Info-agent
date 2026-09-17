@@ -1,7 +1,9 @@
 import json
+import io
 import os
 import tempfile
 import unittest
+import urllib.error
 from pathlib import Path
 
 from services.collectors.wechat import service
@@ -24,12 +26,17 @@ class IncrementalFallbackDB:
         ]
 
 
+class TextDB:
+    def get_messages(self, _chat_id, limit=1000, offset=0):
+        return [{"local_id": 8, "sort_seq": 8, "type": "文本", "content": "hello", "create_time": 1_700_000_008}]
+
+
 class CollectorServiceTest(unittest.TestCase):
     def setUp(self):
         self.original = {name: getattr(service, name) for name in ("db", "knowledge", "download_attachment", "upload_attachment", "save_state")}
         service.binding.clear(); service.binding.update({"status": "running", "wxid": "wxid-test"})
         service.config.clear(); service.config.update({"enabled": True, "listen_mode": "whitelist", "selected_conversations": ["chat"], "connector_id": "account"})
-        service.checkpoints.clear(); service.db = FakeDB(); self.calls = []
+        service.checkpoints.clear(); service.replayed_media.clear(); service.db = FakeDB(); self.calls = []
         def knowledge(path, method="GET", payload=None):
             self.calls.append((path, method, payload))
             if path.endswith("assignments?connector_id=account"):
@@ -143,6 +150,38 @@ class CollectorServiceTest(unittest.TestCase):
             service.binding.clear()
             service.binding.update(original)
 
+    def test_private_sender_uses_conversation_identity_when_provider_sender_is_stale(self):
+        original = dict(service.binding)
+        try:
+            service.binding["wxid"] = "wxid_me_account"
+            sender, display = service.resolve_sender(
+                {"sender_username": "wxid_stale", "content": "没看手机"},
+                {"wxid_stale": "错误联系人"},
+                conversation_type="private",
+                conversation_id="wxid_partner",
+                conversation_name="小呆呆仓鼠",
+            )
+            self.assertEqual((sender, display), ("wxid_partner", "小呆呆仓鼠"))
+        finally:
+            service.binding.clear()
+            service.binding.update(original)
+
+    def test_private_sender_keeps_self_identity_with_desktop_account_suffix(self):
+        original = dict(service.binding)
+        try:
+            service.binding["wxid"] = "wxid_me_account_46ff"
+            sender, display = service.resolve_sender(
+                {"sender_username": "wxid_me_account", "content": "我在"},
+                {"wxid_me_account": "稻成"},
+                conversation_type="private",
+                conversation_id="wxid_partner",
+                conversation_name="对方",
+            )
+            self.assertEqual((sender, display), ("wxid_me_account", "稻成"))
+        finally:
+            service.binding.clear()
+            service.binding.update(original)
+
     def test_media_xml_and_attachment_metadata_are_not_message_text(self):
         xml = '<msg><appmsg><type>6</type><title>安排.docx</title></appmsg></msg>'
         attachment = [{"file_name": "安排.docx"}]
@@ -188,6 +227,30 @@ class CollectorServiceTest(unittest.TestCase):
         self.assertEqual(service.checkpoints["collector"], 7)
         self.assertNotIn("last_error", service.binding)
 
+    def test_conflicting_message_does_not_starve_later_conversations(self):
+        service.db = TextDB()
+        service.config["selected_conversations"] = ["chat-a", "chat-b"]
+
+        def conflict_then_success(path, method="GET", payload=None):
+            self.calls.append((path, method, payload))
+            if path.endswith("assignments?connector_id=account"):
+                return {"items": [
+                    {"collector": {"id": "collector-a", "status": "active"}, "conversation": {"status": "active", "external_conversation_id": "chat-a"}},
+                    {"collector": {"id": "collector-b", "status": "active"}, "conversation": {"status": "active", "external_conversation_id": "chat-b"}},
+                ]}
+            if path.endswith("/collector-a/messages"):
+                raise urllib.error.HTTPError(path, 409, "Conflict", {}, io.BytesIO(b'{"code":"external_id_conflict"}'))
+            if path.endswith("/messages"):
+                return {"attachments": []}
+            return {}
+
+        service.knowledge = conflict_then_success
+        service.collect_once()
+        self.assertTrue(any(call[0].endswith("/collector-b/messages") for call in self.calls))
+        self.assertTrue(any(call[0].endswith("/collector-b/heartbeat") for call in self.calls))
+        self.assertEqual(service.checkpoints["collector-a"], 8)
+        self.assertEqual(service.checkpoints["collector-b"], 8)
+
     def test_paused_conversation_is_not_collected(self):
         self.calls.clear()
         original_knowledge = service.knowledge
@@ -212,6 +275,7 @@ class CollectorServiceTest(unittest.TestCase):
                 "binding": {"wxid": "stale", "db_dir": "C:/stale", "status": "running"},
                 "config": {"selected_conversations": ["stale-chat"]},
                 "checkpoints": {"collector": 42},
+                "replayed_media": {"collector": ["7", "8"]},
             }), encoding="utf-8")
             original_path = os.environ.get("WECHAT_COLLECTOR_STATE_FILE")
             os.environ["WECHAT_COLLECTOR_STATE_FILE"] = str(path)
@@ -219,6 +283,7 @@ class CollectorServiceTest(unittest.TestCase):
                 service.binding.clear()
                 service.config.clear()
                 service.checkpoints.clear()
+                service.replayed_media.clear()
                 service.load_state()
             finally:
                 if original_path is None:
@@ -229,6 +294,7 @@ class CollectorServiceTest(unittest.TestCase):
             self.assertEqual(service.binding, {})
             self.assertEqual(service.config, {})
             self.assertEqual(service.checkpoints, {"collector": 42})
+            self.assertEqual(service.replayed_media, {"collector": {"7", "8"}})
 
 
 if __name__ == "__main__":

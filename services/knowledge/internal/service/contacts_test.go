@@ -122,3 +122,25 @@ func TestListContactsKeepsUnmappedPlatformsSeparate(t *testing.T) {
 		t.Fatalf("unmapped identities leaked without a relationship: %#v", contacts)
 	}
 }
+
+func TestAvailableContactsFromMembershipsFiltersAndDeduplicates(t *testing.T) {
+	memberships := []repository.ContactMembership{
+		{Identity: repository.ExternalIdentity{ID: "one", Platform: domain.PlatformFeishu, ExternalUserID: "ou-1", DisplayName: "张三", AvatarURL: "avatar"}, ConversationID: "chat-1"},
+		{Identity: repository.ExternalIdentity{ID: "one", Platform: domain.PlatformFeishu, ExternalUserID: "ou-1", DisplayName: "张三"}, ConversationID: "chat-2"},
+		{Identity: repository.ExternalIdentity{ID: "two", Platform: domain.PlatformWechat, ExternalUserID: "wxid-2", DisplayName: "张三"}, ConversationID: "chat-3"},
+	}
+	contacts := availableContactsFromMemberships(memberships, domain.PlatformFeishu, "张")
+	if len(contacts) != 1 || contacts[0].ExternalUserID != "ou-1" || contacts[0].DisplayName != "张三" || contacts[0].AvatarURL != "avatar" {
+		t.Fatalf("unexpected membership contacts: %+v", contacts)
+	}
+}
+
+func TestMergeAvailableContactsKeepsProviderMetadata(t *testing.T) {
+	contacts := mergeAvailableContacts(
+		[]domain.AvailableContact{{ExternalUserID: "ou-1", DisplayName: "目录姓名", Email: "person@example.com"}},
+		[]domain.AvailableContact{{ExternalUserID: "ou-1", DisplayName: "会话姓名", AvatarURL: "avatar"}, {ExternalUserID: "ou-2"}},
+	)
+	if len(contacts) != 2 || contacts[0].DisplayName != "目录姓名" || contacts[0].Email != "person@example.com" || contacts[0].AvatarURL != "avatar" || contacts[1].DisplayName != "ou-2" {
+		t.Fatalf("unexpected merged contacts: %+v", contacts)
+	}
+}

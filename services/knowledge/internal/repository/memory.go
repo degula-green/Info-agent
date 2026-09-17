@@ -1802,6 +1802,19 @@ func (s *MemoryStore) FailAttachment(_ context.Context, id, message string) erro
 func (s *MemoryStore) ListMessages(_ context.Context, conversationID string, limit int, before string) ([]domain.Message, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	conversation := s.conversations[conversationID]
+	accountExternalID := ""
+	if conversation.Platform == domain.PlatformWechat && conversation.ConversationType == "private" {
+		for _, collector := range s.collectors {
+			if collector.ConversationID != conversationID || collector.Status == domain.CollectorRemoved {
+				continue
+			}
+			if account, ok := s.connectors[collector.ConnectorAccountID]; ok {
+				accountExternalID = account.ExternalAccountID
+				break
+			}
+		}
+	}
 	cutoff, err := parseBeforeTime(before)
 	var cutoffID string
 	if err != nil && strings.TrimSpace(before) != "" {
@@ -1828,6 +1841,11 @@ func (s *MemoryStore) ListMessages(_ context.Context, conversationID string, lim
 		}
 		if beforeCursor {
 			m.Attachments = s.attachmentsForMessageLocked(m.ID)
+			senderExternalID := ""
+			if identity, ok := s.identities[m.SenderIdentityID]; ok {
+				senderExternalID = identity.ExternalUserID
+			}
+			m.SenderDisplayName = normalizePrivateWechatSender(conversation.ConversationType, conversation.Name, conversation.ExternalConversationID, senderExternalID, accountExternalID, m.SenderDisplayName)
 			out = append(out, cloneMessage(m))
 		}
 	}
