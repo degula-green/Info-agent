@@ -763,6 +763,57 @@ func (s *MemoryStore) ListContactRelations(_ context.Context, userID, platform s
 	return out, nil
 }
 
+func (s *MemoryStore) ListContactActivity(_ context.Context, userID, platform string) ([]ContactActivity, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	allowedIdentities := map[string]bool{}
+	for _, relation := range s.contactRelations {
+		if relation.OwnerUserID == userID && relation.Status == "active" && (platform == "" || relation.ExternalIdentity.Platform == platform) {
+			allowedIdentities[relation.ExternalIdentity.ID] = true
+		}
+	}
+	activity := map[string]*ContactActivity{}
+	for _, membership := range s.memberships {
+		if membership.Status != "active" || !allowedIdentities[membership.ExternalIdentityID] {
+			continue
+		}
+		conversation, ok := s.conversations[membership.ConversationID]
+		if !ok {
+			continue
+		}
+		accessible := conversation.OwnerUserID == userID
+		if !accessible {
+			for _, collector := range s.collectors {
+				if collector.ConversationID == conversation.ID && collector.CollectorUserID == userID && collector.Status != domain.CollectorRemoved {
+					accessible = true
+					break
+				}
+			}
+		}
+		if !accessible {
+			continue
+		}
+		key := membership.ExternalIdentityID + "|" + membership.ConversationID
+		activity[key] = &ContactActivity{IdentityID: membership.ExternalIdentityID, ConversationID: membership.ConversationID}
+	}
+	for _, message := range s.messages {
+		key := message.SenderIdentityID + "|" + message.ConversationID
+		if current := activity[key]; current != nil {
+			current.MessageCount++
+			for _, attachment := range s.attachments {
+				if attachment.MessageID == message.ID {
+					current.AttachmentCount++
+				}
+			}
+		}
+	}
+	out := make([]ContactActivity, 0, len(activity))
+	for _, current := range activity {
+		out = append(out, *current)
+	}
+	return out, nil
+}
+
 func (s *MemoryStore) UpsertContactRelation(_ context.Context, input ContactRelationInput) (*ContactRelation, error) {
 	if strings.TrimSpace(input.OwnerUserID) == "" || strings.TrimSpace(input.ConnectorID) == "" || strings.TrimSpace(input.ExternalIdentityID) == "" {
 		return nil, apperror.New("invalid_contact", "owner, connector, and external identity are required", 400, false)

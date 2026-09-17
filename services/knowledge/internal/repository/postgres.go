@@ -598,6 +598,39 @@ func (s *PostgresStore) ListContactRelations(ctx context.Context, userID, platfo
 	return out, dbError(rows.Err())
 }
 
+func (s *PostgresStore) ListContactActivity(ctx context.Context, userID, platform string) ([]ContactActivity, error) {
+	query := `SELECT cr.external_identity_id::text,cm.conversation_ingestion_id::text,COUNT(DISTINCT m.id),COUNT(DISTINCT a.id)
+		FROM knowledge.contact_relations cr
+		JOIN knowledge.external_identities ei ON ei.id=cr.external_identity_id
+		JOIN knowledge.connector_accounts ca ON ca.id=cr.connector_account_id
+		JOIN knowledge.conversation_memberships cm ON cm.external_identity_id=cr.external_identity_id AND cm.status='active'
+		JOIN knowledge.conversation_ingestions ci ON ci.id=cm.conversation_ingestion_id
+		LEFT JOIN knowledge.conversation_collectors cc ON cc.conversation_ingestion_id=ci.id AND cc.collector_user_id=$1 AND cc.status<>'removed'
+		LEFT JOIN knowledge.messages m ON m.conversation_ingestion_id=ci.id AND m.sender_identity_id=cr.external_identity_id
+		LEFT JOIN knowledge.attachments a ON a.message_id=m.id
+		WHERE cr.owner_user_id=$1 AND cr.status='active' AND ca.status<>'revoked' AND (ci.owner_user_id=$1 OR cc.id IS NOT NULL)`
+	args := []any{userID}
+	if platform != "" {
+		query += ` AND ei.platform=$2`
+		args = append(args, platform)
+	}
+	query += ` GROUP BY cr.external_identity_id,cm.conversation_ingestion_id`
+	rows, err := s.pool.Query(ctx, query, args...)
+	if err != nil {
+		return nil, dbError(err)
+	}
+	defer rows.Close()
+	out := []ContactActivity{}
+	for rows.Next() {
+		var activity ContactActivity
+		if err := rows.Scan(&activity.IdentityID, &activity.ConversationID, &activity.MessageCount, &activity.AttachmentCount); err != nil {
+			return nil, dbError(err)
+		}
+		out = append(out, activity)
+	}
+	return out, dbError(rows.Err())
+}
+
 func (s *PostgresStore) UpsertContactRelation(ctx context.Context, input ContactRelationInput) (*ContactRelation, error) {
 	if strings.TrimSpace(input.OwnerUserID) == "" || strings.TrimSpace(input.ConnectorID) == "" || strings.TrimSpace(input.ExternalIdentityID) == "" {
 		return nil, apperror.New("invalid_contact", "owner, connector, and external identity are required", 400, false)
@@ -1586,15 +1619,37 @@ func (s *PostgresStore) ListMessages(ctx context.Context, conversationID string,
 			return nil, dbError(err)
 		}
 		m.SenderDisplayName = normalizePrivateWechatSender(conversationType, conversationName, externalConversationID, senderExternalID, accountExternalID, m.SenderDisplayName)
-		attachments, attachmentErr := s.ListAttachmentsForMessage(ctx, m.ID)
-		if attachmentErr != nil {
-			return nil, attachmentErr
-		}
-		m.Attachments = attachments
 		out = append(out, m)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, dbError(err)
+	}
+	if len(out) > 0 {
+		messageIDs := make([]string, 0, len(out))
+		messageIndex := make(map[string]int, len(out))
+		for index := range out {
+			messageIDs = append(messageIDs, out[index].ID)
+			messageIndex[out[index].ID] = index
+		}
+		attachmentRows, attachmentErr := s.pool.Query(ctx, `SELECT `+attachmentColumns+` FROM knowledge.attachments WHERE message_id=ANY($1::uuid[]) ORDER BY created_at`, messageIDs)
+		if attachmentErr != nil {
+			return nil, dbError(attachmentErr)
+		}
+		for attachmentRows.Next() {
+			attachment, scanErr := scanAttachment(attachmentRows)
+			if scanErr != nil {
+				attachmentRows.Close()
+				return nil, dbError(scanErr)
+			}
+			if index, ok := messageIndex[attachment.MessageID]; ok {
+				out[index].Attachments = append(out[index].Attachments, *attachment)
+			}
+		}
+		attachmentErr = attachmentRows.Err()
+		attachmentRows.Close()
+		if attachmentErr != nil {
+			return nil, dbError(attachmentErr)
+		}
 	}
 	// The query takes the newest window, while the public response remains in
 	// chronological order for the conversation UI and for deterministic tests.

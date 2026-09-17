@@ -94,7 +94,15 @@ func TestGetContactAggregatesMessagesFromMergedIdentities(t *testing.T) {
 	if _, err = repo.UpsertContactRelation(ctx, repository.ContactRelationInput{OwnerUserID: "owner", ConnectorID: feishu.ID, ExternalIdentityID: feishuIdentity}); err != nil {
 		t.Fatal(err)
 	}
-	detail, err := (&Service{Repo: repo}).GetContact(ctx, "owner", wechatRelation.ID)
+	svc := &Service{Repo: repo}
+	contacts, err := svc.ListContacts(ctx, "owner", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(contacts) != 1 || contacts[0].MessageCount != 2 {
+		t.Fatalf("contact activity was not aggregated across identities: %+v", contacts)
+	}
+	detail, err := svc.GetContact(ctx, "owner", wechatRelation.ID)
 	if err != nil {
 		t.Fatal(err)
 	}

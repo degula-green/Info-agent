@@ -196,13 +196,13 @@ export async function setConversationStatus(conversationID: string, status: 'pau
   return knowledgeRequest<{ status: string }>(`/conversations/${encodeURIComponent(conversationID)}/${status}`, { method: 'POST' })
 }
 
-export async function getConversationDetail(conversationID: string, limit = 200): Promise<ConversationDetail> {
-  const conversation = await knowledgeRequest<ConversationDTO>(`/conversations/${encodeURIComponent(conversationID)}`)
-  // Fetch the two potentially expensive collections in sequence. The global
-  // request queue also limits traffic, but keeping this path sequential avoids
-  // a burst when a detail page is opened or refreshed.
-  const messageBody = await knowledgeRequest<{ items: MessageDTO[] }>(`/conversations/${encodeURIComponent(conversationID)}/messages?limit=${limit}`)
-  const attachmentBody = await knowledgeRequest<{ items: AttachmentDTO[] }>(`/conversations/${encodeURIComponent(conversationID)}/attachments`)
+export async function getConversationDetail(conversationID: string, limit = 50): Promise<ConversationDetail> {
+  const encodedID = encodeURIComponent(conversationID)
+  const [conversation, messageBody, attachmentBody] = await Promise.all([
+    knowledgeRequest<ConversationDTO>(`/conversations/${encodedID}`),
+    knowledgeRequest<{ items: MessageDTO[] }>(`/conversations/${encodedID}/messages?limit=${limit}`),
+    knowledgeRequest<{ items: AttachmentDTO[] }>(`/conversations/${encodedID}/attachments`),
+  ])
   return { conversation, messages: messageBody.items || [], attachments: attachmentBody.items || [] }
 }
 

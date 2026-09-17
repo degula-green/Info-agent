@@ -1,6 +1,7 @@
 import json
 import io
 import os
+import sqlite3
 import tempfile
 import unittest
 import urllib.error
@@ -31,6 +32,30 @@ class TextDB:
         return [{"local_id": 8, "sort_seq": 8, "type": "文本", "content": "hello", "create_time": 1_700_000_008}]
 
 
+class ContactDB:
+    def __init__(self):
+        self._db_files = [("contact.db", "contact.db", 0)]
+        self.connection = sqlite3.connect(":memory:")
+        self.connection.row_factory = sqlite3.Row
+        self.connection.execute(
+            "CREATE TABLE contact ("
+            "id INTEGER PRIMARY KEY, username TEXT, nick_name TEXT, remark TEXT, alias TEXT"
+            ")"
+        )
+        self.connection.executemany(
+            "INSERT INTO contact (id, username, nick_name, remark, alias) VALUES (?, ?, ?, ?, ?)",
+            [
+                (1, "notifymessage", "服务通知", "", ""),
+                (2, "wxid_selected", "KO", "杨静涵", ""),
+                (3, "wxid_symbols", "......", "", ""),
+            ],
+        )
+        self.connection.commit()
+
+    def _open(self, _relative_path):
+        return self.connection
+
+
 class CollectorServiceTest(unittest.TestCase):
     def setUp(self):
         self.original = {name: getattr(service, name) for name in ("db", "knowledge", "download_attachment", "upload_attachment", "save_state")}
@@ -58,6 +83,23 @@ class CollectorServiceTest(unittest.TestCase):
         parsed = service.parse_time("1721000000000")
         self.assertEqual(parsed.year, 2024)
         self.assertEqual(parsed.month, 7)
+
+    def test_contacts_returns_all_rows_in_wechat_contact_order(self):
+        original_db = service.db
+        try:
+            service.db = ContactDB()
+            result = service.contacts("", "local-development-only")
+            self.assertEqual(result["total"], 3)
+            self.assertEqual(
+                [(item["username"], item["nick_name"], item["remark"]) for item in result["contacts"]],
+                [
+                    ("notifymessage", "服务通知", ""),
+                    ("wxid_selected", "KO", "杨静涵"),
+                    ("wxid_symbols", "......", ""),
+                ],
+            )
+        finally:
+            service.db = original_db
 
     def tearDown(self):
         for name, value in self.original.items(): setattr(service, name, value)

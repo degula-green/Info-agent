@@ -685,7 +685,32 @@ def conversations(x_collector_token: str | None = Header(default=None)) -> dict[
 def contacts(keyword: str = "", x_collector_token: str | None = Header(default=None)) -> dict[str, Any]:
     auth(x_collector_token)
     if db is None: return {"contacts": [], "total": 0}
-    rows = db.search_contact(keyword.strip()) if keyword.strip() else db.search_contact("")
+    # wechatauto-replica.search_contact currently applies a hard LIMIT 50.
+    # Read the same local contact table here so discovery is complete; filtering
+    # remains parameterized and happens in SQLite rather than in application code.
+    needle = keyword.strip()
+    rows: list[dict[str, Any]] = []
+    for rel, path, _ in db._db_files:
+        if Path(path).name != "contact.db":
+            continue
+        conn = db._open(rel)
+        try:
+            pattern = f"%{needle}%"
+            records = conn.execute(
+                "SELECT username,nick_name,remark FROM contact "
+                "WHERE nick_name LIKE ? OR remark LIKE ? OR username LIKE ? OR alias LIKE ? "
+                # Keep the same order as WeChat's contact table. The previous
+                # LIMIT 50 helper returned rows in this order; sorting by
+                # nickname/remark made the first page look like unrelated
+                # contacts (many users legitimately use punctuation-only
+                # nicknames) even though the records were correct.
+                "ORDER BY id ASC",
+                (pattern, pattern, pattern, pattern),
+            ).fetchall()
+            rows = [dict(record) for record in records]
+        finally:
+            conn.close()
+        break
     items = [{"username": str(row.get("username") or ""), "nick_name": str(row.get("nick_name") or ""), "remark": str(row.get("remark") or "")} for row in rows if str(row.get("username") or "").strip()]
     return {"contacts": items, "total": len(items)}
 @app.get("/config")

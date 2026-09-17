@@ -1170,31 +1170,21 @@ func (s *Service) ListContacts(ctx context.Context, userID, platform string) ([]
 		return nil, err
 	}
 	views := make([]domain.ContactView, 0, len(relations))
-	memberships, membershipErr := s.Repo.ListContactMemberships(ctx, userID)
-	if membershipErr != nil {
-		return nil, membershipErr
+	activity, activityErr := s.Repo.ListContactActivity(ctx, userID, platform)
+	if activityErr != nil {
+		return nil, activityErr
 	}
 	for _, relation := range relations {
 		view := contactViewFromRelation(relation)
-		for _, membership := range memberships {
-			if membership.Identity.ID != relation.ExternalIdentity.ID {
+		for _, item := range activity {
+			if item.IdentityID != relation.ExternalIdentity.ID {
 				continue
 			}
-			if !containsString(view.ConversationIDs, membership.ConversationID) {
-				view.ConversationIDs = append(view.ConversationIDs, membership.ConversationID)
+			if !containsString(view.ConversationIDs, item.ConversationID) {
+				view.ConversationIDs = append(view.ConversationIDs, item.ConversationID)
 			}
-		}
-		for _, conversationID := range view.ConversationIDs {
-			messages, messageErr := s.Repo.ListMessages(ctx, conversationID, 200, "")
-			if messageErr != nil {
-				return nil, messageErr
-			}
-			for _, message := range messages {
-				if message.SenderIdentityID == relation.ExternalIdentity.ID {
-					view.MessageCount++
-					view.AttachmentCount += len(message.Attachments)
-				}
-			}
+			view.MessageCount += item.MessageCount
+			view.AttachmentCount += item.AttachmentCount
 		}
 		if relation.ExternalIdentity.MappedUserID != "" {
 			view.Kind = "internal"

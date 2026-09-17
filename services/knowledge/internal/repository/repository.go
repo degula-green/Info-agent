@@ -436,6 +436,7 @@ type Repository interface {
 	UpsertExternalIdentity(ctx context.Context, identity ExternalIdentityInput) (string, error)
 	GetExternalIdentity(ctx context.Context, platform, workspaceKey, externalUserID string) (*ExternalIdentity, error)
 	ListContactRelations(ctx context.Context, userID, platform string) ([]ContactRelation, error)
+	ListContactActivity(ctx context.Context, userID, platform string) ([]ContactActivity, error)
 	UpsertContactRelation(ctx context.Context, relation ContactRelationInput) (*ContactRelation, error)
 	DeleteContactRelation(ctx context.Context, userID, relationID string) error
 	ListContactIdentities(ctx context.Context, userID, platform string) ([]ExternalIdentity, error)
@@ -508,6 +509,16 @@ type ExternalIdentity struct {
 type ContactMembership struct {
 	Identity       ExternalIdentity
 	ConversationID string
+}
+
+// ContactActivity is the pre-aggregated activity for one external identity in
+// one conversation. Keeping this aggregation in the repository avoids loading
+// message bodies merely to render contact counters.
+type ContactActivity struct {
+	IdentityID      string
+	ConversationID  string
+	MessageCount    int
+	AttachmentCount int
 }
 
 type ContactRelationInput struct {
