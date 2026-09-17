@@ -312,6 +312,55 @@ func registerUserRoutes(r *gin.Engine, app *App, prefix string) {
 		c.JSON(http.StatusOK, gin.H{"connector": publicConnectorFromAccount(out)})
 	})
 	g.Use(userMiddleware(app))
+	// Knowledge directory endpoints are additive and intentionally separate
+	// from the legacy platform-oriented conversation routes below.
+	g.GET("/knowledge/libraries", func(c *gin.Context) {
+		p := principal(c)
+		libraries, err := app.Service.ListKnowledgeLibraries(c, p.UserID, p.OrganizationID, c.GetHeader("Authorization"))
+		if err != nil {
+			writeError(c, err)
+			return
+		}
+		items := make([]publicKnowledgeLibrary, 0, len(libraries))
+		for _, library := range libraries {
+			items = append(items, publicKnowledgeLibraryFromDomain(library))
+		}
+		c.JSON(http.StatusOK, gin.H{"items": items})
+	})
+	g.GET("/knowledge/libraries/:library_id/items", func(c *gin.Context) {
+		p := principal(c)
+		limit, _ := strconv.Atoi(c.DefaultQuery("limit", "100"))
+		items, err := app.Service.ListKnowledgeLibraryItems(c, p.UserID, p.OrganizationID, c.Param("library_id"), c.Query("kind"), c.Query("platform"), c.Query("q"), limit, c.GetHeader("Authorization"))
+		if err != nil {
+			writeError(c, err)
+			return
+		}
+		out := make([]publicKnowledgeLibraryItem, 0, len(items))
+		for _, item := range items {
+			out = append(out, publicKnowledgeLibraryItemFromDomain(item))
+		}
+		c.JSON(http.StatusOK, gin.H{"items": out})
+	})
+	// Explicit type-specific discovery keeps the group and private workflows
+	// distinct without changing the existing collector discovery contract.
+	g.GET("/connectors/:platform/group-conversations/discover", func(c *gin.Context) {
+		p := principal(c)
+		out, err := app.Service.DiscoverByType(c, p.UserID, c.Param("platform"), "group")
+		if err != nil {
+			writeError(c, err)
+			return
+		}
+		c.JSON(http.StatusOK, publicDiscoveryFromDomain(out))
+	})
+	g.GET("/connectors/:platform/private-conversations/discover", func(c *gin.Context) {
+		p := principal(c)
+		out, err := app.Service.DiscoverByType(c, p.UserID, c.Param("platform"), "private")
+		if err != nil {
+			writeError(c, err)
+			return
+		}
+		c.JSON(http.StatusOK, publicDiscoveryFromDomain(out))
+	})
 	g.POST("/attachments/upload-tasks", func(c *gin.Context) {
 		p := principal(c)
 		var body service.LocalUploadTaskInput
@@ -604,7 +653,9 @@ func registerUserRoutes(r *gin.Engine, app *App, prefix string) {
 	})
 	g.GET("/connectors/:platform/conversations/discover", func(c *gin.Context) {
 		p := principal(c)
-		out, err := app.Service.Discover(c, p.UserID, c.Param("platform"))
+		// Keep the legacy path for existing clients, but make its semantics
+		// explicitly group-only. Private conversations use the typed endpoint.
+		out, err := app.Service.DiscoverByType(c, p.UserID, c.Param("platform"), "group")
 		if err != nil {
 			writeError(c, err)
 			return
@@ -646,13 +697,44 @@ func registerUserRoutes(r *gin.Engine, app *App, prefix string) {
 			writeError(c, apperror.New("invalid_request", "invalid requested_start_at", 400, false))
 			return
 		}
-		out, err := app.Service.Attach(c, repository.AttachInput{UserID: p.UserID, Platform: body.Platform, WorkspaceKey: body.WorkspaceKey, ExternalConversationID: body.ExternalConversationID, ConversationType: body.ConversationType, Name: body.Name, AvatarURL: body.AvatarURL, DiscoveryID: body.DiscoveryID, OrganizationID: body.OrganizationID, RequestedStartAt: start}, c.GetHeader("Authorization"))
+		out, err := app.Service.AttachByType(c, repository.AttachInput{UserID: p.UserID, Platform: body.Platform, WorkspaceKey: body.WorkspaceKey, ExternalConversationID: body.ExternalConversationID, ConversationType: body.ConversationType, Name: body.Name, AvatarURL: body.AvatarURL, DiscoveryID: body.DiscoveryID, OrganizationID: body.OrganizationID, RequestedStartAt: start}, "group", c.GetHeader("Authorization"))
 		if err != nil {
 			writeError(c, err)
 			return
 		}
 		c.JSON(http.StatusCreated, publicConversationFromDomain(*out))
 	})
+	attachByType := func(c *gin.Context, conversationType string) {
+		p := principal(c)
+		var body struct {
+			Platform               string `json:"platform"`
+			WorkspaceKey           string `json:"platform_workspace_key"`
+			ExternalConversationID string `json:"external_conversation_id"`
+			ConversationType       string `json:"conversation_type"`
+			Name                   string `json:"name"`
+			AvatarURL              string `json:"avatar_url"`
+			DiscoveryID            string `json:"discovery_id"`
+			OrganizationID         string `json:"organization_id"`
+			RequestedStartAt       string `json:"requested_start_at"`
+		}
+		if err := c.ShouldBindJSON(&body); err != nil {
+			writeError(c, apperror.New("invalid_request", "invalid attach request", 400, false))
+			return
+		}
+		start, err := parseTime(body.RequestedStartAt)
+		if err != nil {
+			writeError(c, apperror.New("invalid_request", "invalid requested_start_at", 400, false))
+			return
+		}
+		out, err := app.Service.AttachByType(c, repository.AttachInput{UserID: p.UserID, Platform: body.Platform, WorkspaceKey: body.WorkspaceKey, ExternalConversationID: body.ExternalConversationID, ConversationType: body.ConversationType, Name: body.Name, AvatarURL: body.AvatarURL, DiscoveryID: body.DiscoveryID, OrganizationID: body.OrganizationID, RequestedStartAt: start}, conversationType, c.GetHeader("Authorization"))
+		if err != nil {
+			writeError(c, err)
+			return
+		}
+		c.JSON(http.StatusCreated, publicConversationFromDomain(*out))
+	}
+	g.POST("/conversations/group/attach", func(c *gin.Context) { attachByType(c, "group") })
+	g.POST("/conversations/private/attach", func(c *gin.Context) { attachByType(c, "private") })
 	shareHandler := func(c *gin.Context) {
 		p := principal(c)
 		var body struct {

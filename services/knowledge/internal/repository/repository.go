@@ -574,6 +574,8 @@ type Repository interface {
 	GetKnowledgeItemByMessage(ctx context.Context, messageID string) (*domain.KnowledgeItem, error)
 	GetKnowledgeItemByAttachment(ctx context.Context, attachmentID string) (*domain.KnowledgeItem, error)
 	GetKnowledgeContent(ctx context.Context, knowledgeItemID string) (*domain.KnowledgeContent, error)
+	ListKnowledgeLibraries(ctx context.Context, userID, organizationID string) ([]domain.KnowledgeLibrary, error)
+	ListKnowledgeLibraryItems(ctx context.Context, libraryID, userID, organizationID, kind, platform, query string, limit int) ([]domain.KnowledgeLibraryItem, error)
 	Heartbeat(ctx context.Context, collectorID string, now time.Time) (*domain.Collector, error)
 	RecordCollectorFailure(ctx context.Context, collectorID, lastError string, nextPollAt, now time.Time) error
 	RecordCursorReceipt(ctx context.Context, collectorID, cursor string, now time.Time) error

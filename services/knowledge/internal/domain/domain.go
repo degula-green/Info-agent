@@ -363,6 +363,65 @@ type KnowledgeItem struct {
 	UpdatedAt              time.Time   `json:"updated_at"`
 }
 
+// KnowledgeLibrary is a logical directory node presented by the web client.
+// It deliberately groups the physical knowledge bases by ownership and
+// purpose so that a conversation-specific storage base never leaks into the
+// user-facing navigation tree.
+type KnowledgeLibrary struct {
+	ID                string    `json:"id"`
+	Scope             string    `json:"scope"`
+	BaseType          string    `json:"base_type"`
+	Name              string    `json:"name"`
+	OwnerUserID       string    `json:"owner_user_id,omitempty"`
+	OrganizationID    string    `json:"organization_id,omitempty"`
+	Status            string    `json:"status"`
+	ItemCount         int       `json:"item_count"`
+	FileCount         int       `json:"file_count"`
+	ConversationCount int       `json:"conversation_count"`
+	MessageCount      int       `json:"message_count"`
+	SharedItemCount   int       `json:"shared_item_count"`
+	CanUpload         bool      `json:"can_upload"`
+	UpdatedAt         time.Time `json:"updated_at"`
+}
+
+// KnowledgeLibraryItem is a public-directory projection of a message,
+// attachment, or conversation. Storage references and private content are
+// intentionally excluded; the detail APIs remain the authority for those.
+type KnowledgeLibraryItem struct {
+	ID                     string     `json:"id"`
+	LibraryID              string     `json:"library_id"`
+	Kind                   string     `json:"kind"`
+	Title                  string     `json:"title"`
+	Excerpt                string     `json:"excerpt,omitempty"`
+	Platform               string     `json:"platform,omitempty"`
+	ConversationID         string     `json:"conversation_id,omitempty"`
+	ExternalConversationID string     `json:"external_conversation_id,omitempty"`
+	ConversationType       string     `json:"conversation_type,omitempty"`
+	ConversationName       string     `json:"conversation_name,omitempty"`
+	SourceType             string     `json:"source_type"`
+	SourceMessageID        string     `json:"source_message_id,omitempty"`
+	SourceAttachmentID     string     `json:"source_attachment_id,omitempty"`
+	ContentType            string     `json:"content_type,omitempty"`
+	ContentVisibility      string     `json:"content_visibility,omitempty"`
+	AccessScope            string     `json:"access_scope,omitempty"`
+	ProcessingStatus       string     `json:"processing_status,omitempty"`
+	ContentStatus          string     `json:"content_status,omitempty"`
+	FileName               string     `json:"file_name,omitempty"`
+	MIMEType               string     `json:"mime_type,omitempty"`
+	SizeBytes              int64      `json:"size_bytes,omitempty"`
+	MessageCount           int        `json:"message_count,omitempty"`
+	AttachmentCount        int        `json:"attachment_count,omitempty"`
+	MemberCount            int        `json:"member_count,omitempty"`
+	SentAt                 *time.Time `json:"sent_at,omitempty"`
+	CreatedAt              time.Time  `json:"created_at"`
+	UpdatedAt              time.Time  `json:"updated_at"`
+	SharedAt               *time.Time `json:"shared_at,omitempty"`
+	ShareBatchID           string     `json:"share_batch_id,omitempty"`
+	CanView                bool       `json:"can_view"`
+	CanDownload            bool       `json:"can_download"`
+	ContentAccessRequired  bool       `json:"content_access_required"`
+}
+
 type KnowledgeContent struct {
 	KnowledgeItemID string `json:"knowledge_item_id"`
 	ContentVersion  int    `json:"content_version"`

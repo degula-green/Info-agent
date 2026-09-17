@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -2270,6 +2271,256 @@ func (s *PostgresStore) GetKnowledgeContent(ctx context.Context, id string) (*do
 		return nil, apperror.New("knowledge_content_not_found", "knowledge content not found", 404, false)
 	}
 	return &content, dbError(err)
+}
+
+// ListKnowledgeLibraries returns the stable directory nodes used by the web
+// client. The nodes are logical views; the existing knowledge bases remain the
+// source of truth for processing and service-three integration.
+func (s *PostgresStore) ListKnowledgeLibraries(ctx context.Context, userID, organizationID string) ([]domain.KnowledgeLibrary, error) {
+	userID, organizationID = strings.TrimSpace(userID), strings.TrimSpace(organizationID)
+	if userID == "" {
+		return nil, apperror.New("invalid_request", "user id is required", 400, false)
+	}
+	definitions := []struct {
+		id, scope, baseType, name, owner, org string
+		canUpload                             bool
+	}{
+		{personalPrivateLibraryPrefix + userID, "personal", "private_conversation", "私聊知识库", userID, "", false},
+		{personalFilesLibraryPrefix + userID, "personal", "private_local", "本地知识库", userID, "", true},
+	}
+	if organizationID != "" {
+		definitions = append(definitions,
+			struct {
+				id, scope, baseType, name, owner, org string
+				canUpload                             bool
+			}{orgFilesLibraryPrefix + organizationID, "organization", "organization_files", "文件库", "", organizationID, true},
+			struct {
+				id, scope, baseType, name, owner, org string
+				canUpload                             bool
+			}{orgGroupsLibraryPrefix + organizationID, "organization", "organization_conversation", "群聊", "", organizationID, false},
+			struct {
+				id, scope, baseType, name, owner, org string
+				canUpload                             bool
+			}{orgSharedLibraryPrefix + organizationID, "organization", "organization_private_shared", "共享私聊", "", organizationID, false},
+		)
+	}
+
+	items, err := s.pool.Query(ctx, `SELECT ki.knowledge_base_id::text,ki.knowledge_scope,ki.source_type,COALESCE(ki.owner_user_id::text,''),COALESCE(ki.organization_id::text,''),ki.source_attachment_id IS NOT NULL,ki.source_message_id IS NOT NULL,ki.updated_at,CASE WHEN ki.source_type='shared_private_item' THEN 1 ELSE 0 END FROM knowledge.knowledge_items ki WHERE (ki.lifecycle_status='active' OR ki.source_type='local_upload') AND ((ki.knowledge_scope='private' AND ki.owner_user_id=$1) OR (ki.knowledge_scope='organization' AND ki.organization_id=$2))`, userID, nilString(organizationID))
+	if err != nil {
+		return nil, dbError(err)
+	}
+	defer items.Close()
+	type aggregate struct {
+		itemCount, fileCount, messageCount, sharedCount, conversationCount int
+		conversations                                                      map[string]struct{}
+		updatedAt                                                          time.Time
+	}
+	aggregates := make(map[string]*aggregate, len(definitions))
+	for _, definition := range definitions {
+		aggregates[definition.id] = &aggregate{conversations: map[string]struct{}{}}
+	}
+	for items.Next() {
+		var baseID, scope, sourceType, owner, org string
+		var isFile, isMessage bool
+		var updatedAt time.Time
+		var shared int
+		if err := items.Scan(&baseID, &scope, &sourceType, &owner, &org, &isFile, &isMessage, &updatedAt, &shared); err != nil {
+			return nil, dbError(err)
+		}
+		// A physical base is mapped to the logical directory by scope/source.
+		ids := []string{}
+		if scope == "private" && owner == userID {
+			if sourceType == "private_conversation" {
+				ids = append(ids, personalPrivateLibraryPrefix+userID)
+			} else if sourceType == "local_upload" && isFile {
+				ids = append(ids, personalFilesLibraryPrefix+userID)
+			}
+		}
+		if scope == "organization" && organizationID != "" && org == organizationID {
+			if sourceType == "platform_conversation" {
+				ids = append(ids, orgGroupsLibraryPrefix+organizationID)
+				if isFile {
+					ids = append(ids, orgFilesLibraryPrefix+organizationID)
+				}
+			} else if sourceType == "shared_private_item" {
+				ids = append(ids, orgSharedLibraryPrefix+organizationID)
+				if isFile {
+					ids = append(ids, orgFilesLibraryPrefix+organizationID)
+				}
+			} else if sourceType == "local_upload" && isFile {
+				ids = append(ids, orgFilesLibraryPrefix+organizationID)
+			}
+		}
+		for _, id := range ids {
+			aggregate := aggregates[id]
+			if aggregate == nil {
+				continue
+			}
+			aggregate.itemCount++
+			if isFile {
+				aggregate.fileCount++
+			}
+			if isMessage && !isFile {
+				aggregate.messageCount++
+			}
+			aggregate.sharedCount += shared
+			if updatedAt.After(aggregate.updatedAt) {
+				aggregate.updatedAt = updatedAt
+			}
+		}
+	}
+	if err := items.Err(); err != nil {
+		return nil, dbError(err)
+	}
+	// Count conversations separately so files and messages do not inflate the
+	// conversation total when they are projected into the same directory.
+	for _, definition := range definitions {
+		var conversationCount int
+		query := `SELECT COUNT(*) FROM knowledge.conversation_ingestions WHERE status IN ('active','paused') AND `
+		args := []any{}
+		if definition.scope == "private" {
+			query += `owner_user_id=$1 AND conversation_type='private'`
+			args = append(args, userID)
+		} else {
+			query += `organization_id=$1 AND conversation_type='group'`
+			args = append(args, organizationID)
+		}
+		if definition.baseType == "private_conversation" {
+			query += ` AND knowledge_base_id IN (SELECT id FROM knowledge.knowledge_bases WHERE base_type='private_conversation' AND owner_user_id=$2)`
+			args = append(args, userID)
+		} else if definition.baseType == "organization_conversation" {
+			query += ` AND knowledge_base_id IN (SELECT id FROM knowledge.knowledge_bases WHERE base_type='organization_conversation' AND organization_id=$2)`
+			args = append(args, organizationID)
+		}
+		if definition.baseType == "organization_private_shared" {
+			query = `SELECT COUNT(DISTINCT ki.conversation_ingestion_id) FROM knowledge.knowledge_items ki WHERE ki.source_type='shared_private_item' AND ki.organization_id=$1 AND ki.lifecycle_status='active' AND ki.conversation_ingestion_id IS NOT NULL`
+			args = []any{organizationID}
+		}
+		if err := s.pool.QueryRow(ctx, query, args...).Scan(&conversationCount); err != nil {
+			return nil, dbError(err)
+		}
+		aggregates[definition.id].conversationCount = conversationCount
+	}
+	now := time.Now().UTC()
+	out := make([]domain.KnowledgeLibrary, 0, len(definitions))
+	for _, definition := range definitions {
+		aggregate := aggregates[definition.id]
+		updatedAt := aggregate.updatedAt
+		if updatedAt.IsZero() {
+			updatedAt = now
+		}
+		out = append(out, domain.KnowledgeLibrary{ID: definition.id, Scope: definition.scope, BaseType: definition.baseType, Name: definition.name, OwnerUserID: definition.owner, OrganizationID: definition.org, Status: "active", ItemCount: aggregate.itemCount, FileCount: aggregate.fileCount, ConversationCount: aggregate.conversationCount, MessageCount: aggregate.messageCount, SharedItemCount: aggregate.sharedCount, CanUpload: definition.canUpload, UpdatedAt: updatedAt})
+	}
+	return out, nil
+}
+
+func (s *PostgresStore) ListKnowledgeLibraryItems(ctx context.Context, libraryID, userID, organizationID, kind, platformName, queryText string, limit int) ([]domain.KnowledgeLibraryItem, error) {
+	userID, organizationID, libraryID = strings.TrimSpace(userID), strings.TrimSpace(organizationID), strings.TrimSpace(libraryID)
+	if limit <= 0 || limit > 200 {
+		limit = 100
+	}
+	if libraryID == "" {
+		return nil, apperror.New("knowledge_library_not_found", "knowledge library is required", 400, false)
+	}
+	conditions := []string{"(ki.lifecycle_status='active' OR ki.source_type='local_upload')"}
+	args := []any{}
+	add := func(value any) string { args = append(args, value); return "$" + strconv.Itoa(len(args)) }
+	if strings.HasPrefix(libraryID, personalPrivateLibraryPrefix) && libraryID == personalPrivateLibraryPrefix+userID {
+		conditions = append(conditions, "ki.source_type='private_conversation'", "ki.knowledge_scope='private'", "ki.owner_user_id="+add(userID))
+	} else if strings.HasPrefix(libraryID, personalFilesLibraryPrefix) && libraryID == personalFilesLibraryPrefix+userID {
+		conditions = append(conditions, "ki.source_type='local_upload'", "ki.source_attachment_id IS NOT NULL", "ki.knowledge_scope='private'", "ki.owner_user_id="+add(userID))
+	} else if strings.HasPrefix(libraryID, orgGroupsLibraryPrefix) && libraryID == orgGroupsLibraryPrefix+organizationID {
+		conditions = append(conditions, "ki.source_type='platform_conversation'", "ki.knowledge_scope='organization'", "ki.organization_id="+add(organizationID))
+	} else if strings.HasPrefix(libraryID, orgSharedLibraryPrefix) && libraryID == orgSharedLibraryPrefix+organizationID {
+		conditions = append(conditions, "ki.source_type='shared_private_item'", "ki.knowledge_scope='organization'", "ki.organization_id="+add(organizationID))
+	} else if strings.HasPrefix(libraryID, orgFilesLibraryPrefix) && libraryID == orgFilesLibraryPrefix+organizationID {
+		conditions = append(conditions, "ki.source_attachment_id IS NOT NULL", "ki.knowledge_scope='organization'", "ki.organization_id="+add(organizationID), "ki.source_type IN ('local_upload','platform_conversation','shared_private_item')")
+	} else {
+		return nil, apperror.New("knowledge_library_not_found", "knowledge library not found", 404, false)
+	}
+	if strings.EqualFold(strings.TrimSpace(kind), "conversations") || strings.EqualFold(strings.TrimSpace(kind), "conversation") {
+		conditions = append(conditions, "ki.conversation_ingestion_id IS NOT NULL")
+	}
+	if platformName = strings.TrimSpace(platformName); platformName != "" {
+		conditions = append(conditions, "ci.platform="+add(platformName))
+	}
+	if queryText = strings.TrimSpace(queryText); queryText != "" {
+		needle := "%" + strings.ToLower(queryText) + "%"
+		conditions = append(conditions, "(LOWER(COALESCE(ci.name,'')) LIKE "+add(needle)+" OR LOWER(COALESCE(ci.platform,'')) LIKE "+add(needle)+" OR LOWER(COALESCE(m.normalized_content,'')) LIKE "+add(needle)+" OR LOWER(COALESCE(a.file_name,'')) LIKE "+add(needle)+")")
+	}
+	if strings.EqualFold(strings.TrimSpace(kind), "conversations") || strings.EqualFold(strings.TrimSpace(kind), "conversation") {
+		// A conversation directory item is an aggregate. Building it from the
+		// filtered knowledge rows keeps the logical library rules above as the
+		// single authorization boundary while avoiding one row per message or
+		// attachment in the directory.
+		sourceType := "platform_conversation"
+		if strings.HasPrefix(libraryID, orgSharedLibraryPrefix) {
+			sourceType = "shared_private_item"
+		}
+		conversationSQL := `SELECT ci.id::text,COALESCE(ci.platform,''),COALESCE(ci.external_conversation_id,''),COALESCE(ci.conversation_type,''),COALESCE(ci.name,''),ci.created_at,GREATEST(COALESCE(ci.updated_at,ci.created_at),MAX(ki.updated_at)),COUNT(DISTINCT CASE WHEN ki.source_message_id IS NOT NULL AND ki.source_attachment_id IS NULL THEN ki.source_message_id END),COUNT(DISTINCT ki.source_attachment_id), (SELECT COUNT(*) FROM knowledge.conversation_memberships cm WHERE cm.conversation_ingestion_id=ci.id AND cm.status='active') FROM knowledge.knowledge_items ki JOIN knowledge.conversation_ingestions ci ON ci.id=ki.conversation_ingestion_id LEFT JOIN knowledge.messages m ON m.id=ki.source_message_id LEFT JOIN knowledge.attachments a ON a.id=ki.source_attachment_id WHERE ` + strings.Join(conditions, " AND ") + ` GROUP BY ci.id,ci.platform,ci.external_conversation_id,ci.conversation_type,ci.name,ci.created_at,ci.updated_at ORDER BY GREATEST(COALESCE(ci.updated_at,ci.created_at),MAX(ki.updated_at)) DESC LIMIT ` + strconv.Itoa(limit)
+		rows, err := s.pool.Query(ctx, conversationSQL, args...)
+		if err != nil {
+			return nil, dbError(err)
+		}
+		defer rows.Close()
+		out := make([]domain.KnowledgeLibraryItem, 0)
+		for rows.Next() {
+			var item domain.KnowledgeLibraryItem
+			var platformValue, externalConversationID, conversationType, conversationName string
+			if err := rows.Scan(&item.ID, &platformValue, &externalConversationID, &conversationType, &conversationName, &item.CreatedAt, &item.UpdatedAt, &item.MessageCount, &item.AttachmentCount, &item.MemberCount); err != nil {
+				return nil, dbError(err)
+			}
+			item.LibraryID = libraryID
+			item.Kind = "conversation"
+			item.Title = conversationName
+			if item.Title == "" {
+				item.Title = externalConversationID
+			}
+			item.Platform = platformValue
+			item.ConversationID = item.ID
+			item.ExternalConversationID = externalConversationID
+			item.ConversationType = conversationType
+			item.ConversationName = conversationName
+			item.SourceType = sourceType
+			item.CanView = true
+			out = append(out, item)
+		}
+		return out, dbError(rows.Err())
+	}
+	selectSQL := `SELECT ki.id::text,ki.knowledge_scope,ki.access_scope,ki.source_type,COALESCE(ki.source_message_id::text,''),COALESCE(ki.source_attachment_id::text,''),COALESCE(ki.conversation_ingestion_id::text,''),COALESCE(ci.platform,''),COALESCE(ci.external_conversation_id,''),COALESCE(ci.conversation_type,''),COALESCE(ci.name,''),COALESCE(ki.content_type,''),COALESCE(ki.content_visibility,''),COALESCE(ki.processing_status,''),COALESCE(ki.original_access_required,FALSE),COALESCE(ki.share_batch_id::text,''),ki.shared_at,ki.created_at,ki.updated_at,COALESCE(m.sender_display_name,''),COALESCE(m.normalized_content,''),m.sent_at,COALESCE(a.file_name,''),COALESCE(a.mime_type,''),COALESCE(a.size_bytes,0),COALESCE(a.content_status,'') FROM knowledge.knowledge_items ki LEFT JOIN knowledge.conversation_ingestions ci ON ci.id=ki.conversation_ingestion_id LEFT JOIN knowledge.messages m ON m.id=ki.source_message_id LEFT JOIN knowledge.attachments a ON a.id=ki.source_attachment_id WHERE ` + strings.Join(conditions, " AND ") + ` ORDER BY ki.updated_at DESC LIMIT ` + strconv.Itoa(limit)
+	rows, err := s.pool.Query(ctx, selectSQL, args...)
+	if err != nil {
+		return nil, dbError(err)
+	}
+	defer rows.Close()
+	out := make([]domain.KnowledgeLibraryItem, 0)
+	for rows.Next() {
+		var item domain.KnowledgeLibraryItem
+		var scope, accessScope, sourceType, sourceMessageID, sourceAttachmentID, conversationID, platformValue, externalConversationID, conversationType, conversationName, contentType, visibility, processingStatus, shareBatchID, sender, excerpt, fileName, mimeType, contentStatus string
+		var sentAt, sharedAt *time.Time
+		if err := rows.Scan(&item.ID, &scope, &accessScope, &sourceType, &sourceMessageID, &sourceAttachmentID, &conversationID, &platformValue, &externalConversationID, &conversationType, &conversationName, &contentType, &visibility, &processingStatus, &item.ContentAccessRequired, &shareBatchID, &sharedAt, &item.CreatedAt, &item.UpdatedAt, &sender, &excerpt, &sentAt, &fileName, &mimeType, &item.SizeBytes, &contentStatus); err != nil {
+			return nil, dbError(err)
+		}
+		item.LibraryID, item.SourceType, item.SourceMessageID, item.SourceAttachmentID = libraryID, sourceType, sourceMessageID, sourceAttachmentID
+		item.ConversationID, item.Platform, item.ExternalConversationID, item.ConversationType, item.ConversationName = conversationID, platformValue, externalConversationID, conversationType, conversationName
+		item.ContentType, item.ContentVisibility, item.AccessScope, item.ProcessingStatus = contentType, visibility, accessScope, processingStatus
+		item.ShareBatchID, item.SharedAt, item.SentAt = shareBatchID, sharedAt, sentAt
+		item.CanView = true
+		if sourceAttachmentID != "" {
+			item.Kind, item.Title, item.FileName, item.MIMEType, item.ContentStatus = "file", fileName, fileName, mimeType, contentStatus
+			item.CanDownload = contentStatus == "ready" && !item.ContentAccessRequired
+		} else {
+			item.Kind, item.Title, item.Excerpt = "message", sender, excerpt
+			if item.Title == "" {
+				item.Title = "消息"
+			}
+		}
+		if item.ConversationName == "" {
+			item.ConversationName = externalConversationID
+		}
+		out = append(out, item)
+	}
+	return out, dbError(rows.Err())
 }
 
 func (s *PostgresStore) GetOutbox(ctx context.Context, limit int) ([]domain.OutboxEvent, error) {

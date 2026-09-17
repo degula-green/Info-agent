@@ -1,5 +1,5 @@
 <template>
-  <InfoConversation v-if="chat" :chat="chat" @back="router.push(`/knowledge/${chat.source}`)" @toggle="toggleChat" @toast="toast" />
+  <InfoConversation v-if="chat" :chat="chat" @back="router.push(backPath)" @toggle="toggleChat" @toast="toast" @share="shareSelected" />
   <div v-else-if="loading" class="conversation-missing"><t-icon name="loading" size="28px" /><h3>正在加载会话</h3><p>正在从 Knowledge 加载消息和附件。</p></div>
   <div v-else class="conversation-missing"><t-icon name="error-circle" size="28px" /><h3>找不到这个会话</h3><t-button theme="primary" @click="router.push('/knowledge')">返回知识库</t-button></div>
 
@@ -21,6 +21,7 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { MessagePlugin } from 'tdesign-vue-next'
+import { sharePrivateResources } from '@/api/info-knowledge'
 import InfoConversation from '@/components/InfoConversation.vue'
 import type { InfoChat } from '@/mock'
 import { normalizeSourceKey, useInfoKnowledgeStore } from '@/stores/infoKnowledge'
@@ -28,6 +29,11 @@ const route = useRoute(); const router = useRouter(); const store = useInfoKnowl
 const sourceKey = computed(() => normalizeSourceKey(String(route.params.platform)) || 'wechat')
 const conversationId = computed(() => String(route.params.conversationId))
 const chat = computed(() => store.findConversation(sourceKey.value, conversationId.value))
+const backPath = computed(() => {
+  const requested = String(route.query.return || '')
+  if (requested.startsWith('/knowledge/')) return requested
+  return chat.value?.isDirect ? '/knowledge/personal/private' : `/knowledge/${chat.value?.source || sourceKey.value}`
+})
 const loading = ref(true)
 const pollTimer = ref<number | null>(null)
 const resumeDialogVisible = ref(false)
@@ -63,6 +69,20 @@ async function confirmResume() {
   }
 }
 function toast(text: string) { MessagePlugin.success(text) }
+async function shareSelected(payload: { conversationId: string; messageIDs: string[]; attachmentIDs: string[] }) {
+  try {
+    const result = await sharePrivateResources({
+      requestID: `web-share-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+      privateConversationID: payload.conversationId,
+      messageIDs: payload.messageIDs,
+      attachmentIDs: payload.attachmentIDs,
+    })
+    const count = Number(result.shared_message_count || 0) + Number(result.shared_attachment_count || 0)
+    toast(count ? `已共享 ${count} 项到组织` : '已提交共享到组织')
+  } catch (error: any) {
+    MessagePlugin.error(error?.message || '共享失败，请稍后重试')
+  }
+}
 async function loadCurrentConversation(platform: string, id: string, force = false) {
   const loadKey = `${platform}:${id}`
   const existing = conversationLoads.get(loadKey)

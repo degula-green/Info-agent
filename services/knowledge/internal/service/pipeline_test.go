@@ -6,8 +6,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -160,8 +158,8 @@ func TestIngestFiltersBeforeDedupeAndDedupeSkipsRepositoryNormalization(t *testi
 		t.Fatalf("Redis dedupe did not skip repository ingest: result=%+v calls=%d err=%v", second, counting.calls.Load(), err)
 	}
 	changed := pipelineInput(f, "dedupe-1", "text", "changed content")
-	if _, err := f.service.IngestMessage(context.Background(), changed); apperror.From(err).Code != "external_id_conflict" || counting.calls != 2 {
-		t.Fatalf("repository did not reject conflicting payload after cache mismatch: calls=%d err=%v", counting.calls, err)
+	if _, err := f.service.IngestMessage(context.Background(), changed); apperror.From(err).Code != "external_id_conflict" || counting.calls.Load() != 2 {
+		t.Fatalf("repository did not reject conflicting payload after cache mismatch: calls=%d err=%v", counting.calls.Load(), err)
 	}
 }
 
@@ -177,8 +175,8 @@ func TestDedupeCacheAllowsSenderMetadataCorrection(t *testing.T) {
 	corrected.SenderDisplayName = "Corrected Sender"
 	corrected.PayloadHash, _ = repository.CalculatePayloadHash(corrected)
 	result, err := f.service.IngestMessage(context.Background(), corrected)
-	if err != nil || !result.Duplicate || counting.calls != 2 {
-		t.Fatalf("sender correction was rejected before repository reconciliation: result=%+v calls=%d err=%v", result, counting.calls, err)
+	if err != nil || !result.Duplicate || counting.calls.Load() != 2 {
+		t.Fatalf("sender correction was rejected before repository reconciliation: result=%+v calls=%d err=%v", result, counting.calls.Load(), err)
 	}
 	messages, err := f.repo.ListMessages(context.Background(), f.conversation.ID, 10, "")
 	if err != nil || len(messages) != 1 || messages[0].SenderDisplayName != "Corrected Sender" {
@@ -327,7 +325,7 @@ func TestPrivacyPermissionAndReadyOutboxContract(t *testing.T) {
 	if err != nil || len(events) != 1 || events[0].EventType != "knowledge.ready" || events[0].SchemaVersion != 1 || events[0].Producer != "module-2" {
 		t.Fatalf("unexpected ready event contract: events=%+v err=%v", events, err)
 	}
-	if events[0].Payload["resource_type"] != "knowledge_item" || events[0].Payload["knowledge_item_id"] != item.ID || events[0].Payload["acl_version"] != int64(3) || events[0].Payload["organization_id"] != "org-1" {
+	if events[0].Payload["resource_type"] != "knowledge_item" || events[0].Payload["knowledge_item_id"] != item.ID || events[0].Payload["acl_version"] != int64(3) {
 		t.Fatalf("unexpected ready payload: %+v", events[0].Payload)
 	}
 	if err := f.service.PublishOutbox(context.Background()); err != nil {

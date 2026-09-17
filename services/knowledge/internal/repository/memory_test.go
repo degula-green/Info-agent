@@ -201,6 +201,45 @@ func TestMemoryAttachCreatesPrimaryCollectorAtomically(t *testing.T) {
 	}
 }
 
+func TestMemoryKnowledgeLibrariesKeepPrivateAndOrganizationItemsSeparate(t *testing.T) {
+	repo := NewMemoryStore()
+	ctx := context.Background()
+	now := time.Now().UTC()
+	private, err := repo.AttachConversation(ctx, AttachInput{UserID: "u1", Platform: domain.PlatformWechat, WorkspaceKey: "wx", ExternalConversationID: "private", ConversationType: "private", RequestedStartAt: &now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	group, err := repo.AttachConversation(ctx, AttachInput{UserID: "u1", Platform: domain.PlatformFeishu, WorkspaceKey: "tenant", ExternalConversationID: "group", ConversationType: "group", OrganizationID: "org-1", RequestedStartAt: &now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repo.CreateLocalUploadTask(ctx, domain.LocalUploadTaskInput{RequestID: "private-upload", UserID: "u1", UploadDestination: "private_local_library", FileName: "private.txt", MIMEType: "text/plain", ContentHash: hashForTest("private")}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repo.CreateLocalUploadTask(ctx, domain.LocalUploadTaskInput{RequestID: "org-upload", UserID: "u1", UploadDestination: "organization_file_library", OrganizationID: "org-1", FileName: "org.txt", MIMEType: "text/plain", ContentHash: hashForTest("org")}); err != nil {
+		t.Fatal(err)
+	}
+	libraries, err := repo.ListKnowledgeLibraries(ctx, "u1", "org-1")
+	if err != nil || len(libraries) != 5 {
+		t.Fatalf("unexpected library directory: %+v err=%v", libraries, err)
+	}
+	for _, library := range libraries {
+		if library.Scope == "organization" && library.ID == personalPrivateLibraryPrefix+"u1" {
+			t.Fatalf("private library was assigned organization scope: %+v", library)
+		}
+	}
+	privateItems, err := repo.ListKnowledgeLibraryItems(ctx, personalFilesLibraryPrefix+"u1", "u1", "org-1", "files", "", "", 50)
+	if err != nil || len(privateItems) != 1 || privateItems[0].FileName != "private.txt" {
+		t.Fatalf("private file library leaked or omitted item: %+v err=%v", privateItems, err)
+	}
+	orgItems, err := repo.ListKnowledgeLibraryItems(ctx, orgFilesLibraryPrefix+"org-1", "u1", "org-1", "files", "", "", 50)
+	if err != nil || len(orgItems) != 1 || orgItems[0].FileName != "org.txt" {
+		t.Fatalf("organization file library mismatch: %+v err=%v", orgItems, err)
+	}
+	_ = private
+	_ = group
+}
+
 func TestMemoryMessageAttachmentIdempotenceAndCursorMonotonicity(t *testing.T) {
 	repo := NewMemoryStore()
 	ctx := trace.WithIDs(context.Background(), "req-ingest", "trace-ingest")

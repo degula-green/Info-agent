@@ -19,6 +19,11 @@
           <template #icon><t-icon :name="chat.collectionStatus === 'detached' ? 'stop-circle' : chat.collectionStatus === 'collecting' ? 'pause-circle' : 'play-circle'" /></template>
           {{ chat.collectionStatus === 'detached' ? '已解除接入' : chat.collectionStatus === 'collecting' ? '停止采集' : chat.collectionStatus === 'missing' || chat.collectionStatus === 'paused' ? '继续采集' : '开始采集' }}
         </t-button>
+        <t-button v-if="chat.isDirect" variant="outline" theme="primary" :disabled="shareSelecting && !selectedCount" @click="shareConversation">
+          <template #icon><t-icon :name="shareSelecting ? 'check' : 'share'" /></template>
+          {{ shareSelecting ? `共享已选（${selectedCount}）` : '选择内容并共享' }}
+        </t-button>
+        <t-button v-if="chat.isDirect && shareSelecting" variant="text" @click="cancelShareSelection">取消选择</t-button>
       </div>
     </div>
 
@@ -36,7 +41,7 @@
         <span class="conversation-list__hint">{{ collectionHint }}</span>
       </div>
 
-      <div v-if="items.length" class="conversation-table" role="table" aria-label="群聊消息和文件列表">
+      <div v-if="items.length" class="conversation-table" role="table" :aria-label="chat.isDirect ? '私聊消息和文件列表' : '群聊消息和文件列表'">
         <div class="conversation-table__head" role="row">
           <span>名称</span>
           <span>状态</span>
@@ -54,6 +59,15 @@
           @click="openItem(item)"
         >
           <span class="conversation-cell conversation-cell--name" data-label="名称">
+            <input
+              v-if="chat.isDirect && shareSelecting"
+              class="share-selection"
+              type="checkbox"
+              :checked="isSelected(item)"
+              :aria-label="`选择${item.kind === 'file' ? '文件' : '消息'}：${item.name}`"
+              @click.stop
+              @change="toggleSelected(item)"
+            />
             <t-icon :name="item.kind === 'file' ? 'file' : 'chat-bubble'" />
             <span>
               <strong>{{ item.name }}</strong>
@@ -187,6 +201,7 @@ const emit = defineEmits<{
   (event: 'back'): void
   (event: 'toggle', chat: InfoChat): void
   (event: 'toast', text: string): void
+  (event: 'share', payload: { conversationId: string; messageIDs: string[]; attachmentIDs: string[] }): void
 }>()
 
 const chat = computed(() => props.chat)
@@ -195,6 +210,9 @@ const fileDialogVisible = ref(false)
 const activeMessage = ref<InfoMessage | null>(null)
 const activeFile = ref<InfoFile | null>(null)
 const fileDownloading = ref(false)
+const shareSelecting = ref(false)
+const selectedMessageIDs = ref<string[]>([])
+const selectedAttachmentIDs = ref<string[]>([])
 
 const items = computed<ConversationItem[]>(() => [
     ...chat.value.messages.filter((message) => !isAttachmentOnlyMessage(message)).map((message) => ({
@@ -240,6 +258,42 @@ function statusLabel(status: CollectionStatus) { return status === 'collecting' 
 function openItem(item: ConversationItem) { if (item.kind === 'message' && item.message) openMessage(item.message); if (item.kind === 'file' && item.file) openFile(item.file) }
 function openMessage(message: InfoMessage) { activeMessage.value = message; activeFile.value = null; messageDialogVisible.value = true }
 function openFile(file: InfoFile) { activeFile.value = file; activeMessage.value = null; fileDialogVisible.value = true }
+const selectedCount = computed(() => selectedMessageIDs.value.length + selectedAttachmentIDs.value.length)
+
+function itemID(item: ConversationItem) {
+  return item.kind === 'file' ? item.file?.id || '' : item.message?.id || ''
+}
+
+function isSelected(item: ConversationItem) {
+  const id = itemID(item)
+  return item.kind === 'file' ? selectedAttachmentIDs.value.includes(id) : selectedMessageIDs.value.includes(id)
+}
+
+function toggleSelected(item: ConversationItem) {
+  const id = itemID(item)
+  if (!id) return
+  const target = item.kind === 'file' ? selectedAttachmentIDs : selectedMessageIDs
+  target.value = target.value.includes(id) ? target.value.filter((value) => value !== id) : [...target.value, id]
+}
+
+function cancelShareSelection() {
+  shareSelecting.value = false
+  selectedMessageIDs.value = []
+  selectedAttachmentIDs.value = []
+}
+
+function shareConversation() {
+  if (!chat.value.isDirect) return
+  if (!shareSelecting.value) {
+    shareSelecting.value = true
+    selectedMessageIDs.value = []
+    selectedAttachmentIDs.value = []
+    return
+  }
+  if (!selectedCount.value) return
+  emit('share', { conversationId: chat.value.id, messageIDs: [...selectedMessageIDs.value], attachmentIDs: [...selectedAttachmentIDs.value] })
+  cancelShareSelection()
+}
 
 function isRichMessage(content?: string | null) {
   return /<\/?(?:p|div|span|br|strong|b|em|i|a|img|ul|ol|li|table|thead|tbody|tr|td|th)\b/i.test(String(content || ''))
@@ -384,6 +438,7 @@ async function downloadFile() {
 .conversation-row:hover { background: var(--td-bg-color-container-hover); }
 .conversation-cell { min-width: 0; overflow: hidden; color: var(--td-text-color-secondary); font-size: 12px; }
 .conversation-cell--name { display: flex; align-items: center; gap: 11px; color: var(--td-text-color-primary); }
+.share-selection { width: 16px; height: 16px; flex: 0 0 16px; accent-color: var(--td-brand-color); cursor: pointer; }
 .conversation-cell--name > svg { flex: 0 0 21px; width: 21px; height: 21px; color: var(--td-brand-color); }
 .conversation-cell--name > span { min-width: 0; }
 .conversation-cell--name strong, .conversation-cell--name small { display: block; overflow: hidden; text-overflow: ellipsis; }

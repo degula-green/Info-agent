@@ -850,8 +850,34 @@ func (s *Service) cachedDiscoveryOrError(ctx context.Context, userID string, acc
 }
 
 func (s *Service) annotateAttachedConversations(ctx context.Context, userID string, account *domain.ConnectorAccount, conversations []domain.AvailableConversation) error {
+	privateAttached := map[string]*domain.ConversationIngestion{}
+	// FindConversationByExternal is intentionally group-scoped because it is
+	// used by group membership discovery. Private discovery needs the owner's
+	// existing private conversations as well so a refresh remains idempotent.
+	listed, listErr := s.Repo.ListConversations(ctx, userID, account.Platform)
+	if listErr != nil {
+		return listErr
+	}
+	for index := range listed {
+		item := &listed[index]
+		if item.ConversationType == "private" && item.WorkspaceKey == account.WorkspaceKey {
+			privateAttached[item.ExternalConversationID] = item
+		}
+	}
 	for index := range conversations {
 		candidate := &conversations[index]
+		if candidate.ConversationType == "private" {
+			if attached := privateAttached[candidate.ExternalID]; attached != nil {
+				candidate.AttachedConversationID = attached.ID
+				for _, collector := range attached.Collectors {
+					if collector.CollectorUserID == userID && collector.Status != domain.CollectorRemoved {
+						candidate.CurrentUserCollector = true
+						break
+					}
+				}
+			}
+			continue
+		}
 		if candidate.ConversationType != "group" {
 			continue
 		}
@@ -882,6 +908,9 @@ func (s *Service) ReportDiscovery(ctx context.Context, device *domain.AgentDevic
 		return domain.Discovery{}, err
 	}
 	_ = s.Repo.TouchDevice(ctx, device.ID, device.AgentVersion, s.Now())
+	// The collector transport remains unchanged, but service-owned discovery
+	// snapshots are normalized here so private and group entries cannot cross
+	// the corresponding user-facing boundary.
 	discovery := domain.Discovery{ID: uuid.NewString(), OwnerUserID: device.OwnerUserID, ConnectorID: account.ID, Platform: domain.PlatformWechat, ExpiresAt: s.Now().Add(5 * time.Minute), Conversations: dedupeConversations(items)}
 	if err := s.saveDiscovery(ctx, discovery); err != nil {
 		return domain.Discovery{}, apperror.Wrap("discovery_store_failed", "cannot save discovery result", 503, true, err)
@@ -902,6 +931,9 @@ func (s *Service) ListDeviceCollectors(ctx context.Context, device *domain.Agent
 		conversation, convErr := s.Repo.GetConversation(ctx, collector.ConversationID)
 		if convErr != nil {
 			return nil, convErr
+		}
+		if conversation.ConversationType != "group" && conversation.ConversationType != "private" {
+			continue
 		}
 		out = append(out, CollectorAssignment{Collector: collector, Conversation: *conversation})
 	}
@@ -1010,6 +1042,102 @@ func (s *Service) Attach(ctx context.Context, input repository.AttachInput, auth
 		return nil, err
 	}
 	return conversation, nil
+}
+
+// DiscoverByType is the user-facing discovery boundary. The existing
+// Discover method remains available for legacy callers, while new clients
+// must state whether they are selecting a group or a private conversation.
+func (s *Service) DiscoverByType(ctx context.Context, userID, platformName, conversationType string) (domain.Discovery, error) {
+	conversationType = strings.ToLower(strings.TrimSpace(conversationType))
+	if conversationType != "group" && conversationType != "private" {
+		return domain.Discovery{}, apperror.New("invalid_conversation_type", "conversation type is not supported", 400, false)
+	}
+	discovery, err := s.Discover(ctx, userID, platformName)
+	if err != nil {
+		return domain.Discovery{}, err
+	}
+	discovery.Conversations = filterDiscoveryConversations(discovery.Conversations, conversationType)
+	// A legacy discovery is intentionally mixed. Persist a new, typed snapshot
+	// for this entry point so its id cannot later be replayed by the other
+	// workflow. The provider discovery and transport contracts stay unchanged.
+	discovery.ID = uuid.NewString()
+	if err := s.saveDiscoverySnapshot(ctx, discovery); err != nil {
+		return domain.Discovery{}, apperror.Wrap("discovery_store_failed", "cannot save typed discovery result", 503, true, err)
+	}
+	return discovery, nil
+}
+
+func filterDiscoveryConversations(items []domain.AvailableConversation, conversationType string) []domain.AvailableConversation {
+	filtered := make([]domain.AvailableConversation, 0, len(items))
+	for _, item := range items {
+		if strings.EqualFold(strings.TrimSpace(item.ConversationType), conversationType) {
+			filtered = append(filtered, item)
+		}
+	}
+	return filtered
+}
+
+func (s *Service) AttachByType(ctx context.Context, input repository.AttachInput, conversationType string, authorization ...string) (*domain.ConversationIngestion, error) {
+	conversationType = strings.ToLower(strings.TrimSpace(conversationType))
+	if conversationType != "group" && conversationType != "private" {
+		return nil, apperror.New("invalid_conversation_type", "conversation type is not supported", 400, false)
+	}
+	if strings.TrimSpace(input.ConversationType) != "" && !strings.EqualFold(input.ConversationType, conversationType) {
+		return nil, apperror.New("conversation_type_mismatch", "conversation type does not match the selected entry point", 400, false)
+	}
+	// Do not allow a caller to take a discovery id from the legacy mixed
+	// endpoint and use it as proof for a typed attach. A typed snapshot may be
+	// empty, but every entry it contains must belong to this workflow.
+	if strings.TrimSpace(input.DiscoveryID) != "" {
+		account, err := s.GetConnector(ctx, input.UserID, input.Platform)
+		if err != nil {
+			return nil, err
+		}
+		discovery, err := s.getDiscovery(ctx, input.DiscoveryID, input.UserID, account.ID)
+		if err != nil {
+			return nil, err
+		}
+		for _, candidate := range discovery.Conversations {
+			if !strings.EqualFold(strings.TrimSpace(candidate.ConversationType), conversationType) {
+				return nil, apperror.New("conversation_type_mismatch", "discovery result contains another conversation type", 400, false)
+			}
+		}
+	}
+	input.ConversationType = conversationType
+	return s.Attach(ctx, input, authorization...)
+}
+
+func (s *Service) ListKnowledgeLibraries(ctx context.Context, userID, organizationID string, authorization ...string) ([]domain.KnowledgeLibrary, error) {
+	organizationID, err := s.ResolveCurrentOrganization(ctx, userID, organizationID, firstAuthorization(authorization))
+	if err != nil {
+		return nil, err
+	}
+	if organizationID != "" {
+		if err := s.requireOrganizationMember(ctx, userID, organizationID, authorization...); err != nil {
+			return nil, err
+		}
+	}
+	return s.Repo.ListKnowledgeLibraries(ctx, userID, organizationID)
+}
+
+func (s *Service) ListKnowledgeLibraryItems(ctx context.Context, userID, organizationID, libraryID, kind, platformName, query string, limit int, authorization ...string) ([]domain.KnowledgeLibraryItem, error) {
+	organizationID, err := s.ResolveCurrentOrganization(ctx, userID, organizationID, firstAuthorization(authorization))
+	if err != nil {
+		return nil, err
+	}
+	if organizationID != "" {
+		if err := s.requireOrganizationMember(ctx, userID, organizationID, authorization...); err != nil {
+			return nil, err
+		}
+	}
+	return s.Repo.ListKnowledgeLibraryItems(ctx, libraryID, userID, organizationID, kind, platformName, query, limit)
+}
+
+func firstAuthorization(values []string) string {
+	if len(values) == 0 {
+		return ""
+	}
+	return values[0]
 }
 
 func (s *Service) AddCollector(ctx context.Context, userID, conversationID string, authorization ...string) (*domain.Collector, error) {
@@ -1153,7 +1281,21 @@ func (s *Service) ListConversations(ctx context.Context, userID, platformName st
 	if !supportedPlatform(platformName) {
 		return nil, apperror.New("unsupported_platform", "platform is not supported in this release", 400, false)
 	}
-	return s.Repo.ListConversations(ctx, userID, platformName)
+	conversations, err := s.Repo.ListConversations(ctx, userID, platformName)
+	if err != nil {
+		return nil, err
+	}
+	// The legacy user-facing conversation directory is the group workflow.
+	// Private conversations have a separate discovery/attach path and are
+	// intentionally omitted here even though the repository can still expose
+	// them to internal callers and detail/permission checks.
+	out := make([]domain.ConversationIngestion, 0, len(conversations))
+	for _, conversation := range conversations {
+		if strings.EqualFold(strings.TrimSpace(conversation.ConversationType), "group") {
+			out = append(out, conversation)
+		}
+	}
+	return out, nil
 }
 
 func contactViewFromRelation(relation repository.ContactRelation) domain.ContactView {
@@ -1531,17 +1673,6 @@ func (s *Service) IngestMessage(ctx context.Context, input repository.IngestMess
 			return cachedResult, cacheErr
 		} else if cacheErr != nil {
 			slog.WarnContext(ctx, "knowledge message dedupe cache unavailable", "error", cacheErr)
-		} else if found {
-			if strings.EqualFold(cached.PayloadHash, input.PayloadHash) {
-				result := cached.Result
-				result.Duplicate = true
-				return &result, nil
-			}
-			// Provider parsing can legitimately improve metadata for an already
-			// ingested message (for example a corrected WeChat sender nickname or
-			// recovered media metadata). Let the authoritative repository compare
-			// content and apply supported corrections instead of letting a stale
-			// cache entry reject the replay before it reaches that logic.
 		}
 	}
 	normalized, err := normalizeMessageCandidate(filtered, input.Content, input.PayloadHash, *account, s.Now())
@@ -1683,7 +1814,10 @@ func (s *Service) getMessageDedupe(ctx context.Context, key, payloadHash string)
 		return nil, false, err
 	}
 	if !strings.EqualFold(cached.PayloadHash, payloadHash) {
-		return nil, true, apperror.New("external_id_conflict", "external message id has conflicting payload", 409, false)
+		// The cache is only a fast-path. A changed canonical payload must reach
+		// the repository, which can distinguish a real content conflict from a
+		// provider metadata correction (for example a sender nickname update).
+		return nil, false, nil
 	}
 	result := cached.Result
 	result.Duplicate = true
@@ -2371,13 +2505,20 @@ func discoveryLatestKey(userID, connectorID string) string {
 }
 
 func (s *Service) saveDiscovery(ctx context.Context, discovery domain.Discovery) error {
-	if s.KV == nil {
-		return apperror.New("discovery_store_failed", "discovery cache is unavailable", 503, true)
-	}
-	if err := s.KV.Set(ctx, discoveryKey(discovery.OwnerUserID, discovery.ConnectorID, discovery.ID), discovery, discoveryTTL); err != nil {
+	if err := s.saveDiscoverySnapshot(ctx, discovery); err != nil {
 		return err
 	}
 	return s.KV.Set(ctx, discoveryLatestKey(discovery.OwnerUserID, discovery.ConnectorID), discovery.ID, discoveryTTL)
+}
+
+// saveDiscoverySnapshot stores a replayable discovery without changing the
+// legacy "latest" pointer. Typed user-facing discovery must not make a later
+// group/private request read a snapshot belonging to the other workflow.
+func (s *Service) saveDiscoverySnapshot(ctx context.Context, discovery domain.Discovery) error {
+	if s.KV == nil {
+		return apperror.New("discovery_store_failed", "discovery cache is unavailable", 503, true)
+	}
+	return s.KV.Set(ctx, discoveryKey(discovery.OwnerUserID, discovery.ConnectorID, discovery.ID), discovery, discoveryTTL)
 }
 
 func (s *Service) getDiscovery(ctx context.Context, id, userID, connectorID string) (*domain.Discovery, error) {
