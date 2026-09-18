@@ -2449,16 +2449,42 @@ func (s *PostgresStore) ListKnowledgeLibraryItems(ctx context.Context, libraryID
 		conditions = append(conditions, "(LOWER(COALESCE(ci.name,'')) LIKE "+add(needle)+" OR LOWER(COALESCE(ci.platform,'')) LIKE "+add(needle)+" OR LOWER(COALESCE(m.normalized_content,'')) LIKE "+add(needle)+" OR LOWER(COALESCE(a.file_name,'')) LIKE "+add(needle)+")")
 	}
 	if strings.EqualFold(strings.TrimSpace(kind), "conversations") || strings.EqualFold(strings.TrimSpace(kind), "conversation") {
-		// A conversation directory item is an aggregate. Building it from the
-		// filtered knowledge rows keeps the logical library rules above as the
-		// single authorization boundary while avoiding one row per message or
-		// attachment in the directory.
+		// A conversation directory is rooted in the attached conversation, not
+		// in its first knowledge item. Private conversations must therefore be
+		// visible immediately after attach, even before the collector has
+		// produced a message or attachment.
+		conversationConditions := []string{"ci.status IN ('active','paused')"}
+		conversationArgs := []any{}
+		conversationAdd := func(value any) string {
+			conversationArgs = append(conversationArgs, value)
+			return "$" + strconv.Itoa(len(conversationArgs))
+		}
+		itemJoinFilter := "(ki.lifecycle_status='active' OR ki.source_type='local_upload')"
 		sourceType := "platform_conversation"
+		if strings.HasPrefix(libraryID, personalPrivateLibraryPrefix) {
+			conversationConditions = append(conversationConditions, "ci.owner_user_id="+conversationAdd(userID), "ci.conversation_type='private'")
+			itemJoinFilter += " AND ki.source_type='private_conversation'"
+		} else if strings.HasPrefix(libraryID, orgGroupsLibraryPrefix) {
+			conversationConditions = append(conversationConditions, "ci.organization_id="+conversationAdd(organizationID), "ci.conversation_type='group'")
+			itemJoinFilter += " AND ki.source_type='platform_conversation'"
+		} else if strings.HasPrefix(libraryID, orgSharedLibraryPrefix) {
+			conversationConditions = append(conversationConditions, "ci.conversation_type='private'", "EXISTS (SELECT 1 FROM knowledge.knowledge_items shared WHERE shared.conversation_ingestion_id=ci.id AND shared.source_type='shared_private_item' AND shared.organization_id="+conversationAdd(organizationID)+" AND shared.lifecycle_status='active')")
+			itemJoinFilter += " AND ki.source_type='shared_private_item' AND ki.organization_id=" + conversationAdd(organizationID)
+		} else {
+			return []domain.KnowledgeLibraryItem{}, nil
+		}
 		if strings.HasPrefix(libraryID, orgSharedLibraryPrefix) {
 			sourceType = "shared_private_item"
 		}
-		conversationSQL := `SELECT ci.id::text,COALESCE(ci.platform,''),COALESCE(ci.external_conversation_id,''),COALESCE(ci.conversation_type,''),COALESCE(ci.name,''),ci.created_at,GREATEST(COALESCE(ci.updated_at,ci.created_at),MAX(ki.updated_at)),COUNT(DISTINCT CASE WHEN ki.source_message_id IS NOT NULL AND ki.source_attachment_id IS NULL THEN ki.source_message_id END),COUNT(DISTINCT ki.source_attachment_id), (SELECT COUNT(*) FROM knowledge.conversation_memberships cm WHERE cm.conversation_ingestion_id=ci.id AND cm.status='active') FROM knowledge.knowledge_items ki JOIN knowledge.conversation_ingestions ci ON ci.id=ki.conversation_ingestion_id LEFT JOIN knowledge.messages m ON m.id=ki.source_message_id LEFT JOIN knowledge.attachments a ON a.id=ki.source_attachment_id WHERE ` + strings.Join(conditions, " AND ") + ` GROUP BY ci.id,ci.platform,ci.external_conversation_id,ci.conversation_type,ci.name,ci.created_at,ci.updated_at ORDER BY GREATEST(COALESCE(ci.updated_at,ci.created_at),MAX(ki.updated_at)) DESC LIMIT ` + strconv.Itoa(limit)
-		rows, err := s.pool.Query(ctx, conversationSQL, args...)
+		if platformName = strings.TrimSpace(platformName); platformName != "" {
+			conversationConditions = append(conversationConditions, "ci.platform="+conversationAdd(platformName))
+		}
+		if queryText = strings.TrimSpace(queryText); queryText != "" {
+			needle := "%" + strings.ToLower(queryText) + "%"
+			conversationConditions = append(conversationConditions, "(LOWER(COALESCE(ci.name,'')) LIKE "+conversationAdd(needle)+" OR LOWER(COALESCE(ci.external_conversation_id,'')) LIKE "+conversationAdd(needle)+" OR LOWER(COALESCE(m.normalized_content,'')) LIKE "+conversationAdd(needle)+" OR LOWER(COALESCE(a.file_name,'')) LIKE "+conversationAdd(needle)+")")
+		}
+		conversationSQL := `SELECT ci.id::text,COALESCE(ci.platform,''),COALESCE(ci.external_conversation_id,''),COALESCE(ci.conversation_type,''),COALESCE(ci.name,''),ci.created_at,GREATEST(COALESCE(ci.updated_at,ci.created_at),COALESCE(MAX(ki.updated_at),ci.created_at)),COUNT(DISTINCT CASE WHEN ki.source_message_id IS NOT NULL AND ki.source_attachment_id IS NULL THEN ki.source_message_id END),COUNT(DISTINCT ki.source_attachment_id), (SELECT COUNT(*) FROM knowledge.conversation_memberships cm WHERE cm.conversation_ingestion_id=ci.id AND cm.status='active') FROM knowledge.conversation_ingestions ci LEFT JOIN knowledge.knowledge_items ki ON ki.conversation_ingestion_id=ci.id AND ` + itemJoinFilter + ` LEFT JOIN knowledge.messages m ON m.id=ki.source_message_id LEFT JOIN knowledge.attachments a ON a.id=ki.source_attachment_id WHERE ` + strings.Join(conversationConditions, " AND ") + ` GROUP BY ci.id,ci.platform,ci.external_conversation_id,ci.conversation_type,ci.name,ci.created_at,ci.updated_at ORDER BY GREATEST(COALESCE(ci.updated_at,ci.created_at),COALESCE(MAX(ki.updated_at),ci.created_at)) DESC LIMIT ` + strconv.Itoa(limit)
+		rows, err := s.pool.Query(ctx, conversationSQL, conversationArgs...)
 		if err != nil {
 			return nil, dbError(err)
 		}

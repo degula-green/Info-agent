@@ -3,6 +3,7 @@ import { afterEach, test } from 'node:test'
 import {
   addConversationCollector,
   attachConversation,
+  createLocalUploadTask,
   discoverConversations,
   getConnectors,
   getConversationDetail,
@@ -82,6 +83,29 @@ test('attachment content errors preserve the backend permission code', async () 
     assert.equal(error.status, 403)
     return true
   })
+})
+
+test('local upload task includes the required business trace id', async () => {
+  Object.defineProperty(globalThis, 'sessionStorage', { configurable: true, value: storage('jwt-token') })
+  let payload: Record<string, unknown> | undefined
+  globalThis.fetch = async (_input, init = {}) => {
+    payload = JSON.parse(String(init.body || '{}'))
+    return json({ request_id: 'request-1' }, 201)
+  }
+
+  await createLocalUploadTask({
+    requestID: 'request-1',
+    traceID: 'trace-1',
+    uploadDestination: 'private_local_library',
+    fileName: 'notes.txt',
+    mimeType: 'text/plain',
+    sizeBytes: 5,
+    contentHash: 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+  })
+
+  assert.equal(payload?.request_id, 'request-1')
+  assert.equal(payload?.trace_id, 'trace-1')
+  assert.equal(payload?.content_hash, 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa')
 })
 
 test('bounds concurrent detail loads to avoid a pending-request burst', async () => {

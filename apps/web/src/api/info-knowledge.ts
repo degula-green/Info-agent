@@ -318,11 +318,12 @@ export async function getKnowledgeLibraryItems(libraryID: string, options: { kin
   return body.items || []
 }
 
-export async function createLocalUploadTask(input: { requestID: string; uploadDestination: 'private_local_library' | 'organization_file_library'; fileName: string; mimeType: string; sizeBytes: number; contentHash: string }) {
+export async function createLocalUploadTask(input: { requestID: string; traceID?: string; uploadDestination: 'private_local_library' | 'organization_file_library'; fileName: string; mimeType: string; sizeBytes: number; contentHash: string }) {
   return knowledgeRequest<LocalUploadTaskDTO>('/attachments/upload-tasks', {
     method: 'POST',
     body: JSON.stringify({
       request_id: input.requestID,
+      trace_id: input.traceID || input.requestID,
       upload_destination: input.uploadDestination,
       file_name: input.fileName,
       mime_type: input.mimeType,
