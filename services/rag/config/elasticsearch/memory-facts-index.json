@@ -1,0 +1,27 @@
+{
+  "settings": {"number_of_shards": 1, "number_of_replicas": 0},
+  "mappings": {
+    "dynamic": "strict",
+    "_source": {"excludes": ["embedding"]},
+    "properties": {
+      "fact_projection_id": {"type": "keyword"}, "fact_id": {"type": "keyword"},
+      "fact_version_id": {"type": "keyword"}, "tree_id": {"type": "keyword"},
+      "tree_type": {"type": "keyword"}, "node_id": {"type": "keyword"},
+      "parent_id": {"type": "keyword"}, "level": {"type": "integer"},
+      "node_type": {"type": "keyword"}, "knowledge_base_id": {"type": "keyword"},
+      "organization_id": {"type": "keyword"}, "owner_user_id": {"type": "keyword"},
+      "subject_entity_id": {"type": "keyword"}, "fact_type": {"type": "keyword"},
+      "fact_text": {"type": "text", "analyzer": "ik_max_word", "search_analyzer": "ik_smart"},
+      "dedupe_key": {"type": "keyword"}, "fact_status": {"type": "keyword"},
+      "valid_from": {"type": "date"}, "valid_to": {"type": "date"},
+      "source_chunk_ids": {"type": "keyword"}, "knowledge_item_id": {"type": "keyword"},
+      "attachment_id": {"type": "keyword"}, "visibility": {"type": "keyword"},
+      "access_scope": {"type": "keyword"}, "sensitivity": {"type": "keyword"},
+      "auth_object_key": {"type": "keyword"}, "acl_version": {"type": "long"},
+      "content_version": {"type": "integer"},
+      "embedding": {"type": "dense_vector", "dims": 1536, "index": true, "similarity": "cosine", "index_options": {"type": "hnsw", "m": 16, "ef_construction": 100}},
+      "embedding_model": {"type": "keyword"}, "mapping_version": {"type": "keyword"},
+      "lifecycle_status": {"type": "keyword"}, "created_at": {"type": "date"}, "indexed_at": {"type": "date"}
+    }
+  }
+}

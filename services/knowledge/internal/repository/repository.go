@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"info-agent/knowledge/internal/apperror"
 	"info-agent/knowledge/internal/domain"
@@ -155,6 +156,12 @@ func FilterMessageCandidate(input IngestMessageInput) (IngestMessageInput, bool)
 		}
 		input.Content = ""
 	}
+	if isOnlyEmoji(content) || isRobotHeartbeat(content) {
+		if len(input.Attachments) == 0 {
+			return input, true
+		}
+		input.Content = ""
+	}
 	if isCallRecord(content) {
 		if len(input.Attachments) == 0 {
 			return input, true
@@ -208,6 +215,65 @@ func isCallRecord(content string) bool {
 		}
 	}
 	return false
+}
+
+func isRobotHeartbeat(content string) bool {
+	value := strings.ToLower(strings.TrimSpace(content))
+	if value == "" {
+		return false
+	}
+	switch value {
+	case "heartbeat", "robot heartbeat", "bot heartbeat", "心跳", "机器人心跳", "机器人心跳消息", "[heartbeat]", "<heartbeat/>", "<heartbeat />":
+		return true
+	default:
+		return strings.HasPrefix(value, "<heartbeat ") || strings.HasPrefix(value, "<robot-heartbeat")
+	}
+}
+
+func isOnlyEmoji(content string) bool {
+	hasEmoji := false
+	runes := []rune(strings.TrimSpace(content))
+	for index := 0; index < len(runes); index++ {
+		r := runes[index]
+		if unicode.IsSpace(r) || r == '\u200d' || r == '\ufe0e' || r == '\ufe0f' || r == '\u20e3' || (r >= '\U000e0020' && r <= '\U000e007f') {
+			continue
+		}
+		if isKeycapBase(r) {
+			keycapEnd := index + 1
+			if keycapEnd < len(runes) && runes[keycapEnd] == '\ufe0f' {
+				keycapEnd++
+			}
+			if keycapEnd < len(runes) && runes[keycapEnd] == '\u20e3' {
+				hasEmoji = true
+				index = keycapEnd
+				continue
+			}
+		}
+		if !isEmojiRune(r) {
+			return false
+		}
+		hasEmoji = true
+	}
+	return hasEmoji
+}
+
+func isKeycapBase(r rune) bool {
+	return r == '#' || r == '*' || (r >= '0' && r <= '9')
+}
+
+func isEmojiRune(r rune) bool {
+	if (r >= 0x1f000 && r <= 0x1faff) || (r >= 0x2600 && r <= 0x27ff) ||
+		(r >= 0x2190 && r <= 0x21ff) || (r >= 0x2300 && r <= 0x23ff) ||
+		(r >= 0x2b00 && r <= 0x2bff) || (r >= 0x3030 && r <= 0x303d) ||
+		(r >= 0x3297 && r <= 0x3299) {
+		return true
+	}
+	switch r {
+	case 0x00a9, 0x00ae, 0x203c, 0x2049, 0x2122, 0x2139:
+		return true
+	default:
+		return false
+	}
 }
 
 func isAttachmentMetadataJSON(content string) bool {
@@ -381,6 +447,39 @@ type IngestResult struct {
 	Discarded     bool                   `json:"discarded"`
 }
 
+type PrivateShareInput struct {
+	RequesterUserID       string
+	RequestID             string
+	TraceID               string
+	PrivateConversationID string
+	OrganizationID        string
+	MessageIDs            []string
+	AttachmentIDs         []string
+	Now                   time.Time
+}
+
+type PrivateShareResult struct {
+	RequestID             string `json:"request_id"`
+	ShareBatchID          string `json:"share_batch_id"`
+	PrivateConversationID string `json:"private_conversation_id"`
+	OrganizationID        string `json:"organization_id"`
+	Status                string `json:"status"`
+	SharedMessageCount    int    `json:"shared_message_count"`
+	SharedAttachmentCount int    `json:"shared_attachment_count"`
+	ShareAlreadyExists    bool   `json:"share_already_exists,omitempty"`
+}
+
+type PrivateAccessRequestInput struct {
+	RequesterUserID  string    `json:"-"`
+	ShareReferenceID string    `json:"share_reference_id"`
+	ResourceID       string    `json:"resource_id"`
+	ResourceType     string    `json:"resource_type"`
+	RequestedAction  string    `json:"requested_action"`
+	Reason           string    `json:"reason,omitempty"`
+	TraceID          string    `json:"trace_id,omitempty"`
+	Now              time.Time `json:"-"`
+}
+
 type AgentPairingInput struct {
 	PairingID       string
 	CodeHash        string
@@ -463,6 +562,9 @@ type Repository interface {
 	IngestMessage(ctx context.Context, input IngestMessageInput) (*IngestResult, error)
 	ListPendingMessages(ctx context.Context, limit int) ([]PendingMessage, error)
 	CompleteMessageClassification(ctx context.Context, messageID, displayContent string, sensitive bool) error
+	SharePrivateResources(ctx context.Context, input PrivateShareInput) (*PrivateShareResult, error)
+	CreatePrivateAccessRequest(ctx context.Context, input PrivateAccessRequestInput) (*domain.PrivateAccessRequest, error)
+	ReviewPrivateAccessRequest(ctx context.Context, requestID, reviewerUserID, status, note string, now time.Time) (*domain.PrivateAccessRequest, error)
 	ListPendingKnowledgePermissions(ctx context.Context, limit int) ([]domain.KnowledgeItem, error)
 	ListKnowledgePermissionSubjects(ctx context.Context, knowledgeItemID string) ([]string, error)
 	MarkKnowledgePermissionSynced(ctx context.Context, knowledgeItemID string, aclVersion int64) error
@@ -472,6 +574,9 @@ type Repository interface {
 	GetKnowledgeItemByMessage(ctx context.Context, messageID string) (*domain.KnowledgeItem, error)
 	GetKnowledgeItemByAttachment(ctx context.Context, attachmentID string) (*domain.KnowledgeItem, error)
 	GetKnowledgeContent(ctx context.Context, knowledgeItemID string) (*domain.KnowledgeContent, error)
+	ListKnowledgeLibraries(ctx context.Context, userID, organizationID string) ([]domain.KnowledgeLibrary, error)
+	ListKnowledgeLibraryItems(ctx context.Context, libraryID, userID, organizationID, kind, platform, query string, limit int) ([]domain.KnowledgeLibraryItem, error)
+	ApplyRAGResult(ctx context.Context, knowledgeItemID string, input RAGResultInput) (*RAGResultApply, error)
 	Heartbeat(ctx context.Context, collectorID string, now time.Time) (*domain.Collector, error)
 	RecordCollectorFailure(ctx context.Context, collectorID, lastError string, nextPollAt, now time.Time) error
 	RecordCursorReceipt(ctx context.Context, collectorID, cursor string, now time.Time) error
@@ -491,6 +596,24 @@ type Repository interface {
 	FinalizeLocalUpload(ctx context.Context, requestID, objectRef, contentHash string, size int64) (*domain.Attachment, error)
 	MarkLocalDuplicate(ctx context.Context, requestID string, existing *domain.Attachment) (*domain.Attachment, error)
 	FailLocalUpload(ctx context.Context, requestID, message string) error
+}
+
+type RAGResultInput struct {
+	SourceEventID  string
+	RAGJobID       string
+	ContentVersion int
+	ACLVersion     int64
+	Status         string
+	OccurredAt     time.Time
+	Result         map[string]any
+	ErrorCode      string
+	Retryable      bool
+}
+
+type RAGResultApply struct {
+	Applied bool   `json:"applied"`
+	Status  string `json:"status"`
+	Reason  string `json:"reason,omitempty"`
 }
 
 type ExternalIdentityInput struct {

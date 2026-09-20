@@ -148,8 +148,10 @@ if ($nginx) {
     New-Item -ItemType Directory -Force -Path (Join-Path $nginxRuntime 'conf.d') | Out-Null
     New-Item -ItemType Directory -Force -Path (Join-Path $nginxRuntime 'logs') | Out-Null
     New-Item -ItemType Directory -Force -Path (Join-Path $nginxRuntime 'temp\client_body_temp'), (Join-Path $nginxRuntime 'temp\proxy_temp'), (Join-Path $nginxRuntime 'temp\fastcgi_temp'), (Join-Path $nginxRuntime 'temp\uwsgi_temp'), (Join-Path $nginxRuntime 'temp\scgi_temp') | Out-Null
-    Copy-Item (Join-Path $nginxPath 'nginx.conf') (Join-Path $nginxRuntime 'nginx.conf') -Force
-    Copy-Item (Join-Path $nginxPath 'conf.d\default.conf') (Join-Path $nginxRuntime 'conf.d\default.conf') -Force
+Copy-Item (Join-Path $nginxPath 'nginx.conf') (Join-Path $nginxRuntime 'nginx.conf') -Force
+# The repository default.conf targets Docker Compose service names. Use the
+# explicit localhost upstreams for this Windows single-host launcher.
+Copy-Item (Join-Path $nginxPath 'conf.d\local.default.conf') (Join-Path $nginxRuntime 'conf.d\default.conf') -Force
     Start-ServiceWindow 'info-agent nginx :80' $nginxRuntime "& '$nginx' -p '$nginxRuntime' -c nginx.conf -g 'daemon off;'"
     Write-Host 'Gateway started on http://localhost:80'
 } else {

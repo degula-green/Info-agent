@@ -173,7 +173,9 @@ services:
         psql --dbname="$${KNOWLEDGE_DATABASE_URL}" --set=ON_ERROR_STOP=1 --file=/migrations/20260911_knowledge_runtime_compatibility.sql &&
         psql --dbname="$${KNOWLEDGE_DATABASE_URL}" --set=ON_ERROR_STOP=1 --file=/migrations/20260912_attachment_content_access.sql &&
         psql --dbname="$${KNOWLEDGE_DATABASE_URL}" --set=ON_ERROR_STOP=1 --file=/migrations/20260913_contacts.sql &&
-        psql --dbname="$${KNOWLEDGE_DATABASE_URL}" --set=ON_ERROR_STOP=1 --file=/migrations/20260916_knowledge_ready_pipeline.sql
+        psql --dbname="$${KNOWLEDGE_DATABASE_URL}" --set=ON_ERROR_STOP=1 --file=/migrations/20260916_knowledge_ready_pipeline.sql &&
+        psql --dbname="$${KNOWLEDGE_DATABASE_URL}" --set=ON_ERROR_STOP=1 --file=/migrations/20260916_rag_memory_tree.sql &&
+        psql --dbname="$${KNOWLEDGE_DATABASE_URL}" --set=ON_ERROR_STOP=1 --file=/migrations/20260918_knowledge_rag_status.sql
     depends_on:
       postgres:
         condition: service_healthy
@@ -183,6 +185,8 @@ services:
       - ../db/migrations/20260912_attachment_content_access.sql:/migrations/20260912_attachment_content_access.sql:ro
       - ../db/migrations/20260913_contacts.sql:/migrations/20260913_contacts.sql:ro
       - ../db/migrations/20260916_knowledge_ready_pipeline.sql:/migrations/20260916_knowledge_ready_pipeline.sql:ro
+      - ../db/migrations/20260916_rag_memory_tree.sql:/migrations/20260916_rag_memory_tree.sql:ro
+      - ../db/migrations/20260918_knowledge_rag_status.sql:/migrations/20260918_knowledge_rag_status.sql:ro
     restart: "no"
 
   redis:

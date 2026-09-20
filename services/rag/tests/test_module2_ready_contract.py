@@ -65,6 +65,7 @@ class _Knowledge:
         return {
             "knowledge_item_id": knowledge_item_id,
             "organization_id": "00000000-0000-0000-0000-000000000010",
+            "knowledge_base_id": "00000000-0000-0000-0000-000000000050",
             "content_version": 2,
             "acl_version": 3,
             "attachments": [{
@@ -135,6 +136,42 @@ class _Redis:
 
 
 class Module2ReadyContractTests(unittest.TestCase):
+    def test_sparse_attachment_event_hydrates_metadata_before_context_creation(self):
+        knowledge = _Knowledge(protected=False)
+        handler = RAGEventHandler(preprocessor=_Preprocessor(), indexer=_Indexer(), repository=InMemoryRagRepository(), knowledge=knowledge)
+        context = handler._contexts({
+            "knowledge_item_id": "ki-1", "attachment_id": "att-1",
+            "content_version": 2, "acl_version": 3,
+        })[0]
+        self.assertEqual(context.file_name, "report.txt")
+        self.assertEqual(context.object_ref, "objects/report.txt")
+        self.assertEqual(context.knowledge_base_id, "00000000-0000-0000-0000-000000000050")
+        self.assertEqual([call[0] for call in knowledge.calls], ["knowledge", "attachment"])
+
+    def test_complete_attachment_event_uses_authoritative_knowledge_ownership(self):
+        knowledge = _Knowledge(protected=False)
+        handler = RAGEventHandler(preprocessor=_Preprocessor(), indexer=_Indexer(), repository=InMemoryRagRepository(), knowledge=knowledge)
+        context = handler._contexts({
+            "knowledge_item_id": "00000000-0000-0000-0000-000000000020",
+            "attachment_id": "00000000-0000-0000-0000-000000000040",
+            "file_name": "event-name.txt",
+            "mime_type": "text/plain",
+            "object_ref": "objects/from-event.txt",
+            "knowledge_base_id": "00000000-0000-0000-0000-000000000099",
+            "content_version": 2,
+            "acl_version": 3,
+        })[0]
+        self.assertEqual(context.file_name, "report.txt")
+        self.assertEqual(context.knowledge_base_id, "00000000-0000-0000-0000-000000000050")
+        self.assertEqual([call[0] for call in knowledge.calls], ["knowledge"])
+
+    def test_missing_name_uses_stable_mime_fallback(self):
+        knowledge = Mock()
+        knowledge.get_attachment.return_value = {"id": "att-1", "mime_type": "application/pdf", "object_ref": "objects/report"}
+        handler = RAGEventHandler(preprocessor=_Preprocessor(), indexer=_Indexer(), repository=InMemoryRagRepository(), knowledge=knowledge)
+        context = handler._contexts({"attachment_id": "att-1", "content_version": 2, "acl_version": 3})[0]
+        self.assertEqual(context.file_name, "attachment-att-1.pdf")
+
     def test_redis_connection_uses_url_scheme_for_tls(self):
         factory = Mock(return_value=object())
         redis_module = SimpleNamespace(Redis=SimpleNamespace(from_url=factory))

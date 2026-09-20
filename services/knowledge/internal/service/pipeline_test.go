@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -42,11 +43,61 @@ func (s *capturingKV) Publish(_ context.Context, stream string, payload any) err
 
 type ingestCountingRepository struct {
 	repository.Repository
-	calls int
+	calls atomic.Int32
 }
 
 func (r *ingestCountingRepository) IngestMessage(ctx context.Context, input repository.IngestMessageInput) (*repository.IngestResult, error) {
-	r.calls++
+	r.calls.Add(1)
+	return r.Repository.IngestMessage(ctx, input)
+}
+
+type dedupeProbeKV struct {
+	kv.Store
+	gets     atomic.Int32
+	acquires atomic.Int32
+}
+
+func (s *dedupeProbeKV) Get(ctx context.Context, key string, out any) (bool, error) {
+	s.gets.Add(1)
+	return s.Store.Get(ctx, key, out)
+}
+
+func (s *dedupeProbeKV) Acquire(ctx context.Context, key, value string, ttl time.Duration) (bool, error) {
+	s.acquires.Add(1)
+	return s.Store.Acquire(ctx, key, value, ttl)
+}
+
+type failingDedupeKV struct {
+	kv.Store
+	err error
+}
+
+func (s *failingDedupeKV) Get(context.Context, string, any) (bool, error) {
+	return false, s.err
+}
+
+func (s *failingDedupeKV) Acquire(context.Context, string, string, time.Duration) (bool, error) {
+	return false, s.err
+}
+
+func (s *failingDedupeKV) Set(context.Context, string, any, time.Duration) error {
+	return s.err
+}
+
+type blockingIngestRepository struct {
+	repository.Repository
+	calls   atomic.Int32
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (r *blockingIngestRepository) IngestMessage(ctx context.Context, input repository.IngestMessageInput) (*repository.IngestResult, error) {
+	r.calls.Add(1)
+	r.once.Do(func() {
+		close(r.entered)
+		<-r.release
+	})
 	return r.Repository.IngestMessage(ctx, input)
 }
 
@@ -94,21 +145,21 @@ func TestIngestFiltersBeforeDedupeAndDedupeSkipsRepositoryNormalization(t *testi
 	f.service.Repo = counting
 	invalidSystem := repository.IngestMessageInput{MessageType: "system", Content: "voice call duration 00:12"}
 	filtered, err := f.service.IngestMessage(context.Background(), invalidSystem)
-	if err != nil || !filtered.Discarded || counting.calls != 0 {
-		t.Fatalf("system candidate reached normalization/repository: result=%+v calls=%d err=%v", filtered, counting.calls, err)
+	if err != nil || !filtered.Discarded || counting.calls.Load() != 0 {
+		t.Fatalf("system candidate reached normalization/repository: result=%+v calls=%d err=%v", filtered, counting.calls.Load(), err)
 	}
 	input := pipelineInput(f, "dedupe-1", "text", "same content")
 	first, err := f.service.IngestMessage(context.Background(), input)
-	if err != nil || first.Duplicate || counting.calls != 1 {
-		t.Fatalf("first ingest failed: result=%+v calls=%d err=%v", first, counting.calls, err)
+	if err != nil || first.Duplicate || counting.calls.Load() != 1 {
+		t.Fatalf("first ingest failed: result=%+v calls=%d err=%v", first, counting.calls.Load(), err)
 	}
 	second, err := f.service.IngestMessage(context.Background(), input)
-	if err != nil || !second.Duplicate || counting.calls != 1 {
-		t.Fatalf("Redis dedupe did not skip repository ingest: result=%+v calls=%d err=%v", second, counting.calls, err)
+	if err != nil || !second.Duplicate || counting.calls.Load() != 1 {
+		t.Fatalf("Redis dedupe did not skip repository ingest: result=%+v calls=%d err=%v", second, counting.calls.Load(), err)
 	}
 	changed := pipelineInput(f, "dedupe-1", "text", "changed content")
-	if _, err := f.service.IngestMessage(context.Background(), changed); apperror.From(err).Code != "external_id_conflict" || counting.calls != 2 {
-		t.Fatalf("repository did not reject conflicting payload after cache mismatch: calls=%d err=%v", counting.calls, err)
+	if _, err := f.service.IngestMessage(context.Background(), changed); apperror.From(err).Code != "external_id_conflict" || counting.calls.Load() != 2 {
+		t.Fatalf("repository did not reject conflicting payload after cache mismatch: calls=%d err=%v", counting.calls.Load(), err)
 	}
 }
 
@@ -124,8 +175,8 @@ func TestDedupeCacheAllowsSenderMetadataCorrection(t *testing.T) {
 	corrected.SenderDisplayName = "Corrected Sender"
 	corrected.PayloadHash, _ = repository.CalculatePayloadHash(corrected)
 	result, err := f.service.IngestMessage(context.Background(), corrected)
-	if err != nil || !result.Duplicate || counting.calls != 2 {
-		t.Fatalf("sender correction was rejected before repository reconciliation: result=%+v calls=%d err=%v", result, counting.calls, err)
+	if err != nil || !result.Duplicate || counting.calls.Load() != 2 {
+		t.Fatalf("sender correction was rejected before repository reconciliation: result=%+v calls=%d err=%v", result, counting.calls.Load(), err)
 	}
 	messages, err := f.repo.ListMessages(context.Background(), f.conversation.ID, 10, "")
 	if err != nil || len(messages) != 1 || messages[0].SenderDisplayName != "Corrected Sender" {
@@ -182,6 +233,21 @@ func TestLegacyMediaEnvelopeReplayIsNormalizedInsteadOfConflicting(t *testing.T)
 	messages, err := f.repo.ListMessages(context.Background(), f.conversation.ID, 10, "")
 	if err != nil || len(messages) != 1 || messages[0].Content != "" {
 		t.Fatalf("legacy media body was not cleared: messages=%+v err=%v", messages, err)
+	}
+}
+
+func TestServiceMediaEnvelopeReplayUsesFilteredRedisIdentity(t *testing.T) {
+	f := newPipelineFixture(t, domain.PlatformWechat)
+	attachment := repository.AttachmentInput{ExternalAttachmentID: "service-legacy-file", FileName: "report.docx", MIMEType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document"}
+	legacy := pipelineInput(f, "service-legacy-media", "file", `<?xml version="1.0"?><msg><appmsg><type>6</type></appmsg></msg>`, attachment)
+	first, err := f.service.IngestMessage(context.Background(), legacy)
+	if err != nil || first.Discarded || first.Duplicate {
+		t.Fatalf("legacy media service ingest failed: result=%+v err=%v", first, err)
+	}
+	clean := pipelineInput(f, "service-legacy-media", "file", "", attachment)
+	second, err := f.service.IngestMessage(context.Background(), clean)
+	if err != nil || !second.Duplicate {
+		t.Fatalf("normalized media replay was not deduplicated: result=%+v err=%v", second, err)
 	}
 }
 

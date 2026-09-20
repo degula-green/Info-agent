@@ -51,6 +51,11 @@ class ParserRouter:
             safe_extract_zip(archive, extracted)
             return self.normalizer.normalize(extracted)
         except Exception as exc:
+            if preflight.extension == "docx":
+                # DOCX is XML-based and remains searchable when the remote
+                # layout parser is unavailable. Keep MinerU as the preferred
+                # path, but avoid making a transient cloud outage fatal.
+                return self.local.parse_docx(preflight.path)
             if isinstance(exc, ProcessingError):
                 raise
             retryable = bool(getattr(exc, "retryable", False))

@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -84,10 +85,96 @@ func TestRAGSourceRoutesAuthenticateAndValidateVersions(t *testing.T) {
 	if result := call("/internal/knowledge/"+itemID+"?content_version=1&acl_version=2", "rag-token"); result.Code != http.StatusOK || !strings.Contains(result.Body.String(), `"knowledge_item_id":"`+itemID+`"`) {
 		t.Fatalf("ready metadata returned %d: %s", result.Code, result.Body.String())
 	}
+	if result := call("/internal/knowledge/"+itemID+"?content_version=1&acl_version=0", "rag-token"); result.Code != http.StatusOK {
+		t.Fatalf("zero ACL version should be accepted for display source reads, returned %d: %s", result.Code, result.Body.String())
+	}
 	if result := call("/internal/knowledge/"+itemID+"/content?content_version=1&acl_version=2", "rag-token"); result.Code != http.StatusOK || !strings.Contains(result.Body.String(), `[REDACTED]`) || strings.Contains(result.Body.String(), "private") {
 		t.Fatalf("display content response was unsafe: %d %s", result.Code, result.Body.String())
 	}
 	if result := call("/internal/knowledge/"+itemID+"/content?content_version=1&acl_version=2&content_variant=original", "rag-token"); result.Code != http.StatusForbidden {
 		t.Fatalf("protected original returned %d: %s", result.Code, result.Body.String())
+	}
+}
+
+func postRAGResult(t *testing.T, router http.Handler, itemID, token, caller string, payload map[string]any) *httptest.ResponseRecorder {
+	t.Helper()
+	body, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/internal/knowledge/"+itemID+"/rag-result", strings.NewReader(string(body)))
+	request.Header.Set("Content-Type", "application/json")
+	if token != "" {
+		request.Header.Set("Authorization", "Bearer "+token)
+	}
+	if caller != "" {
+		request.Header.Set("X-Caller-Service", caller)
+	}
+	result := httptest.NewRecorder()
+	router.ServeHTTP(result, request)
+	return result
+}
+
+func ragResultPayload(eventID, jobID, status string, contentVersion int, aclVersion int64) map[string]any {
+	return map[string]any{
+		"source_event_id": eventID,
+		"rag_job_id":      jobID,
+		"content_version": contentVersion,
+		"acl_version":     aclVersion,
+		"status":          status,
+		"occurred_at":     "2026-09-18T10:00:00Z",
+		"result":          map[string]any{"chunk_count": 1},
+		"retryable":       false,
+	}
+}
+
+func TestRAGResultCallbackAuthenticatesAndProtectsState(t *testing.T) {
+	router, itemID := readySourceRouter(t)
+	eventID := "10000000-0000-0000-0000-000000000001"
+	jobID := "20000000-0000-0000-0000-000000000001"
+	payload := ragResultPayload(eventID, jobID, "processing", 1, 2)
+	if result := postRAGResult(t, router, itemID, "", "rag", payload); result.Code != http.StatusUnauthorized {
+		t.Fatalf("missing callback token returned %d: %s", result.Code, result.Body.String())
+	}
+	if result := postRAGResult(t, router, itemID, "rag-token", "worker", payload); result.Code != http.StatusForbidden {
+		t.Fatalf("wrong callback caller returned %d: %s", result.Code, result.Body.String())
+	}
+	invalid := ragResultPayload(eventID, jobID, "unknown", 1, 2)
+	if result := postRAGResult(t, router, itemID, "rag-token", "rag", invalid); result.Code != http.StatusBadRequest {
+		t.Fatalf("invalid status returned %d: %s", result.Code, result.Body.String())
+	}
+	if result := postRAGResult(t, router, itemID, "rag-token", "rag", payload); result.Code != http.StatusOK || !strings.Contains(result.Body.String(), `"applied":true`) {
+		t.Fatalf("processing callback returned %d: %s", result.Code, result.Body.String())
+	}
+	if result := postRAGResult(t, router, itemID, "rag-token", "rag", payload); result.Code != http.StatusOK || !strings.Contains(result.Body.String(), `"reason":"duplicate"`) {
+		t.Fatalf("duplicate processing callback returned %d: %s", result.Code, result.Body.String())
+	}
+	succeeded := ragResultPayload(eventID, jobID, "succeeded", 1, 2)
+	if result := postRAGResult(t, router, itemID, "rag-token", "rag", succeeded); result.Code != http.StatusOK || !strings.Contains(result.Body.String(), `"status":"succeeded"`) {
+		t.Fatalf("succeeded callback returned %d: %s", result.Code, result.Body.String())
+	}
+	oldJob := ragResultPayload("30000000-0000-0000-0000-000000000001", "40000000-0000-0000-0000-000000000001", "failed", 1, 2)
+	if result := postRAGResult(t, router, itemID, "rag-token", "rag", oldJob); result.Code != http.StatusOK || !strings.Contains(result.Body.String(), `"reason":"terminal_state"`) {
+		t.Fatalf("old job overwrote terminal state: %d %s", result.Code, result.Body.String())
+	}
+	stale := ragResultPayload("50000000-0000-0000-0000-000000000001", "60000000-0000-0000-0000-000000000001", "failed", 1, 1)
+	if result := postRAGResult(t, router, itemID, "rag-token", "rag", stale); result.Code != http.StatusOK || !strings.Contains(result.Body.String(), `"reason":"stale_version"`) {
+		t.Fatalf("stale callback returned %d: %s", result.Code, result.Body.String())
+	}
+}
+
+func TestRAGResultCallbackValidatesIDsAndFailedState(t *testing.T) {
+	router, itemID := readySourceRouter(t)
+	valid := ragResultPayload("70000000-0000-0000-0000-000000000001", "80000000-0000-0000-0000-000000000001", "failed", 1, 2)
+	valid["error_code"] = "fact_model_timeout"
+	if result := postRAGResult(t, router, "not-a-uuid", "rag-token", "rag", valid); result.Code != http.StatusBadRequest {
+		t.Fatalf("invalid knowledge item id returned %d: %s", result.Code, result.Body.String())
+	}
+	invalidEvent := ragResultPayload("bad-event", "80000000-0000-0000-0000-000000000001", "failed", 1, 2)
+	if result := postRAGResult(t, router, itemID, "rag-token", "rag", invalidEvent); result.Code != http.StatusBadRequest {
+		t.Fatalf("invalid source event id returned %d: %s", result.Code, result.Body.String())
+	}
+	if result := postRAGResult(t, router, itemID, "rag-token", "rag", valid); result.Code != http.StatusOK || !strings.Contains(result.Body.String(), `"status":"failed"`) {
+		t.Fatalf("failed callback returned %d: %s", result.Code, result.Body.String())
 	}
 }

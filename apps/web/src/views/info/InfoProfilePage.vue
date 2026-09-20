@@ -37,7 +37,7 @@
         <div class="organization-content" :class="{ 'organization-content--loading': organizationLoading }">
           <t-skeleton v-if="organizationLoading" :row-col="[{ width: '42%' }, { width: '68%' }]" animation="gradient" />
           <div v-else-if="organization" class="organization-summary"><span class="organization-mark"><t-icon name="usergroup" /></span><div class="organization-summary__body"><strong>{{ organization.organization.name }}</strong><small>{{ organization.membership.roles.some((role) => (role.role_code || role.RoleCode) === 'owner') ? 'Owner' : '组织成员' }} · 已加入</small></div><t-tag theme="success" variant="light">{{ organization.organization.status === 'active' ? '正常' : organization.organization.status }}</t-tag></div>
-          <div v-else class="organization-empty"><div><strong>暂未加入组织</strong><p>创建组织后即可使用组织知识能力</p></div><div class="organization-actions"><t-button theme="primary" size="medium" @click="createDialogVisible = true"><template #icon><t-icon name="add" /></template>创建组织</t-button><t-button variant="outline" size="medium" disabled>加入组织</t-button><small>加入组织即将开放</small></div></div>
+          <div v-else class="organization-empty"><div><strong>暂未加入组织</strong><p>创建组织或使用邀请链接加入组织</p></div><div class="organization-actions"><t-button theme="primary" size="medium" @click="createDialogVisible = true"><template #icon><t-icon name="add" /></template>创建组织</t-button><t-button variant="outline" size="medium" @click="joinDialogVisible = true">加入组织</t-button></div></div>
         </div>
       </section>
 
@@ -100,6 +100,9 @@
     <t-dialog v-model:visible="createDialogVisible" header="创建组织" :confirm-btn="{ content: '创建组织', loading: organizationSubmitting, disabled: !organizationName.trim() }" :cancel-btn="{ content: '取消', disabled: organizationSubmitting }" :close-btn="!organizationSubmitting" @confirm="submitCreateOrganization">
       <div class="organization-dialog"><p>创建后你将成为该组织的 Owner。</p><t-input v-model="organizationName" maxlength="200" autofocus placeholder="请输入组织名称" @keydown.enter.prevent="submitCreateOrganization" /><span class="organization-dialog__count">{{ organizationName.length }}/200</span></div>
     </t-dialog>
+    <t-dialog v-model:visible="joinDialogVisible" header="加入组织" :confirm-btn="{ content: '加入组织', loading: organizationSubmitting, disabled: !invitationToken.trim() }" :cancel-btn="{ content: '取消', disabled: organizationSubmitting }" :close-btn="!organizationSubmitting" @confirm="submitJoinOrganization">
+      <div class="organization-dialog"><p>请输入组织成员发给你的邀请链接或邀请码。</p><t-input v-model="invitationToken" maxlength="500" autofocus placeholder="粘贴邀请链接或邀请码" @keydown.enter.prevent="submitJoinOrganization" /></div>
+    </t-dialog>
   </section>
 </template>
 
@@ -113,7 +116,7 @@ import { useAuthStore } from '@/stores/auth'
 import { bindWechat, connectorCatalog, getConnectors, getFeishuAuthorizeURL, type Connector, type ConnectorPlatform, type Profile, unbindConnector } from '@/api/info-profile'
 import { oauthCallbackNotice } from '@/knowledge-mapping'
 import { downloadAvatar, getCurrentUser, updateCurrentUser, uploadAvatar as uploadCoreAvatar } from '@/api/core-auth'
-import { createOrganization, getCurrentOrganization, type CoreOrganizationResponse } from '@/api/core-organization'
+import { acceptOrganizationInvitation, createOrganization, getCurrentOrganization, type CoreOrganizationResponse } from '@/api/core-organization'
 import { CoreAuthError } from '@/api/core-auth'
 
 const store = useInfoMockStore()
@@ -128,9 +131,11 @@ const feishuDialogVisible = ref(false)
 const wechatDialogVisible = ref(false)
 const restoreDialogVisible = ref(false)
 const createDialogVisible = ref(false)
+const joinDialogVisible = ref(false)
 const organizationLoading = ref(false)
 const organizationSubmitting = ref(false)
 const organizationName = ref('')
+const invitationToken = ref('')
 const organization = ref<CoreOrganizationResponse | null>(null)
 const wechatRebind = ref(false)
 const wechatForm = reactive({ wxid: '', db_dir: '' })
@@ -181,6 +186,32 @@ async function submitCreateOrganization() {
   catch (cause) {
     if (cause instanceof CoreAuthError && cause.code === 'ORGANIZATION_ALREADY_JOINED') { await loadOrganization(); MessagePlugin.info('你已经加入组织') }
     else MessagePlugin.error(errorMessage(cause, '组织创建失败，请稍后重试'))
+  } finally { organizationSubmitting.value = false }
+}
+function invitationValue(value: string) {
+  const trimmed = value.trim()
+  try {
+    const parsed = new URL(trimmed, window.location.origin)
+    const marker = '/organization-invitations/'
+    const index = parsed.pathname.indexOf(marker)
+    if (index >= 0) return decodeURIComponent(parsed.pathname.slice(index + marker.length).split('/')[0])
+  } catch { /* treat the input as a raw token */ }
+  return trimmed.replace(/^\/+|\/+$/g, '')
+}
+async function submitJoinOrganization() {
+  const token = invitationValue(invitationToken.value)
+  if (!token || organizationSubmitting.value) return
+  organizationSubmitting.value = true
+  try {
+    organization.value = await acceptOrganizationInvitation(token)
+    joinDialogVisible.value = false
+    invitationToken.value = ''
+    MessagePlugin.success('已成功加入组织')
+    if (route.name === 'organizationInvitation') await router.replace('/profile')
+  } catch (cause) {
+    const code = cause instanceof CoreAuthError ? cause.code : ''
+    const message = code === 'INVITATION_NOT_FOUND' ? '邀请不存在或已失效' : code === 'INVITATION_INVALID' ? '邀请已过期或已被撤销' : code === 'ORGANIZATION_ALREADY_JOINED' ? '你已经加入其他组织' : errorMessage(cause, '加入组织失败，请检查邀请链接')
+    MessagePlugin.error(message)
   } finally { organizationSubmitting.value = false }
 }
 async function loadOrganization() {
@@ -297,7 +328,15 @@ async function restoreDemo() {
   await loadPage()
   MessagePlugin.success('演示数据已恢复')
 }
-onMounted(async () => { await loadPage(); await handleOAuthCallback() })
+onMounted(async () => {
+  await loadPage()
+  await handleOAuthCallback()
+  const token = String(route.params.token || '').trim()
+  if (token && !organization.value) {
+    invitationToken.value = token
+    await submitJoinOrganization()
+  }
+})
 </script>
 
 <style lang="less" scoped>

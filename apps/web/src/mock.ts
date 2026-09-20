@@ -38,6 +38,7 @@ export interface InfoChat {
   historyStartAt?: string | null; lastStoppedAt?: string | null; remoteExists?: boolean
   isDirect?: boolean
   collectors?: InfoCollector[]
+  knowledgeBaseId?: string
 }
 
 export interface InfoAvailableSession {

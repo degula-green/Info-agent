@@ -20,25 +20,34 @@ import (
 // deterministic tests. The production constructor can replace it with the SQL
 // implementation without changing handlers or business rules.
 type MemoryStore struct {
-	mu               sync.RWMutex
-	connectors       map[string]domain.ConnectorAccount
-	pairings         map[string]domain.Pairing
-	devices          map[string]domain.AgentDevice
-	discoveries      map[string]domain.Discovery
-	conversations    map[string]domain.ConversationIngestion
-	collectors       map[string]domain.Collector
-	messages         map[string]domain.Message
-	privateContent   map[string]string
-	sources          map[string]domain.MessageSource
-	attachments      map[string]domain.Attachment
-	knowledgeItems   map[string]domain.KnowledgeItem
-	cursorReceipts   map[string]time.Time
-	identities       map[string]ExternalIdentity
-	contactRelations map[string]ContactRelation
-	memberships      map[string]domain.ConversationMembership
-	outbox           map[string]domain.OutboxEvent
-	wechatConfigs    map[string]domain.WechatCollectionConfig
-	wechatRuntime    map[string]domain.WechatCollectorRuntime
+	mu                 sync.RWMutex
+	connectors         map[string]domain.ConnectorAccount
+	pairings           map[string]domain.Pairing
+	devices            map[string]domain.AgentDevice
+	discoveries        map[string]domain.Discovery
+	conversations      map[string]domain.ConversationIngestion
+	collectors         map[string]domain.Collector
+	messages           map[string]domain.Message
+	privateContent     map[string]string
+	sources            map[string]domain.MessageSource
+	attachments        map[string]domain.Attachment
+	knowledgeItems     map[string]domain.KnowledgeItem
+	cursorReceipts     map[string]time.Time
+	attachmentReceipts map[string]attachmentCursorReceipt
+	identities         map[string]ExternalIdentity
+	contactRelations   map[string]ContactRelation
+	memberships        map[string]domain.ConversationMembership
+	outbox             map[string]domain.OutboxEvent
+	shareRequests      map[string]domain.PrivateShareRequest
+	shareRefs          map[string]domain.PrivateShareReference
+	accessRequests     map[string]domain.PrivateAccessRequest
+	wechatConfigs      map[string]domain.WechatCollectionConfig
+	wechatRuntime      map[string]domain.WechatCollectorRuntime
+}
+
+type attachmentCursorReceipt struct {
+	CollectorID string
+	Cursor      string
 }
 
 func NewMemoryStore() *MemoryStore {
@@ -50,10 +59,11 @@ func NewMemoryStore() *MemoryStore {
 		privateContent: map[string]string{},
 		attachments:    map[string]domain.Attachment{}, identities: map[string]ExternalIdentity{}, contactRelations: map[string]ContactRelation{},
 		knowledgeItems: map[string]domain.KnowledgeItem{},
-		cursorReceipts: map[string]time.Time{},
-		memberships:    map[string]domain.ConversationMembership{},
-		outbox:         map[string]domain.OutboxEvent{},
-		wechatConfigs:  map[string]domain.WechatCollectionConfig{}, wechatRuntime: map[string]domain.WechatCollectorRuntime{},
+		cursorReceipts: map[string]time.Time{}, attachmentReceipts: map[string]attachmentCursorReceipt{},
+		memberships:   map[string]domain.ConversationMembership{},
+		outbox:        map[string]domain.OutboxEvent{},
+		shareRequests: map[string]domain.PrivateShareRequest{}, shareRefs: map[string]domain.PrivateShareReference{}, accessRequests: map[string]domain.PrivateAccessRequest{},
+		wechatConfigs: map[string]domain.WechatCollectionConfig{}, wechatRuntime: map[string]domain.WechatCollectorRuntime{},
 	}
 }
 
@@ -1507,6 +1517,324 @@ func (s *MemoryStore) CompleteMessageClassification(ctx context.Context, id, dis
 	return apperror.New("message_not_found", "message not found", 404, false)
 }
 
+func (s *MemoryStore) messageByIDLocked(id string) (domain.Message, bool) {
+	for _, message := range s.messages {
+		if message.ID == id {
+			return message, true
+		}
+	}
+	return domain.Message{}, false
+}
+
+func (s *MemoryStore) attachmentByIDLocked(id string) (domain.Attachment, bool) {
+	for _, attachment := range s.attachments {
+		if attachment.ID == id {
+			return attachment, true
+		}
+	}
+	return domain.Attachment{}, false
+}
+
+func (s *MemoryStore) SharePrivateResources(ctx context.Context, input PrivateShareInput) (*PrivateShareResult, error) {
+	requestID := strings.TrimSpace(input.RequestID)
+	if requestID == "" || input.RequesterUserID == "" || input.PrivateConversationID == "" || input.OrganizationID == "" {
+		return nil, apperror.New("invalid_request", "request_id, conversation and organization are required", 400, false)
+	}
+	messages, attachments := uniqueIDs(input.MessageIDs), uniqueIDs(input.AttachmentIDs)
+	if len(messages) == 0 && len(attachments) == 0 {
+		return nil, apperror.New("invalid_request", "at least one message or attachment is required", 400, false)
+	}
+	fingerprint := strings.Join(append(append([]string{"conversation=" + input.PrivateConversationID}, messages...), attachments...), "|")
+	fingerprint = hashText(fingerprint)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	conversation, ok := s.conversations[input.PrivateConversationID]
+	if !ok || conversation.ConversationType != "private" {
+		return nil, apperror.New("conversation_not_found", "private conversation not found", 404, false)
+	}
+	if conversation.OwnerUserID != input.RequesterUserID {
+		return nil, apperror.Clone(apperror.ErrForbidden)
+	}
+	key := input.RequesterUserID + "|" + requestID
+	if existing, ok := s.shareRequests[key]; ok {
+		if existing.RequestFingerprint != fingerprint {
+			return nil, apperror.New("idempotency_conflict", "request_id was already used with a different selection", 409, false)
+		}
+		return &PrivateShareResult{RequestID: requestID, ShareBatchID: existing.ShareBatchID, PrivateConversationID: existing.PrivateConversationID, OrganizationID: existing.OrganizationID, Status: "already_processed", SharedMessageCount: existing.SharedMessageCount, SharedAttachmentCount: existing.SharedAttachmentCount}, nil
+	}
+	for _, id := range messages {
+		m, found := s.messageByIDLocked(id)
+		if !found || m.ConversationID != conversation.ID {
+			return nil, apperror.New("resource_not_found", "selected message does not belong to the private conversation", 404, false)
+		}
+		if m.ClassificationStatus != "succeeded" {
+			return nil, apperror.New("resource_not_ready", "selected message is not ready", 409, true)
+		}
+		ready := false
+		for _, item := range s.knowledgeItems {
+			if item.SourceType == "private_conversation" && item.SourceMessageID == id && item.SourceAttachmentID == "" && item.ContentSaved && item.SecurityReady && item.PermissionReady && item.ACLSyncStatus == "synced" && item.ProcessingStatus == "ready" {
+				for _, event := range s.outbox {
+					if event.EventType == "knowledge.ready" && event.Payload["knowledge_item_id"] == item.ID && event.PublishedAt != nil {
+						ready = true
+						break
+					}
+				}
+				break
+			}
+		}
+		if !ready {
+			return nil, apperror.New("resource_not_ready", "selected message is not ready", 409, true)
+		}
+	}
+	for _, id := range attachments {
+		a, found := s.attachmentByIDLocked(id)
+		if !found || a.ConversationID != conversation.ID {
+			return nil, apperror.New("resource_not_found", "selected attachment does not belong to the private conversation", 404, false)
+		}
+		if a.ContentStatus != "ready" || a.ClassificationStatus != "succeeded" {
+			return nil, apperror.New("resource_not_ready", "selected attachment is not ready", 409, true)
+		}
+		ready := false
+		for _, item := range s.knowledgeItems {
+			if item.SourceType == "private_conversation" && item.SourceAttachmentID == id && item.ContentSaved && item.SecurityReady && item.PermissionReady && item.ACLSyncStatus == "synced" && item.ProcessingStatus == "ready" {
+				for _, event := range s.outbox {
+					if event.EventType == "knowledge.ready" && event.Payload["knowledge_item_id"] == item.ID && event.PublishedAt != nil {
+						ready = true
+						break
+					}
+				}
+				break
+			}
+		}
+		if !ready {
+			return nil, apperror.New("resource_not_ready", "selected attachment is not ready", 409, true)
+		}
+	}
+	baseID := s.privateShareBaseKeyLocked(input.OrganizationID, conversation)
+	for _, item := range s.knowledgeItems {
+		if item.SourceType == "shared_private_item" && item.KnowledgeBaseID == baseID && item.SharedByUserID != input.RequesterUserID {
+			return nil, apperror.New("private_conversation_already_shared", "private conversation has already been shared", 409, false)
+		}
+	}
+	now := input.Now.UTC()
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	batch := uuid.NewString()
+	req := domain.PrivateShareRequest{ID: uuid.NewString(), RequesterUserID: input.RequesterUserID, RequestID: requestID, RequestFingerprint: fingerprint, PrivateConversationID: conversation.ID, OrganizationID: input.OrganizationID, ShareBatchID: batch, Status: "completed", SharedMessageCount: len(messages), SharedAttachmentCount: len(attachments), CreatedAt: now, UpdatedAt: now}
+	completed := now
+	req.CompletedAt = &completed
+	s.shareRequests[key] = req
+	for _, id := range messages {
+		m, _ := s.messageByIDLocked(id)
+		s.addPrivateShareLocked(ctx, conversation, input, baseID, batch, requestID, "message", id, m.ContentVersion, m.ContentHash, m.Sensitive, m.Content, now)
+	}
+	for _, id := range attachments {
+		a, _ := s.attachmentByIDLocked(id)
+		s.addPrivateShareLocked(ctx, conversation, input, baseID, batch, requestID, "attachment", id, a.ContentVersion, a.ContentHash, a.Sensitive, a.FileName, now)
+	}
+	return &PrivateShareResult{RequestID: requestID, ShareBatchID: batch, PrivateConversationID: conversation.ID, OrganizationID: input.OrganizationID, Status: "accepted", SharedMessageCount: len(messages), SharedAttachmentCount: len(attachments)}, nil
+}
+
+func (s *MemoryStore) addPrivateShareLocked(ctx context.Context, conversation domain.ConversationIngestion, input PrivateShareInput, baseID, batch, requestID, resourceType, resourceID string, version int, hash string, sensitive bool, text string, now time.Time) {
+	refKey := input.OrganizationID + "|" + conversation.ID + "|" + resourceType + "|" + resourceID
+	if _, exists := s.shareRefs[refKey]; exists {
+		return
+	}
+	ref := domain.PrivateShareReference{ID: uuid.NewString(), OrganizationID: input.OrganizationID, SourcePrivateResourceID: resourceID, SourceResourceType: resourceType, SourceContentVersion: version, ShareBatchID: batch, ShareRequestID: requestID, CreatedByUserID: input.RequesterUserID, Status: "ready", Sensitive: sensitive, ContentAccessRequired: true, CreatedAt: now}
+	s.shareRefs[refKey] = ref
+	for itemID, source := range s.knowledgeItems {
+		if source.SourceType != "private_conversation" {
+			continue
+		}
+		if (resourceType == "message" && source.SourceMessageID == resourceID && source.SourceAttachmentID == "") || (resourceType == "attachment" && source.SourceAttachmentID == resourceID) {
+			shared := source
+			shared.ID = uuid.NewString()
+			shared.KnowledgeBaseID = baseID
+			shared.KnowledgeScope = "organization"
+			shared.AccessScope = "organization_members"
+			shared.OwnerUserID = ""
+			shared.OrganizationID = input.OrganizationID
+			shared.SourceType = "shared_private_item"
+			shared.SourcePrivateItemID = itemID
+			shared.ShareRequestID = requestID
+			shared.ShareBatchID = batch
+			shared.SharedByUserID = input.RequesterUserID
+			sharedAt := now
+			shared.SharedAt = &sharedAt
+			shared.PermissionReady = false
+			shared.ACLSyncStatus = "pending"
+			shared.ACLVersion = 0
+			// The shared item is a logical reference to the already processed
+			// private item; sharing must not enqueue a second RAG job.
+			shared.ProcessingStatus = "ready"
+			shared.ContentSaved = true
+			shared.OwnershipReady = true
+			shared.SecurityReady = true
+			shared.ContentAccessRequired = true
+			s.knowledgeItems[shared.ID] = shared
+			s.addEventLocked(ctx, "permission.sync.requested", domain.ConversationIngestion{OrganizationID: input.OrganizationID}, map[string]any{"knowledge_item_id": shared.ID, "content_version": version})
+			break
+		}
+	}
+}
+
+func (s *MemoryStore) privateShareBaseKeyLocked(org string, conversation domain.ConversationIngestion) string {
+	participants := []string{conversation.OwnerUserID}
+	for _, membership := range s.memberships {
+		if membership.ConversationID != conversation.ID || membership.Status != "active" {
+			continue
+		}
+		identity := s.identityByIDLocked(membership.ExternalIdentityID)
+		if identity.MappingStatus == "mapped" && identity.MappedUserID != "" {
+			participants = append(participants, identity.MappedUserID)
+		}
+	}
+	participants = uniqueIDs(participants)
+	if len(participants) >= 2 {
+		return "shared-private:" + org + ":participants:" + hashText(strings.Join(participants, "\x00"))
+	}
+	identity := strings.Join([]string{conversation.Platform, conversation.WorkspaceKey, conversation.ExternalConversationID}, "\x00")
+	return "shared-private:" + org + ":external:" + hashText(identity)
+}
+
+func uniqueIDs(values []string) []string {
+	seen := map[string]bool{}
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value != "" && !seen[value] {
+			seen[value] = true
+			out = append(out, value)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+func (s *MemoryStore) CreatePrivateAccessRequest(_ context.Context, input PrivateAccessRequestInput) (*domain.PrivateAccessRequest, error) {
+	if input.RequesterUserID == "" || input.ShareReferenceID == "" {
+		return nil, apperror.New("invalid_request", "share reference is required", 400, false)
+	}
+	if input.RequestedAction != "view" && input.RequestedAction != "download" {
+		return nil, apperror.New("invalid_request", "requested_action must be view or download", 400, false)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var ref domain.PrivateShareReference
+	found := false
+	for _, value := range s.shareRefs {
+		if value.ID == input.ShareReferenceID {
+			ref = value
+			found = true
+			break
+		}
+	}
+	if !found || ref.Status != "ready" {
+		return nil, apperror.New("resource_not_found", "share reference not found", 404, false)
+	}
+	if input.ResourceID != ref.SourcePrivateResourceID || input.ResourceType != ref.SourceResourceType {
+		return nil, apperror.New("resource_mismatch", "share reference does not match resource", 409, false)
+	}
+	if !ref.ContentAccessRequired {
+		return nil, apperror.New("approval_not_required", "resource does not require approval", 400, false)
+	}
+	for _, value := range s.accessRequests {
+		if value.RequesterUserID == input.RequesterUserID && value.ShareReferenceID == input.ShareReferenceID && value.Status == "pending" {
+			out := value
+			return &out, nil
+		}
+	}
+	now := input.Now.UTC()
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	request := domain.PrivateAccessRequest{ID: uuid.NewString(), RequesterUserID: input.RequesterUserID, ShareReferenceID: input.ShareReferenceID, ResourceID: input.ResourceID, ResourceType: input.ResourceType, RequestedAction: input.RequestedAction, Reason: input.Reason, Status: "pending", CreatedAt: now}
+	s.accessRequests[request.ID] = request
+	return &request, nil
+}
+
+func (s *MemoryStore) ReviewPrivateAccessRequest(ctx context.Context, requestID, reviewerUserID, status, note string, now time.Time) (*domain.PrivateAccessRequest, error) {
+	if status != "approved" && status != "rejected" {
+		return nil, apperror.New("invalid_request", "review status must be approved or rejected", 400, false)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	request, ok := s.accessRequests[requestID]
+	if !ok {
+		return nil, apperror.New("request_not_found", "access request not found", 404, false)
+	}
+	ref, ok := func() (domain.PrivateShareReference, bool) {
+		for _, value := range s.shareRefs {
+			if value.ID == request.ShareReferenceID {
+				return value, true
+			}
+		}
+		return domain.PrivateShareReference{}, false
+	}()
+	if !ok {
+		return nil, apperror.New("resource_not_found", "share reference not found", 404, false)
+	}
+	owner := ""
+	if m, found := s.messageByIDLocked(ref.SourcePrivateResourceID); found {
+		owner = s.conversations[m.ConversationID].OwnerUserID
+	} else if a, found := s.attachmentByIDLocked(ref.SourcePrivateResourceID); found {
+		owner = s.conversations[a.ConversationID].OwnerUserID
+	}
+	if owner == "" || owner != reviewerUserID {
+		return nil, apperror.Clone(apperror.ErrForbidden)
+	}
+	if request.Status == "pending" {
+		if now.IsZero() {
+			now = time.Now().UTC()
+		}
+		request.Status = status
+		request.ReviewedByUserID = reviewerUserID
+		request.ReviewNote = safeError(note)
+		request.ReviewedAt = &now
+		s.accessRequests[requestID] = request
+		if status == "approved" {
+			// Approval applies to the whole shared private-conversation entry,
+			// not only the resource used to submit the request. Re-run ACL sync
+			// for every existing reference without reopening the RAG gate.
+			baseID := ""
+			var sourceItemID string
+			for id, item := range s.knowledgeItems {
+				if item.SourceType != "private_conversation" {
+					continue
+				}
+				if (request.ResourceType == "message" && item.SourceMessageID == request.ResourceID && item.SourceAttachmentID == "") || (request.ResourceType == "attachment" && item.SourceAttachmentID == request.ResourceID) {
+					sourceItemID = id
+					break
+				}
+			}
+			if sourceItemID != "" {
+				for _, item := range s.knowledgeItems {
+					if item.SourceType == "shared_private_item" && item.SourcePrivateItemID == sourceItemID {
+						baseID = item.KnowledgeBaseID
+						break
+					}
+				}
+			}
+			if baseID != "" {
+				for id, item := range s.knowledgeItems {
+					if item.SourceType != "shared_private_item" || item.KnowledgeBaseID != baseID || item.LifecycleStatus != "active" {
+						continue
+					}
+					item.PermissionReady = false
+					item.ACLSyncStatus = "pending"
+					item.LastError = ""
+					item.UpdatedAt = now
+					s.knowledgeItems[id] = item
+					s.ensurePermissionEventLocked(ctx, item, now)
+				}
+			}
+		}
+	}
+	out := request
+	return &out, nil
+}
+
 func (s *MemoryStore) ListPendingKnowledgePermissions(_ context.Context, limit int) ([]domain.KnowledgeItem, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -1534,6 +1862,44 @@ func (s *MemoryStore) ListKnowledgePermissionSubjects(_ context.Context, id stri
 		return nil, apperror.New("knowledge_not_found", "knowledge item not found", 404, false)
 	}
 	seen := map[string]struct{}{}
+	if item.KnowledgeScope == "private" {
+		if item.OwnerUserID != "" {
+			seen[item.OwnerUserID] = struct{}{}
+		}
+		out := make([]string, 0, len(seen))
+		for userID := range seen {
+			out = append(out, userID)
+		}
+		sort.Strings(out)
+		return out, nil
+	}
+	if item.SharedByUserID != "" {
+		seen[item.SharedByUserID] = struct{}{}
+	}
+	if item.SourceType == "shared_private_item" && item.SourcePrivateItemID != "" {
+		for _, request := range s.accessRequests {
+			if request.Status != "approved" {
+				continue
+			}
+			for _, ref := range s.shareRefs {
+				if ref.ID != request.ShareReferenceID || ref.OrganizationID != item.OrganizationID {
+					continue
+				}
+				for _, shared := range s.knowledgeItems {
+					if shared.SourceType != "shared_private_item" || shared.KnowledgeBaseID != item.KnowledgeBaseID {
+						continue
+					}
+					source, ok := s.knowledgeItems[shared.SourcePrivateItemID]
+					if ok && ((ref.SourceResourceType == "message" && ref.SourcePrivateResourceID == source.SourceMessageID) || (ref.SourceResourceType == "attachment" && ref.SourcePrivateResourceID == source.SourceAttachmentID)) {
+						seen[request.RequesterUserID] = struct{}{}
+					}
+				}
+			}
+		}
+	}
+	if conversation, ok := s.conversations[item.ConversationID]; ok && conversation.OwnerUserID != "" {
+		seen[conversation.OwnerUserID] = struct{}{}
+	}
 	for _, membership := range s.memberships {
 		if membership.ConversationID != item.ConversationID || membership.Status != "active" {
 			continue
@@ -1651,11 +2017,63 @@ func (s *MemoryStore) GetKnowledgeItem(_ context.Context, id string) (*domain.Kn
 	return &item, nil
 }
 
+func (s *MemoryStore) ApplyRAGResult(_ context.Context, id string, input RAGResultInput) (*RAGResultApply, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	item, ok := s.knowledgeItems[id]
+	if !ok {
+		return nil, apperror.New("knowledge_not_found", "knowledge item not found", 404, false)
+	}
+	status := item.RAGStatus
+	if status == "" {
+		status = "pending"
+	}
+	if input.ContentVersion < item.ContentVersion || input.ACLVersion < item.ACLVersion || input.ContentVersion < item.RAGContentVersion || (input.ContentVersion == item.RAGContentVersion && input.ACLVersion < item.RAGACLVersion) {
+		return &RAGResultApply{Applied: false, Status: status, Reason: "stale_version"}, nil
+	}
+	if input.ContentVersion != item.ContentVersion || input.ACLVersion != item.ACLVersion {
+		return nil, apperror.New("rag_version_mismatch", "RAG result version does not match knowledge item", 409, false)
+	}
+	if item.RAGSourceEventID == input.SourceEventID && item.RAGJobID == input.RAGJobID && status == input.Status {
+		return &RAGResultApply{Applied: false, Status: status, Reason: "duplicate"}, nil
+	}
+	if status == "succeeded" && item.RAGContentVersion == input.ContentVersion && item.RAGACLVersion == input.ACLVersion {
+		return &RAGResultApply{Applied: false, Status: status, Reason: "terminal_state"}, nil
+	}
+	if status == "failed" && input.Status == "processing" && item.RAGJobID == input.RAGJobID {
+		return &RAGResultApply{Applied: false, Status: status, Reason: "terminal_state"}, nil
+	}
+	item.RAGStatus, item.RAGSourceEventID, item.RAGJobID = input.Status, input.SourceEventID, input.RAGJobID
+	item.RAGContentVersion, item.RAGACLVersion = input.ContentVersion, input.ACLVersion
+	if input.Status == "processing" {
+		if item.RAGStartedAt == nil {
+			at := input.OccurredAt
+			item.RAGStartedAt = &at
+		}
+		item.RAGFinishedAt = nil
+	}
+	if input.Status == "succeeded" || input.Status == "failed" {
+		at := input.OccurredAt
+		item.RAGFinishedAt = &at
+	}
+	if input.Status == "failed" {
+		item.RAGLastError = input.ErrorCode
+	} else {
+		item.RAGLastError = ""
+	}
+	if input.Status == "succeeded" {
+		item.RAGResult = input.Result
+	}
+	item.UpdatedAt = time.Now().UTC()
+	s.knowledgeItems[id] = item
+	return &RAGResultApply{Applied: true, Status: input.Status}, nil
+}
+
 func (s *MemoryStore) GetKnowledgeItemByMessage(ctx context.Context, messageID string) (*domain.KnowledgeItem, error) {
 	s.mu.RLock()
 	var id string
 	for itemID, item := range s.knowledgeItems {
-		if item.SourceMessageID == messageID && item.SourceAttachmentID == "" {
+		if item.SourceMessageID == messageID && item.SourceAttachmentID == "" && item.SourceType != "shared_private_item" {
 			id = itemID
 			break
 		}
@@ -1670,13 +2088,21 @@ func (s *MemoryStore) GetKnowledgeItemByMessage(ctx context.Context, messageID s
 func (s *MemoryStore) GetKnowledgeItemByAttachment(ctx context.Context, attachmentID string) (*domain.KnowledgeItem, error) {
 	s.mu.RLock()
 	var id string
+	fallback := ""
 	for itemID, item := range s.knowledgeItems {
-		if item.SourceAttachmentID == attachmentID {
+		if item.SourceAttachmentID != attachmentID {
+			continue
+		}
+		if item.SourceType == "shared_private_item" {
 			id = itemID
 			break
 		}
+		fallback = itemID
 	}
 	s.mu.RUnlock()
+	if id == "" {
+		id = fallback
+	}
 	if id == "" {
 		return nil, apperror.New("knowledge_not_found", "knowledge item not found", 404, false)
 	}
@@ -1699,6 +2125,327 @@ func (s *MemoryStore) GetKnowledgeContent(_ context.Context, id string) (*domain
 		}
 	}
 	return nil, apperror.New("knowledge_content_not_found", "knowledge content not found", 404, false)
+}
+
+const (
+	orgFilesLibraryPrefix        = "organization:files:"
+	orgGroupsLibraryPrefix       = "organization:groups:"
+	orgSharedLibraryPrefix       = "organization:private-shared:"
+	personalPrivateLibraryPrefix = "personal:private:"
+	personalFilesLibraryPrefix   = "personal:files:"
+)
+
+type memoryLibraryAccumulator struct {
+	value         domain.KnowledgeLibrary
+	conversations map[string]struct{}
+	updatedAt     time.Time
+}
+
+func newMemoryLibrary(id, scope, baseType, name, owner, organization string, canUpload bool) *memoryLibraryAccumulator {
+	return &memoryLibraryAccumulator{
+		value:         domain.KnowledgeLibrary{ID: id, Scope: scope, BaseType: baseType, Name: name, OwnerUserID: owner, OrganizationID: organization, Status: "active", CanUpload: canUpload},
+		conversations: map[string]struct{}{},
+	}
+}
+
+func (a *memoryLibraryAccumulator) addItem(item domain.KnowledgeItem, isFile, isMessage, isShared bool) {
+	a.value.ItemCount++
+	if isFile {
+		a.value.FileCount++
+	}
+	if isMessage {
+		a.value.MessageCount++
+	}
+	if isShared {
+		a.value.SharedItemCount++
+	}
+	if item.ConversationID != "" {
+		a.conversations[item.ConversationID] = struct{}{}
+	}
+	updated := item.UpdatedAt
+	if updated.IsZero() {
+		updated = item.CreatedAt
+	}
+	if updated.After(a.updatedAt) {
+		a.updatedAt = updated
+	}
+}
+
+func (a *memoryLibraryAccumulator) finish(now time.Time) domain.KnowledgeLibrary {
+	a.value.ConversationCount = len(a.conversations)
+	if a.updatedAt.IsZero() {
+		a.updatedAt = now
+	}
+	a.value.UpdatedAt = a.updatedAt
+	return a.value
+}
+
+func memoryLibraryIDFor(scope, baseType, owner, organization string) string {
+	if scope == "organization" {
+		switch baseType {
+		case "organization_files":
+			return orgFilesLibraryPrefix + organization
+		case "organization_conversation":
+			return orgGroupsLibraryPrefix + organization
+		case "organization_private_shared":
+			return orgSharedLibraryPrefix + organization
+		}
+	}
+	if baseType == "private_local" {
+		return personalFilesLibraryPrefix + owner
+	}
+	return personalPrivateLibraryPrefix + owner
+}
+
+func memoryLibraryDefinitions(userID, organizationID string) []*memoryLibraryAccumulator {
+	definitions := []*memoryLibraryAccumulator{}
+	if strings.TrimSpace(organizationID) != "" {
+		definitions = append(definitions,
+			newMemoryLibrary(orgFilesLibraryPrefix+organizationID, "organization", "organization_files", "文件库", "", organizationID, true),
+			newMemoryLibrary(orgGroupsLibraryPrefix+organizationID, "organization", "organization_conversation", "群聊", "", organizationID, false),
+			newMemoryLibrary(orgSharedLibraryPrefix+organizationID, "organization", "organization_private_shared", "共享私聊", "", organizationID, false),
+		)
+	}
+	return append(definitions,
+		newMemoryLibrary(personalPrivateLibraryPrefix+userID, "personal", "private_conversation", "私聊知识库", userID, "", false),
+		newMemoryLibrary(personalFilesLibraryPrefix+userID, "personal", "private_local", "本地知识库", userID, "", true),
+	)
+}
+
+func (s *MemoryStore) ListKnowledgeLibraries(_ context.Context, userID, organizationID string) ([]domain.KnowledgeLibrary, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	definitions := memoryLibraryDefinitions(strings.TrimSpace(userID), strings.TrimSpace(organizationID))
+	byID := make(map[string]*memoryLibraryAccumulator, len(definitions))
+	for _, definition := range definitions {
+		byID[definition.value.ID] = definition
+	}
+	for _, item := range s.knowledgeItems {
+		isFile := item.SourceAttachmentID != ""
+		isMessage := item.SourceMessageID != "" && !isFile
+		isShared := item.SourceType == "shared_private_item"
+		if item.SourceType == "private_conversation" && item.KnowledgeScope == "private" && item.OwnerUserID == userID {
+			if library := byID[personalPrivateLibraryPrefix+userID]; library != nil {
+				library.addItem(item, isFile, isMessage, false)
+			}
+		}
+		if item.SourceType == "local_upload" {
+			if item.KnowledgeScope == "private" && item.OwnerUserID == userID {
+				if library := byID[personalFilesLibraryPrefix+userID]; library != nil {
+					library.addItem(item, true, false, false)
+				}
+			}
+			if item.KnowledgeScope == "organization" && item.OrganizationID == organizationID {
+				if library := byID[orgFilesLibraryPrefix+organizationID]; library != nil {
+					library.addItem(item, true, false, false)
+				}
+			}
+		}
+		if item.SourceType == "platform_conversation" && item.KnowledgeScope == "organization" && item.OrganizationID == organizationID {
+			if library := byID[orgGroupsLibraryPrefix+organizationID]; library != nil {
+				library.addItem(item, isFile, isMessage, false)
+			}
+			if isFile {
+				if library := byID[orgFilesLibraryPrefix+organizationID]; library != nil {
+					library.addItem(item, true, false, false)
+				}
+			}
+		}
+		if isShared && item.KnowledgeScope == "organization" && item.OrganizationID == organizationID {
+			if library := byID[orgSharedLibraryPrefix+organizationID]; library != nil {
+				library.addItem(item, isFile, isMessage, true)
+			}
+			if isFile {
+				if library := byID[orgFilesLibraryPrefix+organizationID]; library != nil {
+					library.addItem(item, true, false, true)
+				}
+			}
+		}
+	}
+	now := time.Now().UTC()
+	out := make([]domain.KnowledgeLibrary, 0, len(definitions))
+	for _, definition := range definitions {
+		out = append(out, definition.finish(now))
+	}
+	return out, nil
+}
+
+func memoryLibraryMatchesItem(libraryID string, item domain.KnowledgeItem, userID, organizationID string) bool {
+	if strings.HasPrefix(libraryID, personalPrivateLibraryPrefix) {
+		return item.SourceType == "private_conversation" && item.KnowledgeScope == "private" && item.OwnerUserID == userID && libraryID == personalPrivateLibraryPrefix+userID
+	}
+	if strings.HasPrefix(libraryID, personalFilesLibraryPrefix) {
+		return item.SourceType == "local_upload" && item.KnowledgeScope == "private" && item.OwnerUserID == userID && item.SourceAttachmentID != "" && libraryID == personalFilesLibraryPrefix+userID
+	}
+	if strings.HasPrefix(libraryID, orgGroupsLibraryPrefix) {
+		return item.SourceType == "platform_conversation" && item.KnowledgeScope == "organization" && item.OrganizationID == organizationID && libraryID == orgGroupsLibraryPrefix+organizationID
+	}
+	if strings.HasPrefix(libraryID, orgSharedLibraryPrefix) {
+		return item.SourceType == "shared_private_item" && item.KnowledgeScope == "organization" && item.OrganizationID == organizationID && libraryID == orgSharedLibraryPrefix+organizationID
+	}
+	if strings.HasPrefix(libraryID, orgFilesLibraryPrefix) {
+		return item.SourceAttachmentID != "" && item.KnowledgeScope == "organization" && item.OrganizationID == organizationID && (item.SourceType == "local_upload" || item.SourceType == "platform_conversation" || item.SourceType == "shared_private_item") && libraryID == orgFilesLibraryPrefix+organizationID
+	}
+	return false
+}
+
+func memoryLibraryItemFromKnowledge(item domain.KnowledgeItem, libraryID string, conversation *domain.ConversationIngestion, message *domain.Message, attachment *domain.Attachment) domain.KnowledgeLibraryItem {
+	out := domain.KnowledgeLibraryItem{
+		ID: item.ID, LibraryID: libraryID, Kind: "message", Title: item.ID, Platform: "", ConversationID: item.ConversationID,
+		ExternalConversationID: item.ExternalConversationID, SourceType: item.SourceType, SourceMessageID: item.SourceMessageID,
+		SourceAttachmentID: item.SourceAttachmentID, ContentType: item.ContentType, ContentVisibility: item.ContentVisibility,
+		AccessScope: item.AccessScope, ProcessingStatus: item.ProcessingStatus, CreatedAt: item.CreatedAt, UpdatedAt: item.UpdatedAt,
+		CanView: true, ContentAccessRequired: item.ContentAccessRequired, ShareBatchID: item.ShareBatchID, SharedAt: item.SharedAt,
+	}
+	if conversation != nil {
+		out.Platform = conversation.Platform
+		out.ConversationType = conversation.ConversationType
+		out.ConversationName = conversation.Name
+		if out.Title == item.ID {
+			out.Title = conversation.Name
+		}
+		out.MemberCount = len(conversation.Memberships)
+	}
+	if message != nil {
+		out.Kind = "message"
+		out.Title = message.SenderDisplayName
+		if out.Title == "" {
+			out.Title = "消息"
+		}
+		out.Excerpt = message.Content
+		value := message.SentAt
+		out.SentAt = &value
+	}
+	if attachment != nil {
+		out.Kind = "file"
+		out.Title = attachment.FileName
+		out.FileName, out.MIMEType, out.SizeBytes = attachment.FileName, attachment.MIMEType, attachment.SizeBytes
+		out.ContentStatus = attachment.ContentStatus
+		out.ContentAccessRequired = attachment.ContentAccessRequired || item.ContentAccessRequired
+		out.CanDownload = attachment.ContentStatus == "ready" && attachment.ObjectRef != ""
+		out.UpdatedAt = attachment.UpdatedAt
+	}
+	if out.Title == "" {
+		out.Title = "知识条目"
+	}
+	return out
+}
+
+func (s *MemoryStore) ListKnowledgeLibraryItems(_ context.Context, libraryID, userID, organizationID, kind, platformName, query string, limit int) ([]domain.KnowledgeLibraryItem, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if limit <= 0 || limit > 200 {
+		limit = 100
+	}
+	libraryID = strings.TrimSpace(libraryID)
+	userID, organizationID = strings.TrimSpace(userID), strings.TrimSpace(organizationID)
+	if libraryID == "" {
+		return nil, apperror.New("knowledge_library_not_found", "knowledge library is required", 400, false)
+	}
+	valid := false
+	for _, definition := range memoryLibraryDefinitions(userID, organizationID) {
+		if definition.value.ID == libraryID {
+			valid = true
+			break
+		}
+	}
+	if !valid {
+		return nil, apperror.New("knowledge_library_not_found", "knowledge library not found", 404, false)
+	}
+	kind = strings.ToLower(strings.TrimSpace(kind))
+	platformName = strings.ToLower(strings.TrimSpace(platformName))
+	needle := strings.ToLower(strings.TrimSpace(query))
+	if kind == "conversations" || kind == "conversation" {
+		return s.memoryLibraryConversationsLocked(libraryID, userID, organizationID, platformName, needle, limit), nil
+	}
+	out := make([]domain.KnowledgeLibraryItem, 0)
+	for _, item := range s.knowledgeItems {
+		if !memoryLibraryMatchesItem(libraryID, item, userID, organizationID) {
+			continue
+		}
+		if (kind == "files" || kind == "file") && item.SourceAttachmentID == "" {
+			continue
+		}
+		if (kind == "messages" || kind == "message") && item.SourceMessageID == "" {
+			continue
+		}
+		conversation := s.conversations[item.ConversationID]
+		if platformName != "" && !strings.EqualFold(conversation.Platform, platformName) {
+			continue
+		}
+		message := s.messages[item.SourceMessageID]
+		attachment := s.attachments[item.SourceAttachmentID]
+		title, excerpt, fileName := item.ID, "", ""
+		if item.SourceMessageID != "" {
+			title, excerpt = message.SenderDisplayName, message.Content
+		}
+		if item.SourceAttachmentID != "" {
+			fileName = attachment.FileName
+			title = fileName
+		}
+		if title == "" {
+			title = conversation.Name
+		}
+		if needle != "" && !strings.Contains(strings.ToLower(strings.Join([]string{title, excerpt, fileName, conversation.Name, conversation.Platform}, " ")), needle) {
+			continue
+		}
+		var conversationPtr *domain.ConversationIngestion
+		if item.ConversationID != "" {
+			copy := conversation
+			copy.Collectors = s.collectorsForLocked(copy.ID)
+			copy.Memberships = s.membershipsForLocked(copy.ID)
+			conversationPtr = &copy
+		}
+		var messageValue *domain.Message
+		if item.SourceMessageID != "" {
+			copy := message
+			messageValue = &copy
+		}
+		var attachmentValue *domain.Attachment
+		if item.SourceAttachmentID != "" {
+			copy := attachment
+			attachmentValue = &copy
+		}
+		entry := memoryLibraryItemFromKnowledge(item, libraryID, conversationPtr, messageValue, attachmentValue)
+		out = append(out, entry)
+	}
+	sort.SliceStable(out, func(i, j int) bool { return out[i].UpdatedAt.After(out[j].UpdatedAt) })
+	if len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
+}
+
+func (s *MemoryStore) memoryLibraryConversationsLocked(libraryID, userID, organizationID, platformName, needle string, limit int) []domain.KnowledgeLibraryItem {
+	conversationIDs := map[string]struct{}{}
+	for _, item := range s.knowledgeItems {
+		if memoryLibraryMatchesItem(libraryID, item, userID, organizationID) && item.ConversationID != "" {
+			conversationIDs[item.ConversationID] = struct{}{}
+		}
+	}
+	out := make([]domain.KnowledgeLibraryItem, 0, len(conversationIDs))
+	for id := range conversationIDs {
+		conversation, ok := s.conversations[id]
+		if !ok || (platformName != "" && !strings.EqualFold(conversation.Platform, platformName)) {
+			continue
+		}
+		if needle != "" && !strings.Contains(strings.ToLower(strings.Join([]string{conversation.Name, conversation.Platform, conversation.ExternalConversationID}, " ")), needle) {
+			continue
+		}
+		conversation.Collectors = s.collectorsForLocked(id)
+		conversation.Memberships = s.membershipsForLocked(id)
+		conversation.MessageCount, conversation.AttachmentCount = s.conversationCountsLocked(id)
+		entry := domain.KnowledgeLibraryItem{ID: conversation.ID, LibraryID: libraryID, Kind: "conversation", Title: conversation.Name, Platform: conversation.Platform, ConversationID: conversation.ID, ExternalConversationID: conversation.ExternalConversationID, ConversationType: conversation.ConversationType, ConversationName: conversation.Name, SourceType: "platform_conversation", MessageCount: conversation.MessageCount, AttachmentCount: conversation.AttachmentCount, MemberCount: len(conversation.Memberships), CreatedAt: conversation.CreatedAt, UpdatedAt: conversation.UpdatedAt, CanView: true}
+		if strings.HasPrefix(libraryID, orgSharedLibraryPrefix) {
+			entry.SourceType = "shared_private_item"
+		}
+		out = append(out, entry)
+	}
+	sort.SliceStable(out, func(i, j int) bool { return out[i].UpdatedAt.After(out[j].UpdatedAt) })
+	if len(out) > limit {
+		out = out[:limit]
+	}
+	return out
 }
 
 func (s *MemoryStore) Heartbeat(_ context.Context, collectorID string, _ time.Time) (*domain.Collector, error) {
@@ -1775,8 +2522,12 @@ func (s *MemoryStore) AdvanceCursor(_ context.Context, collectorID, cursor strin
 }
 
 func (s *MemoryStore) cursorReceiptReadyLocked(collectorID, cursor string) bool {
-	if _, ok := s.cursorReceipts[collectorID+"|"+cursor]; ok {
-		return true
+	_, explicitReceipt := s.cursorReceipts[collectorID+"|"+cursor]
+	requirePublished := false
+	if collector, ok := s.collectors[collectorID]; ok {
+		if conversation, found := s.conversations[collector.ConversationID]; found {
+			requirePublished = conversation.Platform == domain.PlatformWechat && conversation.IngestionScope == "private"
+		}
 	}
 	found := false
 	for _, source := range s.sources {
@@ -1789,8 +2540,42 @@ func (s *MemoryStore) cursorReceiptReadyLocked(collectorID, cursor string) bool 
 				return false
 			}
 		}
+		if !requirePublished {
+			continue
+		}
+		knowledgeFound := false
+		for _, item := range s.knowledgeItems {
+			if item.SourceType == "shared_private_item" || item.SourceMessageID != source.MessageID {
+				continue
+			}
+			knowledgeFound = true
+			published := false
+			for _, event := range s.outbox {
+				if event.EventType == "knowledge.ready" && event.Payload["knowledge_item_id"] == item.ID && event.Payload["content_version"] == item.ContentVersion && event.PublishedAt != nil {
+					published = true
+					break
+				}
+			}
+			if !published {
+				return false
+			}
+		}
+		if !knowledgeFound {
+			return false
+		}
 	}
-	return found
+	for attachmentID, receipt := range s.attachmentReceipts {
+		if receipt.CollectorID != collectorID || receipt.Cursor != cursor {
+			continue
+		}
+		found = true
+		for _, attachment := range s.attachments {
+			if attachment.ID == attachmentID && attachment.ContentStatus != "ready" {
+				return false
+			}
+		}
+	}
+	return found || explicitReceipt
 }
 
 func (s *MemoryStore) GetAttachment(_ context.Context, id string) (*domain.Attachment, error) {
@@ -2210,6 +2995,20 @@ func (s *MemoryStore) addEventLocked(ctx context.Context, eventType string, c do
 		event.OrganizationID = c.OrganizationID
 	}
 	s.outbox[event.ID] = event
+}
+
+func (s *MemoryStore) ensurePermissionEventLocked(ctx context.Context, item domain.KnowledgeItem, now time.Time) {
+	for id, event := range s.outbox {
+		if event.EventType == "permission.sync.requested" && event.Payload["knowledge_item_id"] == item.ID {
+			event.PublishedAt = nil
+			event.RetryCount = 0
+			event.LastError = ""
+			event.AvailableAt = now
+			s.outbox[id] = event
+			return
+		}
+	}
+	s.addEventLocked(ctx, "permission.sync.requested", domain.ConversationIngestion{OrganizationID: item.OrganizationID}, map[string]any{"knowledge_item_id": item.ID, "content_version": item.ContentVersion})
 }
 
 func (s *MemoryStore) ensureMessageKnowledgeItemLocked(ctx context.Context, conversation domain.ConversationIngestion, message domain.Message) string {

@@ -1,0 +1,24 @@
+{
+  "settings": {"number_of_shards": 1, "number_of_replicas": 0},
+  "mappings": {
+    "dynamic": "strict",
+    "_source": {"excludes": ["embedding"]},
+    "properties": {
+      "node_id": {"type": "keyword"}, "tree_id": {"type": "keyword"},
+      "tree_type": {"type": "keyword"}, "node_type": {"type": "keyword"},
+      "parent_id": {"type": "keyword"}, "level": {"type": "integer"},
+      "knowledge_base_id": {"type": "keyword"}, "organization_id": {"type": "keyword"},
+      "owner_user_id": {"type": "keyword"}, "subject_key": {"type": "keyword"},
+      "topic_key": {"type": "keyword"}, "phase_key": {"type": "keyword"},
+      "time_start": {"type": "date"}, "time_end": {"type": "date"},
+      "summary": {"type": "text", "analyzer": "ik_max_word", "search_analyzer": "ik_smart"},
+      "summary_version": {"type": "integer"}, "summary_strategy_version": {"type": "keyword"},
+      "content_version": {"type": "long"}, "visibility": {"type": "keyword"},
+      "access_scope": {"type": "keyword"}, "sensitivity": {"type": "keyword"},
+      "auth_object_key": {"type": "keyword"}, "acl_version": {"type": "long"},
+      "embedding": {"type": "dense_vector", "dims": 1536, "index": true, "similarity": "cosine", "index_options": {"type": "hnsw", "m": 16, "ef_construction": 100}},
+      "embedding_model": {"type": "keyword"}, "mapping_version": {"type": "keyword"},
+      "lifecycle_status": {"type": "keyword"}, "created_at": {"type": "date"}, "indexed_at": {"type": "date"}
+    }
+  }
+}

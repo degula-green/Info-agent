@@ -281,6 +281,7 @@ class SearchRequest:
     user_id: str
     organization_id: str | None = None
     knowledge_base_id: str | None = None
+    knowledge_base_ids: tuple[str, ...] = ()
     entry: str = "global"
     resource_types: tuple[str, ...] = ()
     sender_name: str | None = None
@@ -289,6 +290,9 @@ class SearchRequest:
     top_k: int = 8
     include_protected: bool = True
     conversation_id: str | None = None
+    qa_mode: str | None = None
+    source_attachment_ids: tuple[str, ...] = ()
+    source_knowledge_item_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)

@@ -2,10 +2,15 @@ import { computed, ref } from 'vue'
 import { defineStore } from 'pinia'
 import {
   attachConversation,
+  attachConversationByType,
   addConversationCollector,
+  type AvailableConversationDTO,
   discoverConversations,
+  discoverConversationsByType,
   getConnectors,
   getConversationDetail,
+  getKnowledgeLibraries,
+  type KnowledgeLibraryDTO,
   getWechatConfig,
   listConversations,
   removeConversationCollector,
@@ -219,6 +224,7 @@ function mapConversation(value: ConversationDTO, messages: MessageDTO[] = [], at
       agentOnline: collector.agent_online,
       lastHeartbeatAt: collector.last_heartbeat_at,
     } satisfies InfoCollector)),
+    knowledgeBaseId: value.knowledge_base_id,
     messageCount: messages.length ? mappedMessages.length : (value.message_count || 0),
     attachmentCount: attachments.length ? mappedFiles.length : (value.attachment_count || 0),
     lastSeenAt: value.last_synced_at,
@@ -266,7 +272,10 @@ export const useInfoKnowledgeStore = defineStore('infoKnowledge', () => {
   const loading = ref(false)
   const loadedAt = ref(0)
   const loadError = ref<string | null>(null)
+  const libraries = ref<KnowledgeLibraryDTO[]>([])
+  const librariesLoadedAt = ref(0)
   const discoveries = new Map<SourceKey, DiscoveryDTO>()
+  const typedDiscoveries = new Map<string, DiscoveryDTO>()
   let pendingLoad: Promise<InfoSource[]> | null = null
 
   function findSource(key?: SourceKey | string | null) { return sources.value.find((source) => source.key === normalizeSourceKey(key)) }
@@ -332,6 +341,19 @@ export const useInfoKnowledgeStore = defineStore('infoKnowledge', () => {
 
   async function refreshSources(force = true) { return ensureSources(force) }
 
+  async function ensureLibraries() {
+    if (libraries.value.length && Date.now() - librariesLoadedAt.value < 15_000) return libraries.value
+    const next = await getKnowledgeLibraries()
+    libraries.value = next
+    librariesLoadedAt.value = Date.now()
+    return next
+  }
+
+  async function refreshLibraries() {
+    librariesLoadedAt.value = 0
+    return ensureLibraries()
+  }
+
   async function refreshAvailableSessions(platform: SourceKey) {
     const source = findSource(platform)
     if (!source || !source.bound || source.available === false) return []
@@ -351,6 +373,26 @@ export const useInfoKnowledgeStore = defineStore('infoKnowledge', () => {
         const loaded = source.chats.find((chat) => String(chat.externalId || '') === String(session.externalId || session.id))
         return loaded ? { ...session, attachedConversationId: loaded.id, currentUserCollector: true } : session
       })
+      return source.availableSessions
+    } catch (error: any) {
+      source.discoveryLoaded = true
+      source.discoveryError = displayKnowledgeError(error, '会话发现失败，请稍后重试')
+      throw error
+    } finally {
+      source.discoveryLoading = false
+    }
+  }
+
+  async function refreshTypedSessions(platform: SourceKey, conversationType: 'group' | 'private') {
+    const source = findSource(platform)
+    if (!source || !source.bound || source.available === false) return []
+    source.discoveryLoading = true
+    source.discoveryError = null
+    try {
+      const discovery = await discoverConversationsByType(platform, conversationType)
+      typedDiscoveries.set(`${platform}:${conversationType}`, discovery)
+      source.discoveryLoaded = true
+      source.availableSessions = discovery.conversations.map(mapAvailable)
       return source.availableSessions
     } catch (error: any) {
       source.discoveryLoaded = true
@@ -391,6 +433,21 @@ export const useInfoKnowledgeStore = defineStore('infoKnowledge', () => {
     available.attachedConversationId = chat.id
     available.currentUserCollector = true
     source.selectedConversationCount = source.chats.length
+    return chat
+  }
+
+  async function accessTypedSession(platform: SourceKey, conversationType: 'group' | 'private', candidate: AvailableConversationDTO, discoveryID: string, historyStart?: string | null) {
+    const source = findSource(platform)
+    if (!source || !source.bound) return undefined
+    const available = source.availableSessions.find((item) => String(item.externalId || item.id) === String(candidate.external_id))
+    if (available?.attachedConversationId) return findConversation(platform, available.attachedConversationId)
+    const attached = await attachConversationByType({ type: conversationType, platform, externalConversationID: candidate.external_id, conversationType, name: candidate.name, discoveryID, requestedStartAt: historyStart || null })
+    await enableWechatConversation(platform, candidate.external_id)
+    const chat = mapConversation(attached)
+    source.chats = [chat, ...source.chats.filter((item) => item.id !== chat.id)]
+    source.selectedConversationCount = source.chats.length
+    if (available) { available.attachedConversationId = chat.id; available.currentUserCollector = true }
+    await refreshLibraries()
     return chat
   }
 
@@ -438,13 +495,23 @@ export const useInfoKnowledgeStore = defineStore('infoKnowledge', () => {
       await ensureSources(true)
       chat = findConversation(key, id)
     }
-    if (!chat) return undefined
-    const detail = await getConversationDetail(chat.id)
+    // The source directory intentionally contains group conversations only.
+    // Private-library deep links still load their owner-authorized detail by
+    // id and then hydrate the local source cache for the detail page.
+    const conversationID = chat?.id || String(id)
+    let detail: Awaited<ReturnType<typeof getConversationDetail>>
+    try {
+      detail = await getConversationDetail(conversationID)
+    } catch (error) {
+      if (!chat) return undefined
+      throw error
+    }
     const mapped = mapConversation(detail.conversation, detail.messages, detail.attachments)
     const source = findSource(key)
     if (source) {
-      const index = source.chats.findIndex((item) => item.id === chat?.id)
+      const index = source.chats.findIndex((item) => item.id === mapped.id)
       if (index >= 0) source.chats[index] = mapped
+      else source.chats = [mapped, ...source.chats]
     }
     return mapped
   }
@@ -458,5 +525,5 @@ export const useInfoKnowledgeStore = defineStore('infoKnowledge', () => {
     if (file) file.content = content
   }
 
-  return { sources, allChats, loading, loadedAt, loadError, findSource, findConversation, ensureSources, refreshSources, refreshAvailableSessions, accessSession, pauseConversation, resumeConversation, removeCollector, loadConversation, search, updateMessage, updateFile }
+  return { sources, allChats, loading, loadedAt, loadError, libraries, librariesLoadedAt, findSource, findConversation, ensureSources, refreshSources, ensureLibraries, refreshLibraries, refreshAvailableSessions, refreshTypedSessions, accessSession, accessTypedSession, pauseConversation, resumeConversation, removeCollector, loadConversation, search, updateMessage, updateFile }
 })

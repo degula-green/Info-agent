@@ -49,12 +49,19 @@ class EmbeddingClient(EmbeddingProvider):
                 output[index] = cached
         if not missing:
             return output
-        for start in range(0, len(missing), max(1, settings.embedding_batch_size)):
-            batch = missing[start : start + max(1, settings.embedding_batch_size)]
+        # The configured provider currently rejects requests larger than eight
+        # inputs with HTTP 400. Keep the application setting as an upper bound
+        # while enforcing the provider's documented-safe batch size.
+        batch_size = min(max(1, settings.embedding_batch_size), 8)
+        for start in range(0, len(missing), batch_size):
+            batch = missing[start : start + batch_size]
             response = self.http.request(
                 "POST",
                 join_url(self.base_url, "/embeddings"),
-                body={"model": self.model, "input": [item[1] for item in batch]},
+                # DashScope text-embedding-v4 defaults to a shorter vector.
+                # Send the configured dimension explicitly so the response
+                # matches the fixed ES vector mapping.
+                body={"model": self.model, "input": [item[1] for item in batch], "dimensions": self.dimensions},
                 token=self.api_key,
                 timeout=settings.embedding_timeout_seconds,
             ).json()

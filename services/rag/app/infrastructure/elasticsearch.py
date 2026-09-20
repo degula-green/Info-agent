@@ -261,7 +261,18 @@ def _load_mapping() -> dict[str, Any]:
 
 
 def _results_from_response(response: Any) -> list[SearchResult]:
-    hits = response.get("hits", {}).get("hits", []) if isinstance(response, dict) else []
+    # Elasticsearch 8/9 clients return ObjectApiResponse rather than a plain
+    # dict. It still exposes mapping-style `get`, so normalize by capability
+    # instead of dropping every live response as an empty result set.
+    if isinstance(response, dict):
+        payload = response
+    elif hasattr(response, "body") and isinstance(response.body, dict):
+        payload = response.body
+    elif hasattr(response, "get"):
+        payload = response
+    else:
+        payload = {}
+    hits = payload.get("hits", {}).get("hits", [])
     output: list[SearchResult] = []
     for rank, hit in enumerate(hits, start=1):
         if not isinstance(hit, dict):

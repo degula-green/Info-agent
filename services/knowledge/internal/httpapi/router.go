@@ -77,6 +77,46 @@ func NewRouterWithApp(app *App) *gin.Engine {
 
 func registerRAGSourceRoutes(r *gin.Engine, app *App) {
 	g := r.Group("/internal", ragServiceMiddleware(app))
+	g.POST("/knowledge/:knowledge_item_id/rag-result", func(c *gin.Context) {
+		if !strings.EqualFold(strings.TrimSpace(c.GetHeader("X-Caller-Service")), "rag") {
+			writeError(c, apperror.New("invalid_caller_service", "X-Caller-Service must be rag", http.StatusForbidden, false))
+			return
+		}
+		var body struct {
+			SourceEventID  string         `json:"source_event_id"`
+			RAGJobID       string         `json:"rag_job_id"`
+			ContentVersion int            `json:"content_version"`
+			ACLVersion     int64          `json:"acl_version"`
+			Status         string         `json:"status"`
+			OccurredAt     string         `json:"occurred_at"`
+			Result         map[string]any `json:"result"`
+			ErrorCode      string         `json:"error_code"`
+			Retryable      bool           `json:"retryable"`
+		}
+		if err := c.ShouldBindJSON(&body); err != nil {
+			writeError(c, apperror.New("invalid_rag_result", "invalid RAG result request", http.StatusBadRequest, false))
+			return
+		}
+		occurredAt := time.Now().UTC()
+		if strings.TrimSpace(body.OccurredAt) != "" {
+			parsed, err := time.Parse(time.RFC3339Nano, body.OccurredAt)
+			if err != nil {
+				writeError(c, apperror.New("invalid_rag_result", "occurred_at must be RFC3339", 400, false))
+				return
+			}
+			occurredAt = parsed.UTC()
+		}
+		result, err := app.Service.ApplyRAGResult(c, c.Param("knowledge_item_id"), repository.RAGResultInput{
+			SourceEventID: body.SourceEventID, RAGJobID: body.RAGJobID, ContentVersion: body.ContentVersion,
+			ACLVersion: body.ACLVersion, Status: body.Status, OccurredAt: occurredAt, Result: body.Result,
+			ErrorCode: body.ErrorCode, Retryable: body.Retryable,
+		})
+		if err != nil {
+			writeError(c, err)
+			return
+		}
+		c.JSON(http.StatusOK, result)
+	})
 	g.GET("/knowledge/:knowledge_item_id", func(c *gin.Context) {
 		contentVersion, aclVersion, ok := sourceVersions(c)
 		if !ok {
@@ -94,6 +134,8 @@ func registerRAGSourceRoutes(r *gin.Engine, app *App) {
 			"organization_id": item.OrganizationID, "conversation_ingestion_id": item.ConversationID,
 			"external_conversation_id": item.ExternalConversationID,
 			"source_message_id":        item.SourceMessageID, "source_attachment_id": item.SourceAttachmentID,
+			"source_private_item_id": item.SourcePrivateItemID, "share_request_id": item.ShareRequestID,
+			"share_batch_id": item.ShareBatchID, "shared_by_user_id": item.SharedByUserID,
 			"content_type": item.ContentType, "content_hash": item.ContentHash,
 			"content_version": item.ContentVersion, "acl_version": item.ACLVersion,
 			"content_variant": "display", "content_access_required": item.ContentAccessRequired,
@@ -163,8 +205,8 @@ func sourceVersions(c *gin.Context) (int, int64, bool) {
 	aclVersion := int64(0)
 	if raw := strings.TrimSpace(c.Query("acl_version")); raw != "" {
 		aclVersion, err = strconv.ParseInt(raw, 10, 64)
-		if err != nil || aclVersion < 1 {
-			writeError(c, apperror.New("invalid_acl_version", "acl_version must be positive", 400, false))
+		if err != nil || aclVersion < 0 {
+			writeError(c, apperror.New("invalid_acl_version", "acl_version must be non-negative", 400, false))
 			return 0, 0, false
 		}
 	}
@@ -310,6 +352,55 @@ func registerUserRoutes(r *gin.Engine, app *App, prefix string) {
 		c.JSON(http.StatusOK, gin.H{"connector": publicConnectorFromAccount(out)})
 	})
 	g.Use(userMiddleware(app))
+	// Knowledge directory endpoints are additive and intentionally separate
+	// from the legacy platform-oriented conversation routes below.
+	g.GET("/knowledge/libraries", func(c *gin.Context) {
+		p := principal(c)
+		libraries, err := app.Service.ListKnowledgeLibraries(c, p.UserID, p.OrganizationID, c.GetHeader("Authorization"))
+		if err != nil {
+			writeError(c, err)
+			return
+		}
+		items := make([]publicKnowledgeLibrary, 0, len(libraries))
+		for _, library := range libraries {
+			items = append(items, publicKnowledgeLibraryFromDomain(library))
+		}
+		c.JSON(http.StatusOK, gin.H{"items": items})
+	})
+	g.GET("/knowledge/libraries/:library_id/items", func(c *gin.Context) {
+		p := principal(c)
+		limit, _ := strconv.Atoi(c.DefaultQuery("limit", "100"))
+		items, err := app.Service.ListKnowledgeLibraryItems(c, p.UserID, p.OrganizationID, c.Param("library_id"), c.Query("kind"), c.Query("platform"), c.Query("q"), limit, c.GetHeader("Authorization"))
+		if err != nil {
+			writeError(c, err)
+			return
+		}
+		out := make([]publicKnowledgeLibraryItem, 0, len(items))
+		for _, item := range items {
+			out = append(out, publicKnowledgeLibraryItemFromDomain(item))
+		}
+		c.JSON(http.StatusOK, gin.H{"items": out})
+	})
+	// Explicit type-specific discovery keeps the group and private workflows
+	// distinct without changing the existing collector discovery contract.
+	g.GET("/connectors/:platform/group-conversations/discover", func(c *gin.Context) {
+		p := principal(c)
+		out, err := app.Service.DiscoverByType(c, p.UserID, c.Param("platform"), "group")
+		if err != nil {
+			writeError(c, err)
+			return
+		}
+		c.JSON(http.StatusOK, publicDiscoveryFromDomain(out))
+	})
+	g.GET("/connectors/:platform/private-conversations/discover", func(c *gin.Context) {
+		p := principal(c)
+		out, err := app.Service.DiscoverByType(c, p.UserID, c.Param("platform"), "private")
+		if err != nil {
+			writeError(c, err)
+			return
+		}
+		c.JSON(http.StatusOK, publicDiscoveryFromDomain(out))
+	})
 	g.POST("/attachments/upload-tasks", func(c *gin.Context) {
 		p := principal(c)
 		var body service.LocalUploadTaskInput
@@ -602,7 +693,9 @@ func registerUserRoutes(r *gin.Engine, app *App, prefix string) {
 	})
 	g.GET("/connectors/:platform/conversations/discover", func(c *gin.Context) {
 		p := principal(c)
-		out, err := app.Service.Discover(c, p.UserID, c.Param("platform"))
+		// Keep the legacy path for existing clients, but make its semantics
+		// explicitly group-only. Private conversations use the typed endpoint.
+		out, err := app.Service.DiscoverByType(c, p.UserID, c.Param("platform"), "group")
 		if err != nil {
 			writeError(c, err)
 			return
@@ -644,13 +737,118 @@ func registerUserRoutes(r *gin.Engine, app *App, prefix string) {
 			writeError(c, apperror.New("invalid_request", "invalid requested_start_at", 400, false))
 			return
 		}
-		out, err := app.Service.Attach(c, repository.AttachInput{UserID: p.UserID, Platform: body.Platform, WorkspaceKey: body.WorkspaceKey, ExternalConversationID: body.ExternalConversationID, ConversationType: body.ConversationType, Name: body.Name, AvatarURL: body.AvatarURL, DiscoveryID: body.DiscoveryID, OrganizationID: body.OrganizationID, RequestedStartAt: start}, c.GetHeader("Authorization"))
+		out, err := app.Service.AttachByType(c, repository.AttachInput{UserID: p.UserID, Platform: body.Platform, WorkspaceKey: body.WorkspaceKey, ExternalConversationID: body.ExternalConversationID, ConversationType: body.ConversationType, Name: body.Name, AvatarURL: body.AvatarURL, DiscoveryID: body.DiscoveryID, OrganizationID: body.OrganizationID, RequestedStartAt: start}, "group", c.GetHeader("Authorization"))
 		if err != nil {
 			writeError(c, err)
 			return
 		}
 		c.JSON(http.StatusCreated, publicConversationFromDomain(*out))
 	})
+	attachByType := func(c *gin.Context, conversationType string) {
+		p := principal(c)
+		var body struct {
+			Platform               string `json:"platform"`
+			WorkspaceKey           string `json:"platform_workspace_key"`
+			ExternalConversationID string `json:"external_conversation_id"`
+			ConversationType       string `json:"conversation_type"`
+			Name                   string `json:"name"`
+			AvatarURL              string `json:"avatar_url"`
+			DiscoveryID            string `json:"discovery_id"`
+			OrganizationID         string `json:"organization_id"`
+			RequestedStartAt       string `json:"requested_start_at"`
+		}
+		if err := c.ShouldBindJSON(&body); err != nil {
+			writeError(c, apperror.New("invalid_request", "invalid attach request", 400, false))
+			return
+		}
+		start, err := parseTime(body.RequestedStartAt)
+		if err != nil {
+			writeError(c, apperror.New("invalid_request", "invalid requested_start_at", 400, false))
+			return
+		}
+		out, err := app.Service.AttachByType(c, repository.AttachInput{UserID: p.UserID, Platform: body.Platform, WorkspaceKey: body.WorkspaceKey, ExternalConversationID: body.ExternalConversationID, ConversationType: body.ConversationType, Name: body.Name, AvatarURL: body.AvatarURL, DiscoveryID: body.DiscoveryID, OrganizationID: body.OrganizationID, RequestedStartAt: start}, conversationType, c.GetHeader("Authorization"))
+		if err != nil {
+			writeError(c, err)
+			return
+		}
+		c.JSON(http.StatusCreated, publicConversationFromDomain(*out))
+	}
+	g.POST("/conversations/group/attach", func(c *gin.Context) { attachByType(c, "group") })
+	g.POST("/conversations/private/attach", func(c *gin.Context) { attachByType(c, "private") })
+	shareHandler := func(c *gin.Context) {
+		p := principal(c)
+		var body struct {
+			RequestID             string   `json:"request_id"`
+			TraceID               string   `json:"trace_id"`
+			PrivateConversationID string   `json:"private_conversation_id"`
+			MessageIDs            []string `json:"message_ids"`
+			AttachmentIDs         []string `json:"attachment_ids"`
+		}
+		if err := c.ShouldBindJSON(&body); err != nil {
+			writeError(c, apperror.New("invalid_request", "invalid private share request", 400, false))
+			return
+		}
+		if strings.TrimSpace(body.RequestID) == "" || strings.TrimSpace(body.PrivateConversationID) == "" || (len(body.MessageIDs) == 0 && len(body.AttachmentIDs) == 0) {
+			writeError(c, apperror.New("invalid_request", "request_id, conversation and selected resources are required", 400, false))
+			return
+		}
+		out, err := app.Service.SharePrivateResources(c, p.UserID, repository.PrivateShareInput{RequestID: body.RequestID, TraceID: body.TraceID, PrivateConversationID: body.PrivateConversationID, MessageIDs: body.MessageIDs, AttachmentIDs: body.AttachmentIDs})
+		if err != nil {
+			writeError(c, err)
+			return
+		}
+		c.JSON(http.StatusOK, out)
+	}
+	g.POST("/private-share-requests", shareHandler)
+	g.POST("/private/shares", shareHandler)
+	g.POST("/private-share-requests/:id/approve", func(c *gin.Context) {
+		p := principal(c)
+		var body struct {
+			Note string `json:"note"`
+		}
+		if err := c.ShouldBindJSON(&body); err != nil && err != io.EOF {
+			writeError(c, apperror.New("invalid_request", "invalid approval request", 400, false))
+			return
+		}
+		out, err := app.Service.ReviewPrivateAccessRequest(c, p.UserID, c.Param("id"), "approved", body.Note)
+		if err != nil {
+			writeError(c, err)
+			return
+		}
+		c.JSON(http.StatusOK, out)
+	})
+	g.POST("/private-share-requests/:id/reject", func(c *gin.Context) {
+		p := principal(c)
+		var body struct {
+			Note string `json:"note"`
+		}
+		if err := c.ShouldBindJSON(&body); err != nil && err != io.EOF {
+			writeError(c, apperror.New("invalid_request", "invalid rejection request", 400, false))
+			return
+		}
+		out, err := app.Service.ReviewPrivateAccessRequest(c, p.UserID, c.Param("id"), "rejected", body.Note)
+		if err != nil {
+			writeError(c, err)
+			return
+		}
+		c.JSON(http.StatusOK, out)
+	})
+	accessHandler := func(c *gin.Context) {
+		p := principal(c)
+		var body repository.PrivateAccessRequestInput
+		if err := c.ShouldBindJSON(&body); err != nil {
+			writeError(c, apperror.New("invalid_request", "invalid private access request", 400, false))
+			return
+		}
+		out, err := app.Service.CreatePrivateAccessRequest(c, p.UserID, body)
+		if err != nil {
+			writeError(c, err)
+			return
+		}
+		c.JSON(http.StatusCreated, out)
+	}
+	g.POST("/private-access-requests", accessHandler)
+	g.POST("/private-share-requests/access", accessHandler)
 	g.GET("/conversations/:conversation_id", func(c *gin.Context) {
 		p := principal(c)
 		out, err := app.Service.GetConversation(c, p.UserID, c.Param("conversation_id"))

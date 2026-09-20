@@ -46,6 +46,7 @@ class HybridRetriever:
                 organization_id=request.organization_id,
                 resource_parts=("original", "content"),
                 knowledge_base_id=request.knowledge_base_id,
+                knowledge_base_ids=tuple(request.knowledge_base_ids),
             ) if request.include_protected else None
             if vector_future is not None:
                 try:
@@ -163,8 +164,9 @@ def _common_filters(request: SearchRequest) -> list[dict[str, Any]]:
     filters: list[dict[str, Any]] = [{"term": {"lifecycle_status": "active"}}]
     if request.organization_id:
         filters.append({"term": {"organization_id": request.organization_id}})
-    if request.knowledge_base_id:
-        filters.append({"term": {"knowledge_base_id": request.knowledge_base_id}})
+    knowledge_base_ids = tuple(request.knowledge_base_ids) or ((request.knowledge_base_id,) if request.knowledge_base_id else ())
+    if knowledge_base_ids:
+        filters.append({"terms": {"knowledge_base_id": list(knowledge_base_ids)}})
     if request.resource_types:
         filters.append({"bool": {"should": [
             {"terms": {"part_kind": list(request.resource_types)}},
@@ -172,6 +174,13 @@ def _common_filters(request: SearchRequest) -> list[dict[str, Any]]:
         ], "minimum_should_match": 1}})
     if request.conversation_id:
         filters.append({"term": {"conversation_group_id": request.conversation_id}})
+    source_should: list[dict[str, Any]] = []
+    if request.source_attachment_ids:
+        source_should.append({"terms": {"attachment_id": list(request.source_attachment_ids)}})
+    if request.source_knowledge_item_ids:
+        source_should.append({"terms": {"knowledge_item_id": list(request.source_knowledge_item_ids)}})
+    if source_should:
+        filters.append({"bool": {"should": source_should, "minimum_should_match": 1}})
     return filters
 
 
@@ -181,7 +190,7 @@ def _display_filters(request: SearchRequest) -> list[dict[str, Any]]:
         return filters
     # The final Service 1 check remains authoritative; these terms only reduce
     # the candidate set and never grant access.
-    if request.user_id and not request.knowledge_base_id:
+    if request.user_id and not (request.knowledge_base_id or request.knowledge_base_ids):
         should = [{"term": {"owner_user_id": request.user_id}}]
         if request.organization_id:
             should.append({"term": {"organization_id": request.organization_id}})

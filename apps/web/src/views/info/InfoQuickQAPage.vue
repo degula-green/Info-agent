@@ -12,13 +12,13 @@
         <div v-for="(message, index) in messages" :key="index" :class="['qa-message', `qa-message--${message.role}`]">
           <div v-if="message.role === 'user'" class="qa-user-bubble">{{ message.text }}</div>
           <div v-else class="qa-answer">
-            <div v-if="loading && index === messages.length - 1 && !message.text" class="qa-thinking" role="status" aria-live="polite">
+            <div v-if="message.streaming && !message.text" class="qa-thinking" role="status" aria-live="polite">
               <span>AI 正在回答</span><i></i><i></i><i></i>
             </div>
-            <div v-else class="qa-answer__content" v-html="renderQaMarkdown(message.text, loading && index === messages.length - 1)"></div>
-            <span v-if="loading && index === messages.length - 1" class="qa-stream-caret" aria-hidden="true"></span>
-            <div v-if="!loading" class="qa-answer__meta"><t-icon name="file" />{{ scopeLabel }} · {{ modeLabel }} · 当前知识库数据</div>
-            <div v-if="!loading && message.citations?.length" class="qa-citations" aria-label="回答引用">
+            <div v-else class="qa-answer__content" v-html="renderQaMarkdown(message.text, message.streaming)"></div>
+            <span v-if="message.streaming" class="qa-stream-caret" aria-hidden="true"></span>
+            <div v-if="!message.streaming" class="qa-answer__meta"><t-icon name="file" />{{ scopeLabel }} · {{ modeLabel }} · 当前知识库数据</div>
+            <div v-if="message.citations?.length" class="qa-citations" aria-label="回答引用">
               <button type="button" class="qa-citations__toggle" :aria-expanded="isCitationsExpanded(index)" @click="toggleCitations(index)">
                 <span><t-icon name="file" />{{ message.citations.length }} 条来源</span>
                 <t-icon :name="isCitationsExpanded(index) ? 'chevron-up' : 'chevron-down'" />
@@ -26,12 +26,11 @@
               <div v-if="isCitationsExpanded(index)" class="qa-citations__list">
                 <button v-for="citation in message.citations" :key="citation.citation_id" type="button" class="qa-citation" @click="openCitation(citation)">
                   <t-icon :name="citation.type === 'document' ? 'file' : 'chat-bubble-1'" />
-                  <span>{{ citation.file_name || citation.conversation_name || citation.platform || '来源' }}</span>
-                  <small>{{ citation.snippet }}</small>
+                  <span>{{ citation.file_name || citation.message_summary || citation.conversation_name || citation.platform || '来源' }}</span>
                 </button>
               </div>
             </div>
-            <div v-if="!loading" class="qa-answer__actions" aria-label="回答操作">
+            <div v-if="!message.streaming" class="qa-answer__actions" aria-label="回答操作">
               <button type="button" title="复制回答" aria-label="复制回答" @click="copyAnswer(message.text)"><t-icon name="file-copy" /></button>
               <button type="button" title="编辑问题" aria-label="编辑问题" @click="editQuestion(message.text)"><t-icon name="edit-1" /></button>
               <button type="button" title="反馈回答" aria-label="反馈回答" @click="reportAnswer"><t-icon name="error-circle" /></button>
@@ -87,16 +86,44 @@ import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } 
 import { MessagePlugin } from 'tdesign-vue-next'
 import { useRoute, useRouter } from 'vue-router'
 import { sourceName, type InfoSource, type SourceKey } from '@/mock'
-import { useInfoMockStore } from '@/stores/infoMock'
+import { useInfoKnowledgeStore } from '@/stores/infoKnowledge'
 import { renderChatMarkdown } from '@/utils/chatMarkdownRenderer'
-import { getQaConversation } from '@/mock-api/qa-history'
+import { getQaConversation, askQaStream } from '@/api/rag'
+import { getCurrentOrganization } from '@/api/core-organization'
 
 type Scope = SourceKey | 'all'
 type Mode = 'quick' | 'deep'
-type QaCitation = { citation_id: string; type: 'message' | 'document'; platform?: string; file_name?: string; conversation_name?: string; conversation_id?: number | null; snippet?: string; message_id?: string; attachment_id?: number | null; document_id?: number | null }
-type QaMessage = { role: 'user' | 'assistant'; text: string; citations?: QaCitation[] }
+type QaCitation = { citation_id: string; type: 'message' | 'document'; source_kind?: 'message' | 'document'; platform?: string; file_name?: string; message_summary?: string; conversation_name?: string; conversation_id?: string | number | null; snippet?: string; message_id?: string; attachment_id?: string | number | null; knowledge_item_id?: string | null; document_id?: number | null }
+type QaMessage = { role: 'user' | 'assistant'; text: string; citations?: QaCitation[]; streaming?: boolean }
 
-const store = useInfoMockStore()
+function mapCitation(item: any): QaCitation {
+  const path = Array.isArray(item?.tree_path) ? item.tree_path.map((node: any) => node?.summary || node?.topic_key || node?.phase_key).filter(Boolean).join(' / ') : ''
+  const sourceKind = item?.source_kind === 'document' || item?.file_name ? 'document' : 'message'
+  const attachmentId = sourceKind === 'document' ? item?.attachment_id ?? null : null
+  const knowledgeItemId = item?.knowledge_item_id ?? null
+  const messageId = item?.message_id ?? item?.source_resource_id ?? null
+  const identity = item?.source_id || (attachmentId ? `attachment:${attachmentId}` : messageId ? `message:${messageId}` : knowledgeItemId ? `knowledge:${knowledgeItemId}` : String(item?.es_chunk_id || item?.chunk_id || item?.fact_id || `${Date.now()}-${Math.random()}`))
+  return { citation_id: identity, type: sourceKind, source_kind: sourceKind, platform: item?.platform, file_name: item?.file_name, message_summary: item?.message_summary || item?.display_name, conversation_name: path || item?.title, conversation_id: item?.conversation_id, message_id: messageId, attachment_id: attachmentId, knowledge_item_id: knowledgeItemId, snippet: item?.quote_text || item?.content || item?.fact_text || path }
+}
+
+function mergeCitations(values: any[]): QaCitation[] {
+  const merged = new Map<string, QaCitation>()
+  for (const value of values) {
+    const citation = value?.citation_id && value?.type ? value as QaCitation : mapCitation(value)
+    const key = citation.citation_id || (citation.attachment_id ? `attachment:${citation.attachment_id}` : citation.message_id ? `message:${citation.message_id}` : citation.knowledge_item_id ? `knowledge:${citation.knowledge_item_id}` : citation.citation_id)
+    const current = merged.get(key)
+    if (!current) {
+      merged.set(key, citation)
+      continue
+    }
+    if (!current.file_name && citation.file_name) current.file_name = citation.file_name
+    if (!current.platform && citation.platform) current.platform = citation.platform
+    if (!current.conversation_id && citation.conversation_id) current.conversation_id = citation.conversation_id
+  }
+  return [...merged.values()]
+}
+
+const store = useInfoKnowledgeStore()
 const router = useRouter()
 const route = useRoute()
 const question = ref('')
@@ -119,6 +146,17 @@ function parseConversationId(value: unknown): ConversationId | null {
   return /^\d+$/.test(text) ? Number(text) : text
 }
 const conversationId = ref<ConversationId | null>(parseConversationId(route.query.session))
+const organizationId = ref<string | undefined>(undefined)
+let organizationPromise: Promise<void> | null = null
+
+function ensureOrganization() {
+  if (!organizationPromise) {
+    organizationPromise = getCurrentOrganization()
+      .then((value) => { organizationId.value = value.organization.id })
+      .catch(() => { organizationId.value = undefined })
+  }
+  return organizationPromise
+}
 
 function renderQaMarkdown(text: string, _streaming = false): string { return renderChatMarkdown(text) }
 
@@ -135,6 +173,11 @@ const kbLabel = computed(() => scopeLabel.value)
 const modeLabel = computed(() => mode.value === 'quick' ? '快速' : '深度')
 const conversationTitle = computed(() => messages.value.find((message) => message.role === 'user')?.text || '新的对话')
 const totalCount = computed(() => store.allChats.reduce((sum, chat) => sum + chat.messages.length + chat.files.length, 0))
+
+const selectedKnowledgeBaseIds = computed(() => {
+  const selectedSources = scope.value === 'all' ? store.sources : store.sources.filter((source) => source.key === scope.value)
+  return [...new Set(selectedSources.flatMap((source) => source.chats.map((chat) => chat.knowledgeBaseId).filter(Boolean) as string[]))]
+})
 
 function sourceCount(source: InfoSource) {
   return source.chats.reduce((sum, chat) => sum + chat.messages.length + chat.files.length, 0)
@@ -213,19 +256,24 @@ async function sendQuestion() {
   const text = question.value.trim()
   if (!text || loading.value) return
   closeMenus()
-  if (!conversationId.value) {
-    conversationId.value = `qa-${Date.now()}`
-    await router.replace({ path: '/chat', query: { session: String(conversationId.value) } })
-  }
   messages.value.push({ role: 'user', text })
   // Keep the object itself reactive: mutating a raw object after pushing it
   // into a reactive array does not notify Vue and leaves the answer paragraph
   // visually empty even though the SSE callbacks received content.
-  const assistant = reactive<QaMessage>({ role: 'assistant', text: '', citations: [] })
+  const assistant = reactive<QaMessage>({ role: 'assistant', text: '', citations: [], streaming: true })
   messages.value.push(assistant)
   question.value = ''
   loading.value = true
-  try { const result = await store.ask(text, scope.value === 'all' ? [] : [scope.value], conversationId.value ?? undefined); assistant.text = result.answer; assistant.citations = result.citations.map((item: any) => ({ citation_id: `${item.conversationId}-${item.messageId}`, type: 'message', platform: item.source, conversation_name: item.label, conversation_id: item.conversationId, message_id: item.messageId, snippet: item.label })) } catch { assistant.text = '检索服务暂时不可用，请稍后重试。'; MessagePlugin.error('问答请求失败') } finally { loading.value = false }
+  try {
+    await ensureOrganization()
+    await askQaStream({ query: text, conversationId: conversationId.value ?? undefined, mode: mode.value, knowledgeBaseIds: selectedKnowledgeBaseIds.value, organizationId: organizationId.value }, {
+      onMeta: (value) => { if (value.conversation_id && !conversationId.value) { conversationId.value = value.conversation_id; void router.replace({ path: '/chat', query: { session: String(value.conversation_id) } }) } },
+      onToken: (delta) => { assistant.text += delta },
+      onCitation: (value) => { assistant.citations = mergeCitations([...(assistant.citations || []), value]) },
+      onDone: (value) => { if (!assistant.text && value.answer) assistant.text = value.answer; if (value.citations?.length) assistant.citations = mergeCitations(value.citations); assistant.streaming = false },
+      onError: () => { assistant.text = '本次回答失败，请稍后重试。'; assistant.streaming = false; MessagePlugin.error('问答服务暂时不可用') },
+    })
+  } catch { assistant.text = '检索服务暂时不可用，请稍后重试。'; assistant.streaming = false; MessagePlugin.error('问答请求失败') } finally { assistant.streaming = false; loading.value = false }
   await nextTick()
   scrollRef.value?.scrollTo({ top: scrollRef.value.scrollHeight, behavior: 'smooth' })
 }
@@ -237,15 +285,19 @@ function onDocumentPointerdown(event: PointerEvent) {
 async function loadConversation() {
   if (!conversationId.value) return
   try {
-    const detail = await getQaConversation(conversationId.value)
+    const detail = await getQaConversation(String(conversationId.value))
     for (const record of detail.messages || []) {
-      messages.value.push({ role: 'user', text: record.question })
-      messages.value.push({ role: 'assistant', text: record.answer || (record.answer_status === 'failed' ? '本次回答失败，请重试。' : ''), citations: record.citations || [] })
+      if (record.role === 'user') messages.value.push({ role: 'user', text: record.content })
+      if (record.role === 'assistant') messages.value.push({ role: 'assistant', text: record.content || (record.status === 'failed' ? '本次回答失败，请重试。' : ''), citations: mergeCitations(record.citations || []) })
     }
   } catch { MessagePlugin.error('加载历史会话失败') }
 }
 
-onMounted(() => { document.addEventListener('pointerdown', onDocumentPointerdown); void loadConversation() })
+onMounted(() => {
+  document.addEventListener('pointerdown', onDocumentPointerdown)
+  void loadConversation()
+  void ensureOrganization()
+})
 watch(() => route.query.session, async (value) => {
   const next = parseConversationId(value)
   if (next === conversationId.value) return
@@ -277,9 +329,8 @@ onBeforeUnmount(() => {
 .qa-citations__toggle > svg { width: 14px; margin-left: 12px; }
 .qa-citations__toggle:hover { border-color: var(--td-brand-color); }
 .qa-citations__list { display: grid; gap: 7px; }
-.qa-citation { display: grid; grid-template-columns: 18px minmax(0, 1fr); gap: 2px 7px; width: min(680px, 100%); padding: 9px 11px; border: 1px solid var(--td-component-stroke); border-radius: 8px; color: var(--td-text-color-primary); background: var(--td-bg-color-container); text-align: left; cursor: pointer; }
+.qa-citation { display: flex; align-items: center; gap: 7px; width: min(680px, 100%); padding: 9px 11px; border: 1px solid var(--td-component-stroke); border-radius: 8px; color: var(--td-text-color-primary); background: var(--td-bg-color-container); text-align: left; cursor: pointer; }
 .qa-citation:hover { border-color: var(--td-brand-color); background: var(--td-bg-color-secondarycontainer); }
-.qa-citation > svg { grid-row: span 2; margin-top: 2px; color: var(--td-brand-color); }
+.qa-citation > svg { flex: 0 0 auto; color: var(--td-brand-color); }
 .qa-citation span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
-.qa-citation small { overflow: hidden; color: var(--td-text-color-secondary); text-overflow: ellipsis; white-space: nowrap; font-size: 11px; }
 </style>

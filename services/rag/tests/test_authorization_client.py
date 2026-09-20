@@ -25,6 +25,17 @@ class _Http:
 
 
 class AuthorizationClientTests(unittest.TestCase):
+    def test_scope_unions_multiple_knowledge_bases_for_core_single_id_contract(self):
+        http = _Http([
+            {"available": True, "snapshot_id": "s1", "objects": {"knowledge_original": ["knowledge_original:ki-1"]}},
+            {"available": True, "snapshot_id": "s2", "objects": {"knowledge_original": ["knowledge_original:ki-2"]}},
+        ])
+        client = Service1AuthorizationClient(base_url="http://auth", token="secret", http=http)
+        value = client.search_scope(user_id="u", organization_id="o", resource_parts=("original",), knowledge_base_ids=("kb-1", "kb-2"))
+        self.assertTrue(value.available)
+        self.assertEqual(value.objects["knowledge_original"], ("knowledge_original:ki-1", "knowledge_original:ki-2"))
+        self.assertEqual([call[2]["body"]["knowledge_base_id"] for call in http.calls], ["kb-1", "kb-2"])
+
     def test_scope_rejects_public_keys_and_wildcards(self):
         http = _Http([{"available": True, "objects": {"knowledge_item": ["knowledge_item:ki-1"]}}])
         client = Service1AuthorizationClient(base_url="http://auth", token="secret", http=http)

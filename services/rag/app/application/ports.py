@@ -14,6 +14,7 @@ from app.domain.models import (
     SearchRequest,
     SearchResult,
 )
+from app.domain.memory import FactCandidate, MemoryGraph, SourceRouteCandidate, TreeSearchRequest
 
 
 class AuthorizationGateway(Protocol):
@@ -24,6 +25,7 @@ class AuthorizationGateway(Protocol):
         organization_id: str | None,
         resource_parts: tuple[str, ...],
         knowledge_base_id: str | None = None,
+        knowledge_base_ids: tuple[str, ...] = (),
     ) -> AuthorizationScope:
         ...
 
@@ -54,6 +56,44 @@ class EmbeddingProvider(Protocol):
     dimensions: int
 
     def embed(self, texts: list[str]) -> list[list[float]]:
+        ...
+
+
+class FactExtractor(Protocol):
+    def extract(self, chunks: list[ChunkRecord]) -> list[FactCandidate]:
+        ...
+
+
+class NodeSummarizer(Protocol):
+    def summarize(self, *, title: str, facts: list[str]) -> str:
+        ...
+
+
+class MemoryRepository(Protocol):
+    def upsert_memory(self, context: AttachmentContext, chunks: list[ChunkRecord], facts: list[FactCandidate], *, routes: list[SourceRouteCandidate] | None = None) -> MemoryGraph:
+        ...
+
+    def sources_for_nodes(self, node_ids: list[str]) -> dict[str, list[dict[str, Any]]]:
+        ...
+
+    def update_node_summaries(self, summaries: dict[str, str], *, strategy_version: str) -> tuple[dict[str, Any], ...]:
+        ...
+
+    def evidence_for_facts(self, fact_ids: list[str]) -> dict[str, list[dict[str, Any]]]:
+        ...
+
+    def record_memory_projections(self, graph: MemoryGraph, *, embedding_model: str) -> None:
+        ...
+
+
+class MemoryIndexer(Protocol):
+    def create_indices(self) -> list[str]:
+        ...
+
+    def index_graph(self, graph: MemoryGraph, vectors: dict[str, list[float]]) -> int:
+        ...
+
+    def search_tree(self, request: TreeSearchRequest, query_vector: list[float] | None) -> list[dict[str, Any]]:
         ...
 
 
@@ -101,11 +141,32 @@ class RagStateRepository(Protocol):
     def mark_outbox_published(self, event_id: str) -> None:
         ...
 
-    def create_qa_conversation(self, *, user_id: str, organization_id: str | None, title: str | None = None) -> str:
+    def mark_outbox_failed(self, event_id: str, error: str) -> None:
         ...
 
-    def add_qa_message(self, *, conversation_id: str, role: str, content: str, citations: list[dict[str, Any]] | None = None, model_name: str | None = None, prompt_version: str | None = None, status: str = "completed") -> str:
+    def create_qa_conversation(self, *, user_id: str, organization_id: str | None, title: str | None = None, retrieval_mode: str = "quick", knowledge_base_ids: list[str] | None = None) -> str:
         ...
+
+    def add_qa_message(
+        self,
+        *,
+        conversation_id: str,
+        role: str,
+        content: str,
+        citations: list[dict[str, Any]] | None = None,
+        model_name: str | None = None,
+        prompt_version: str | None = None,
+        status: str = "completed",
+        token_usage: dict[str, Any] | None = None,
+        duration_ms: int | None = None,
+        error_message: str | None = None,
+    ) -> str:
+        ...
+
+    def list_qa_conversations(self, *, user_id: str, page: int, page_size: int) -> tuple[list[dict[str, Any]], int]: ...
+    def get_qa_conversation(self, *, user_id: str, conversation_id: str) -> dict[str, Any] | None: ...
+    def rename_qa_conversation(self, *, user_id: str, conversation_id: str, title: str) -> bool: ...
+    def delete_qa_conversation(self, *, user_id: str, conversation_id: str) -> bool: ...
 
 
 class DocumentParser(Protocol):

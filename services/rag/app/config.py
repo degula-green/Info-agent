@@ -78,6 +78,10 @@ class Settings:
     elasticsearch_protected_index: str = _text(
         "ELASTICSEARCH_PROTECTED_INDEX", "knowledge_protected_chunks_read"
     )
+    memory_display_facts_index: str = _text("MEMORY_DISPLAY_FACTS_INDEX", "memory_display_facts_read")
+    memory_protected_facts_index: str = _text("MEMORY_PROTECTED_FACTS_INDEX", "memory_protected_facts_read")
+    memory_display_nodes_index: str = _text("MEMORY_DISPLAY_NODES_INDEX", "memory_display_nodes_read")
+    memory_protected_nodes_index: str = _text("MEMORY_PROTECTED_NODES_INDEX", "memory_protected_nodes_read")
     elasticsearch_verify_certs: bool = _bool("ELASTICSEARCH_VERIFY_CERTS", False)
     elasticsearch_connect_timeout_seconds: float = _float(
         "ELASTICSEARCH_CONNECT_TIMEOUT_SECONDS", 0.3
@@ -179,6 +183,8 @@ class Settings:
         "RAG_KNOWLEDGE_CONNECT_TIMEOUT_SECONDS", 2.0
     )
     knowledge_timeout_seconds: float = _float("RAG_KNOWLEDGE_TIMEOUT_SECONDS", 10.0)
+    knowledge_callback_enabled: bool = _bool("RAG_KNOWLEDGE_CALLBACK_ENABLED", True)
+    knowledge_callback_path: str = _text("RAG_KNOWLEDGE_CALLBACK_PATH", "/internal/knowledge/{knowledge_item_id}/rag-result")
 
     # Redis Streams.
     redis_url: str = _text("RAG_REDIS_URL")
@@ -206,6 +212,9 @@ class Settings:
     qa_max_context_tokens: int = _int("QA_MAX_CONTEXT_TOKENS", 6000)
     qa_max_chunks: int = _int("QA_MAX_CHUNKS", 8)
     qa_max_output_tokens: int = _int("QA_MAX_OUTPUT_TOKENS", 1200)
+    memory_extraction_version: str = _text("RAG_MEMORY_EXTRACTION_VERSION", "v1")
+    memory_tree_strategy_version: str = _text("RAG_MEMORY_TREE_STRATEGY_VERSION", "v1")
+    memory_summary_strategy_version: str = _text("RAG_MEMORY_SUMMARY_STRATEGY_VERSION", "v1")
 
     rerank_enabled: bool = _bool("RERANK_ENABLED", False)
     rerank_api_base_url: str = _text("RERANK_API_BASE_URL")

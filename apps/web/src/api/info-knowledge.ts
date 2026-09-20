@@ -49,6 +49,81 @@ export interface DiscoveryDTO {
   conversations: AvailableConversationDTO[]
 }
 
+export type KnowledgeScope = 'organization' | 'personal'
+export type KnowledgeLibraryBaseType =
+  | 'organization_files'
+  | 'organization_conversation'
+  | 'organization_private_shared'
+  | 'private_conversation'
+  | 'private_local'
+
+export interface KnowledgeLibraryDTO {
+  id: string
+  scope: KnowledgeScope | string
+  base_type: KnowledgeLibraryBaseType | string
+  name: string
+  status: string
+  item_count: number
+  file_count: number
+  conversation_count: number
+  message_count: number
+  shared_item_count: number
+  can_upload: boolean
+  updated_at: string
+}
+
+export interface KnowledgeLibraryItemDTO {
+  id: string
+  library_id: string
+  kind: 'conversation' | 'message' | 'file' | string
+  title: string
+  excerpt?: string
+  platform?: ConnectorPlatform | string
+  conversation_id?: string
+  external_conversation_id?: string
+  conversation_type?: 'private' | 'group' | string
+  conversation_name?: string
+  source_type: string
+  source_message_id?: string
+  source_attachment_id?: string
+  content_type?: string
+  content_visibility?: string
+  access_scope?: string
+  processing_status?: string
+  content_status?: string
+  file_name?: string
+  mime_type?: string
+  size_bytes?: number
+  message_count?: number
+  attachment_count?: number
+  member_count?: number
+  sent_at?: string | null
+  created_at: string
+  updated_at: string
+  shared_at?: string | null
+  share_batch_id?: string
+  can_view: boolean
+  can_download: boolean
+  content_access_required: boolean
+}
+
+export interface LocalUploadTaskDTO {
+  request_id: string
+  upload_destination: 'private_local_library' | 'organization_file_library' | string
+  file_name: string
+  mime_type: string
+  size_bytes: number
+  content_hash: string
+  upload_status: string
+  processing_status: string
+  attachment_id?: string
+  resource_id?: string
+  organization_id?: string
+  content_status?: string
+  created_at?: string
+  updated_at?: string
+}
+
 export interface CollectorDTO {
   id: string
   conversation_id: string
@@ -164,6 +239,11 @@ export async function discoverConversations(platform: ConnectorPlatform) {
   return knowledgeRequest<DiscoveryDTO>(`/connectors/${encodeURIComponent(platform)}/conversations/discover`)
 }
 
+export async function discoverConversationsByType(platform: ConnectorPlatform, conversationType: 'group' | 'private') {
+  const path = conversationType === 'group' ? 'group-conversations' : 'private-conversations'
+  return knowledgeRequest<DiscoveryDTO>(`/connectors/${encodeURIComponent(platform)}/${path}/discover`)
+}
+
 export async function listConversations(platform: ConnectorPlatform) {
   const body = await knowledgeRequest<{ items: ConversationDTO[] }>(`/connectors/${encodeURIComponent(platform)}/conversations`)
   return body.items || []
@@ -204,6 +284,77 @@ export async function getConversationDetail(conversationID: string, limit = 50):
     knowledgeRequest<{ items: AttachmentDTO[] }>(`/conversations/${encodedID}/attachments`),
   ])
   return { conversation, messages: messageBody.items || [], attachments: attachmentBody.items || [] }
+}
+
+export async function attachConversationByType(input: { type: 'group' | 'private'; platform: ConnectorPlatform; externalConversationID: string; conversationType: 'group' | 'private'; name?: string; discoveryID: string; organizationID?: string; requestedStartAt?: string | null }) {
+  const path = input.type === 'group' ? '/conversations/group/attach' : '/conversations/private/attach'
+  return knowledgeRequest<ConversationDTO>(path, {
+    method: 'POST',
+    body: JSON.stringify({
+      platform: input.platform,
+      external_conversation_id: input.externalConversationID,
+      conversation_type: input.conversationType,
+      name: input.name || '',
+      discovery_id: input.discoveryID,
+      organization_id: input.organizationID || '',
+      requested_start_at: input.requestedStartAt || '',
+    }),
+  })
+}
+
+export async function getKnowledgeLibraries() {
+  const body = await knowledgeRequest<{ items: KnowledgeLibraryDTO[] }>('/knowledge/libraries')
+  return body.items || []
+}
+
+export async function getKnowledgeLibraryItems(libraryID: string, options: { kind?: string; platform?: string; query?: string; limit?: number } = {}) {
+  const params = new URLSearchParams()
+  if (options.kind) params.set('kind', options.kind)
+  if (options.platform) params.set('platform', options.platform)
+  if (options.query) params.set('q', options.query)
+  if (options.limit) params.set('limit', String(options.limit))
+  const suffix = params.toString() ? `?${params.toString()}` : ''
+  const body = await knowledgeRequest<{ items: KnowledgeLibraryItemDTO[] }>(`/knowledge/libraries/${encodeURIComponent(libraryID)}/items${suffix}`)
+  return body.items || []
+}
+
+export async function createLocalUploadTask(input: { requestID: string; traceID?: string; uploadDestination: 'private_local_library' | 'organization_file_library'; fileName: string; mimeType: string; sizeBytes: number; contentHash: string }) {
+  return knowledgeRequest<LocalUploadTaskDTO>('/attachments/upload-tasks', {
+    method: 'POST',
+    body: JSON.stringify({
+      request_id: input.requestID,
+      trace_id: input.traceID || input.requestID,
+      upload_destination: input.uploadDestination,
+      file_name: input.fileName,
+      mime_type: input.mimeType,
+      size_bytes: input.sizeBytes,
+      content_hash: input.contentHash,
+    }),
+  })
+}
+
+export async function uploadLocalContent(requestID: string, content: Blob) {
+  return knowledgeRequest<LocalUploadTaskDTO>(`/attachments/upload-tasks/${encodeURIComponent(requestID)}/content`, {
+    method: 'PUT',
+    headers: { 'Content-Type': content.type || 'application/octet-stream' },
+    body: content,
+  })
+}
+
+export async function getLocalUploadTask(requestID: string) {
+  return knowledgeRequest<LocalUploadTaskDTO>(`/attachments/upload-tasks/${encodeURIComponent(requestID)}`)
+}
+
+export async function sharePrivateResources(input: { requestID: string; privateConversationID: string; messageIDs?: string[]; attachmentIDs?: string[] }) {
+  return knowledgeRequest<Record<string, any>>('/private/shares', {
+    method: 'POST',
+    body: JSON.stringify({
+      request_id: input.requestID,
+      private_conversation_id: input.privateConversationID,
+      message_ids: input.messageIDs || [],
+      attachment_ids: input.attachmentIDs || [],
+    }),
+  })
 }
 
 export async function getKnowledgeAttachmentContent(id: string, download = false) {

@@ -14,6 +14,75 @@ import (
 	"info-agent/knowledge/internal/trace"
 )
 
+func completeMemoryPrivateReady(t *testing.T, repo *MemoryStore, ctx context.Context, messageID string, attachmentIDs ...string) {
+	t.Helper()
+	pending, err := repo.ListPendingMessages(ctx, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, candidate := range pending {
+		if candidate.Message.ID == messageID {
+			if err := repo.CompleteMessageClassification(ctx, messageID, candidate.OriginalContent, false); err != nil {
+				t.Fatal(err)
+			}
+			break
+		}
+	}
+	for _, attachmentID := range attachmentIDs {
+		attachment, err := repo.GetAttachment(ctx, attachmentID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := repo.CompleteAttachment(ctx, attachmentID, "object:"+attachmentID, attachment.ContentHash, attachment.SizeBytes, "ready"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	item, err := repo.GetKnowledgeItemByMessage(ctx, messageID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.MarkKnowledgePermissionSynced(ctx, item.ID, 1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repo.TryMarkKnowledgeReady(ctx, item.ID, "test-ready"); err != nil {
+		t.Fatal(err)
+	}
+	readyEvents, err := repo.GetOutbox(ctx, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range readyEvents {
+		if event.EventType == "knowledge.ready" && event.Payload["knowledge_item_id"] == item.ID {
+			if err := repo.MarkOutboxPublished(ctx, event.ID, time.Now().UTC()); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	for _, attachmentID := range attachmentIDs {
+		attachmentItem, err := repo.GetKnowledgeItemByAttachment(ctx, attachmentID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := repo.MarkKnowledgePermissionSynced(ctx, attachmentItem.ID, 1); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := repo.TryMarkKnowledgeReady(ctx, attachmentItem.ID, "test-ready"); err != nil {
+			t.Fatal(err)
+		}
+		readyEvents, err := repo.GetOutbox(ctx, 100)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, event := range readyEvents {
+			if event.EventType == "knowledge.ready" && event.Payload["knowledge_item_id"] == attachmentItem.ID {
+				if err := repo.MarkOutboxPublished(ctx, event.ID, time.Now().UTC()); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+	}
+}
+
 func TestIngestMessageInputUsesSnakeCaseProtocolFields(t *testing.T) {
 	var input IngestMessageInput
 	if err := json.Unmarshal([]byte(`{"collector_id":"collector-1","external_conversation_id":"chat-1","external_message_id":"message-1","payload_hash":"payload-hash","sender_external_id":"sender-1","sender_display_name":"Sender","message_type":"text","content":"hello","content_hash":"content-hash","sent_at":"2026-09-05T00:00:00Z","cursor":"3","attachments":[{"external_attachment_id":"attachment-1","file_name":"note.txt","mime_type":"text/plain","size_bytes":12,"content_hash":"attachment-hash"}]}`), &input); err != nil {
@@ -132,6 +201,45 @@ func TestMemoryAttachCreatesPrimaryCollectorAtomically(t *testing.T) {
 	}
 }
 
+func TestMemoryKnowledgeLibrariesKeepPrivateAndOrganizationItemsSeparate(t *testing.T) {
+	repo := NewMemoryStore()
+	ctx := context.Background()
+	now := time.Now().UTC()
+	private, err := repo.AttachConversation(ctx, AttachInput{UserID: "u1", Platform: domain.PlatformWechat, WorkspaceKey: "wx", ExternalConversationID: "private", ConversationType: "private", RequestedStartAt: &now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	group, err := repo.AttachConversation(ctx, AttachInput{UserID: "u1", Platform: domain.PlatformFeishu, WorkspaceKey: "tenant", ExternalConversationID: "group", ConversationType: "group", OrganizationID: "org-1", RequestedStartAt: &now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repo.CreateLocalUploadTask(ctx, domain.LocalUploadTaskInput{RequestID: "private-upload", UserID: "u1", UploadDestination: "private_local_library", FileName: "private.txt", MIMEType: "text/plain", ContentHash: hashForTest("private")}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repo.CreateLocalUploadTask(ctx, domain.LocalUploadTaskInput{RequestID: "org-upload", UserID: "u1", UploadDestination: "organization_file_library", OrganizationID: "org-1", FileName: "org.txt", MIMEType: "text/plain", ContentHash: hashForTest("org")}); err != nil {
+		t.Fatal(err)
+	}
+	libraries, err := repo.ListKnowledgeLibraries(ctx, "u1", "org-1")
+	if err != nil || len(libraries) != 5 {
+		t.Fatalf("unexpected library directory: %+v err=%v", libraries, err)
+	}
+	for _, library := range libraries {
+		if library.Scope == "organization" && library.ID == personalPrivateLibraryPrefix+"u1" {
+			t.Fatalf("private library was assigned organization scope: %+v", library)
+		}
+	}
+	privateItems, err := repo.ListKnowledgeLibraryItems(ctx, personalFilesLibraryPrefix+"u1", "u1", "org-1", "files", "", "", 50)
+	if err != nil || len(privateItems) != 1 || privateItems[0].FileName != "private.txt" {
+		t.Fatalf("private file library leaked or omitted item: %+v err=%v", privateItems, err)
+	}
+	orgItems, err := repo.ListKnowledgeLibraryItems(ctx, orgFilesLibraryPrefix+"org-1", "u1", "org-1", "files", "", "", 50)
+	if err != nil || len(orgItems) != 1 || orgItems[0].FileName != "org.txt" {
+		t.Fatalf("organization file library mismatch: %+v err=%v", orgItems, err)
+	}
+	_ = private
+	_ = group
+}
+
 func TestMemoryMessageAttachmentIdempotenceAndCursorMonotonicity(t *testing.T) {
 	repo := NewMemoryStore()
 	ctx := trace.WithIDs(context.Background(), "req-ingest", "trace-ingest")
@@ -192,13 +300,16 @@ func TestMemoryMessageAttachmentIdempotenceAndCursorMonotonicity(t *testing.T) {
 	if _, err := repo.CompleteAttachment(ctx, first.Attachments[0].ID, "object", attachmentHash, 10, "ready"); err != nil {
 		t.Fatal(err)
 	}
+	completeMemoryPrivateReady(t, repo, ctx, first.Message.ID, first.Attachments[0].ID)
 	input.ExternalMessageID = "m2"
 	input.Cursor = "90"
 	input.Attachments = nil
 	input.PayloadHash, _ = CalculatePayloadHash(input)
-	if _, err := repo.IngestMessage(ctx, input); err != nil {
+	secondMessage, err := repo.IngestMessage(ctx, input)
+	if err != nil {
 		t.Fatal(err)
 	}
+	completeMemoryPrivateReady(t, repo, ctx, secondMessage.Message.ID)
 	current, err := repo.GetCollector(ctx, collector.ID)
 	if err != nil {
 		t.Fatal(err)
@@ -571,7 +682,7 @@ func TestMemoryFiltersSystemAndRedactsSensitiveContent(t *testing.T) {
 		t.Fatalf("ready gate was not idempotent: created=%v err=%v", again, err)
 	}
 	events, _ := repo.GetOutbox(ctx, 10)
-	if len(events) != 1 || events[0].EventType != "knowledge.ready" || events[0].Payload["knowledge_item_id"] != item.ID {
+	if len(events) != 1 || events[0].EventType != "knowledge.ready" || events[0].Payload["knowledge_item_id"] != item.ID || events[0].Payload["resource_type"] != "knowledge_item" {
 		t.Fatalf("unexpected ready events: %+v", events)
 	}
 }

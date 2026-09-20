@@ -688,6 +688,77 @@ func TestDiscoverUsesManagedFeishuDiscoveryWhenTokenRefreshFails(t *testing.T) {
 	}
 }
 
+func TestTypeSpecificDiscoverySeparatesGroupsAndPrivateChats(t *testing.T) {
+	provider := &fakeOAuthProvider{discoveries: []domain.AvailableConversation{
+		{ExternalID: "group-1", Name: "团队群", ConversationType: "group"},
+		{ExternalID: "private-1", Name: "私聊", ConversationType: "private"},
+	}}
+	service, repo, _ := newServiceForTest(provider)
+	ctx := context.Background()
+	if _, err := repo.SaveConnector(ctx, domain.ConnectorAccount{ID: "a1", OwnerUserID: "u1", Platform: domain.PlatformFeishu, WorkspaceKey: "tenant", ExternalAccountID: "user", CredentialRef: "cred", Status: domain.ConnectorActive}); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.Vault.Put(ctx, "cred", vault.TokenSet{AccessToken: "access", ExpiresAt: time.Now().Add(time.Hour)}, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	groups, err := service.DiscoverByType(ctx, "u1", domain.PlatformFeishu, "group")
+	if err != nil || len(groups.Conversations) != 1 || groups.Conversations[0].ConversationType != "group" {
+		t.Fatalf("group discovery leaked private chat: %+v err=%v", groups.Conversations, err)
+	}
+	private, err := service.DiscoverByType(ctx, "u1", domain.PlatformFeishu, "private")
+	if err != nil || len(private.Conversations) != 1 || private.Conversations[0].ConversationType != "private" {
+		t.Fatalf("private discovery was not isolated: %+v err=%v", private.Conversations, err)
+	}
+	_, err = service.AttachByType(ctx, repository.AttachInput{UserID: "u1", Platform: domain.PlatformFeishu, ExternalConversationID: "private-1", ConversationType: "private", DiscoveryID: groups.ID}, "group")
+	if apperror.From(err).Code != "conversation_type_mismatch" {
+		t.Fatalf("expected type mismatch when using group entry point for private chat, got %v", err)
+	}
+}
+
+func TestTypedDiscoveryDoesNotReplaceMixedLatestSnapshot(t *testing.T) {
+	provider := &fakeOAuthProvider{discoveries: []domain.AvailableConversation{
+		{ExternalID: "group-1", Name: "团队群", ConversationType: "group"},
+		{ExternalID: "private-1", Name: "私聊", ConversationType: "private"},
+	}}
+	service, repo, _ := newServiceForTest(provider)
+	ctx := context.Background()
+	if _, err := repo.SaveConnector(ctx, domain.ConnectorAccount{ID: "a1", OwnerUserID: "u1", Platform: domain.PlatformFeishu, WorkspaceKey: "tenant", ExternalAccountID: "user", CredentialRef: "cred", Status: domain.ConnectorActive}); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.Vault.Put(ctx, "cred", vault.TokenSet{AccessToken: "access", ExpiresAt: time.Now().Add(time.Hour)}, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.DiscoverByType(ctx, "u1", domain.PlatformFeishu, "group"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.DiscoverByType(ctx, "u1", domain.PlatformFeishu, "private"); err != nil {
+		t.Fatal(err)
+	}
+	latest, err := service.listDiscoveries(ctx, "u1", "a1")
+	if err != nil || len(latest) != 1 || len(latest[0].Conversations) != 2 {
+		t.Fatalf("typed discovery replaced the mixed latest snapshot: %+v err=%v", latest, err)
+	}
+}
+
+func TestLegacyConversationDirectoryOnlyReturnsGroups(t *testing.T) {
+	service, repo, _ := newServiceForTest(nil)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	if _, err := repo.SaveConnector(ctx, domain.ConnectorAccount{ID: "a1", OwnerUserID: "u1", Platform: domain.PlatformWechat, WorkspaceKey: "wx", ExternalAccountID: "user", Status: domain.ConnectorActive}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repo.AttachConversation(ctx, repository.AttachInput{UserID: "u1", Platform: domain.PlatformWechat, WorkspaceKey: "wx", ExternalConversationID: "private-1", ConversationType: "private", RequestedStartAt: &now}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repo.AttachConversation(ctx, repository.AttachInput{UserID: "u1", Platform: domain.PlatformWechat, WorkspaceKey: "wx", ExternalConversationID: "group-1", ConversationType: "group", OrganizationID: "org-1", RequestedStartAt: &now, PrimaryConnectorID: "a1"}); err != nil {
+		t.Fatal(err)
+	}
+	items, err := service.ListConversations(ctx, "u1", domain.PlatformWechat)
+	if err != nil || len(items) != 1 || items[0].ConversationType != "group" {
+		t.Fatalf("legacy directory leaked private conversation: %+v err=%v", items, err)
+	}
+}
+
 func TestAddCollectorRejectsDifferentWorkspace(t *testing.T) {
 	service, repo, _ := newServiceForTest(nil)
 	ctx := context.Background()

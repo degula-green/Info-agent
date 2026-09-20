@@ -18,6 +18,11 @@ export default defineConfig({
 				target: process.env.VITE_KNOWLEDGE_DEV_PROXY || 'http://127.0.0.1:8090',
 				changeOrigin: true,
 			},
+			'/api/rag': {
+				target: process.env.VITE_RAG_DEV_PROXY || 'http://127.0.0.1:8000',
+				changeOrigin: true,
+				rewrite: (path) => path.replace(/^\/api\/rag/, ''),
+			},
 		},
 	},
 })

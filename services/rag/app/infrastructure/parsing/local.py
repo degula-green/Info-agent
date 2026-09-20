@@ -4,6 +4,8 @@ import csv
 import io
 import json
 import re
+import zipfile
+from xml.etree import ElementTree
 from pathlib import Path
 
 from app.domain.models import CanonicalBlock, ParsedDocument
@@ -52,6 +54,40 @@ class LocalDocumentParser:
             parser=f"local-{extension}",
             parser_version="v1",
         )
+
+    def parse_docx(self, path: Path) -> ParsedDocument:
+        """Extract searchable text from a DOCX without requiring MinerU.
+
+        This is intentionally a conservative fallback for service outages:
+        paragraph/table text is preserved, while layout-heavy assets remain
+        the responsibility of the primary MinerU parser.
+        """
+        namespace = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+        try:
+            with zipfile.ZipFile(path) as package:
+                document = ElementTree.fromstring(package.read("word/document.xml"))
+        except (OSError, KeyError, zipfile.BadZipFile, ElementTree.ParseError) as exc:
+            raise LocalParseError("DOCX_READ_FAILED", "could not read DOCX document") from exc
+        blocks: list[CanonicalBlock] = []
+        lines: list[str] = []
+        for paragraph in document.iter(namespace + "p"):
+            text = "".join(node.text or "" for node in paragraph.iter(namespace + "t")).strip()
+            if text:
+                lines.append(text)
+        for table in document.iter(namespace + "tbl"):
+            rows: list[str] = []
+            for row in table.findall(namespace + "tr"):
+                cells = []
+                for cell in row.findall(namespace + "tc"):
+                    cells.append(" ".join((node.text or "").strip() for node in cell.iter(namespace + "t") if node.text).strip())
+                if any(cells):
+                    rows.append(" | ".join(cells))
+            if rows:
+                lines.append("\n".join(rows))
+        markdown = normalize_newlines("\n\n".join(lines))
+        if markdown:
+            blocks = markdown_blocks(markdown)
+        return ParsedDocument(markdown=markdown, blocks=blocks, parser="local-docx", parser_version="v1")
 
 
 def markdown_blocks(markdown: str) -> list[CanonicalBlock]:

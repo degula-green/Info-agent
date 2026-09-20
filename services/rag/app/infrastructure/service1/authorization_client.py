@@ -49,8 +49,12 @@ class Service1AuthorizationClient(AuthorizationGateway):
         organization_id: str | None,
         resource_parts: tuple[str, ...],
         knowledge_base_id: str | None = None,
+        knowledge_base_ids: tuple[str, ...] = (),
     ) -> AuthorizationScope:
-        key = (user_id, organization_id, tuple(sorted(resource_parts)), knowledge_base_id)
+        requested_ids = tuple(dict.fromkeys(str(value) for value in knowledge_base_ids if str(value).strip()))
+        if not requested_ids and knowledge_base_id:
+            requested_ids = (str(knowledge_base_id),)
+        key = (user_id, organization_id, tuple(sorted(resource_parts)), requested_ids)
         now = time.monotonic()
         with self._lock:
             cached = self._cache.get(key)
@@ -60,26 +64,50 @@ class Service1AuthorizationClient(AuthorizationGateway):
                 self._cache.pop(key, None)
         if not self.configured:
             return AuthorizationScope(available=False)
-        payload = {
-            "subject_type": "user",
-            "subject_id": str(user_id),
-            "organization_id": organization_id,
-            "resource_parts": list(resource_parts),
-            "knowledge_base_id": knowledge_base_id,
-        }
-        try:
-            response = self.http.request(
-                "POST",
-                join_url(self.base_url, "/internal/v1/authorization/search-scope"),
-                body=payload,
-                headers=_integration_headers(),
-                token=self.token,
-                timeout=settings.authz_timeout_seconds,
-            ).json()
-            value = _scope_from_response(response)
-        except IntegrationError:
-            # Protected search must fail closed. Returning unavailable lets the
-            # application omit that branch and record the degradation.
+        # Core currently accepts one knowledge_base_id per scope request. Query
+        # each requested library and union the object keys so a multi-library
+        # QA request never silently authorizes only its first library.
+        scope_ids = requested_ids or (None,)
+        values: list[AuthorizationScope] = []
+        for scope_id in scope_ids:
+            payload = {
+                "subject_type": "user",
+                "subject_id": str(user_id),
+                "organization_id": organization_id,
+                "resource_parts": list(resource_parts),
+                "knowledge_base_id": scope_id,
+            }
+            try:
+                response = self.http.request(
+                    "POST",
+                    join_url(self.base_url, "/internal/v1/authorization/search-scope"),
+                    body=payload,
+                    headers=_integration_headers(),
+                    token=self.token,
+                    timeout=settings.authz_timeout_seconds,
+                ).json()
+                value = _scope_from_response(response)
+            except IntegrationError:
+                # A partial scope is unsafe for protected recall because it is
+                # impossible to distinguish an empty result from a failed
+                # library query. Fail closed for the whole request.
+                value = AuthorizationScope(available=False)
+            if not value.available:
+                values = []
+                break
+            values.append(value)
+        if values:
+            objects: dict[str, tuple[str, ...]] = {}
+            for value in values:
+                for name, keys in value.objects.items():
+                    objects[name] = tuple(dict.fromkeys((*objects.get(name, ()), *keys)))
+            value = AuthorizationScope(
+                snapshot_id=values[0].snapshot_id,
+                expires_at=values[0].expires_at,
+                objects=objects,
+                available=True,
+            )
+        else:
             value = AuthorizationScope(available=False)
         if len(value.object_keys) > settings.authz_scope_max_objects:
             return AuthorizationScope(
@@ -155,7 +183,10 @@ class AllowAllAuthorizationGateway(AuthorizationGateway):
     """Explicit test/dev double; never selected by production bootstrap."""
 
     def search_scope(self, **_: Any) -> AuthorizationScope:
-        return AuthorizationScope(objects={"knowledge_original": ("*",), "attachment_content": ("*",)})
+        # There is no safe wildcard representation for a protected object
+        # scope.  Development may allow display checks, but protected recall
+        # remains fail-closed until Core/OpenFGA is configured.
+        return AuthorizationScope(available=False)
 
     def check_batch(self, *, checks: list[AccessCheck], **_: Any) -> list[bool]:
         return [True] * len(checks)
