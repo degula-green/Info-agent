@@ -7,12 +7,6 @@ $webPath = Join-Path $projectRoot "apps\web"
 $wechatCollectorPath = Join-Path $projectRoot "services\collectors\wechat"
 $nginxPath = Join-Path $projectRoot "gateway\nginx"
 $nginxRuntime = "C:\info-agent-nginx"
-$ragRuntime = Join-Path $ragPath ".runtime\python"
-$ragRequirements = Join-Path $ragPath "requirements.txt"
-$ragRequirementsStamp = Join-Path $ragRuntime ".requirements.sha256"
-$wechatRuntime = Join-Path $wechatCollectorPath ".runtime\python"
-$wechatRequirements = Join-Path $wechatCollectorPath "requirements.txt"
-$wechatRequirementsStamp = Join-Path $wechatRuntime ".requirements.sha256"
 
 function Find-Tool([string]$Name, [string[]]$Candidates = @()) {
     $command = Get-Command $Name -ErrorAction SilentlyContinue
@@ -63,14 +57,16 @@ function Import-EnvFile([string]$Path) {
 
 $go = Find-Tool 'go' @('C:\Program Files\Go\bin\go.exe')
 $npm = Find-Tool 'npm'
-$uv = Find-Tool 'uv'
-$python = Find-Tool 'python' @('C:\Program Files\Python311\python.exe')
+$uv = Find-Tool 'uv' @(
+    (Join-Path $env:LOCALAPPDATA 'Programs\uv\uv.exe'),
+    (Join-Path $env:APPDATA 'Python\Python311\Scripts\uv.exe'),
+    (Join-Path $env:USERPROFILE '.local\bin\uv.exe')
+)
 $nginx = Find-Tool 'nginx'
 
 if (-not $go) { throw "Go not found. Install Go first." }
 if (-not $npm) { throw "npm not found. Install Node.js first." }
 if (-not $uv) { throw "uv not found. Install uv first." }
-if (-not $python) { throw "Python not found. Install Python 3.11 first." }
 
 if (-not (Test-Path (Join-Path $webPath 'node_modules'))) {
     Write-Host 'Installing frontend dependencies...'
@@ -83,33 +79,13 @@ if (-not (Test-Path (Join-Path $webPath 'node_modules'))) {
     }
 }
 
-$requirementsHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $ragRequirements).Hash
-$installedHash = if (Test-Path $ragRequirementsStamp) {
-    (Get-Content -Raw -LiteralPath $ragRequirementsStamp).Trim()
-} else {
-    ''
-}
-if (-not (Test-Path (Join-Path $ragRuntime 'uvicorn')) -or $installedHash -ne $requirementsHash) {
-    Write-Host 'Installing RAG dependencies with uv...'
-    New-Item -ItemType Directory -Force -Path $ragRuntime | Out-Null
-    & $uv pip install --python $python --target $ragRuntime --link-mode copy --upgrade --requirement $ragRequirements
-    if ($LASTEXITCODE -ne 0) { throw "uv pip install failed with exit code $LASTEXITCODE." }
-    Set-Content -LiteralPath $ragRequirementsStamp -Value $requirementsHash -Encoding ascii
-}
+Write-Host 'Synchronizing RAG virtual environment...'
+& $uv sync --project $ragPath
+if ($LASTEXITCODE -ne 0) { throw "RAG uv sync failed with exit code $LASTEXITCODE." }
 
-$wechatRequirementsHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $wechatRequirements).Hash
-$wechatInstalledHash = if (Test-Path $wechatRequirementsStamp) {
-    (Get-Content -Raw -LiteralPath $wechatRequirementsStamp).Trim()
-} else {
-    ''
-}
-if (-not (Test-Path (Join-Path $wechatRuntime 'uvicorn')) -or $wechatInstalledHash -ne $wechatRequirementsHash) {
-    Write-Host 'Installing WeChat Collector dependencies with uv...'
-    New-Item -ItemType Directory -Force -Path $wechatRuntime | Out-Null
-    & $uv pip install --python $python --target $wechatRuntime --link-mode copy --upgrade --requirement $wechatRequirements
-    if ($LASTEXITCODE -ne 0) { throw "WeChat Collector dependency installation failed with exit code $LASTEXITCODE." }
-    Set-Content -LiteralPath $wechatRequirementsStamp -Value $wechatRequirementsHash -Encoding ascii
-}
+Write-Host 'Synchronizing WeChat Collector virtual environment...'
+& $uv sync --project $wechatCollectorPath
+if ($LASTEXITCODE -ne 0) { throw "WeChat Collector uv sync failed with exit code $LASTEXITCODE." }
 
 Import-EnvFile (Join-Path $corePath '.env')
 Import-EnvFile (Join-Path $knowledgePath '.env')
@@ -134,15 +110,13 @@ if (-not $env:RAG_REDIS_INBOUND_STREAM) { $env:RAG_REDIS_INBOUND_STREAM = $env:K
 
 Start-ServiceWindow 'info-agent core :8080' $corePath "& '$go' run ./cmd/server"
 Start-ServiceWindow 'info-agent knowledge :8090' $knowledgePath "& '$go' run ./cmd/server"
-Start-ServiceWindow 'info-agent rag :8000' $ragPath "`$env:PYTHONPATH = '$ragRuntime'; & '$python' -m uvicorn app.main:app --host 0.0.0.0 --port 8000"
+Start-ServiceWindow 'info-agent rag :8000' $ragPath "& '$uv' run --project '$ragPath' python -m uvicorn app.main:app --host 0.0.0.0 --port 8000"
 if ($env:RAG_REDIS_URL) {
-    Start-ServiceWindow 'info-agent rag-worker' $ragPath "`$env:PYTHONPATH = '$ragRuntime'; & '$python' worker.py"
+    Start-ServiceWindow 'info-agent rag-worker' $ragPath "& '$uv' run --project '$ragPath' python worker.py"
 }
 Start-ServiceWindow 'info-agent web :5173' $webPath "& '$npm' run dev -- --host 0.0.0.0"
-if ($python) {
-    Stop-PortProcess 8091
-    Start-ServiceWindow 'info-agent wechat collector :8091' $projectRoot "`$env:PYTHONPATH = '$wechatRuntime;$projectRoot'; & '$python' -m services.collectors.wechat.main"
-}
+Stop-PortProcess 8091
+Start-ServiceWindow 'info-agent wechat collector :8091' $projectRoot "& '$uv' run --project '$wechatCollectorPath' python -m services.collectors.wechat.main"
 
 if ($nginx) {
     New-Item -ItemType Directory -Force -Path (Join-Path $nginxRuntime 'conf.d') | Out-Null

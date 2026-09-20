@@ -21,8 +21,8 @@ scripts/start-platform.cmd
 ```
 
 脚本会启动六个进程：Vue、Gin Core、Gin Knowledge、FastAPI RAG、WeChat Collector 和 Nginx。首次运行会自动执行
-`npm ci`，并用 `uv` 将 Python 依赖安装到 `services/rag/.runtime/python`；该目录不是虚拟环境。
+`npm ci`，并用 `uv sync` 分别创建和同步 RAG、WeChat Collector 的 `.venv`。
 
 个人微信采集器由同一启动脚本启动，运行于用户本机并读取用户提供的微信数据库目录。应用当前按单机单实例运行。
 
-需要先安装：Node.js、Go、系统 Python、uv。Nginx 未安装时，Core、Knowledge、RAG、Web 和 WeChat Collector 仍会启动。
+需要先安装：Node.js、Go、uv。uv 会选择兼容的 Python 3.11/3.12，并管理各服务的虚拟环境。Nginx 未安装时，Core、Knowledge、RAG、Web 和 WeChat Collector 仍会启动。
