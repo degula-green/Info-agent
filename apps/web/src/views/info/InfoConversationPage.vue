@@ -88,12 +88,12 @@ async function loadCurrentConversation(platform: string, id: string, force = fal
   const existing = conversationLoads.get(loadKey)
   if (existing) return existing
   const request = (async () => {
-  loading.value = true
+  const hadChat = Boolean(store.findConversation(platform, id))
+  loading.value = !hadChat
   try {
-    // The shell refreshes conversation summaries globally. Do not force a
-    // second summary refresh here, because it would temporarily clear detail
-    // messages while this page is loading them.
-    await store.ensureSources(false)
+    // Detail pages refresh their own conversation. A directory refresh here
+    // can replace the in-memory snapshot while a provider returns a partial
+    // page, briefly turning a valid route into "conversation not found".
     await store.loadConversation(platform as 'feishu' | 'wecom' | 'wechat', id, force)
   } finally {
     loading.value = false

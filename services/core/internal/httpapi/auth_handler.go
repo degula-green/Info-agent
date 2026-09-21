@@ -136,7 +136,9 @@ func (h *AuthHandler) Refresh(c *gin.Context) {
 		h.writeAuthenticationError(c, err, "authentication required")
 		return
 	}
-	h.setRefreshCookie(c, result.RefreshToken, result.RefreshExpiry)
+	if result.RefreshToken != "" {
+		h.setRefreshCookie(c, result.RefreshToken, result.RefreshExpiry)
+	}
 	writeTokenResponse(c, result)
 }
 

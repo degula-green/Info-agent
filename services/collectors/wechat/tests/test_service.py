@@ -310,6 +310,35 @@ class CollectorServiceTest(unittest.TestCase):
             service.knowledge = original_knowledge
         self.assertEqual([call[0].rsplit("/", 1)[-1] for call in self.calls], ["assignments?connector_id=account"])
 
+    def test_system_paused_conversation_is_recovered_by_heartbeat(self):
+        self.calls.clear()
+
+        def system_paused_knowledge(path, method="GET", payload=None):
+            self.calls.append((path, method, payload))
+            if path.endswith("assignments?connector_id=account"):
+                return {"items": [{
+                    "collector": {"id": "collector", "status": "active"},
+                    "conversation": {
+                        "status": "paused",
+                        "pause_reason": "no_available_collector",
+                        "external_conversation_id": "chat",
+                    },
+                }]}
+            if path.endswith("/messages"):
+                return {"attachments": [{"id": "attachment", "content_status": "ready"}]}
+            return {}
+
+        original_knowledge = service.knowledge
+        service.knowledge = system_paused_knowledge
+        try:
+            service.collect_once()
+        finally:
+            service.knowledge = original_knowledge
+
+        paths = [call[0] for call in self.calls]
+        self.assertTrue(any(path.endswith("/collector/heartbeat") for path in paths))
+        self.assertTrue(any(path.endswith("/collector/messages") for path in paths))
+
     def test_local_state_only_restores_checkpoint_cache(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "state.json"

@@ -123,6 +123,22 @@ func (s *OrganizationService) ListMembers(ctx context.Context, actorID, organiza
 	return s.repo.ListMembers(ctx, organizationID)
 }
 
+// CheckOrganizationMember is the narrow, read-only membership check used by
+// internal services. It deliberately does not apply the management
+// permission required by ListMembers: a service needs to know whether a
+// target user belongs to an organization, not whether that service may read
+// the whole member directory.
+func (s *OrganizationService) CheckOrganizationMember(ctx context.Context, userID, organizationID string) (bool, error) {
+	membership, _, err := s.repo.GetMembership(ctx, userID, organizationID)
+	if errors.Is(err, repository.ErrMembershipNotFound) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return membership.IsActive(), nil
+}
+
 func (s *OrganizationService) GrantRole(ctx context.Context, actorID, organizationID, userID, role string) error {
 	if !domain.IsValidRole(role) {
 		return ErrInvalidRole

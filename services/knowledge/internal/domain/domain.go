@@ -398,6 +398,7 @@ type KnowledgeLibraryItem struct {
 	ExternalConversationID string     `json:"external_conversation_id,omitempty"`
 	ConversationType       string     `json:"conversation_type,omitempty"`
 	ConversationName       string     `json:"conversation_name,omitempty"`
+	CollectionStatus       string     `json:"collection_status,omitempty"`
 	SourceType             string     `json:"source_type"`
 	SourceMessageID        string     `json:"source_message_id,omitempty"`
 	SourceAttachmentID     string     `json:"source_attachment_id,omitempty"`

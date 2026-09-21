@@ -24,6 +24,7 @@ import {
 } from '@/api/info-knowledge'
 import type { InfoAvailableSession, InfoChat, InfoCollector, InfoFile, InfoMessage, InfoSource, SearchResult, SourceKey } from '@/mock'
 import { discoveryAction, isPrivateConversation, mapAttachmentStatus, mapCollectionStatus, searchLoadedSources } from '@/knowledge-mapping'
+import { isDisplayableTextMessage } from '@/utils/message-visibility'
 
 const sourceMeta: Record<SourceKey, Pick<InfoSource, 'name' | 'kbName' | 'description'>> = {
   feishu: { name: '飞书', kbName: '飞书知识库', description: '飞书群聊、私聊消息与文件' },
@@ -159,7 +160,8 @@ function mapMessage(value: MessageDTO, attachments: AttachmentDTO[], senderNames
 }
 
 function isAttachmentOnlyMessage(value: MessageDTO, attachments: AttachmentDTO[]) {
-  const content = String(value.content || '').trim()
+	if (!isDisplayableTextMessage(value.message_type, value.content)) return true
+	const content = String(value.content || '').trim()
   if (!content) return true
   const hasAttachment = attachments.some((item) => item.message_id === value.id)
   if (!hasAttachment) return false

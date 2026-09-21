@@ -201,6 +201,7 @@ type publicKnowledgeLibraryItem struct {
 	ExternalConversationID string     `json:"external_conversation_id,omitempty"`
 	ConversationType       string     `json:"conversation_type,omitempty"`
 	ConversationName       string     `json:"conversation_name,omitempty"`
+	CollectionStatus       string     `json:"collection_status,omitempty"`
 	SourceType             string     `json:"source_type"`
 	SourceMessageID        string     `json:"source_message_id,omitempty"`
 	SourceAttachmentID     string     `json:"source_attachment_id,omitempty"`
@@ -398,7 +399,7 @@ func publicKnowledgeLibraryFromDomain(value domain.KnowledgeLibrary) publicKnowl
 }
 
 func publicKnowledgeLibraryItemFromDomain(value domain.KnowledgeLibraryItem) publicKnowledgeLibraryItem {
-	return publicKnowledgeLibraryItem{ID: value.ID, LibraryID: value.LibraryID, Kind: value.Kind, Title: value.Title, Excerpt: value.Excerpt, Platform: value.Platform, ConversationID: value.ConversationID, ExternalConversationID: value.ExternalConversationID, ConversationType: value.ConversationType, ConversationName: value.ConversationName, SourceType: value.SourceType, SourceMessageID: value.SourceMessageID, SourceAttachmentID: value.SourceAttachmentID, ContentType: value.ContentType, ContentVisibility: value.ContentVisibility, AccessScope: value.AccessScope, ProcessingStatus: value.ProcessingStatus, ContentStatus: value.ContentStatus, FileName: value.FileName, MIMEType: value.MIMEType, SizeBytes: value.SizeBytes, MessageCount: value.MessageCount, AttachmentCount: value.AttachmentCount, MemberCount: value.MemberCount, SentAt: value.SentAt, CreatedAt: value.CreatedAt, UpdatedAt: value.UpdatedAt, SharedAt: value.SharedAt, ShareBatchID: value.ShareBatchID, CanView: value.CanView, CanDownload: value.CanDownload, ContentAccessRequired: value.ContentAccessRequired}
+	return publicKnowledgeLibraryItem{ID: value.ID, LibraryID: value.LibraryID, Kind: value.Kind, Title: value.Title, Excerpt: value.Excerpt, Platform: value.Platform, ConversationID: value.ConversationID, ExternalConversationID: value.ExternalConversationID, ConversationType: value.ConversationType, ConversationName: value.ConversationName, CollectionStatus: value.CollectionStatus, SourceType: value.SourceType, SourceMessageID: value.SourceMessageID, SourceAttachmentID: value.SourceAttachmentID, ContentType: value.ContentType, ContentVisibility: value.ContentVisibility, AccessScope: value.AccessScope, ProcessingStatus: value.ProcessingStatus, ContentStatus: value.ContentStatus, FileName: value.FileName, MIMEType: value.MIMEType, SizeBytes: value.SizeBytes, MessageCount: value.MessageCount, AttachmentCount: value.AttachmentCount, MemberCount: value.MemberCount, SentAt: value.SentAt, CreatedAt: value.CreatedAt, UpdatedAt: value.UpdatedAt, SharedAt: value.SharedAt, ShareBatchID: value.ShareBatchID, CanView: value.CanView, CanDownload: value.CanDownload, ContentAccessRequired: value.ContentAccessRequired}
 }
 
 func publicIngestResultFromDomain(value *repository.IngestResult) publicIngestResult {

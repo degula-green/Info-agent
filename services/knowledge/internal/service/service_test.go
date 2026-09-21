@@ -47,6 +47,15 @@ type fakeOAuthProvider struct {
 	authorizeState string
 }
 
+type fakeProviderWithContacts struct {
+	*fakeOAuthProvider
+	contacts []domain.AvailableContact
+}
+
+func (f *fakeProviderWithContacts) DiscoverContacts(context.Context, vault.TokenSet, string) ([]domain.AvailableContact, error) {
+	return append([]domain.AvailableContact(nil), f.contacts...), nil
+}
+
 type failingRevokeRepository struct {
 	repository.Repository
 }
@@ -182,6 +191,32 @@ func TestFeishuOpenIDMappingAllowsInitialGroupAttach(t *testing.T) {
 	}
 	if conversation == nil || len(conversation.Memberships) != 1 || conversation.Memberships[0].ExternalUserID != "open-id" {
 		t.Fatalf("unexpected group memberships: %+v", conversation)
+	}
+}
+
+func TestFeishuDiscoveryDoesNotTurnContactsIntoPrivateConversations(t *testing.T) {
+	provider := &fakeProviderWithContacts{
+		fakeOAuthProvider: &fakeOAuthProvider{
+			profile:     platform.Profile{ExternalAccountID: "feishu-user", ExternalUserID: "open-id", WorkspaceKey: "tenant", DisplayName: "Alice"},
+			discoveries: []domain.AvailableConversation{{ExternalID: "group-1", Name: "Team", ConversationType: "group"}},
+		},
+		contacts: []domain.AvailableContact{{ExternalUserID: "ou-contact", DisplayName: "Contact"}},
+	}
+	service, _, _ := newServiceForTest(provider)
+	ctx := context.Background()
+	start, err := service.StartFeishuOAuth(ctx, "u1", "bind", "org-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = service.CompleteFeishuOAuth(ctx, start.StateID, "code", ""); err != nil {
+		t.Fatal(err)
+	}
+	discovery, err := service.Discover(ctx, "u1", domain.PlatformFeishu)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(discovery.Conversations) != 1 || discovery.Conversations[0].ConversationType != "group" {
+		t.Fatalf("contact directory entry was exposed as a private conversation: %+v", discovery.Conversations)
 	}
 }
 
@@ -813,6 +848,58 @@ func TestGetTokenRefreshesOnceAndReusesNewToken(t *testing.T) {
 	}
 }
 
+func TestConcurrentRefreshUsesOneProviderCall(t *testing.T) {
+	provider := &blockingRefreshProvider{started: make(chan struct{}), release: make(chan struct{})}
+	service, repo, _ := newServiceForTest(provider)
+	account := domain.ConnectorAccount{ID: "concurrent-account", OwnerUserID: "u1", Platform: domain.PlatformFeishu, CredentialRef: "credential", Status: domain.ConnectorActive}
+	if _, err := repo.SaveConnector(context.Background(), account); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.Vault.Put(context.Background(), account.CredentialRef, vault.TokenSet{AccessToken: "old", RefreshToken: "refresh", ExpiresAt: time.Now().UTC().Add(-time.Minute)}, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	results := make(chan vault.TokenSet, 2)
+	errs := make(chan error, 2)
+	for range 2 {
+		go func() {
+			token, err := service.RefreshToken(context.Background(), &account)
+			results <- token
+			errs <- err
+		}()
+	}
+	<-provider.started
+	close(provider.release)
+	for range 2 {
+		if err := <-errs; err != nil {
+			t.Fatal(err)
+		}
+	}
+	first, second := <-results, <-results
+	provider.mu.Lock()
+	calls := provider.refreshCalls
+	provider.mu.Unlock()
+	if calls != 1 || first.AccessToken != "access-refreshed" || second.AccessToken != first.AccessToken {
+		t.Fatalf("concurrent refresh calls=%d first=%+v second=%+v", calls, first, second)
+	}
+}
+
+type blockingRefreshProvider struct {
+	fakeOAuthProvider
+	started chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (p *blockingRefreshProvider) Refresh(ctx context.Context, token vault.TokenSet) (vault.TokenSet, error) {
+	p.once.Do(func() { close(p.started) })
+	select {
+	case <-p.release:
+	case <-ctx.Done():
+		return vault.TokenSet{}, ctx.Err()
+	}
+	return p.fakeOAuthProvider.Refresh(ctx, token)
+}
+
 func TestRefreshTokenClassifiesProviderFailures(t *testing.T) {
 	for _, tc := range []struct {
 		name, wantCode, wantStatus string
@@ -887,6 +974,73 @@ func TestWorkerFiltersHistoryAndCommitsEmptyPageCursor(t *testing.T) {
 	current, _ = repo.GetCollector(context.Background(), collector.ID)
 	if current.LastCursor != "page-3" {
 		t.Fatalf("empty page cursor was not committed: %+v", current)
+	}
+}
+
+func TestWorkerContinuesPollingWhenPermissionSyncFails(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	provider := &fakeOAuthProvider{
+		pollMessages: []platform.Message{{
+			ExternalConversationID: "chat", ExternalMessageID: "new", SenderExternalID: "user",
+			MessageType: "text", Content: "new message", ContentHash: hashForTest("new message"), SentAt: now,
+		}},
+		nextCursor: "cursor-1",
+	}
+	service, repo, _ := newServiceForTest(provider)
+	service.Now = func() time.Time { return now }
+	account := domain.ConnectorAccount{ID: "a1", OwnerUserID: "u1", Platform: domain.PlatformFeishu, WorkspaceKey: "tenant", ExternalAccountID: "user", CredentialRef: "credential", Status: domain.ConnectorActive}
+	if _, err := repo.SaveConnector(context.Background(), account); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.Vault.Put(context.Background(), account.CredentialRef, vault.TokenSet{AccessToken: "access", RefreshToken: "refresh", ExpiresAt: now.Add(time.Hour)}, 2*time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	start := now.Add(-time.Hour)
+	conversation, err := repo.AttachConversation(context.Background(), repository.AttachInput{UserID: "u1", Platform: domain.PlatformFeishu, WorkspaceKey: "tenant", ExternalConversationID: "chat", ConversationType: "group", OrganizationID: "org-1", RequestedStartAt: &start})
+	if err != nil {
+		t.Fatal(err)
+	}
+	collector, err := repo.AddCollector(context.Background(), repository.CollectorInput{ConversationID: conversation.ID, ConnectorAccountID: account.ID, CollectorUserID: "u1", Role: domain.CollectorPrimary})
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := repository.IngestMessageInput{
+		CollectorID: collector.ID, ExternalConversationID: "chat", ExternalMessageID: "old",
+		SenderExternalID: "user", MessageType: "text", Content: "existing message",
+		ContentHash: hashForTest("existing message"), SentAt: now.Add(-time.Minute),
+	}
+	old.PayloadHash, err = repository.CalculatePayloadHash(old)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = service.IngestMessage(context.Background(), old); err != nil {
+		t.Fatal(err)
+	}
+	if err = service.ProcessPrivacy(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	core := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "unavailable", http.StatusServiceUnavailable)
+	}))
+	defer core.Close()
+	service.Core = coreclient.New(core.URL, "service-token")
+	if err = NewWorker(service, time.Second).Tick(context.Background()); err == nil {
+		t.Fatal("permission failure was not reported")
+	}
+	messages, err := repo.ListMessages(context.Background(), conversation.ID, 10, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, message := range messages {
+		if message.ExternalMessageID == "new" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("worker skipped polling after permission failure: %+v", messages)
 	}
 }
 

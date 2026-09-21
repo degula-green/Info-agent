@@ -85,12 +85,15 @@ func Load() Config {
 		DevUserID:            env("KNOWLEDGE_DEV_USER_ID", "dev-user"),
 		DevOrganizationID:    env("KNOWLEDGE_DEV_ORGANIZATION_ID", "dev-org"),
 
-		FeishuClientID:         env("KNOWLEDGE_FEISHU_CLIENT_ID", ""),
-		FeishuClientSecret:     env("KNOWLEDGE_FEISHU_CLIENT_SECRET", ""),
-		FeishuRedirectURI:      env("KNOWLEDGE_FEISHU_REDIRECT_URI", ""),
-		FeishuAuthURL:          env("KNOWLEDGE_FEISHU_AUTH_URL", "https://accounts.feishu.cn/open-apis/authen/v1/authorize"),
-		FeishuAPIURL:           env("KNOWLEDGE_FEISHU_API_URL", "https://open.feishu.cn"),
-		FeishuScopes:           env("KNOWLEDGE_FEISHU_SCOPES", "contact:user.id:readonly im:message im:chat drive:drive"),
+		FeishuClientID:     env("KNOWLEDGE_FEISHU_CLIENT_ID", ""),
+		FeishuClientSecret: env("KNOWLEDGE_FEISHU_CLIENT_SECRET", ""),
+		FeishuRedirectURI:  env("KNOWLEDGE_FEISHU_REDIRECT_URI", ""),
+		FeishuAuthURL:      env("KNOWLEDGE_FEISHU_AUTH_URL", "https://accounts.feishu.cn/open-apis/authen/v1/authorize"),
+		FeishuAPIURL:       env("KNOWLEDGE_FEISHU_API_URL", "https://open.feishu.cn"),
+		// Private conversations are read with the OAuth user's identity. Feishu
+		// requires the dedicated p2p scope in addition to the base message scope;
+		// without it the API only exposes messages sent by the app itself.
+		FeishuScopes:           env("KNOWLEDGE_FEISHU_SCOPES", "contact:user.id:readonly im:message im:message.p2p_msg:get_as_user im:chat drive:drive search:message"),
 		WorkerInterval:         envDuration("KNOWLEDGE_WORKER_INTERVAL", 30*time.Second),
 		OAuthStateTTL:          envDuration("KNOWLEDGE_OAUTH_STATE_TTL", 10*time.Minute),
 		PairingTTL:             envDuration("KNOWLEDGE_PAIRING_TTL", 10*time.Minute),

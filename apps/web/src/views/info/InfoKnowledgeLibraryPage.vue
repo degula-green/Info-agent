@@ -62,7 +62,7 @@
           <span><t-icon name="chat-bubble" />{{ item.message_count || 0 }} 条消息</span>
           <span><t-icon name="file" />{{ item.attachment_count || 0 }} 个文件</span>
         </span>
-        <span class="conversation-card__status">{{ item.content_access_required ? '部分内容受限' : '可查看采集内容' }}</span>
+        <span class="conversation-card__status" :class="`conversation-card__status--${collectionStatus(item)}`"><i />{{ collectionStatusLabel(item.collection_status) }}</span>
       </button>
     </div>
     <div v-else-if="filteredItems.length" class="library-list">
@@ -74,7 +74,7 @@
         </span>
         <span class="library-row__meta">
           <span v-if="item.platform">{{ platformName(item.platform) }}</span>
-          <span v-if="item.kind === 'conversation'">{{ item.message_count || 0 }} 条消息 · {{ item.attachment_count || 0 }} 个文件</span>
+          <span v-if="item.kind === 'conversation'">{{ item.message_count || 0 }} 条消息 · {{ item.attachment_count || 0 }} 个文件 · {{ collectionStatusLabel(item.collection_status) }}</span>
           <span v-else-if="item.kind === 'file'">{{ formatSize(item.size_bytes) }} · {{ status(item) }}</span>
           <span v-else>{{ status(item) }}</span>
         </span>
@@ -110,8 +110,11 @@
       </div>
     </t-dialog>
 
-    <t-dialog v-model:visible="filePreviewVisible" :header="previewFile?.name || '附件预览'" :footer="false" width="min(960px, calc(100vw - 32px))" destroy-on-close>
-      <InfoAttachmentPreview v-if="previewFile" :file="previewFile" :active="filePreviewVisible" />
+    <t-dialog v-model:visible="filePreviewVisible" :header="previewFile?.name || '附件预览'" :footer="false" width="min(960px, calc(100vw - 32px))" dialog-class-name="library-file-preview-dialog" placement="center" destroy-on-close>
+      <div class="library-file-preview">
+        <div v-if="previewSource" class="library-file-preview__source"><t-icon name="chat" /><span>来源：{{ previewSource.name }} · {{ platformName(previewSource.platform) }}</span></div>
+        <InfoAttachmentPreview v-if="previewFile" :file="previewFile" :active="filePreviewVisible" />
+      </div>
     </t-dialog>
 
     <t-dialog v-model:visible="shareVisible" header="共享到组织" :footer="false" width="520px">
@@ -156,37 +159,56 @@ const discoveryVisible = ref(false); const discoveryLoading = ref(false); const 
 const availableConnectors = computed(() => store.sources.filter((source) => source.bound && source.available !== false))
 const discoverySessions = computed(() => (discovery.value?.conversations || []).filter((item) => !discoveryQuery.value.trim() || `${item.name} ${item.external_id}`.toLowerCase().includes(discoveryQuery.value.trim().toLowerCase())))
 const shareVisible = ref(false); const sharing = ref(false); const selectedMessageIDs = ref<string[]>([]); const selectedAttachmentIDs = ref<string[]>([])
-const filePreviewVisible = ref(false); const previewFile = ref<InfoFile | null>(null)
+const filePreviewVisible = ref(false); const previewFile = ref<InfoFile | null>(null); const previewSource = ref<{ name: string; platform?: string } | null>(null)
 
 function platformName(value?: string) { return value === 'feishu' ? '飞书' : value === 'wechat' ? '个人微信' : value === 'wecom' ? '企业微信' : value || '未知平台' }
 function formatSize(value?: number) { if (!value) return '-'; if (value < 1024) return `${value} B`; if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`; return `${(value / 1024 / 1024).toFixed(1)} MB` }
 function status(item: KnowledgeLibraryItemDTO) { if (item.content_access_required) return '仅元数据'; return item.content_status || item.processing_status || '已采集' }
+function collectionStatus(item: KnowledgeLibraryItemDTO) {
+  const value = String(item.collection_status || '').toLowerCase()
+  return value === 'active' ? 'collecting' : value || 'not_started'
+}
+function collectionStatusLabel(value?: string) {
+  switch (String(value || '').toLowerCase()) {
+    case 'active':
+    case 'collecting': return '采集中'
+    case 'paused': return '已暂停'
+    case 'detached': return '已解除接入'
+    case 'error': return '异常'
+    case 'missing': return '已不存在'
+    default: return '未开始'
+  }
+}
 function secondary(item: KnowledgeLibraryItemDTO) { if (item.kind === 'conversation') return `${item.conversation_type === 'private' ? '私聊' : '群聊'} · ${item.conversation_name || item.external_conversation_id || ''}`; return item.excerpt || `${item.conversation_name || item.external_conversation_id || ''} · ${item.sent_at ? new Date(item.sent_at).toLocaleString('zh-CN') : ''}` }
 function openItem(item: KnowledgeLibraryItemDTO) {
-  if (item.conversation_id) {
-    void router.push({ path: `/knowledge/${item.platform || 'wechat'}/conversations/${item.conversation_id}`, query: { return: route.fullPath } })
+  if (item.kind === 'file' && item.source_attachment_id) {
+    previewSource.value = item.conversation_name || item.external_conversation_id
+      ? { name: item.conversation_name || item.external_conversation_id || '会话', platform: item.platform }
+      : null
+    previewFile.value = {
+      id: item.source_attachment_id,
+      name: item.file_name || item.title || '附件',
+      type: item.mime_type || item.content_type || 'FILE',
+      mimeType: item.mime_type || '',
+      size: formatSize(item.size_bytes),
+      time: item.sent_at ? new Date(item.sent_at).toLocaleString('zh-CN') : '上传时间未知',
+      uploadedAt: item.created_at ? new Date(item.created_at).toLocaleString('zh-CN') : '',
+      uploader: '',
+      content: '',
+      timestamp: item.created_at,
+      sentAt: item.sent_at ? new Date(item.sent_at).toLocaleString('zh-CN') : '',
+      collectedAt: item.updated_at ? new Date(item.updated_at).toLocaleString('zh-CN') : '',
+      contentAccessRequired: item.content_access_required,
+      documentStatus: item.content_status || item.processing_status || null,
+      parseStatus: item.content_status || item.processing_status,
+      fileSizeBytes: item.size_bytes,
+    }
+    filePreviewVisible.value = true
     return
   }
-  if (item.kind !== 'file' || !item.source_attachment_id) return
-  previewFile.value = {
-    id: item.source_attachment_id,
-    name: item.file_name || item.title || '附件',
-    type: item.mime_type || item.content_type || 'FILE',
-    mimeType: item.mime_type || '',
-    size: formatSize(item.size_bytes),
-    time: item.sent_at ? new Date(item.sent_at).toLocaleString('zh-CN') : '上传时间未知',
-    uploadedAt: item.created_at ? new Date(item.created_at).toLocaleString('zh-CN') : '',
-    uploader: '',
-    content: '',
-    timestamp: item.created_at,
-    sentAt: item.sent_at ? new Date(item.sent_at).toLocaleString('zh-CN') : '',
-    collectedAt: item.updated_at ? new Date(item.updated_at).toLocaleString('zh-CN') : '',
-    contentAccessRequired: item.content_access_required,
-    documentStatus: item.content_status || item.processing_status || null,
-    parseStatus: item.content_status || item.processing_status,
-    fileSizeBytes: item.size_bytes,
+  if (item.conversation_id) {
+    void router.push({ path: `/knowledge/${item.platform || 'wechat'}/conversations/${item.conversation_id}`, query: { return: route.fullPath } })
   }
-  filePreviewVisible.value = true
 }
 async function loadItems() {
   if (!library.value) { await store.ensureLibraries(); if (!library.value) return }
@@ -239,6 +261,11 @@ onMounted(async () => { await store.ensureSources(); await store.ensureLibraries
 .conversation-card { display: flex; min-width: 0; min-height: 190px; flex-direction: column; gap: 10px; padding: 17px; border: 1px solid var(--td-component-stroke); border-radius: 10px; color: var(--td-text-color-primary); background: var(--td-bg-color-container); text-align: left; cursor: pointer; transition: border-color .16s ease, box-shadow .16s ease, transform .16s ease; }
 .conversation-card:hover { border-color: var(--td-brand-color-4); box-shadow: 0 8px 22px rgb(0 0 0 / 7%); transform: translateY(-1px); }
 .conversation-card:focus-visible { outline: 2px solid var(--td-brand-color); outline-offset: 2px; }
+.conversation-card__status { display: inline-flex; align-items: center; gap: 5px; color: var(--td-text-color-placeholder); font-size: 11px; }.conversation-card__status i { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }.conversation-card__status--collecting { color: var(--td-success-color) !important; }.conversation-card__status--paused { color: var(--td-warning-color) !important; }.conversation-card__status--detached, .conversation-card__status--not_started { color: var(--td-text-color-placeholder) !important; }.conversation-card__status--error, .conversation-card__status--missing { color: var(--td-error-color) !important; }
+  .library-file-preview { display: flex; min-width: 0; height: min(calc(100dvh - 150px), 760px); max-height: calc(100dvh - 150px); flex-direction: column; overflow: hidden; }.library-file-preview__source { display: flex; align-items: center; gap: 6px; min-height: 34px; flex: 0 0 34px; padding: 0 16px; color: var(--td-text-color-secondary); font-size: 12px; }.library-file-preview :deep(.attachment-preview) { height: auto; max-height: none; flex: 1; overflow: hidden; }.library-file-preview :deep(.attachment-preview__source), .library-file-preview :deep(.attachment-preview__pdf), .library-file-preview :deep(.attachment-preview pre) { max-height: none; }
+:global(.library-file-preview-dialog.t-dialog) { max-height: calc(100dvh - 32px); margin: 0 auto; overflow: hidden; }.library-file-preview-dialog :deep(.t-dialog__body), :global(.library-file-preview-dialog .t-dialog__body) { min-height: 0; max-height: calc(100dvh - 112px); overflow: hidden; }
+:global(.t-dialog__wrap:has(.library-file-preview-dialog)) { overflow: hidden; }
+:global(.t-dialog__wrap:has(.library-file-preview-dialog) .t-dialog__position) { min-height: 100%; height: 100%; display: flex; align-items: center; justify-content: center; box-sizing: border-box; }
 .conversation-card__head { display: flex; align-items: center; gap: 9px; }.conversation-card__icon { display: inline-grid; flex: 0 0 38px; place-items: center; width: 38px; height: 38px; border-radius: 9px; color: var(--td-brand-color-7); background: var(--td-brand-color-1); }.conversation-card__icon :deep(svg) { width: 19px; height: 19px; }.conversation-card__type { color: var(--td-text-color-secondary); font-size: 11px; }.conversation-card__arrow { width: 15px; margin-left: auto; color: var(--td-text-color-placeholder); }.conversation-card__title { min-width: 0; overflow: hidden; font-size: 16px; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }.conversation-card__subtitle { min-width: 0; overflow: hidden; color: var(--td-text-color-secondary); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }.conversation-card__metrics { display: flex; flex-wrap: wrap; gap: 10px 14px; margin-top: auto; color: var(--td-text-color-secondary); font-size: 11px; }.conversation-card__metrics span { display: inline-flex; align-items: center; gap: 4px; }.conversation-card__metrics :deep(svg) { width: 13px; height: 13px; }.conversation-card__status { color: var(--td-brand-color-7); font-size: 11px; }
 @media (max-width: 700px) { .library-page { padding: 24px 16px 45px; }.library-page__header { align-items: stretch; flex-direction: column; }.library-page__actions { justify-content: flex-start; flex-wrap: wrap; }.library-toolbar { align-items: stretch; flex-wrap: wrap; }.library-toolbar :deep(.t-input) { max-width: none; flex-basis: 100%; }.platform-filter { width: calc(100% - 64px); }.library-toolbar__count { align-self: center; margin-left: auto; }.library-row { align-items: flex-start; }.library-row__meta { display: none; }.library-row__arrow { margin-top: 9px; }.conversation-grid { grid-template-columns: 1fr; } }
 </style>

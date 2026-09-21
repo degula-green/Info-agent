@@ -93,9 +93,15 @@ type fixedClock struct{ now time.Time }
 
 func (c fixedClock) Now() time.Time { return c.now }
 
+const memoryRefreshGrace = 20 * time.Millisecond
+
 type memoryToken struct {
 	sessionID string
 	state     string
+}
+type memoryPrevious struct {
+	hash  string
+	until time.Time
 }
 
 type memoryRefreshStore struct {
@@ -103,6 +109,7 @@ type memoryRefreshStore struct {
 	sessions map[string]domain.RefreshSession
 	current  map[string]string
 	tokens   map[string]memoryToken
+	previous map[string]memoryPrevious
 }
 
 func newMemoryRefreshStore() *memoryRefreshStore {
@@ -110,6 +117,7 @@ func newMemoryRefreshStore() *memoryRefreshStore {
 		sessions: make(map[string]domain.RefreshSession),
 		current:  make(map[string]string),
 		tokens:   make(map[string]memoryToken),
+		previous: make(map[string]memoryPrevious),
 	}
 }
 
@@ -133,6 +141,12 @@ func (s *memoryRefreshStore) FindByTokenHash(_ context.Context, tokenHash string
 	if !ok {
 		return domain.RefreshSession{}, repository.ErrNotFound
 	}
+	if token.state == "used" {
+		previous := s.previous[session.ID]
+		if session.Status == domain.SessionStatusActive && previous.hash == tokenHash && time.Now().Before(previous.until) {
+			return session, nil
+		}
+	}
 	if token.state == "used" || (session.Status == domain.SessionStatusActive && s.current[session.ID] != tokenHash) {
 		session.Status = domain.SessionStatusRevoked
 		s.sessions[session.ID] = session
@@ -152,6 +166,12 @@ func (s *memoryRefreshStore) Rotate(_ context.Context, session domain.RefreshSes
 	if !ok || !sessionOK {
 		return repository.ErrNotFound
 	}
+	if token.state == "used" {
+		previous := s.previous[session.ID]
+		if stored.Status == domain.SessionStatusActive && previous.hash == currentHash && time.Now().Before(previous.until) {
+			return repository.ErrRefreshTokenGrace
+		}
+	}
 	if token.state == "used" || (stored.Status == domain.SessionStatusActive && s.current[session.ID] != currentHash) {
 		stored.Status = domain.SessionStatusRevoked
 		s.sessions[session.ID] = stored
@@ -162,6 +182,7 @@ func (s *memoryRefreshStore) Rotate(_ context.Context, session domain.RefreshSes
 	}
 	token.state = "used"
 	s.tokens[currentHash] = token
+	s.previous[session.ID] = memoryPrevious{hash: currentHash, until: time.Now().Add(memoryRefreshGrace)}
 	s.tokens[nextHash] = memoryToken{sessionID: session.ID, state: "active"}
 	s.current[session.ID] = nextHash
 	return nil
@@ -284,8 +305,9 @@ func TestRefreshRotatesAndReplayRevokesDeviceSession(t *testing.T) {
 	if refreshed.RefreshToken == login.RefreshToken {
 		t.Fatal("refresh token was not rotated")
 	}
+	time.Sleep(memoryRefreshGrace + time.Millisecond)
 	if _, err := fixture.service.Refresh(context.Background(), login.RefreshToken); !errors.Is(err, ErrUnauthenticated) {
-		t.Fatalf("replayed token error = %v", err)
+		t.Fatalf("expired replayed token error = %v", err)
 	}
 	if _, err := fixture.service.Refresh(context.Background(), refreshed.RefreshToken); !errors.Is(err, ErrUnauthenticated) {
 		t.Fatalf("device session remained active after replay: %v", err)
@@ -318,8 +340,8 @@ func TestConcurrentRefreshAllowsOnlyOneRequest(t *testing.T) {
 			rejected++
 		}
 	}
-	if success != 1 || rejected != 1 {
-		t.Fatalf("success=%d rejected=%d", success, rejected)
+	if success != 2 || rejected != 0 {
+		t.Fatalf("concurrent grace behavior: success=%d rejected=%d", success, rejected)
 	}
 }
 

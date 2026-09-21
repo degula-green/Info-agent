@@ -5,7 +5,7 @@
     <div v-else-if="loading" class="attachment-preview__state"><t-icon name="loading" />正在加载预览…</div>
     <div v-else-if="error" class="attachment-preview__state attachment-preview__state--error"><t-icon name="error-circle" />{{ error }}</div>
     <template v-else>
-      <div v-if="isImage" class="attachment-preview__image-box"><img :src="blobUrl" :alt="file.name" /></div>
+      <div v-if="isImage" class="attachment-preview__image-box"><img :src="blobUrl" :alt="file.name" draggable="false" /></div>
       <div v-else-if="isPdf" class="attachment-preview__pdf" aria-label="PDF 只读预览">
         <canvas v-for="page in pdfPages" :key="page" :ref="(element) => setPdfCanvas(element, page)" class="attachment-preview__pdf-page" />
       </div>
@@ -125,14 +125,14 @@ onUnmounted(() => { loadVersion++; release() })
 </script>
 
 <style scoped>
-.attachment-preview { min-height: 220px; padding: 16px; border-radius: 8px; background: var(--td-bg-color-secondarycontainer); }
+.attachment-preview { display: flex; width: 100%; min-height: 0; height: 100%; max-height: 100%; flex-direction: column; padding: 16px; overflow: hidden; box-sizing: border-box; border-radius: 8px; background: var(--td-bg-color-secondarycontainer); }
 .attachment-preview__state { display: grid; min-height: 180px; place-items: center; gap: 8px; color: var(--td-text-color-secondary); }.attachment-preview__state--error { color: var(--td-error-color); }
 .attachment-preview__state--large { align-content:center; text-align:center; }.attachment-preview__state--large svg { width:36px; height:36px; color:var(--td-brand-color); }.attachment-preview__state--large strong { color:var(--td-text-color-primary); }.attachment-preview__state--large span { max-width:52ch; line-height:1.7; }
-.attachment-preview__image-box { display: grid; width: 100%; min-height: 220px; max-height: min(72vh, 760px); margin: auto; place-items: center; overflow: auto; background: #fff; border: 1px solid var(--td-border-level-1-color); border-radius: 8px; }.attachment-preview__image-box img { display: block; width: auto; height: auto; max-width: min(100%, 960px); max-height: min(68vh, 680px); object-fit: contain; }
-.attachment-preview__pdf { display: grid; gap: 14px; max-height: 74vh; overflow: auto; padding: 4px; }.attachment-preview__pdf-page { display: block; width: min(100%, 1040px); height: auto; margin: 0 auto; background: #fff; box-shadow: 0 1px 5px rgb(0 0 0 / 16%); }
-.attachment-preview__source { width: min(100%, 1040px); max-height: 74vh; margin: 0 auto; overflow: auto; padding: 24px; background: #eef0f3; color: var(--td-text-color-primary); box-shadow: 0 1px 5px rgb(0 0 0 / 12%); }
+.attachment-preview__image-box { display: grid; grid-template-rows: minmax(0, 1fr); width: 100%; min-width: 0; min-height: 0; flex: 1 1 0; margin: auto; place-items: center; overflow: hidden; background: #fff; border: 1px solid var(--td-border-level-1-color); border-radius: 8px; }.attachment-preview__image-box img { display: block; width: auto; height: auto; min-width: 0; min-height: 0; max-width: 100%; max-height: 100%; object-fit: contain; user-select: none; -webkit-user-drag: none; pointer-events: none; }
+.attachment-preview__pdf { display: grid; min-height: 0; flex: 1; gap: 14px; overflow: auto; padding: 4px; }.attachment-preview__pdf-page { display: block; width: min(100%, 1040px); height: auto; margin: 0 auto; background: #fff; box-shadow: 0 1px 5px rgb(0 0 0 / 16%); }
+.attachment-preview__source { width: min(100%, 1040px); min-height: 0; flex: 1; margin: 0 auto; overflow: auto; padding: 24px; background: #eef0f3; color: var(--td-text-color-primary); box-shadow: 0 1px 5px rgb(0 0 0 / 12%); box-sizing: border-box; }
 .attachment-preview__word :deep(.docx-wrapper) { padding: 0 !important; background: transparent !important; }.attachment-preview__word :deep(.docx) { margin: 0 auto 18px; }
 .attachment-preview__spreadsheet :deep(table) { margin: 0 auto 18px; }
 .attachment-preview__presentation { display: flex; justify-content: center; }.attachment-preview__presentation :deep(canvas), .attachment-preview__presentation :deep(svg) { max-width: 100%; height: auto; }
-.attachment-preview pre { max-height: 72vh; margin: 0 auto; overflow: auto; color: var(--td-text-color-secondary); font: 13px/1.7 var(--app-font-family); white-space: pre-wrap; }.attachment-preview__unsupported { display: grid; min-height: 260px; place-items: center; align-content: center; gap: 10px; color: var(--td-text-color-secondary); text-align: center; }.attachment-preview__unsupported svg { width: 40px; height: 40px; color: var(--td-brand-color); }.attachment-preview__unsupported strong { color: var(--td-text-color-primary); }.attachment-preview__unsupported span { max-width: 100%; overflow-wrap: anywhere; }
+.attachment-preview pre { min-height: 0; flex: 1; margin: 0 auto; overflow: auto; color: var(--td-text-color-secondary); font: 13px/1.7 var(--app-font-family); white-space: pre-wrap; }.attachment-preview__unsupported { display: grid; min-height: 260px; flex: 1; place-items: center; align-content: center; gap: 10px; color: var(--td-text-color-secondary); text-align: center; }.attachment-preview__unsupported svg { width: 40px; height: 40px; color: var(--td-brand-color); }.attachment-preview__unsupported strong { color: var(--td-text-color-primary); }.attachment-preview__unsupported span { max-width: 100%; overflow-wrap: anywhere; }
 </style>

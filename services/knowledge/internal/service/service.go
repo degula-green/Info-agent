@@ -725,8 +725,13 @@ func (s *Service) token(ctx context.Context, account *domain.ConnectorAccount, f
 	if latestErr != nil {
 		return vault.TokenSet{}, apperror.New("credential_store_unavailable", "cannot read refreshed credentials", 503, true)
 	}
-	if latestOK && latest.AccessToken != token.AccessToken && latest.ExpiresAt.After(s.Now().Add(30*time.Second)) {
-		return latest, nil
+	if latestOK && latest.ExpiresAt.After(s.Now().Add(30*time.Second)) {
+		// A forced refresh may have started after this caller's first read and
+		// completed before it acquired the lock. If the observed token is now
+		// fresh, reuse it instead of consuming the provider refresh token again.
+		if latest.AccessToken != token.AccessToken {
+			return latest, nil
+		}
 	}
 	if !forceRefresh && latestOK && latest.ExpiresAt.After(s.Now().Add(2*time.Minute)) {
 		return latest, nil
@@ -788,15 +793,34 @@ func (s *Service) Discover(ctx context.Context, userID, platformName string) (do
 			if refreshErr != nil {
 				return domain.Discovery{}, refreshErr
 			}
+			token = refreshed
 			conversations, err = s.Feishu.Discover(ctx, refreshed)
 		}
 	} else if platformName == domain.PlatformWechat {
-		discoveries, discoverErr := s.listDiscoveries(ctx, userID, account.ID)
-		if discoverErr != nil {
-			return domain.Discovery{}, discoverErr
+		// The managed collector owns the local WeChat database. Read its current
+		// session list synchronously so a freshly bound account is discoverable
+		// before its background snapshot/report loop has run.
+		managed, discoverErr := s.WechatCollector().Conversations(ctx)
+		if discoverErr == nil {
+			if raw, ok := managed["conversations"].([]any); ok {
+				for _, value := range raw {
+					if item, ok := value.(map[string]any); ok {
+						conversation := domain.AvailableConversation{ExternalID: strings.TrimSpace(fmt.Sprint(item["external_id"])), Name: strings.TrimSpace(fmt.Sprint(item["name"])), ConversationType: strings.TrimSpace(fmt.Sprint(item["conversation_type"]))}
+						if conversation.ExternalID != "" && (conversation.ConversationType == "group" || conversation.ConversationType == "private") {
+							conversations = append(conversations, conversation)
+						}
+					}
+				}
+			}
 		}
-		for _, d := range discoveries {
-			conversations = append(conversations, d.Conversations...)
+		if len(conversations) == 0 {
+			discoveries, snapshotErr := s.listDiscoveries(ctx, userID, account.ID)
+			if snapshotErr != nil {
+				return domain.Discovery{}, snapshotErr
+			}
+			for _, d := range discoveries {
+				conversations = append(conversations, d.Conversations...)
+			}
 		}
 	} else {
 		return domain.Discovery{}, apperror.New("unsupported_platform", "platform is not supported in this release", 400, false)
@@ -1576,7 +1600,8 @@ func (s *Service) GetContact(ctx context.Context, userID, relationID string) (*d
 	for _, conversationID := range matched.ConversationIDs {
 		// Reuse the existing conversation authorization boundary before reading
 		// any messages or attachment references through the contact view.
-		if _, accessErr := s.GetConversation(ctx, userID, conversationID); accessErr != nil {
+		conversation, accessErr := s.GetConversation(ctx, userID, conversationID)
+		if accessErr != nil {
 			return nil, accessErr
 		}
 		messages, messageErr := s.Repo.ListMessages(ctx, conversationID, 200, "")
@@ -1584,9 +1609,16 @@ func (s *Service) GetContact(ctx context.Context, userID, relationID string) (*d
 			return nil, messageErr
 		}
 		for _, message := range messages {
-			if _, ok := identityIDs[message.SenderIdentityID]; ok {
+			belongsToContact := conversation.ConversationType == "private"
+			if !belongsToContact {
+				_, belongsToContact = identityIDs[message.SenderIdentityID]
+			}
+			if !belongsToContact {
+				continue
+			}
+			detail.Attachments = append(detail.Attachments, message.Attachments...)
+			if repository.IsDisplayableTextMessage(message.MessageType, message.Content) {
 				detail.Messages = append(detail.Messages, message)
-				detail.Attachments = append(detail.Attachments, message.Attachments...)
 			}
 		}
 	}
@@ -1847,6 +1879,12 @@ func (s *Service) Heartbeat(ctx context.Context, collectorID, version string) (*
 			return nil, err
 		}
 	}
+	conversation, conversationErr := s.Repo.GetConversation(ctx, collector.ConversationID)
+	if conversationErr == nil && conversation.Status == domain.ConversationPaused && conversation.PauseReason == "no_available_collector" {
+		if err := s.Repo.SetConversationStatus(ctx, conversation.ID, domain.ConversationActive, ""); err != nil {
+			return nil, err
+		}
+	}
 	return collector, nil
 }
 
@@ -1906,7 +1944,7 @@ type LocalUploadTaskInput struct {
 	OrganizationID    string `json:"organization_id,omitempty"`
 }
 
-func (s *Service) CreateLocalUploadTask(ctx context.Context, userID, organizationHint string, input LocalUploadTaskInput) (*domain.Attachment, error) {
+func (s *Service) CreateLocalUploadTask(ctx context.Context, userID, organizationHint string, input LocalUploadTaskInput, authorization ...string) (*domain.Attachment, error) {
 	input.RequestID, input.TraceID, input.UploadDestination = strings.TrimSpace(input.RequestID), strings.TrimSpace(input.TraceID), strings.TrimSpace(input.UploadDestination)
 	input.FileName, input.MIMEType, input.ContentHash = strings.TrimSpace(input.FileName), strings.TrimSpace(input.MIMEType), strings.TrimSpace(input.ContentHash)
 	if input.RequestID == "" || input.TraceID == "" || input.FileName == "" || input.MIMEType == "" || input.ContentHash == "" || input.SizeBytes < 0 {
@@ -1928,13 +1966,26 @@ func (s *Service) CreateLocalUploadTask(ctx context.Context, userID, organizatio
 	org := ""
 	if input.UploadDestination == "organization_file_library" {
 		if s.Core != nil {
-			resolved, err := s.Core.CurrentOrganization(ctx, userID)
-			if err == nil {
-				org = resolved
-			} else if s.Config.AllowDevAuth && strings.TrimSpace(organizationHint) != "" {
+			org = strings.TrimSpace(organizationHint)
+			if org == "" {
+				var current string
+				var resolveErr error
+				if len(authorization) > 0 && strings.TrimSpace(firstAuthorization(authorization)) != "" {
+					resolved, err := s.Core.GetCurrentOrganization(ctx, firstAuthorization(authorization))
+					current, resolveErr = resolved.OrganizationID, err
+				} else {
+					current, resolveErr = s.Core.CurrentOrganization(ctx, userID)
+				}
+				if resolveErr == nil {
+					org = current
+				} else if s.Config.AllowDevAuth && strings.TrimSpace(organizationHint) != "" {
+					org = strings.TrimSpace(organizationHint)
+				} else {
+					return nil, apperror.Wrap("organization_required", "current organization could not be resolved", 409, false, resolveErr)
+				}
+			}
+			if org == "" && s.Config.AllowDevAuth {
 				org = strings.TrimSpace(organizationHint)
-			} else {
-				return nil, apperror.Wrap("organization_required", "current organization could not be resolved", 409, false, err)
 			}
 		} else if s.Config.AllowDevAuth {
 			org = strings.TrimSpace(organizationHint)
@@ -1959,7 +2010,7 @@ func (s *Service) CreateLocalUploadTask(ctx context.Context, userID, organizatio
 	return task, nil
 }
 
-func (s *Service) GetLocalUploadTask(ctx context.Context, userID, requestID string) (*domain.Attachment, error) {
+func (s *Service) GetLocalUploadTask(ctx context.Context, userID, requestID string, authorization ...string) (*domain.Attachment, error) {
 	task, err := s.Repo.GetLocalUploadTask(ctx, strings.TrimSpace(requestID))
 	if err != nil {
 		return nil, err
@@ -1971,11 +2022,19 @@ func (s *Service) GetLocalUploadTask(ctx context.Context, userID, requestID stri
 	} else if task.UploadDestination == "organization_file_library" {
 		allowed := false
 		if s.Core != nil && task.OrganizationID != "" {
-			member, checkErr := s.Core.CheckOrganizationMember(ctx, userID, task.OrganizationID)
-			if checkErr != nil {
-				return nil, apperror.Wrap("core_dependency_unavailable", "organization membership service is unavailable", 503, true, checkErr)
+			if auth := firstAuthorization(authorization); auth != "" {
+				current, checkErr := s.Core.GetCurrentOrganization(ctx, auth)
+				if checkErr != nil {
+					return nil, apperror.Wrap("core_dependency_unavailable", "organization service is unavailable", 503, true, checkErr)
+				}
+				allowed = current.UserID == userID && current.OrganizationID == task.OrganizationID && (current.Status == "" || current.Status == "active")
+			} else {
+				member, checkErr := s.Core.CheckOrganizationMember(ctx, userID, task.OrganizationID)
+				if checkErr != nil {
+					return nil, apperror.Wrap("core_dependency_unavailable", "organization membership service is unavailable", 503, true, checkErr)
+				}
+				allowed = allowed || member
 			}
-			allowed = allowed || member
 		}
 		if !allowed {
 			return nil, apperror.Clone(apperror.ErrForbidden)
@@ -1984,8 +2043,8 @@ func (s *Service) GetLocalUploadTask(ctx context.Context, userID, requestID stri
 	return task, nil
 }
 
-func (s *Service) UploadLocalContent(ctx context.Context, userID, requestID string, reader io.Reader) (*domain.Attachment, error) {
-	task, err := s.GetLocalUploadTask(ctx, userID, requestID)
+func (s *Service) UploadLocalContent(ctx context.Context, userID, requestID string, reader io.Reader, authorization ...string) (*domain.Attachment, error) {
+	task, err := s.GetLocalUploadTask(ctx, userID, requestID, authorization...)
 	if err != nil {
 		return nil, err
 	}
@@ -2153,7 +2212,7 @@ func (s *Service) UploadAttachment(ctx context.Context, collectorID, attachmentI
 	return UploadResult{Attachment: *saved}, nil
 }
 
-func (s *Service) OpenAttachment(ctx context.Context, userID, id string) (*domain.Attachment, io.ReadCloser, error) {
+func (s *Service) OpenAttachment(ctx context.Context, userID, id string, authorization ...string) (*domain.Attachment, io.ReadCloser, error) {
 	attachment, err := s.Repo.GetAttachment(ctx, id)
 	if err != nil {
 		return nil, nil, err
@@ -2166,11 +2225,19 @@ func (s *Service) OpenAttachment(ctx context.Context, userID, id string) (*domai
 		} else if attachment.UploadDestination == "organization_file_library" {
 			allowed := false
 			if s.Core != nil && attachment.OrganizationID != "" {
-				member, checkErr := s.Core.CheckOrganizationMember(ctx, userID, attachment.OrganizationID)
-				if checkErr != nil {
-					return nil, nil, apperror.Wrap("core_dependency_unavailable", "organization membership service is unavailable", 503, true, checkErr)
+				if auth := firstAuthorization(authorization); auth != "" {
+					current, resolveErr := s.Core.GetCurrentOrganization(ctx, auth)
+					if resolveErr != nil {
+						return nil, nil, apperror.Wrap("core_dependency_unavailable", "organization service is unavailable", 503, true, resolveErr)
+					}
+					allowed = current.UserID == userID && current.OrganizationID == attachment.OrganizationID && (current.Status == "" || current.Status == "active")
+				} else {
+					member, checkErr := s.Core.CheckOrganizationMember(ctx, userID, attachment.OrganizationID)
+					if checkErr != nil {
+						return nil, nil, apperror.Wrap("core_dependency_unavailable", "organization membership service is unavailable", 503, true, checkErr)
+					}
+					allowed = member
 				}
-				allowed = allowed || member
 			}
 			if !allowed {
 				return nil, nil, apperror.Clone(apperror.ErrForbidden)

@@ -11,6 +11,7 @@ var (
 	ErrNotFound           = errors.New("repository: not found")
 	ErrEmailAlreadyExists = errors.New("repository: email already exists")
 	ErrRefreshTokenReused = errors.New("repository: refresh token reused")
+	ErrRefreshTokenGrace  = errors.New("repository: refresh token is already being rotated")
 	ErrSessionInactive    = errors.New("repository: refresh session inactive")
 )
 

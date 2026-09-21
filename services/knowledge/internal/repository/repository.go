@@ -176,6 +176,44 @@ func ShouldDiscardMessage(input IngestMessageInput) bool {
 	return discard
 }
 
+// IsDisplayableTextMessage is the shared presentation contract for contact
+// counters and detail views. Provider envelopes and structured payloads remain
+// available for attachment processing, but they are not text messages.
+func IsDisplayableTextMessage(messageType, content string) bool {
+	if strings.EqualFold(strings.TrimSpace(messageType), "system") {
+		return false
+	}
+	value := strings.TrimSpace(content)
+	if value == "" {
+		return false
+	}
+	if colon := strings.IndexByte(value, ':'); colon > 0 && !strings.ContainsAny(value[:colon], " \t\r\n") {
+		prefix := strings.ToLower(value[:colon])
+		if strings.HasPrefix(prefix, "wxid_") || strings.HasPrefix(prefix, "gh_") || strings.HasSuffix(prefix, "@chatroom") {
+			value = strings.TrimSpace(value[colon+1:])
+		}
+	}
+	if value == "" {
+		return false
+	}
+	lower := strings.ToLower(value)
+	if strings.HasPrefix(lower, "<?xml") || strings.HasPrefix(lower, "<msg") || strings.HasPrefix(lower, "<appmsg") {
+		return false
+	}
+	if strings.HasPrefix(value, "{") && strings.HasSuffix(value, "}") {
+		var payload map[string]any
+		if json.Unmarshal([]byte(value), &payload) == nil {
+			return false
+		}
+	}
+	switch strings.ToLower(value) {
+	case "merged and forwarded message", "forwarded message", "file name", "filename", "[无法解析]", "[表情]", "[动画表情]", "<msg>":
+		return false
+	default:
+		return true
+	}
+}
+
 func PrepareRepositoryInput(input IngestMessageInput) (IngestMessageInput, bool, error) {
 	if err := validateIngestInput(input); err != nil {
 		return input, false, err

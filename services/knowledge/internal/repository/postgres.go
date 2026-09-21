@@ -626,14 +626,32 @@ func (s *PostgresStore) ListContactRelations(ctx context.Context, userID, platfo
 }
 
 func (s *PostgresStore) ListContactActivity(ctx context.Context, userID, platform string) ([]ContactActivity, error) {
-	query := `SELECT cr.external_identity_id::text,cm.conversation_ingestion_id::text,COUNT(DISTINCT m.id),COUNT(DISTINCT a.id)
+	// Private messages can be stored with the connector/app identity as the
+	// sender (for example, Feishu returns the bot's cli_ identity), while the
+	// contact relation points at the other participant. For private chats the
+	// conversation itself is therefore the activity boundary; group chats keep
+	// the sender-identity boundary so one contact cannot claim the whole group.
+	query := `SELECT cr.external_identity_id::text,m.conversation_ingestion_id::text,
+		COUNT(DISTINCT m.id) FILTER (WHERE m.message_type='text' AND btrim(COALESCE(m.normalized_content,'')) <> '' AND btrim(COALESCE(m.normalized_content,'')) !~* '^(<\?xml|<msg|<appmsg|\{)'),
+		COUNT(DISTINCT a.id)
 		FROM knowledge.contact_relations cr
 		JOIN knowledge.external_identities ei ON ei.id=cr.external_identity_id
 		JOIN knowledge.connector_accounts ca ON ca.id=cr.connector_account_id
-		JOIN knowledge.conversation_memberships cm ON cm.external_identity_id=cr.external_identity_id AND cm.status='active'
-		JOIN knowledge.conversation_ingestions ci ON ci.id=cm.conversation_ingestion_id
+		JOIN knowledge.conversation_ingestions ci ON (
+			(ci.conversation_type='private' AND ci.platform=ei.platform AND ci.platform_workspace_key IS NOT DISTINCT FROM ei.platform_workspace_key AND (
+				ci.external_conversation_id=ei.external_user_id
+				OR EXISTS (SELECT 1 FROM knowledge.conversation_memberships private_member WHERE private_member.conversation_ingestion_id=ci.id AND private_member.external_identity_id=cr.external_identity_id AND private_member.status='active')
+			))
+			OR EXISTS (SELECT 1 FROM knowledge.messages sender_message WHERE sender_message.conversation_ingestion_id=ci.id AND sender_message.sender_identity_id=cr.external_identity_id)
+		)
+		JOIN knowledge.messages m ON m.conversation_ingestion_id=ci.id AND (
+			(ci.conversation_type='private' AND ci.platform=ei.platform AND ci.platform_workspace_key IS NOT DISTINCT FROM ei.platform_workspace_key AND (
+				ci.external_conversation_id=ei.external_user_id
+				OR EXISTS (SELECT 1 FROM knowledge.conversation_memberships private_member WHERE private_member.conversation_ingestion_id=ci.id AND private_member.external_identity_id=cr.external_identity_id AND private_member.status='active')
+			))
+			OR m.sender_identity_id=cr.external_identity_id
+		)
 		LEFT JOIN knowledge.conversation_collectors cc ON cc.conversation_ingestion_id=ci.id AND cc.collector_user_id=$1 AND cc.status<>'removed'
-		LEFT JOIN knowledge.messages m ON m.conversation_ingestion_id=ci.id AND m.sender_identity_id=cr.external_identity_id
 		LEFT JOIN knowledge.attachments a ON a.message_id=m.id
 		WHERE cr.owner_user_id=$1 AND cr.status='active' AND ca.status<>'revoked' AND (ci.owner_user_id=$1 OR cc.id IS NOT NULL)`
 	args := []any{userID}
@@ -641,7 +659,7 @@ func (s *PostgresStore) ListContactActivity(ctx context.Context, userID, platfor
 		query += ` AND ei.platform=$2`
 		args = append(args, platform)
 	}
-	query += ` GROUP BY cr.external_identity_id,cm.conversation_ingestion_id`
+	query += ` GROUP BY cr.external_identity_id,m.conversation_ingestion_id`
 	rows, err := s.pool.Query(ctx, query, args...)
 	if err != nil {
 		return nil, dbError(err)
@@ -1027,7 +1045,7 @@ func (s *PostgresStore) ListConversations(ctx context.Context, userID, platformN
 }
 
 func (s *PostgresStore) populateConversationCounts(ctx context.Context, c *domain.ConversationIngestion) error {
-	if err := s.pool.QueryRow(ctx, `SELECT COUNT(*) FROM knowledge.messages m WHERE m.conversation_ingestion_id=$1 AND btrim(COALESCE(m.normalized_content,'')) <> '' AND NOT (m.message_type IN ('image','file') AND EXISTS (SELECT 1 FROM knowledge.attachments a WHERE a.message_id=m.id))`, c.ID).Scan(&c.MessageCount); err != nil {
+	if err := s.pool.QueryRow(ctx, `SELECT COUNT(*) FROM knowledge.messages m WHERE m.conversation_ingestion_id=$1 AND m.message_type<>'system' AND btrim(COALESCE(m.normalized_content,'')) <> ''`, c.ID).Scan(&c.MessageCount); err != nil {
 		return dbError(err)
 	}
 	if err := s.pool.QueryRow(ctx, `SELECT COUNT(*) FROM knowledge.attachments WHERE conversation_ingestion_id=$1`, c.ID).Scan(&c.AttachmentCount); err != nil {
@@ -1822,7 +1840,11 @@ func (s *PostgresStore) AdvanceCursor(ctx context.Context, collectorID, cursor s
 	return dbError(tx.Commit(ctx))
 }
 
-const attachmentColumns = `id::text,COALESCE(conversation_ingestion_id::text,''),COALESCE(message_id::text,''),COALESCE(external_attachment_id,''),file_name,COALESCE(mime_type,''),size_bytes,COALESCE(object_ref,''),COALESCE(content_hash,''),content_version,content_status,access_scope,content_access_required,COALESCE(preview_capability,''),COALESCE(last_error,''),created_at,updated_at,sensitive,classification_status`
+// attachmentColumns is shared by platform attachments and local-upload
+// records. Older installations allowed several of these fields to be NULL;
+// keep the read projection total so one legacy row cannot make the content
+// endpoint fail while scanning into the domain's non-null Go fields.
+const attachmentColumns = `id::text,COALESCE(conversation_ingestion_id::text,''),COALESCE(message_id::text,''),COALESCE(external_attachment_id,''),COALESCE(file_name,''),COALESCE(mime_type,''),COALESCE(size_bytes,0),COALESCE(object_ref,''),COALESCE(content_hash,''),COALESCE(content_version,1),COALESCE(content_status,'pending'),COALESCE(access_scope,'conversation_members'),COALESCE(content_access_required,FALSE),COALESCE(preview_capability,''),COALESCE(last_error,''),COALESCE(created_at,CURRENT_TIMESTAMP),COALESCE(updated_at,CURRENT_TIMESTAMP),COALESCE(sensitive,FALSE),COALESCE(classification_status,'pending')`
 
 func scanAttachment(row rowScanner) (*domain.Attachment, error) {
 	var a domain.Attachment
@@ -1834,7 +1856,20 @@ func (s *PostgresStore) GetAttachment(ctx context.Context, id string) (*domain.A
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, apperror.New("attachment_not_found", "attachment not found", 404, false)
 	}
-	return a, dbError(err)
+	if err != nil {
+		return nil, dbError(err)
+	}
+	// Local uploads share the attachment table with platform files but do not
+	// have a conversation_ingestion_id. Hydrate their ownership fields before
+	// the service performs the content authorization check; otherwise a local
+	// attachment is mistaken for a conversation attachment and an empty UUID is
+	// sent to GetConversation.
+	if a.ConversationID == "" {
+		if metadataErr := s.pool.QueryRow(ctx, `SELECT COALESCE(request_id,''),COALESCE(uploaded_by_user_id::text,''),COALESCE(upload_destination,''),COALESCE(organization_id::text,'') FROM knowledge.attachments WHERE id=$1`, id).Scan(&a.RequestID, &a.UploadedByUserID, &a.UploadDestination, &a.OrganizationID); metadataErr != nil {
+			return nil, dbError(metadataErr)
+		}
+	}
+	return a, nil
 }
 func (s *PostgresStore) CompleteAttachment(ctx context.Context, id, objectRef, contentHash string, size int64, status string) (*domain.Attachment, error) {
 	tx, err := s.pool.Begin(ctx)
@@ -2376,7 +2411,7 @@ func (s *PostgresStore) ListKnowledgeLibraries(ctx context.Context, userID, orga
 	// conversation total when they are projected into the same directory.
 	for _, definition := range definitions {
 		var conversationCount int
-		query := `SELECT COUNT(*) FROM knowledge.conversation_ingestions WHERE status IN ('active','paused') AND `
+		query := `SELECT COUNT(*) FROM knowledge.conversation_ingestions WHERE status IN ('active','paused','detached','error') AND `
 		args := []any{}
 		if definition.scope == "private" {
 			query += `owner_user_id=$1 AND conversation_type='private'`
@@ -2453,7 +2488,7 @@ func (s *PostgresStore) ListKnowledgeLibraryItems(ctx context.Context, libraryID
 		// in its first knowledge item. Private conversations must therefore be
 		// visible immediately after attach, even before the collector has
 		// produced a message or attachment.
-		conversationConditions := []string{"ci.status IN ('active','paused')"}
+		conversationConditions := []string{"ci.status IN ('active','paused','detached','error')"}
 		conversationArgs := []any{}
 		conversationAdd := func(value any) string {
 			conversationArgs = append(conversationArgs, value)
@@ -2483,7 +2518,20 @@ func (s *PostgresStore) ListKnowledgeLibraryItems(ctx context.Context, libraryID
 			needle := "%" + strings.ToLower(queryText) + "%"
 			conversationConditions = append(conversationConditions, "(LOWER(COALESCE(ci.name,'')) LIKE "+conversationAdd(needle)+" OR LOWER(COALESCE(ci.external_conversation_id,'')) LIKE "+conversationAdd(needle)+" OR LOWER(COALESCE(m.normalized_content,'')) LIKE "+conversationAdd(needle)+" OR LOWER(COALESCE(a.file_name,'')) LIKE "+conversationAdd(needle)+")")
 		}
-		conversationSQL := `SELECT ci.id::text,COALESCE(ci.platform,''),COALESCE(ci.external_conversation_id,''),COALESCE(ci.conversation_type,''),COALESCE(ci.name,''),ci.created_at,GREATEST(COALESCE(ci.updated_at,ci.created_at),COALESCE(MAX(ki.updated_at),ci.created_at)),COUNT(DISTINCT CASE WHEN ki.source_message_id IS NOT NULL AND ki.source_attachment_id IS NULL THEN ki.source_message_id END),COUNT(DISTINCT ki.source_attachment_id), (SELECT COUNT(*) FROM knowledge.conversation_memberships cm WHERE cm.conversation_ingestion_id=ci.id AND cm.status='active') FROM knowledge.conversation_ingestions ci LEFT JOIN knowledge.knowledge_items ki ON ki.conversation_ingestion_id=ci.id AND ` + itemJoinFilter + ` LEFT JOIN knowledge.messages m ON m.id=ki.source_message_id LEFT JOIN knowledge.attachments a ON a.id=ki.source_attachment_id WHERE ` + strings.Join(conversationConditions, " AND ") + ` GROUP BY ci.id,ci.platform,ci.external_conversation_id,ci.conversation_type,ci.name,ci.created_at,ci.updated_at ORDER BY GREATEST(COALESCE(ci.updated_at,ci.created_at),COALESCE(MAX(ki.updated_at),ci.created_at)) DESC LIMIT ` + strconv.Itoa(limit)
+		// Conversation cards must use the same source-of-truth as the detail
+		// view. Counting knowledge_items made a newly ingested message disappear
+		// until the asynchronous indexing pipeline caught up, and also counted
+		// provider attachment envelopes as messages. Use the raw message/attachment
+		// tables for private and group conversations; shared-private cards are
+		// restricted to the explicitly shared source rows.
+		messageCountExpr := `(SELECT COUNT(*) FROM knowledge.messages cm WHERE cm.conversation_ingestion_id=ci.id AND cm.message_type<>'system' AND btrim(COALESCE(cm.normalized_content,'')) <> '')`
+		attachmentCountExpr := `(SELECT COUNT(*) FROM knowledge.attachments ca WHERE ca.conversation_ingestion_id=ci.id)`
+		if strings.HasPrefix(libraryID, orgSharedLibraryPrefix) {
+			sharedOrgArg := conversationAdd(organizationID)
+			messageCountExpr = `(SELECT COUNT(DISTINCT shared.source_message_id) FROM knowledge.knowledge_items shared JOIN knowledge.messages cm ON cm.id=shared.source_message_id WHERE shared.conversation_ingestion_id=ci.id AND shared.source_type='shared_private_item' AND shared.organization_id=` + sharedOrgArg + ` AND shared.lifecycle_status='active' AND cm.message_type<>'system' AND btrim(COALESCE(cm.normalized_content,'')) <> '')`
+			attachmentCountExpr = `(SELECT COUNT(DISTINCT shared.source_attachment_id) FROM knowledge.knowledge_items shared WHERE shared.conversation_ingestion_id=ci.id AND shared.source_type='shared_private_item' AND shared.organization_id=` + sharedOrgArg + ` AND shared.lifecycle_status='active' AND shared.source_attachment_id IS NOT NULL)`
+		}
+		conversationSQL := `SELECT ci.id::text,COALESCE(ci.platform,''),COALESCE(ci.external_conversation_id,''),COALESCE(ci.conversation_type,''),COALESCE(ci.name,''),CASE WHEN ci.status='active' AND EXISTS (SELECT 1 FROM knowledge.conversation_collectors cc_error WHERE cc_error.conversation_ingestion_id=ci.id AND cc_error.status='unavailable') AND NOT EXISTS (SELECT 1 FROM knowledge.conversation_collectors cc_active WHERE cc_active.conversation_ingestion_id=ci.id AND cc_active.status='active') THEN 'error' WHEN ci.status IN ('active','paused','detached','error') THEN ci.status ELSE 'not_started' END,ci.created_at,GREATEST(COALESCE(ci.updated_at,ci.created_at),COALESCE(MAX(ki.updated_at),ci.created_at)),` + messageCountExpr + `,` + attachmentCountExpr + `,(SELECT COUNT(*) FROM knowledge.conversation_memberships cmem WHERE cmem.conversation_ingestion_id=ci.id AND cmem.status='active') FROM knowledge.conversation_ingestions ci LEFT JOIN knowledge.knowledge_items ki ON ki.conversation_ingestion_id=ci.id AND ` + itemJoinFilter + ` LEFT JOIN knowledge.messages m ON m.id=ki.source_message_id LEFT JOIN knowledge.attachments a ON a.id=ki.source_attachment_id WHERE ` + strings.Join(conversationConditions, " AND ") + ` GROUP BY ci.id,ci.platform,ci.external_conversation_id,ci.conversation_type,ci.name,ci.status,ci.created_at,ci.updated_at ORDER BY GREATEST(COALESCE(ci.updated_at,ci.created_at),COALESCE(MAX(ki.updated_at),ci.created_at)) DESC LIMIT ` + strconv.Itoa(limit)
 		rows, err := s.pool.Query(ctx, conversationSQL, conversationArgs...)
 		if err != nil {
 			return nil, dbError(err)
@@ -2493,7 +2541,7 @@ func (s *PostgresStore) ListKnowledgeLibraryItems(ctx context.Context, libraryID
 		for rows.Next() {
 			var item domain.KnowledgeLibraryItem
 			var platformValue, externalConversationID, conversationType, conversationName string
-			if err := rows.Scan(&item.ID, &platformValue, &externalConversationID, &conversationType, &conversationName, &item.CreatedAt, &item.UpdatedAt, &item.MessageCount, &item.AttachmentCount, &item.MemberCount); err != nil {
+			if err := rows.Scan(&item.ID, &platformValue, &externalConversationID, &conversationType, &conversationName, &item.CollectionStatus, &item.CreatedAt, &item.UpdatedAt, &item.MessageCount, &item.AttachmentCount, &item.MemberCount); err != nil {
 				return nil, dbError(err)
 			}
 			item.LibraryID = libraryID
@@ -2581,7 +2629,7 @@ func (s *PostgresStore) MarkOutboxFailed(ctx context.Context, id, failure string
 	return dbError(err)
 }
 func localAttachmentQuery() string {
-	return `id::text,COALESCE(request_id,''),COALESCE(uploaded_by_user_id::text,''),COALESCE(upload_destination,''),COALESCE(organization_id::text,''),file_name,mime_type,size_bytes,COALESCE(object_ref,''),COALESCE(content_hash,''),content_version,metadata_access_scope,content_access_scope,content_access_required,upload_status,COALESCE(upload_error,''),processing_status,created_at,updated_at`
+	return `id::text,COALESCE(request_id,''),COALESCE(uploaded_by_user_id::text,''),COALESCE(upload_destination,''),COALESCE(organization_id::text,''),COALESCE(file_name,''),COALESCE(mime_type,''),COALESCE(size_bytes,0),COALESCE(object_ref,''),COALESCE(content_hash,''),COALESCE(content_version,1),COALESCE(metadata_access_scope,''),COALESCE(content_access_scope,''),COALESCE(content_access_required,FALSE),COALESCE(upload_status,'pending'),COALESCE(upload_error,''),COALESCE(processing_status,'pending'),COALESCE(created_at,CURRENT_TIMESTAMP),COALESCE(updated_at,CURRENT_TIMESTAMP)`
 }
 
 func scanLocalAttachment(row rowScanner) (*domain.Attachment, error) {
@@ -2614,6 +2662,9 @@ func (s *PostgresStore) CreateLocalUploadTask(ctx context.Context, input domain.
 	id, resourceID, baseID := uuid.NewString(), uuid.NewString(), uuid.NewString()
 	scope, access, baseType, baseScope := "private", "owner_only", "private_local", "private"
 	var owner any = input.UserID
+	// Keep the authenticated uploader on organization uploads even though the
+	// organization-scoped knowledge item itself has no owner.
+	var uploadedBy any = input.UserID
 	var org any
 	if input.UploadDestination == "organization_file_library" {
 		scope, access, baseType, baseScope, owner, org = "organization", "organization_members", "organization_files", "organization", nil, input.OrganizationID
@@ -2621,16 +2672,23 @@ func (s *PostgresStore) CreateLocalUploadTask(ctx context.Context, input domain.
 	if _, err = tx.Exec(ctx, `INSERT INTO knowledge.knowledge_bases (id,knowledge_scope,base_type,name,owner_user_id,organization_id) VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT DO NOTHING`, baseID, baseScope, baseType, baseType, owner, org); err != nil {
 		return nil, dbError(err)
 	}
-	if err = tx.QueryRow(ctx, `SELECT id::text FROM knowledge.knowledge_bases WHERE base_type=$1 AND ((owner_user_id=$2 AND $2 IS NOT NULL) OR (organization_id=$3 AND $3 IS NOT NULL)) LIMIT 1`, baseType, owner, org).Scan(&baseID); err != nil {
+	var baseQuery string
+	var baseArgs []any
+	if input.UploadDestination == "organization_file_library" {
+		baseQuery, baseArgs = `SELECT id::text FROM knowledge.knowledge_bases WHERE base_type=$1 AND organization_id=$2 LIMIT 1`, []any{baseType, org}
+	} else {
+		baseQuery, baseArgs = `SELECT id::text FROM knowledge.knowledge_bases WHERE base_type=$1 AND owner_user_id=$2 LIMIT 1`, []any{baseType, owner}
+	}
+	if err = tx.QueryRow(ctx, baseQuery, baseArgs...).Scan(&baseID); err != nil {
 		return nil, dbError(err)
 	}
 	placeholder := "pending/" + id
-	if err = tx.QueryRow(ctx, `INSERT INTO knowledge.attachments (id,request_id,uploaded_by_user_id,upload_destination,organization_id,file_name,mime_type,size_bytes,object_ref,content_hash,content_version,metadata_access_scope,content_access_scope,content_access_required,upload_status,processing_status) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,1,$11,$11,false,'pending','pending') RETURNING `+localAttachmentQuery(), id, input.RequestID, owner, input.UploadDestination, org, input.FileName, input.MIMEType, input.SizeBytes, placeholder, input.ContentHash, access).Scan(&existing.ID, &existing.RequestID, &existing.UploadedByUserID, &existing.UploadDestination, &existing.OrganizationID, &existing.FileName, &existing.MIMEType, &existing.SizeBytes, &existing.ObjectRef, &existing.ContentHash, &existing.ContentVersion, &existing.MetadataAccessScope, &existing.ContentAccessScope, &existing.ContentAccessRequired, &existing.UploadStatus, &existing.UploadError, &existing.ProcessingStatus, &existing.CreatedAt, &existing.UpdatedAt); err != nil {
+	if err = tx.QueryRow(ctx, `INSERT INTO knowledge.attachments (id,request_id,uploaded_by_user_id,upload_destination,organization_id,file_name,mime_type,size_bytes,object_ref,content_hash,content_version,metadata_access_scope,content_access_scope,content_access_required,upload_status,processing_status) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,1,$11,$11,false,'pending','pending') RETURNING `+localAttachmentQuery(), id, input.RequestID, uploadedBy, input.UploadDestination, org, input.FileName, input.MIMEType, input.SizeBytes, placeholder, input.ContentHash, access).Scan(&existing.ID, &existing.RequestID, &existing.UploadedByUserID, &existing.UploadDestination, &existing.OrganizationID, &existing.FileName, &existing.MIMEType, &existing.SizeBytes, &existing.ObjectRef, &existing.ContentHash, &existing.ContentVersion, &existing.MetadataAccessScope, &existing.ContentAccessScope, &existing.ContentAccessRequired, &existing.UploadStatus, &existing.UploadError, &existing.ProcessingStatus, &existing.CreatedAt, &existing.UpdatedAt); err != nil {
 		return nil, dbError(err)
 	}
 	existing.AccessScope = existing.ContentAccessScope
 	existing.ResourceID = resourceID
-	if _, err = tx.Exec(ctx, `INSERT INTO knowledge.knowledge_items (id,knowledge_base_id,knowledge_scope,access_scope,owner_user_id,organization_id,source_type,source_attachment_id,content_type,content_ref,content_hash,content_version,content_visibility,security_status,content_saved,ownership_ready,security_ready,permission_ready,acl_version,acl_sync_status,processing_status,lifecycle_status) VALUES ($1,$2,$3,$4,$5,$6,'local_upload',$7,'file',$8,$9,1,'display','not_required',false,true,true,false,0,'pending','pending','pending')`, resourceID, baseID, scope, access, owner, org, existing.ID, placeholder, input.ContentHash); err != nil {
+	if _, err = tx.Exec(ctx, `INSERT INTO knowledge.knowledge_items (id,knowledge_base_id,knowledge_scope,access_scope,owner_user_id,organization_id,source_type,source_attachment_id,content_type,content_ref,content_hash,content_version,content_visibility,security_status,content_saved,ownership_ready,security_ready,permission_ready,acl_version,acl_sync_status,processing_status,lifecycle_status) VALUES ($1,$2,$3,$4,$5,$6,'local_upload',$7,'file',$8,$9,1,'original','not_required',false,true,true,false,0,'pending','pending','active')`, resourceID, baseID, scope, access, owner, org, existing.ID, placeholder, input.ContentHash); err != nil {
 		return nil, dbError(err)
 	}
 	if err = tx.Commit(ctx); err != nil {

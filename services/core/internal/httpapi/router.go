@@ -54,6 +54,10 @@ func newRouter(authentication Authentication, cookies RefreshCookieConfig, logge
 		org.DELETE("/:organization_id/members/:user_id/roles/:role_code", orgHandler.RevokeRole)
 		inv := router.Group("/organization-invitations", RequireAuthentication(authentication, logger))
 		inv.POST("/:token/accept", orgHandler.AcceptInvitation)
+		if authorization != nil {
+			internalOrganizationHandler := NewInternalOrganizationHandler(organization, authorization.KnowledgeToken)
+			router.GET("/internal/organizations/:organization_id/members/:user_id/check", internalOrganizationHandler.CheckMember)
+		}
 	}
 	if authorization != nil && authorization.Provider != nil {
 		authzHandler := NewAuthorizationHandler(authorization.Provider, authorization.Token)

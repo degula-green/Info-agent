@@ -15,7 +15,8 @@ import (
 )
 
 const (
-	defaultKeyPrefix = "info-agent:auth"
+	defaultKeyPrefix     = "info-agent:auth"
+	defaultRotationGrace = 5 * time.Second
 
 	createSessionLua = `
 if redis.call('EXISTS', KEYS[1]) == 1 or redis.call('EXISTS', KEYS[2]) == 1 then
@@ -24,6 +25,8 @@ end
 redis.call('HSET', KEYS[1],
   'user_id', ARGV[1],
   'current_hash', ARGV[2],
+  'previous_hash', '',
+  'previous_until', '0',
   'status', 'active',
   'created_at', ARGV[3],
   'expires_at', ARGV[4])
@@ -44,6 +47,12 @@ if not status then
   return cjson.encode({code = 'not_found'})
 end
 local current_hash = redis.call('HGET', session_key, 'current_hash')
+local previous_hash = redis.call('HGET', session_key, 'previous_hash')
+local previous_until = tonumber(redis.call('HGET', session_key, 'previous_until') or '0')
+local now_ms = tonumber(ARGV[4])
+if state == 'used' and status == 'active' and previous_hash == ARGV[2] and previous_until > now_ms then
+  return cjson.encode({code = 'ok', session_id = sid, user_id = redis.call('HGET', session_key, 'user_id'), created_at = tonumber(redis.call('HGET', session_key, 'created_at')), expires_at = tonumber(redis.call('HGET', session_key, 'expires_at'))})
+end
 if state == 'used' or (status == 'active' and current_hash ~= ARGV[2]) then
   redis.call('HSET', session_key, 'status', 'revoked')
   if current_hash then
@@ -77,6 +86,12 @@ if not status then
   return 'not_found'
 end
 local current_hash = redis.call('HGET', KEYS[3], 'current_hash')
+local previous_hash = redis.call('HGET', KEYS[3], 'previous_hash')
+local previous_until = tonumber(redis.call('HGET', KEYS[3], 'previous_until') or '0')
+local now_ms = tonumber(ARGV[5])
+if state == 'used' and status == 'active' and previous_hash == ARGV[1] and previous_until > now_ms then
+  return 'grace'
+end
 if state == 'used' or (status == 'active' and current_hash ~= ARGV[1]) then
   redis.call('HSET', KEYS[3], 'status', 'revoked')
   if current_hash then
@@ -101,7 +116,7 @@ end
 redis.call('HSET', KEYS[1], 'state', 'used')
 redis.call('HSET', KEYS[2], 'session_id', sid, 'state', 'active')
 redis.call('PEXPIRE', KEYS[2], ttl)
-redis.call('HSET', KEYS[3], 'current_hash', ARGV[2])
+redis.call('HSET', KEYS[3], 'previous_hash', ARGV[1], 'previous_until', ARGV[5] + ARGV[6], 'current_hash', ARGV[2])
 return 'ok'`
 
 	revokeSessionLua = `
@@ -128,6 +143,7 @@ type RefreshSessionStore struct {
 	client        *redis.Client
 	sessionPrefix string
 	tokenPrefix   string
+	rotationGrace time.Duration
 }
 
 type findSessionResult struct {
@@ -138,15 +154,20 @@ type findSessionResult struct {
 	ExpiresAt int64  `json:"expires_at"`
 }
 
-func NewRefreshSessionStore(client *redis.Client, keyPrefix string) *RefreshSessionStore {
+func NewRefreshSessionStore(client *redis.Client, keyPrefix string, grace ...time.Duration) *RefreshSessionStore {
 	prefix := strings.TrimSuffix(strings.TrimSpace(keyPrefix), ":")
 	if prefix == "" {
 		prefix = defaultKeyPrefix
+	}
+	rotationGrace := defaultRotationGrace
+	if len(grace) > 0 && grace[0] > 0 {
+		rotationGrace = grace[0]
 	}
 	return &RefreshSessionStore{
 		client:        client,
 		sessionPrefix: prefix + ":refresh:session:",
 		tokenPrefix:   prefix + ":refresh:token:",
+		rotationGrace: rotationGrace,
 	}
 }
 
@@ -179,6 +200,7 @@ func (s *RefreshSessionStore) FindByTokenHash(ctx context.Context, tokenHash str
 		s.sessionPrefix,
 		tokenHash,
 		s.tokenPrefix,
+		time.Now().UnixMilli(),
 	).Text()
 	if err != nil {
 		return domain.RefreshSession{}, fmt.Errorf("find Redis refresh session: %w", err)
@@ -214,6 +236,8 @@ func (s *RefreshSessionStore) Rotate(ctx context.Context, session domain.Refresh
 		nextTokenHash,
 		s.tokenPrefix,
 		session.ID,
+		time.Now().UnixMilli(),
+		s.rotationGrace.Milliseconds(),
 	).Text()
 	if err != nil {
 		return fmt.Errorf("rotate Redis refresh token: %w", err)
@@ -227,6 +251,8 @@ func (s *RefreshSessionStore) Rotate(ctx context.Context, session domain.Refresh
 		return repository.ErrSessionInactive
 	case "reused":
 		return repository.ErrRefreshTokenReused
+	case "grace":
+		return repository.ErrRefreshTokenGrace
 	default:
 		return fmt.Errorf("rotate Redis refresh token: unknown result %q", result)
 	}

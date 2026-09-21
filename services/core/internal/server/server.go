@@ -84,7 +84,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Server, 
 
 	authRepository := postgres.NewAuthRepository(pool)
 	organizationRepository := postgres.NewOrganizationRepository(pool)
-	sessionStore := redisstore.NewRefreshSessionStore(redisClient, cfg.RedisKeyPrefix)
+	sessionStore := redisstore.NewRefreshSessionStore(redisClient, cfg.RedisKeyPrefix, cfg.RefreshRotationGrace)
 	authService, err := application.NewAuthService(
 		authRepository,
 		authRepository,

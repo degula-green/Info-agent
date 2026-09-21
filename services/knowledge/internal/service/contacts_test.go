@@ -131,6 +131,120 @@ func TestListContactsKeepsUnmappedPlatformsSeparate(t *testing.T) {
 	}
 }
 
+func TestListContactsCountsPrivateMessagesWithoutMembershipSnapshot(t *testing.T) {
+	repo := repository.NewMemoryStore()
+	ctx := context.Background()
+	now := time.Now().UTC()
+	account, err := repo.SaveConnector(ctx, domain.ConnectorAccount{OwnerUserID: "owner", Platform: domain.PlatformWechat, ExternalAccountID: "wx", Status: domain.ConnectorActive})
+	if err != nil {
+		t.Fatal(err)
+	}
+	identityID, err := repo.UpsertExternalIdentity(ctx, repository.ExternalIdentityInput{Platform: domain.PlatformWechat, ExternalUserID: "wx-contact", DisplayName: "联系人"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	conversation, err := repo.AttachConversation(ctx, repository.AttachInput{UserID: "owner", Platform: domain.PlatformWechat, ExternalConversationID: "wx-private", ConversationType: "private", RequestedStartAt: &now, PrimaryConnectorID: account.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := repository.IngestMessageInput{CollectorID: conversation.Collectors[0].ID, ExternalConversationID: "wx-private", ExternalMessageID: "message-1", SenderExternalID: "wx-contact", SenderDisplayName: "联系人", MessageType: "text", Content: "已采集", ContentHash: hashForTest("已采集"), SentAt: now}
+	input.PayloadHash, err = repository.CalculatePayloadHash(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = repo.IngestMessage(ctx, input); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = repo.UpsertContactRelation(ctx, repository.ContactRelationInput{OwnerUserID: "owner", ConnectorID: account.ID, ExternalIdentityID: identityID}); err != nil {
+		t.Fatal(err)
+	}
+	contacts, err := (&Service{Repo: repo}).ListContacts(ctx, "owner", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(contacts) != 1 || contacts[0].MessageCount != 1 || len(contacts[0].ConversationIDs) != 1 || contacts[0].ConversationIDs[0] != conversation.ID {
+		t.Fatalf("private activity without membership was not counted: %+v", contacts)
+	}
+}
+
+func TestListContactsCountsBothParticipantsForPrivateConnectorIdentity(t *testing.T) {
+	repo := repository.NewMemoryStore()
+	ctx := context.Background()
+	now := time.Now().UTC()
+	account, err := repo.SaveConnector(ctx, domain.ConnectorAccount{OwnerUserID: "owner", Platform: domain.PlatformFeishu, WorkspaceKey: "tenant", ExternalAccountID: "fs", Status: domain.ConnectorActive})
+	if err != nil {
+		t.Fatal(err)
+	}
+	contactID, err := repo.UpsertExternalIdentity(ctx, repository.ExternalIdentityInput{Platform: domain.PlatformFeishu, WorkspaceKey: "tenant", ExternalUserID: "ou-contact", DisplayName: "飞书联系人", MappedUserID: "owner"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	conversation, err := repo.AttachConversation(ctx, repository.AttachInput{UserID: "owner", Platform: domain.PlatformFeishu, WorkspaceKey: "tenant", ExternalConversationID: "ou-contact", ConversationType: "private", RequestedStartAt: &now, PrimaryConnectorID: account.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, sender := range []string{"cli_app", "ou-contact", "cli_app"} {
+		content := "飞书私聊消息" + string(rune('0'+i))
+		input := repository.IngestMessageInput{CollectorID: conversation.Collectors[0].ID, ExternalConversationID: "ou-contact", ExternalMessageID: "feishu-message-" + string(rune('0'+i)), SenderExternalID: sender, MessageType: "text", Content: content, ContentHash: hashForTest(content), SentAt: now.Add(time.Duration(i) * time.Second)}
+		input.PayloadHash, err = repository.CalculatePayloadHash(input)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err = repo.IngestMessage(ctx, input); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err = repo.UpsertContactRelation(ctx, repository.ContactRelationInput{OwnerUserID: "owner", ConnectorID: account.ID, ExternalIdentityID: contactID}); err != nil {
+		t.Fatal(err)
+	}
+	contacts, err := (&Service{Repo: repo}).ListContacts(ctx, "owner", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(contacts) != 1 || contacts[0].MessageCount != 3 || len(contacts[0].ConversationIDs) != 1 {
+		t.Fatalf("private connector identity messages were not counted: %+v", contacts)
+	}
+}
+
+func TestListContactsCountsPrivateMessagesWhenProviderUsesP2PChatID(t *testing.T) {
+	repo := repository.NewMemoryStore()
+	ctx := context.Background()
+	now := time.Now().UTC()
+	account, err := repo.SaveConnector(ctx, domain.ConnectorAccount{OwnerUserID: "owner", Platform: domain.PlatformFeishu, WorkspaceKey: "tenant", ExternalAccountID: "fs", Status: domain.ConnectorActive})
+	if err != nil {
+		t.Fatal(err)
+	}
+	contactID, err := repo.UpsertExternalIdentity(ctx, repository.ExternalIdentityInput{Platform: domain.PlatformFeishu, WorkspaceKey: "tenant", ExternalUserID: "ou-contact", DisplayName: "飞书联系人", MappedUserID: "owner"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	conversation, err := repo.AttachConversation(ctx, repository.AttachInput{
+		UserID: "owner", Platform: domain.PlatformFeishu, WorkspaceKey: "tenant", ExternalConversationID: "oc-p2p-chat", ConversationType: "private", RequestedStartAt: &now, PrimaryConnectorID: account.ID,
+		Members: []domain.AvailableMember{{ExternalUserID: "ou-contact", DisplayName: "飞书联系人"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := repository.IngestMessageInput{CollectorID: conversation.Collectors[0].ID, ExternalConversationID: "oc-p2p-chat", ExternalMessageID: "feishu-p2p-message", SenderExternalID: "cli_app", MessageType: "text", Content: "实际 p2p 会话消息", ContentHash: hashForTest("实际 p2p 会话消息"), SentAt: now}
+	input.PayloadHash, err = repository.CalculatePayloadHash(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = repo.IngestMessage(ctx, input); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = repo.UpsertContactRelation(ctx, repository.ContactRelationInput{OwnerUserID: "owner", ConnectorID: account.ID, ExternalIdentityID: contactID}); err != nil {
+		t.Fatal(err)
+	}
+	contacts, err := (&Service{Repo: repo}).ListContacts(ctx, "owner", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(contacts) != 1 || contacts[0].MessageCount != 1 || len(contacts[0].ConversationIDs) != 1 || contacts[0].ConversationIDs[0] != conversation.ID {
+		t.Fatalf("p2p chat-id activity was not attributed through membership: %+v", contacts)
+	}
+}
+
 func TestAvailableContactsFromMembershipsFiltersAndDeduplicates(t *testing.T) {
 	memberships := []repository.ContactMembership{
 		{Identity: repository.ExternalIdentity{ID: "one", Platform: domain.PlatformFeishu, ExternalUserID: "ou-1", DisplayName: "张三", AvatarURL: "avatar"}, ConversationID: "chat-1"},
