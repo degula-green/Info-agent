@@ -15,46 +15,55 @@
         <div class="contact-detail__identities"><span v-for="identity in detail.identities" :key="identity.id">{{ identity.platform === 'feishu' ? '飞书' : '微信' }} · {{ identity.display_name || identity.external_user_id }}</span></div>
         <div v-if="detailLoading" class="contact-detail__loading"><t-icon name="loading" />正在加载消息和附件…</div>
         <template v-else>
-          <section class="contact-detail__section"><h3>相关消息 <small>{{ detail.messages?.length || 0 }}</small></h3><div v-if="detail.messages?.length" class="contact-message-list"><article v-for="message in detail.messages" :key="message.id" class="contact-message"><div><strong>{{ message.sender_display_name || '未知发送人' }}</strong><time>{{ formatDate(message.sent_at) }}</time></div><p>{{ messageContent(message.content) || '（空消息）' }}</p></article></div><span v-else class="contact-detail__empty">暂无已采集消息</span></section>
+          <section class="contact-detail__section"><h3>相关消息 <small>{{ visibleDetailMessages.length }}</small></h3><div v-if="visibleDetailMessages.length" class="contact-message-list"><article v-for="message in visibleDetailMessages" :key="message.id" class="contact-message"><div><strong>{{ message.sender_display_name || '未知发送人' }}</strong><time>{{ formatDate(message.sent_at) }}</time></div><p>{{ messageContent(message.content) }}</p></article></div><span v-else class="contact-detail__empty">暂无已采集消息</span></section>
           <section class="contact-detail__section"><h3>相关附件 <small>{{ detail.attachments?.length || 0 }}</small></h3><div v-if="detail.attachments?.length" class="contact-attachment-list"><button v-for="attachment in detail.attachments" :key="attachment.id" type="button" class="contact-attachment" @click="openAttachment(attachment)"><t-icon name="file" /><span><strong>{{ attachment.file_name }}</strong><small>{{ formatSize(attachment.size_bytes) }} · {{ attachment.mime_type || '未知类型' }}</small></span><t-icon name="chevron-right" /></button></div><span v-else class="contact-detail__empty">暂无已采集附件</span></section>
         </template>
         <div class="contact-detail__actions"><t-button theme="danger" variant="outline" :disabled="detailLoading" @click="remove">移除联系人</t-button></div>
       </div>
     </t-dialog>
-    <t-dialog v-model:visible="previewVisible" header="附件预览" :confirm-btn="null" width="min(92vw, 1200px)" dialog-class-name="contact-preview-dialog" placement="center"><InfoAttachmentPreview v-if="previewFile" :file="previewFile" :active="previewVisible" /></t-dialog>
+    <t-dialog v-model:visible="previewVisible" header="附件预览" :footer="false" width="min(92vw, 1200px)" dialog-class-name="contact-attachment-preview-dialog" placement="center" destroy-on-close><div class="contact-attachment-preview"><InfoAttachmentPreview v-if="previewFile" :file="previewFile" :active="previewVisible" /></div></t-dialog>
   </section>
 </template>
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { listContacts, discoverContacts, attachContact, removeContact, getContact, type ContactDTO, type AvailableContactDTO, type ContactDetailDTO } from '@/api/contacts'
 import { getConnectors, type AttachmentDTO, type ConnectorDTO } from '@/api/info-knowledge'
 import InfoAttachmentPreview from '@/components/InfoAttachmentPreview.vue'
 import type { InfoFile } from '@/mock'
+import { isDisplayableTextMessage } from '@/utils/message-visibility'
 const contacts = ref<ContactDTO[]>([]); const loading = ref(false); const error = ref(''); const platform = ref(''); const showAttach = ref(false); const attachPlatform = ref<'wechat'|'feishu'>('wechat'); const query = ref(''); const available = ref<AvailableContactDTO[]>([]); const discovering = ref(false); const showDetail = ref(false); const detail = ref<ContactDetailDTO | null>(null); const detailLoading = ref(false); let detailRequest = 0
 const previewVisible = ref(false); const previewFile = ref<InfoFile | null>(null)
 const connectors = ref<ConnectorDTO[]>([])
 const visibleContactCount = ref(100)
 const visibleAvailable = computed(() => available.value.slice(0, visibleContactCount.value))
+const visibleDetailMessages = computed(() => (detail.value?.messages || []).filter((message) => {
+  return isDisplayableTextMessage(message.message_type, message.content)
+}))
 const feishuBound = computed(() => connectors.value.some((item) => item.platform === 'feishu' && item.bound && item.status === 'active'))
 const platformOptions = [{ label: '微信', value: 'wechat' }, { label: '飞书', value: 'feishu' }]
 async function load() { loading.value = true; error.value = ''; try { contacts.value = await listContacts(platform.value) } catch (e: any) { error.value = e?.message || '联系人加载失败' } finally { loading.value = false } }
-watch(platform, load); watch(attachPlatform, () => { if (showAttach.value) void discover() }); watch(showAttach, (visible) => { if (visible) { void refreshConnectors(); void discover() } }); onMounted(async () => { await Promise.all([load(), refreshConnectors()]) })
+async function refreshDetail(contactID: string, showLoading = false) {
+  const request = ++detailRequest
+  if (showLoading) detailLoading.value = true
+  try {
+    const loaded = await getContact(contactID)
+    if (request === detailRequest) detail.value = loaded
+  } catch (e: any) {
+    if (request === detailRequest && showLoading) error.value = e?.message || '联系人详情加载失败'
+  } finally {
+    if (request === detailRequest && showLoading) detailLoading.value = false
+  }
+}
+let contactPollTimer: number | undefined
+watch(platform, load); watch(attachPlatform, () => { if (showAttach.value) void discover() }); watch(showAttach, (visible) => { if (visible) { void refreshConnectors(); void discover() } }); onMounted(async () => { await Promise.all([load(), refreshConnectors()]); contactPollTimer = window.setInterval(() => { if (detail.value && showDetail.value) void refreshDetail(detail.value.id); else void load() }, 10000) })
+onBeforeUnmount(() => { if (contactPollTimer != null) window.clearInterval(contactPollTimer) })
 async function refreshConnectors() { try { connectors.value = await getConnectors() } catch { connectors.value = [] } }
 async function discover() { discovering.value = true; visibleContactCount.value = 100; error.value = ''; try { available.value = await discoverContacts(attachPlatform.value, query.value) } catch (e:any) { available.value = []; error.value = e?.message || '联系人发现失败' } finally { discovering.value = false } }
 async function attach(item: AvailableContactDTO) { if (item.selected) return; try { await attachContact({ platform: attachPlatform.value, externalUserID: item.external_user_id, displayName: item.display_name, avatarURL: item.avatar_url }); item.selected = true; await load() } catch (e:any) { error.value = e?.message || '联系人接入失败' } }
 async function openDetail(contact: ContactDTO) {
-  const request = ++detailRequest
   detail.value = { ...contact, messages: [], attachments: [] }
-  detailLoading.value = true
   showDetail.value = true
-  try {
-    const loaded = await getContact(contact.id)
-    if (request === detailRequest) detail.value = loaded
-  } catch (e:any) {
-    if (request === detailRequest) error.value = e?.message || '联系人详情加载失败'
-  } finally {
-    if (request === detailRequest) detailLoading.value = false
-  }
+  await refreshDetail(contact.id, true)
 }
 async function remove() { if (!detail.value) return; try { await removeContact(detail.value.id); showDetail.value = false; detail.value = null; await load() } catch (e:any) { error.value = e?.message || '联系人移除失败' } }
 function formatDate(value?: string) { if (!value) return ''; return new Date(value).toLocaleString('zh-CN', { dateStyle: 'short', timeStyle: 'short' }) }
@@ -69,11 +78,13 @@ function openAttachment(value: AttachmentDTO) { previewFile.value = { id: value.
 .contact-detail__section { min-height:0; }
 .contact-message-list, .contact-attachment-list { max-height:190px; }
 .contact-stats { margin-top:10px; color:var(--td-text-color-placeholder); font-size:11px; }
-.contact-detail__loading { display:flex; min-height:128px; align-items:center; justify-content:center; gap:8px; color:var(--td-text-color-secondary); }
-.discover-more { width:100%; margin-top:4px; }
+ .contact-detail__loading { display:flex; min-height:128px; align-items:center; justify-content:center; gap:8px; color:var(--td-text-color-secondary); }
+ .discover-more { width:100%; margin-top:4px; }
 :global(.t-dialog__wrap:has(.contact-detail-dialog) .t-dialog__position) { display:flex; min-height:100%; height:100%; align-items:center; justify-content:center; box-sizing:border-box; }
-:global(.contact-preview-dialog.t-dialog) { display:flex; max-height:calc(100dvh - 32px); margin:0; flex-direction:column; overflow:hidden; }
-:global(.contact-preview-dialog .t-dialog__body) { min-height:0; flex:1; overflow:hidden; }
-:global(.t-dialog__wrap:has(.contact-preview-dialog)) { overflow:hidden; }
-:global(.t-dialog__wrap:has(.contact-preview-dialog) .t-dialog__position) { display:flex; min-height:100%; height:100%; align-items:center; justify-content:center; overflow:hidden; box-sizing:border-box; }
+.contact-attachment-preview { display:flex; min-width:0; height:min(calc(100dvh - 150px), 760px); max-height:calc(100dvh - 150px); overflow:hidden; }
+.contact-attachment-preview :deep(.attachment-preview) { min-height:0; flex:1; }
+:global(.contact-attachment-preview-dialog.t-dialog) { max-height:calc(100dvh - 32px); margin:0 auto; overflow:hidden; }
+:global(.contact-attachment-preview-dialog .t-dialog__body) { min-height:0; max-height:calc(100dvh - 112px); overflow:hidden; }
+:global(.t-dialog__wrap:has(.contact-attachment-preview-dialog)) { overflow:hidden; }
+:global(.t-dialog__wrap:has(.contact-attachment-preview-dialog) .t-dialog__position) { display:flex; min-height:100%; height:100%; align-items:center; justify-content:center; box-sizing:border-box; }
 </style>

@@ -107,6 +107,24 @@ def ingest_message(collector_id: str, payload: dict[str, Any]) -> dict[str, Any]
             return None
         raise
 
+def commit_cursor(collector_id: str, cursor: str) -> bool:
+    """Commit a cursor without letting private publication lag stop other chats."""
+    try:
+        knowledge(f"/api/knowledge/v1/internal/collectors/{collector_id}/cursor", "POST", {"cursor": cursor})
+        return True
+    except urllib.error.HTTPError as exc:
+        try:
+            body = exc.read().decode("utf-8", errors="replace")
+        finally:
+            exc.close()
+        try:
+            code = str((json.loads(body) or {}).get("code") or "")
+        except (TypeError, ValueError):
+            code = ""
+        if exc.code == 409 and code == "cursor_unverified":
+            return False
+        raise
+
 load_state()
 bootstrap_from_knowledge()
 
@@ -462,7 +480,20 @@ def collect_once() -> None:
         names = nickname_index()
         for item in assignments:
             conversation = item.get("conversation") or {}; collector = item.get("collector") or {}; chat_id = str(conversation.get("external_conversation_id") or ""); collector_id = str(collector.get("id") or "")
-            if conversation.get("status") != "active" or not chat_id or not collector_id or (config.get("listen_mode") == "whitelist" and chat_id not in selected): continue
+            if not chat_id or not collector_id or (config.get("listen_mode") == "whitelist" and chat_id not in selected): continue
+            # A conversation can be paused automatically when its last
+            # collector is removed.  The Knowledge heartbeat restores that
+            # system-paused state once an active collector is available.  Do
+            # not do this for a user-paused conversation: PauseResume leaves
+            # pause_reason empty, so it remains intentionally excluded.
+            conversation_status = str(conversation.get("status") or "")
+            pause_reason = str(conversation.get("pause_reason") or "")
+            if conversation_status != "active":
+                if conversation_status == "paused" and pause_reason == "no_available_collector":
+                    knowledge(f"/api/knowledge/v1/internal/collectors/{collector_id}/heartbeat", "POST", {"agent_version": "server-wechat-collector"})
+                    conversation_status = "active"
+                else:
+                    continue
             try: since = int(str(collector.get("last_cursor") or "0"))
             except ValueError: since = checkpoints.get(collector_id, 0)
             rows = messages_after(db, chat_id, since, limit=200)
@@ -546,7 +577,7 @@ def collect_once() -> None:
                             shutil.rmtree(temp_root, ignore_errors=True)
                 if local_id not in replay_ids:
                     knowledge(f"/api/knowledge/v1/internal/collectors/{collector_id}/cursor-receipt", "POST", {"cursor": cursor})
-                    knowledge(f"/api/knowledge/v1/internal/collectors/{collector_id}/cursor", "POST", {"cursor": cursor})
+                    commit_cursor(collector_id, cursor)
                 else:
                     replayed_media.setdefault(collector_id, set()).add(local_id)
                 try:

@@ -83,6 +83,7 @@ export interface KnowledgeLibraryItemDTO {
   external_conversation_id?: string
   conversation_type?: 'private' | 'group' | string
   conversation_name?: string
+  collection_status?: 'not_started' | 'collecting' | 'paused' | 'detached' | 'missing' | 'error' | string
   source_type: string
   source_message_id?: string
   source_attachment_id?: string

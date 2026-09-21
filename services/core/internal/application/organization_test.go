@@ -70,6 +70,20 @@ func TestPlainActiveMemberCanListMembers(t *testing.T) {
 	}
 }
 
+func TestCheckOrganizationMemberDoesNotRequireMemberDirectoryPermission(t *testing.T) {
+	repo := &organizationRepositoryStub{membership: domain.Membership{Status: domain.MembershipStatusActive}}
+	service := NewOrganizationService(repo, nil)
+	allowed, err := service.CheckOrganizationMember(context.Background(), "member", "organization")
+	if err != nil || !allowed {
+		t.Fatalf("active member was rejected: allowed=%v err=%v", allowed, err)
+	}
+	repo.membership.Status = "left"
+	allowed, err = service.CheckOrganizationMember(context.Background(), "member", "organization")
+	if err != nil || allowed {
+		t.Fatalf("inactive member was accepted: allowed=%v err=%v", allowed, err)
+	}
+}
+
 func TestManagementPermissionsComeFromRBACCatalog(t *testing.T) {
 	repo := &rbacRepositoryStub{
 		organizationRepositoryStub: &organizationRepositoryStub{

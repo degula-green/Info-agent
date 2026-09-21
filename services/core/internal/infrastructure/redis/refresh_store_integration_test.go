@@ -61,11 +61,17 @@ func TestRefreshSessionStoreAgainstRedis(t *testing.T) {
 	if err := store.Rotate(ctx, found, currentHash, nextHash); err != nil {
 		t.Fatal(err)
 	}
+	// The immediately previous token is accepted during the short overlap
+	// window so requests already in flight do not revoke the session.
+	if _, err := store.FindByTokenHash(ctx, currentHash); err != nil {
+		t.Fatalf("old token was not accepted during grace window: %v", err)
+	}
+	time.Sleep(defaultRotationGrace + 100*time.Millisecond)
 	if _, err := store.FindByTokenHash(ctx, currentHash); !errors.Is(err, repository.ErrRefreshTokenReused) {
-		t.Fatalf("old token error = %v", err)
+		t.Fatalf("expired old token error = %v", err)
 	}
 	if _, err := store.FindByTokenHash(ctx, nextHash); !errors.Is(err, repository.ErrSessionInactive) {
-		t.Fatalf("session was not revoked after replay: %v", err)
+		t.Fatalf("session was not revoked after expired replay: %v", err)
 	}
 	if err := store.RevokeByTokenHash(ctx, nextHash); err != nil {
 		t.Fatal(err)

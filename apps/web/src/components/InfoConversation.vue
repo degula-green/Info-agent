@@ -181,6 +181,7 @@ import InfoAttachmentPreview from '@/components/InfoAttachmentPreview.vue'
 import type { CollectionStatus, InfoChat, InfoFile, InfoMessage } from '@/mock'
 import { sourceName } from '@/mock'
 import { sanitizeHTML } from '@/utils/security'
+import { isDisplayableTextMessage } from '@/utils/message-visibility'
 
 type ConversationItem = {
   key: string
@@ -307,7 +308,8 @@ function messagePreview(content?: string | null) {
 }
 
 function isAttachmentOnlyMessage(message: InfoMessage) {
-  const raw = String(message.content || '').trim()
+	if (!isDisplayableTextMessage(message.messageType, message.content)) return true
+	const raw = String(message.content || '').trim()
   const visible = displayMessageContent(raw).trim()
   if (!visible) return true
   if (/^(?:merged and forwarded message|forwarded message|file name|filename)$/i.test(raw)) return true
@@ -474,10 +476,12 @@ async function downloadFile() {
 .detail-modal__actions { display: flex; flex: 0 0 auto; gap: 10px; }
 .document-modal { height: min(92dvh, 1080px); max-height: calc(100dvh - 32px); }
 .document-modal__header { padding: 22px 28px 16px; }
-.document-modal__canvas { flex: 1; min-height: 0; overflow: auto; padding: 18px 20px 20px; background: #f4f5f7; }
+.document-modal__canvas { display: flex; min-height: 0; flex: 1; align-items: center; justify-content: center; overflow: hidden; padding: 18px 20px 20px; background: #f4f5f7; }
+.document-modal__canvas :deep(.attachment-preview) { min-height: 0; }
 .document-modal__footer { min-height: 76px; }
 :global(.info-message-dialog.t-dialog), :global(.info-file-dialog.t-dialog) { padding: 0; overflow: hidden; border-radius: 14px; }
 :global(.info-message-dialog .t-dialog__body), :global(.info-file-dialog .t-dialog__body) { padding: 0; }
+:global(.t-dialog__wrap:has(.info-message-dialog) .t-dialog__position), :global(.t-dialog__wrap:has(.info-file-dialog) .t-dialog__position) { display: flex; min-height: 100%; height: 100%; align-items: center; justify-content: center; box-sizing: border-box; }
 @media (max-width: 850px) {
   .conversation-table__head { display: none; }
   .conversation-row { grid-template-columns: 1fr 1fr; gap: 10px 16px; padding: 15px 17px; }
@@ -505,7 +509,7 @@ async function downloadFile() {
   .detail-modal__status { max-width: 100%; flex-wrap: wrap; }
   .record-id { max-width: min(70vw, 320px); }
   .detail-modal__actions { margin-left: auto; }
-  .document-modal__canvas { overflow: auto; }
+  .document-modal__canvas { overflow: hidden; }
   .document-modal__footer { flex-wrap: nowrap; }
 }
 </style>

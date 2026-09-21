@@ -9,6 +9,7 @@ services:
     environment:
       CORE_REDIS_DATABASE: ${CORE_REDIS_DATABASE:-1}
       CORE_REDIS_URL: ${CORE_REDIS_URL:-redis://redis:6379/1}
+      CORE_REFRESH_ROTATION_GRACE: ${CORE_REFRESH_ROTATION_GRACE:-5s}
       CORE_DATABASE_URL: ${CORE_DATABASE_URL:-postgresql://postgres:postgres@postgres:5432/info_agent}
       CORE_DATABASE_SCHEMA: ${CORE_DATABASE_SCHEMA:-public}
       CORE_MINIO_ENDPOINT: ${CORE_MINIO_ENDPOINT:-minio:9000}
@@ -170,6 +171,7 @@ services:
       - -ec
       - >-
         psql --dbname="$${KNOWLEDGE_DATABASE_URL}" --set=ON_ERROR_STOP=1 --file=/migrations/20260905_knowledge_connectors.sql &&
+        psql --dbname="$${KNOWLEDGE_DATABASE_URL}" --set=ON_ERROR_STOP=1 --file=/migrations/20260910_private_chat_pipeline.sql &&
         psql --dbname="$${KNOWLEDGE_DATABASE_URL}" --set=ON_ERROR_STOP=1 --file=/migrations/20260911_knowledge_runtime_compatibility.sql &&
         psql --dbname="$${KNOWLEDGE_DATABASE_URL}" --set=ON_ERROR_STOP=1 --file=/migrations/20260912_attachment_content_access.sql &&
         psql --dbname="$${KNOWLEDGE_DATABASE_URL}" --set=ON_ERROR_STOP=1 --file=/migrations/20260913_contacts.sql &&
@@ -181,6 +183,7 @@ services:
         condition: service_healthy
     volumes:
       - ../db/migrations/20260905_knowledge_connectors.sql:/migrations/20260905_knowledge_connectors.sql:ro
+      - ../db/migrations/20260910_private_chat_pipeline.sql:/migrations/20260910_private_chat_pipeline.sql:ro
       - ../db/migrations/20260911_knowledge_runtime_compatibility.sql:/migrations/20260911_knowledge_runtime_compatibility.sql:ro
       - ../db/migrations/20260912_attachment_content_access.sql:/migrations/20260912_attachment_content_access.sql:ro
       - ../db/migrations/20260913_contacts.sql:/migrations/20260913_contacts.sql:ro
@@ -191,6 +194,10 @@ services:
 
   redis:
     image: redis:7-alpine
+    # Refresh sessions and connector credentials are stateful. AOF keeps the
+    # latest rotation/lock state across restarts instead of relying only on a
+    # periodic RDB snapshot.
+    command: ["redis-server", "--appendonly", "yes", "--appendfsync", "everysec"]
     ports:
       - "6379:6379"
     volumes:

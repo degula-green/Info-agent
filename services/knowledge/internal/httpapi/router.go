@@ -408,7 +408,7 @@ func registerUserRoutes(r *gin.Engine, app *App, prefix string) {
 			writeError(c, apperror.New("invalid_request", "invalid upload task request", 400, false))
 			return
 		}
-		out, err := app.Service.CreateLocalUploadTask(c, p.UserID, p.OrganizationID, body)
+		out, err := app.Service.CreateLocalUploadTask(c, p.UserID, p.OrganizationID, body, c.GetHeader("Authorization"))
 		if err != nil {
 			writeError(c, err)
 			return
@@ -416,7 +416,7 @@ func registerUserRoutes(r *gin.Engine, app *App, prefix string) {
 		c.JSON(http.StatusCreated, publicLocalUploadTask(*out))
 	})
 	g.GET("/attachments/upload-tasks/:request_id", func(c *gin.Context) {
-		out, err := app.Service.GetLocalUploadTask(c, principal(c).UserID, c.Param("request_id"))
+		out, err := app.Service.GetLocalUploadTask(c, principal(c).UserID, c.Param("request_id"), c.GetHeader("Authorization"))
 		if err != nil {
 			writeError(c, err)
 			return
@@ -437,7 +437,7 @@ func registerUserRoutes(r *gin.Engine, app *App, prefix string) {
 			reader, cleanup = file, closeFn
 		}
 		defer cleanup()
-		out, err := app.Service.UploadLocalContent(c, p.UserID, c.Param("request_id"), reader)
+		out, err := app.Service.UploadLocalContent(c, p.UserID, c.Param("request_id"), reader, c.GetHeader("Authorization"))
 		if err != nil {
 			writeError(c, err)
 			return
@@ -928,7 +928,7 @@ func registerUserRoutes(r *gin.Engine, app *App, prefix string) {
 	})
 	g.GET("/attachments/:attachment_id/content", func(c *gin.Context) {
 		p := principal(c)
-		attachment, reader, err := app.Service.OpenAttachment(c, p.UserID, c.Param("attachment_id"))
+		attachment, reader, err := app.Service.OpenAttachment(c, p.UserID, c.Param("attachment_id"), c.GetHeader("Authorization"))
 		if err != nil {
 			writeError(c, err)
 			return

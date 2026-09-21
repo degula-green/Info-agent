@@ -783,37 +783,75 @@ func (s *MemoryStore) ListContactActivity(_ context.Context, userID, platform st
 		}
 	}
 	activity := map[string]*ContactActivity{}
-	for _, membership := range s.memberships {
-		if membership.Status != "active" || !allowedIdentities[membership.ExternalIdentityID] {
-			continue
-		}
-		conversation, ok := s.conversations[membership.ConversationID]
-		if !ok {
-			continue
-		}
+	accessibleConversations := map[string]bool{}
+	for id, conversation := range s.conversations {
 		accessible := conversation.OwnerUserID == userID
 		if !accessible {
 			for _, collector := range s.collectors {
-				if collector.ConversationID == conversation.ID && collector.CollectorUserID == userID && collector.Status != domain.CollectorRemoved {
+				if collector.ConversationID == id && collector.CollectorUserID == userID && collector.Status != domain.CollectorRemoved {
 					accessible = true
 					break
 				}
 			}
 		}
-		if !accessible {
-			continue
+		if accessible {
+			accessibleConversations[id] = true
 		}
-		key := membership.ExternalIdentityID + "|" + membership.ConversationID
-		activity[key] = &ContactActivity{IdentityID: membership.ExternalIdentityID, ConversationID: membership.ConversationID}
 	}
 	for _, message := range s.messages {
-		key := message.SenderIdentityID + "|" + message.ConversationID
-		if current := activity[key]; current != nil {
-			current.MessageCount++
-			for _, attachment := range s.attachments {
-				if attachment.MessageID == message.ID {
-					current.AttachmentCount++
+		if !accessibleConversations[message.ConversationID] {
+			continue
+		}
+		conversation, exists := s.conversations[message.ConversationID]
+		if !exists {
+			continue
+		}
+		identityID := message.SenderIdentityID
+		if conversation.ConversationType == "private" {
+			// A connector may persist its own identity as the sender for a
+			// private message. Attribute the whole private conversation to the
+			// related contact rather than requiring every message sender to be
+			// the contact identity. The provider may also persist the real chat
+			// container ID (oc_...) instead of the contact's user ID (ou_...);
+			// active conversation membership is the authoritative fallback in
+			// that case.
+			for relation := range allowedIdentities {
+				identity := s.identityByIDLocked(relation)
+				if identity.ID == "" || identity.Platform != conversation.Platform || identity.WorkspaceKey != conversation.WorkspaceKey {
+					continue
 				}
+				matchesExternalID := identity.ExternalUserID == conversation.ExternalConversationID
+				matchesMembership := false
+				if !matchesExternalID {
+					for _, membership := range s.memberships {
+						if membership.ConversationID == message.ConversationID && membership.ExternalIdentityID == relation && membership.Status == "active" {
+							matchesMembership = true
+							break
+						}
+					}
+				}
+				if !matchesExternalID && !matchesMembership {
+					continue
+				}
+				identityID = relation
+				break
+			}
+		}
+		if !allowedIdentities[identityID] {
+			continue
+		}
+		key := identityID + "|" + message.ConversationID
+		current := activity[key]
+		if current == nil {
+			current = &ContactActivity{IdentityID: identityID, ConversationID: message.ConversationID}
+			activity[key] = current
+		}
+		if IsDisplayableTextMessage(message.MessageType, message.Content) {
+			current.MessageCount++
+		}
+		for _, attachment := range s.attachments {
+			if attachment.MessageID == message.ID {
+				current.AttachmentCount++
 			}
 		}
 	}
@@ -2331,6 +2369,30 @@ func memoryLibraryItemFromKnowledge(item domain.KnowledgeItem, libraryID string,
 	return out
 }
 
+func memoryCollectionStatus(conversation domain.ConversationIngestion) string {
+	if conversation.Status == domain.ConversationActive {
+		hasUnavailable, hasActive := false, false
+		for _, collector := range conversation.Collectors {
+			switch collector.Status {
+			case domain.CollectorUnavailable:
+				hasUnavailable = true
+			case domain.CollectorActive:
+				hasActive = true
+			}
+		}
+		if hasUnavailable && !hasActive {
+			return domain.ConversationError
+		}
+		return "collecting"
+	}
+	switch conversation.Status {
+	case domain.ConversationPaused, domain.ConversationDetached, domain.ConversationError:
+		return conversation.Status
+	default:
+		return "not_started"
+	}
+}
+
 func (s *MemoryStore) ListKnowledgeLibraryItems(_ context.Context, libraryID, userID, organizationID, kind, platformName, query string, limit int) ([]domain.KnowledgeLibraryItem, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -2435,7 +2497,7 @@ func (s *MemoryStore) memoryLibraryConversationsLocked(libraryID, userID, organi
 		conversation.Collectors = s.collectorsForLocked(id)
 		conversation.Memberships = s.membershipsForLocked(id)
 		conversation.MessageCount, conversation.AttachmentCount = s.conversationCountsLocked(id)
-		entry := domain.KnowledgeLibraryItem{ID: conversation.ID, LibraryID: libraryID, Kind: "conversation", Title: conversation.Name, Platform: conversation.Platform, ConversationID: conversation.ID, ExternalConversationID: conversation.ExternalConversationID, ConversationType: conversation.ConversationType, ConversationName: conversation.Name, SourceType: "platform_conversation", MessageCount: conversation.MessageCount, AttachmentCount: conversation.AttachmentCount, MemberCount: len(conversation.Memberships), CreatedAt: conversation.CreatedAt, UpdatedAt: conversation.UpdatedAt, CanView: true}
+		entry := domain.KnowledgeLibraryItem{ID: conversation.ID, LibraryID: libraryID, Kind: "conversation", Title: conversation.Name, Platform: conversation.Platform, ConversationID: conversation.ID, ExternalConversationID: conversation.ExternalConversationID, ConversationType: conversation.ConversationType, ConversationName: conversation.Name, CollectionStatus: memoryCollectionStatus(conversation), SourceType: "platform_conversation", MessageCount: conversation.MessageCount, AttachmentCount: conversation.AttachmentCount, MemberCount: len(conversation.Memberships), CreatedAt: conversation.CreatedAt, UpdatedAt: conversation.UpdatedAt, CanView: true}
 		if strings.HasPrefix(libraryID, orgSharedLibraryPrefix) {
 			entry.SourceType = "shared_private_item"
 		}
@@ -3181,7 +3243,10 @@ func (s *MemoryStore) attachmentsForMessageLocked(messageID string) []domain.Att
 
 func (s *MemoryStore) conversationCountsLocked(conversationID string) (messages, attachments int) {
 	for _, message := range s.messages {
-		if message.ConversationID == conversationID {
+		// Keep the directory/card counter aligned with the detail view: only
+		// user-authored text messages are counted as messages. Attachment-only
+		// envelopes remain represented by the attachment counter below.
+		if message.ConversationID == conversationID && IsDisplayableTextMessage(message.MessageType, message.Content) {
 			messages++
 		}
 	}

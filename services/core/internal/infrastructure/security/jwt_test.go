@@ -61,7 +61,7 @@ func TestRSAAccessTokenRejectsTamperingExpiryIssuerAudienceAndAlgorithm(t *testi
 	manager.now = func() time.Time { return now }
 
 	for name, token := range map[string]string{
-		"tampered":        valid[:len(valid)-1] + replacementLastByte(valid[len(valid)-1]),
+		"tampered":        tamperTokenSignature(valid),
 		"wrong issuer":    signedTestToken(t, privateKey, now, "other", "audience", "RS256"),
 		"wrong audience":  signedTestToken(t, privateKey, now, "issuer", "other", "RS256"),
 		"wrong algorithm": signedTestToken(t, privateKey, now, "issuer", "audience", "HS256"),
@@ -130,4 +130,9 @@ func replacementLastByte(last byte) string {
 		return "b"
 	}
 	return "a"
+}
+
+func tamperTokenSignature(token string) string {
+	index := len(token) - 10
+	return token[:index] + replacementLastByte(token[index]) + token[index+1:]
 }

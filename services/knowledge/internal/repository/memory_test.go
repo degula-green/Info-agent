@@ -444,8 +444,27 @@ func TestMemoryListConversationsIncludesMessageAndAttachmentCounts(t *testing.T)
 	if len(items) != 1 || items[0].MessageCount != 2 || items[0].AttachmentCount != 2 {
 		t.Fatalf("unexpected conversation counts: %+v", items)
 	}
+	attachmentOnly := IngestMessageInput{
+		CollectorID:            collector.ID,
+		ExternalConversationID: conversation.ExternalConversationID,
+		ExternalMessageID:      "attachment-only",
+		MessageType:            "file",
+		Content:                "",
+		ContentHash:            hashForTest(""),
+		SentAt:                 now.Add(3 * time.Minute),
+		Cursor:                 "cursor-attachment-only",
+		Attachments:            []AttachmentInput{{ExternalAttachmentID: "attachment-only-1", FileName: "only.txt", MIMEType: "text/plain"}},
+	}
+	attachmentOnly.PayloadHash, _ = CalculatePayloadHash(attachmentOnly)
+	if _, err := repo.IngestMessage(ctx, attachmentOnly); err != nil {
+		t.Fatal(err)
+	}
+	items, err = repo.ListConversations(ctx, "u1", domain.PlatformWechat)
+	if err != nil || len(items) != 1 || items[0].MessageCount != 2 || items[0].AttachmentCount != 3 {
+		t.Fatalf("attachment-only envelope changed message count: items=%+v err=%v", items, err)
+	}
 	messages, err := repo.ListMessages(ctx, conversation.ID, 20, "")
-	if err != nil || len(messages) != 2 || messages[0].SenderDisplayName != "Alice" || messages[1].SenderDisplayName != "Bob" {
+	if err != nil || len(messages) != 3 || messages[0].SenderDisplayName != "Alice" || messages[1].SenderDisplayName != "Bob" {
 		t.Fatalf("sender names were not resolved from identities: messages=%+v err=%v", messages, err)
 	}
 }

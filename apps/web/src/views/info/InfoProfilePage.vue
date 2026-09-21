@@ -57,6 +57,7 @@
               <small>{{ connectorSummary(connector) }}</small>
             </div>
             <t-tag :theme="connector.bound ? 'success' : 'default'" variant="light">{{ connectorStatus(connector) }}</t-tag>
+            <t-button v-if="connector.platform === 'feishu' && connector.bound" class="connector-action" theme="primary" variant="outline" size="medium" :loading="connectorPending[connector.platform]" :disabled="connectorPending[connector.platform]" @click="openFeishuReauthorization">重新授权</t-button>
             <t-button class="connector-action" :theme="connector.bound || connector.cleanup_pending ? 'default' : 'primary'" :variant="connector.bound || connector.cleanup_pending ? 'outline' : 'base'" size="medium" :loading="connectorPending[connector.platform]" :disabled="connector.availability !== 'available' || connectorPending[connector.platform]" @click="handleConnector(connector)">
               {{ connector.cleanup_pending ? '重试解绑' : needsFeishuAuthorization(connector) ? '重新授权' : connector.bound ? '解除绑定' : connector.availability === 'available' ? `绑定${connector.display_name}` : '暂未开放' }}
             </t-button>
@@ -270,6 +271,7 @@ function heartbeatAge(value?: string | null) {
   return date.toLocaleDateString('zh-CN')
 }
 async function refreshConnectors() { connectors.value = await getConnectors() }
+function openFeishuReauthorization() { feishuDialogVisible.value = true }
 async function handleConnector(connector: Connector) {
 	if (connectorPending[connector.platform]) return
 	if (needsFeishuAuthorization(connector)) {

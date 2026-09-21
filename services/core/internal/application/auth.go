@@ -251,6 +251,11 @@ func (s *AuthService) Refresh(ctx context.Context, plainRefreshToken string) (Au
 		return AuthResult{}, fmt.Errorf("generate rotated refresh token: %w", err)
 	}
 	if err := s.sessions.Rotate(ctx, session, currentHash, nextHash); err != nil {
+		// A short grace result means another request already committed the
+		// rotation. Do not emit a second cookie with an uncommitted token.
+		if errors.Is(err, repository.ErrRefreshTokenGrace) {
+			return AuthResult{AccessToken: accessToken, AccessTokenExpiry: accessExpiry, RefreshExpiry: session.ExpiresAt}, nil
+		}
 		if errors.Is(err, repository.ErrNotFound) || errors.Is(err, repository.ErrSessionInactive) || errors.Is(err, repository.ErrRefreshTokenReused) {
 			return AuthResult{}, ErrUnauthenticated
 		}

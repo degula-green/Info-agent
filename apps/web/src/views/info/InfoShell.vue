@@ -133,7 +133,13 @@ onMounted(() => {
   // refresh can replace a complete snapshot with a partial page and make
   // conversations appear/disappear. Explicit refresh actions still call
   // refreshSources(true).
-  knowledgePollTimer.value = window.setInterval(() => { void knowledgeStore.ensureSources() }, 30000)
+  knowledgePollTimer.value = window.setInterval(() => {
+    // Keep a detail route stable. InfoConversationPage refreshes the current
+    // conversation directly, while replacing the whole directory snapshot
+    // can make an otherwise valid conversation disappear temporarily.
+    if (route.name === 'conversation') return
+    void knowledgeStore.ensureSources()
+  }, 30000)
 })
 onBeforeUnmount(() => {
   if (knowledgePollTimer.value != null) window.clearInterval(knowledgePollTimer.value)

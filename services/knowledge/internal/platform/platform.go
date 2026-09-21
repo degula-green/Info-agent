@@ -32,6 +32,7 @@ type OAuthProvider interface {
 }
 
 var ErrAuthorizationExpired = errors.New("feishu authorization expired")
+var ErrPrivateConversationNotFound = errors.New("feishu private conversation not found")
 
 type Profile struct {
 	ExternalAccountID string
@@ -247,7 +248,11 @@ func (p *HTTPFeishu) Discover(ctx context.Context, token vault.TokenSet) ([]doma
 	items := make([]domain.AvailableConversation, 0)
 	pageToken := ""
 	for {
-		endpoint := "/open-apis/im/v1/chats?page_size=100"
+		// The chat list endpoint does not support a `types` filter on all
+		// Feishu tenants. Keep the provider's stable parameters here and let
+		// the response's chat_type distinguish group and p2p conversations.
+		query := url.Values{"page_size": {"100"}, "user_id_type": {"open_id"}}
+		endpoint := "/open-apis/im/v1/chats?" + query.Encode()
 		if pageToken != "" {
 			endpoint += "&page_token=" + url.QueryEscape(pageToken)
 		}
@@ -257,11 +262,14 @@ func (p *HTTPFeishu) Discover(ctx context.Context, token vault.TokenSet) ([]doma
 			Msg     string `json:"msg"`
 			Data    struct {
 				Items []struct {
-					ChatID      string `json:"chat_id"`
-					Name        string `json:"name"`
-					Description string `json:"description"`
-					OwnerID     string `json:"owner_id"`
-					Type        string `json:"chat_type"`
+					ChatID        string `json:"chat_id"`
+					Name          string `json:"name"`
+					Description   string `json:"description"`
+					OwnerID       string `json:"owner_id"`
+					Type          string `json:"chat_type"`
+					Mode          string `json:"chat_mode"`
+					P2PTargetID   string `json:"p2p_target_id"`
+					P2PTargetType string `json:"p2p_target_type"`
 					// Feishu returns this field as a JSON boolean in current API
 					// responses, while older responses used a string value.
 					External any `json:"external"`
@@ -278,12 +286,16 @@ func (p *HTTPFeishu) Discover(ctx context.Context, token vault.TokenSet) ([]doma
 		}
 		now := time.Now().UTC()
 		for _, item := range body.Data.Items {
+			chatType := strings.TrimSpace(item.Type)
+			if chatType == "" {
+				chatType = strings.TrimSpace(item.Mode)
+			}
 			kind := "group"
-			if strings.EqualFold(item.Type, "p2p") {
+			if strings.EqualFold(chatType, "p2p") {
 				kind = "private"
 			}
 			members := []domain.AvailableMember(nil)
-			metadata := map[string]any{"description": item.Description, "owner_id": item.OwnerID, "external": item.External}
+			metadata := map[string]any{"description": item.Description, "owner_id": item.OwnerID, "external": item.External, "p2p_target_id": item.P2PTargetID, "p2p_target_type": item.P2PTargetType, "chat_mode": chatType}
 			if kind == "group" {
 				var memberErr error
 				members, memberErr = p.discoverChatMembers(ctx, token, item.ChatID, item.OwnerID)
@@ -306,6 +318,80 @@ func (p *HTTPFeishu) Discover(ctx context.Context, token vault.TokenSet) ([]doma
 		}
 		if body.Data.PageToken == "" || body.Data.PageToken == pageToken {
 			return nil, errors.New("feishu conversation discovery returned an invalid page token")
+		}
+		pageToken = body.Data.PageToken
+	}
+	// Feishu's default chat listing returns group chats only for some tenants.
+	// Query p2p chats explicitly as a read-only supplement so private discovery
+	// does not depend on tenant-specific default filtering. Permission and
+	// authorization failures must remain visible; otherwise the private picker
+	// silently looks empty and the worker cannot explain why it cannot collect.
+	privateItems, err := p.discoverP2PChats(ctx, token)
+	if err != nil {
+		return nil, err
+	}
+	seen := make(map[string]struct{}, len(items))
+	for _, item := range items {
+		seen[item.ExternalID] = struct{}{}
+	}
+	for _, item := range privateItems {
+		if _, exists := seen[item.ExternalID]; exists {
+			continue
+		}
+		items = append(items, item)
+	}
+	return items, nil
+}
+
+func (p *HTTPFeishu) discoverP2PChats(ctx context.Context, token vault.TokenSet) ([]domain.AvailableConversation, error) {
+	items := make([]domain.AvailableConversation, 0)
+	pageToken := ""
+	for {
+		query := url.Values{"page_size": {"100"}, "user_id_type": {"open_id"}, "types": {"p2p"}}
+		if pageToken != "" {
+			query.Set("page_token", pageToken)
+		}
+		var body struct {
+			Code int `json:"code"`
+			Data struct {
+				Items []struct {
+					ChatID        string `json:"chat_id"`
+					Name          string `json:"name"`
+					Mode          string `json:"chat_mode"`
+					Type          string `json:"chat_type"`
+					P2PTargetID   string `json:"p2p_target_id"`
+					P2PTargetType string `json:"p2p_target_type"`
+					External      any    `json:"external"`
+				} `json:"items"`
+				HasMore   bool   `json:"has_more"`
+				PageToken string `json:"page_token"`
+			} `json:"data"`
+		}
+		if err := p.getJSON(ctx, "/open-apis/im/v1/chats?"+query.Encode(), token, &body); err != nil {
+			return nil, err
+		}
+		if body.Code != 0 {
+			return nil, fmt.Errorf("feishu p2p conversation discovery failed: code=%d", body.Code)
+		}
+		now := time.Now().UTC()
+		for _, item := range body.Data.Items {
+			chatType := strings.TrimSpace(item.Type)
+			if chatType == "" {
+				chatType = strings.TrimSpace(item.Mode)
+			}
+			if !strings.EqualFold(chatType, "p2p") || strings.TrimSpace(item.ChatID) == "" {
+				continue
+			}
+			items = append(items, domain.AvailableConversation{
+				ExternalID: item.ChatID, Name: item.Name, ConversationType: "private", LastSeenAt: &now,
+				Metadata: map[string]any{"external": item.External, "p2p_target_id": item.P2PTargetID, "p2p_target_type": item.P2PTargetType, "chat_mode": chatType},
+			})
+		}
+		if !body.Data.HasMore {
+			break
+		}
+		if body.Data.PageToken == "" || body.Data.PageToken == pageToken {
+			return nil, errors.New("feishu p2p conversation discovery returned an invalid page token")
 		}
 		pageToken = body.Data.PageToken
 	}
@@ -427,7 +513,28 @@ func (p *HTTPFeishu) discoverChatMembers(ctx context.Context, token vault.TokenS
 }
 
 func (p *HTTPFeishu) PollMessages(ctx context.Context, token vault.TokenSet, conversation domain.ConversationIngestion, cursor string) ([]Message, string, error) {
-	cycleEnd := time.Now().UTC()
+	containerID := conversation.ExternalConversationID
+	if conversation.ConversationType == "private" {
+		resolved, resolveErr := p.resolveP2PChatID(ctx, token, containerID, conversation.Name, conversation.Memberships)
+		if resolveErr != nil {
+			if errors.Is(resolveErr, ErrPrivateConversationNotFound) {
+				// A contact can exist before a p2p container is visible to the
+				// app. Keep the collector healthy and retry on the normal interval.
+				return nil, cursor, nil
+			}
+			return nil, cursor, resolveErr
+		}
+		if resolved != containerID {
+			slog.Default().DebugContext(ctx, "feishu private conversation resolved", "external_id", containerID, "chat_id", resolved)
+		}
+		containerID = resolved
+	}
+	// The Feishu messages endpoint accepts second-resolution bounds. A raw
+	// `time.Now()` therefore creates a race: a message sent during the current
+	// second can be newer than the truncated `end_time` and be skipped until a
+	// later cycle. Advance the watermark to the next whole second so the poll
+	// window includes messages created while this request is in flight.
+	cycleEnd := time.Now().UTC().Truncate(time.Second).Add(time.Second)
 	startAt := cycleEnd.Add(-7 * 24 * time.Hour)
 	if conversation.EffectiveStartAt != nil && conversation.EffectiveStartAt.After(startAt) {
 		startAt = conversation.EffectiveStartAt.UTC()
@@ -463,7 +570,7 @@ func (p *HTTPFeishu) PollMessages(ctx context.Context, token vault.TokenSet, con
 	for {
 		query := url.Values{
 			"container_id_type": {"chat"},
-			"container_id":      {conversation.ExternalConversationID},
+			"container_id":      {containerID},
 			"page_size":         {"50"},
 			"sort_type":         {"ByCreateTimeAsc"},
 			"start_time":        {strconv.FormatInt(startAt.Unix(), 10)},
@@ -521,6 +628,330 @@ func (p *HTTPFeishu) PollMessages(ctx context.Context, token vault.TokenSet, con
 		pageToken = body.Data.PageToken
 	}
 	return messages, cycleEnd.Format(time.RFC3339Nano), nil
+}
+
+// resolveP2PChatID accepts both the real Feishu chat ID and the open_id used
+// by the contact-directory fallback. Feishu's message API only accepts the
+// former, while older attached private collectors may already persist the
+// latter as their external conversation ID.
+func (p *HTTPFeishu) resolveP2PChatID(ctx context.Context, token vault.TokenSet, value, targetName string, memberships []domain.ConversationMembership) (string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" || strings.HasPrefix(value, "oc_") {
+		return value, nil
+	}
+	// A private conversation discovered from a contact relation is stored as
+	// the target open_id. The chat list endpoint is the authoritative mapping;
+	// restrict matches to actual p2p user chats so account/security bots cannot
+	// be mistaken for the contact conversation.
+	// The unfiltered form is the documented/stable request. Older tenants
+	// reject it or return no p2p rows, so retain the narrower forms as
+	// fallbacks for those deployments.
+	queries := []url.Values{
+		{"page_size": {"100"}, "user_id_type": {"open_id"}},
+		{"page_size": {"100"}, "user_id_type": {"open_id"}, "types": {"p2p"}},
+		{"page_size": {"100"}, "user_id_type": {"open_id"}, "chat_type": {"p2p"}},
+	}
+	var lastLookupErr error
+	for _, query := range queries {
+		pageToken := ""
+		for {
+			if pageToken != "" {
+				query.Set("page_token", pageToken)
+			}
+			var body struct {
+				Code    int    `json:"code"`
+				Message string `json:"message"`
+				Msg     string `json:"msg"`
+				Data    struct {
+					Items []struct {
+						ChatID        string `json:"chat_id"`
+						Name          string `json:"name"`
+						Type          string `json:"chat_type"`
+						Mode          string `json:"chat_mode"`
+						P2PTargetID   string `json:"p2p_target_id"`
+						P2PTargetType string `json:"p2p_target_type"`
+						UserID        string `json:"user_id"`
+						TargetID      string `json:"target_id"`
+					} `json:"items"`
+					HasMore   bool   `json:"has_more"`
+					PageToken string `json:"page_token"`
+				} `json:"data"`
+			}
+			if err := p.getJSON(ctx, "/open-apis/im/v1/chats?"+query.Encode(), token, &body); err != nil {
+				if errors.Is(err, ErrAuthorizationExpired) {
+					return "", err
+				}
+				// Feishu reports unsupported query parameters as an API-level
+				// error. Keep trying the compatible query variants, but do not
+				// hide transport or decoding failures from the worker.
+				if strings.Contains(err.Error(), "feishu api request") {
+					lastLookupErr = err
+					break
+				}
+				return "", err
+			}
+			if body.Code != 0 {
+				// Query variants are not uniformly supported by Feishu tenants.
+				// A rejected variant must not prevent the next compatible form
+				// from resolving the contact's p2p chat ID.
+				break
+			}
+			for _, item := range body.Data.Items {
+				chatType := strings.TrimSpace(item.Type)
+				if chatType == "" {
+					chatType = strings.TrimSpace(item.Mode)
+				}
+				if chatType != "" && !strings.EqualFold(chatType, "p2p") {
+					continue
+				}
+				// Feishu labels p2p targets as user or bot. Only a user target can
+				// represent an attached human private conversation.
+				if strings.EqualFold(strings.TrimSpace(item.P2PTargetType), "bot") {
+					continue
+				}
+				// A display name is only a last-resort key. If Feishu supplies a
+				// target id, require it to agree with the persisted contact id;
+				// otherwise a duplicate name could resolve to an unrelated bot or
+				// system conversation.
+				nameMatches := strings.TrimSpace(targetName) != "" && strings.EqualFold(strings.TrimSpace(item.Name), strings.TrimSpace(targetName)) && (item.P2PTargetID == "" || strings.EqualFold(strings.TrimSpace(item.P2PTargetID), value))
+				if item.P2PTargetID == value || item.UserID == value || item.TargetID == value || nameMatches {
+					return item.ChatID, nil
+				}
+			}
+			if !body.Data.HasMore {
+				break
+			}
+			if body.Data.PageToken == "" || body.Data.PageToken == pageToken {
+				return "", errors.New("feishu private conversation lookup returned an invalid page token")
+			}
+			pageToken = body.Data.PageToken
+		}
+	}
+	if searched, err := p.searchP2PChatID(ctx, token, value, targetName, memberships); err == nil && searched != "" {
+		return searched, nil
+	} else if err != nil {
+		lastLookupErr = err
+	}
+	if lastLookupErr != nil {
+		return "", fmt.Errorf("feishu private conversation lookup failed: %w", lastLookupErr)
+	}
+	return "", fmt.Errorf("%w: %s", ErrPrivateConversationNotFound, value)
+}
+
+// searchP2PChatID handles contacts that are visible in the directory but are
+// absent from the chat list. Feishu's message search response includes the
+// actual chat_id in meta_data, which is the only read-only way to recover an
+// existing p2p container for such a contact.
+func (p *HTTPFeishu) searchP2PChatID(ctx context.Context, token vault.TokenSet, value, targetName string, memberships []domain.ConversationMembership) (string, error) {
+	// A contact may not have authored a message recently. In that case a
+	// search constrained to from_ids is empty even though the user has an
+	// existing p2p chat. Try the precise query first, then inspect visible p2p
+	// chats and their members without sending a synthetic message.
+	if chatID, err := p.searchP2PChatMessages(ctx, token, value, targetName, memberships); err != nil || chatID != "" {
+		return chatID, err
+	}
+	return p.searchP2PChatsByMember(ctx, token, value, targetName, memberships)
+}
+
+type feishuMessageSearchItem struct {
+	ChatID   string `json:"chat_id"`
+	FromID   string `json:"from_id"`
+	ChatType string `json:"chat_type"`
+	Sender   struct {
+		ID string `json:"id"`
+	} `json:"sender"`
+	Metadata struct {
+		ChatID    string `json:"chat_id"`
+		FromID    string `json:"from_id"`
+		IsP2PChat *bool  `json:"is_p2p_chat"`
+	} `json:"meta_data"`
+}
+
+func (p *HTTPFeishu) searchP2PChatMessages(ctx context.Context, token vault.TokenSet, targetID, targetName string, memberships []domain.ConversationMembership) (string, error) {
+	pageToken := ""
+	for {
+		// Feishu's search API nests all message constraints under `filter`.
+		// Keeping these fields at the request root silently drops the sender and
+		// p2p constraints, which can return an unrelated bot conversation.
+		request := struct {
+			Query  string `json:"query"`
+			Filter struct {
+				FromIDs  []string `json:"from_ids,omitempty"`
+				ChatType string   `json:"chat_type,omitempty"`
+			} `json:"filter"`
+		}{Query: ""}
+		if strings.TrimSpace(targetID) != "" {
+			request.Filter.FromIDs = []string{targetID}
+		}
+		request.Filter.ChatType = "p2p"
+		query := url.Values{"page_size": {"30"}, "user_id_type": {"open_id"}}
+		if pageToken != "" {
+			query.Set("page_token", pageToken)
+		}
+		var body struct {
+			Code int `json:"code"`
+			Data struct {
+				Items     []feishuMessageSearchItem `json:"items"`
+				HasMore   bool                      `json:"has_more"`
+				PageToken string                    `json:"page_token"`
+			} `json:"data"`
+		}
+		if err := p.postJSON(ctx, "/open-apis/im/v1/messages/search?"+query.Encode(), token, request, &body); err != nil {
+			return "", err
+		}
+		if body.Code != 0 {
+			return "", fmt.Errorf("feishu private message search failed: code=%d", body.Code)
+		}
+		for _, item := range body.Data.Items {
+			chatID := firstNonEmpty(item.Metadata.ChatID, item.ChatID)
+			if !strings.HasPrefix(chatID, "oc_") || !isP2PSearchItem(item) {
+				continue
+			}
+			matches, err := p.p2pSearchItemMatchesTarget(ctx, token, item, chatID, targetID, targetName, memberships)
+			if err != nil {
+				return "", err
+			}
+			if matches {
+				return chatID, nil
+			}
+		}
+		if !body.Data.HasMore {
+			return "", nil
+		}
+		if body.Data.PageToken == "" || body.Data.PageToken == pageToken {
+			return "", errors.New("feishu private message search returned an invalid page token")
+		}
+		pageToken = body.Data.PageToken
+	}
+}
+
+func (p *HTTPFeishu) searchP2PChatsByMember(ctx context.Context, token vault.TokenSet, value, targetName string, memberships []domain.ConversationMembership) (string, error) {
+	pageToken := ""
+	seen := map[string]struct{}{}
+	for {
+		request := struct {
+			Query  string `json:"query"`
+			Filter struct {
+				ChatType string `json:"chat_type,omitempty"`
+			} `json:"filter"`
+		}{Query: ""}
+		request.Filter.ChatType = "p2p"
+		query := url.Values{"page_size": {"30"}, "user_id_type": {"open_id"}}
+		if pageToken != "" {
+			query.Set("page_token", pageToken)
+		}
+		var body struct {
+			Code int `json:"code"`
+			Data struct {
+				Items     []feishuMessageSearchItem `json:"items"`
+				HasMore   bool                      `json:"has_more"`
+				PageToken string                    `json:"page_token"`
+			} `json:"data"`
+		}
+		if err := p.postJSON(ctx, "/open-apis/im/v1/messages/search?"+query.Encode(), token, request, &body); err != nil {
+			return "", err
+		}
+		if body.Code != 0 {
+			return "", fmt.Errorf("feishu private message search failed: code=%d", body.Code)
+		}
+		for _, item := range body.Data.Items {
+			chatID := firstNonEmpty(item.Metadata.ChatID, item.ChatID)
+			if !strings.HasPrefix(chatID, "oc_") || !isP2PSearchItem(item) {
+				continue
+			}
+			if _, ok := seen[chatID]; ok {
+				continue
+			}
+			seen[chatID] = struct{}{}
+			matches, err := p.p2pSearchItemMatchesTarget(ctx, token, item, chatID, value, targetName, memberships)
+			if err != nil {
+				return "", err
+			}
+			if matches {
+				return chatID, nil
+			}
+		}
+		if !body.Data.HasMore {
+			return "", nil
+		}
+		if body.Data.PageToken == "" || body.Data.PageToken == pageToken {
+			return "", errors.New("feishu private message search returned an invalid page token")
+		}
+		pageToken = body.Data.PageToken
+	}
+}
+
+func isP2PSearchItem(item feishuMessageSearchItem) bool {
+	if item.Metadata.IsP2PChat != nil && !*item.Metadata.IsP2PChat {
+		return false
+	}
+	chatType := strings.TrimSpace(item.ChatType)
+	return chatType == "" || strings.EqualFold(chatType, "p2p")
+}
+
+func (p *HTTPFeishu) p2pSearchItemMatchesTarget(ctx context.Context, token vault.TokenSet, item feishuMessageSearchItem, chatID, targetID, targetName string, memberships []domain.ConversationMembership) (bool, error) {
+	targetID = strings.TrimSpace(targetID)
+	fromID := firstNonEmpty(item.Metadata.FromID, item.FromID, item.Sender.ID)
+	if fromID != "" && targetID != "" && strings.EqualFold(fromID, targetID) {
+		if len(memberships) == 0 {
+			return true, nil
+		}
+		return p.confirmP2PChatMembers(ctx, token, chatID, targetID, targetName, memberships)
+	}
+	// Some tenants omit sender metadata from message-search results. In that
+	// response shape, or when the search result was authored by the current
+	// user, confirm the target is actually a member of the p2p container before
+	// accepting its chat_id. This matters for a newly opened private chat where
+	// only the owner's outbound messages exist so far.
+	members, err := p.discoverChatMembers(ctx, token, chatID, "")
+	if err != nil {
+		if errors.Is(err, ErrAuthorizationExpired) {
+			return false, err
+		}
+		return false, nil
+	}
+	return p2pMembersMatchTarget(members, targetID, targetName, memberships), nil
+}
+
+func (p *HTTPFeishu) confirmP2PChatMembers(ctx context.Context, token vault.TokenSet, chatID, targetID, targetName string, memberships []domain.ConversationMembership) (bool, error) {
+	members, err := p.discoverChatMembers(ctx, token, chatID, "")
+	if err != nil {
+		if errors.Is(err, ErrAuthorizationExpired) {
+			return false, err
+		}
+		return false, nil
+	}
+	return p2pMembersMatchTarget(members, targetID, targetName, memberships), nil
+}
+
+func p2pMembersMatchTarget(members []domain.AvailableMember, targetID, targetName string, memberships []domain.ConversationMembership) bool {
+	memberIDs := make(map[string]struct{}, len(members))
+	memberNames := make(map[string]struct{}, len(members))
+	for _, member := range members {
+		memberIDs[strings.ToLower(strings.TrimSpace(member.ExternalUserID))] = struct{}{}
+		memberNames[strings.ToLower(strings.TrimSpace(member.DisplayName))] = struct{}{}
+	}
+	if targetID != "" {
+		if _, ok := memberIDs[strings.ToLower(strings.TrimSpace(targetID))]; !ok {
+			return false
+		}
+		return true
+	}
+	if targetName != "" {
+		if _, ok := memberNames[strings.ToLower(strings.TrimSpace(targetName))]; ok {
+			return true
+		}
+	}
+	for _, membership := range memberships {
+		id := strings.ToLower(strings.TrimSpace(membership.ExternalUserID))
+		if id == "" {
+			continue
+		}
+		if _, ok := memberIDs[id]; ok {
+			return true
+		}
+	}
+	return false
 }
 
 func parseFeishuMessage(apiURL, messageID, messageType, raw string) (string, []Attachment) {
@@ -739,6 +1170,47 @@ func (p *HTTPFeishu) getJSON(ctx context.Context, path string, token vault.Token
 		return fmt.Errorf("feishu api request was rejected: path=%s code=%d message=%s description=%s", path, envelope.Code, firstNonEmpty(envelope.Msg, envelope.Message), envelope.ErrorDescription)
 	}
 	return json.NewDecoder(bytes.NewReader(raw)).Decode(out)
+}
+
+func (p *HTTPFeishu) postJSON(ctx context.Context, path string, token vault.TokenSet, input, out any) error {
+	rawInput, err := json.Marshal(input)
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.apiURL+path, bytes.NewReader(rawInput))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", bearer(token))
+	req.Header.Set("Content-Type", "application/json; charset=utf-8")
+	setTraceHeaders(req)
+	res, err := p.client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer res.Body.Close()
+	raw, err := io.ReadAll(io.LimitReader(res.Body, 8<<20))
+	if err != nil {
+		return err
+	}
+	var envelope struct {
+		Code             int    `json:"code"`
+		Error            string `json:"error"`
+		ErrorDescription string `json:"error_description"`
+		Message          string `json:"message"`
+		Msg              string `json:"msg"`
+	}
+	_ = json.Unmarshal(raw, &envelope)
+	if authorizationRejected(res.StatusCode, envelope.Code, envelope.Error, envelope.ErrorDescription, envelope.Message, envelope.Msg) {
+		return ErrAuthorizationExpired
+	}
+	if res.StatusCode >= 400 {
+		return fmt.Errorf("feishu api request failed: status=%d path=%s code=%d message=%s description=%s", res.StatusCode, path, envelope.Code, firstNonEmpty(envelope.Msg, envelope.Message), envelope.ErrorDescription)
+	}
+	if envelope.Code != 0 {
+		return fmt.Errorf("feishu api request was rejected: path=%s code=%d message=%s description=%s", path, envelope.Code, firstNonEmpty(envelope.Msg, envelope.Message), envelope.ErrorDescription)
+	}
+	return json.Unmarshal(raw, out)
 }
 
 func setTraceHeaders(req *http.Request) {
