@@ -369,3 +369,7 @@ export async function getKnowledgeAttachmentContent(id: string, download = false
   }
   return response.blob()
 }
+
+export async function listKnowledgeConversationAttachments(conversationID: string) {
+  return knowledgeRequest<{ items: AttachmentDTO[] }>(`/conversations/${encodeURIComponent(conversationID)}/attachments`)
+}

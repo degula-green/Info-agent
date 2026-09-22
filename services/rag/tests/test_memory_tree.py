@@ -9,6 +9,7 @@ from app.infrastructure.embedding.client import HashEmbeddingProvider
 from app.infrastructure.memory_models import DeterministicFactExtractor, DeterministicNodeSummarizer, MemoryModelUnavailable, parse_fact_response
 from app.infrastructure.memory_elasticsearch import ElasticsearchMemoryStore
 from app.infrastructure.persistence.repository import InMemoryRagRepository
+from app.infrastructure.persistence.repository import _memory_plan
 
 
 def context(version: int = 1) -> AttachmentContext:
@@ -54,6 +55,18 @@ class _RouteOnlyExtractor:
 
 
 class MemoryTreeTests(unittest.TestCase):
+    def test_message_display_does_not_become_attachment_source(self):
+        value = AttachmentContext(**{**context().__dict__, "part_kind": "message_display", "message_id": "00000000-0000-0000-0000-000000000051"})
+        plan = _memory_plan(value, [], [])
+        self.assertEqual(plan["source_type"], "message")
+        self.assertIsNone(plan["attachment_id"])
+
+    def test_attachment_content_keeps_attachment_source(self):
+        value = AttachmentContext(**{**context().__dict__, "part_kind": "attachment_content"})
+        plan = _memory_plan(value, [], [])
+        self.assertEqual(plan["source_type"], "attachment")
+        self.assertEqual(plan["attachment_id"], value.attachment_id)
+
     def test_fact_json_is_strict(self):
         response = {"choices": [{"message": {"content": '{"facts":[{"fact_type":"state","text":"已交付","subject":"项目","chunk_indexes":[0]}]}'}}]}
         self.assertEqual(parse_fact_response(response, [chunk()])[0].chunk_ids, ("chunk-1-a",))

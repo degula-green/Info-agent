@@ -74,6 +74,9 @@ def build_chunks(parsed: ParsedDocument, context: AttachmentContext) -> list[Chu
         else:
             auth_type, auth_part, auth_id, auth_key = "knowledge_item", "display", context.knowledge_item_id or context.attachment_id, f"knowledge_item:{context.knowledge_item_id or context.attachment_id}"
         source_locator = dict(context.source_locator)
+        source_locator.setdefault("file_name", context.file_name)
+        source_locator.setdefault("mime_type", context.mime_type)
+        source_locator.setdefault("part_kind", context.part_kind)
         if block.page_number is not None:
             source_locator.setdefault("page_number", block.page_number)
         source_locator.setdefault("paragraph_index", block.order)

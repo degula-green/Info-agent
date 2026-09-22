@@ -17,10 +17,13 @@ def assemble_context(results: list[SearchResult], *, max_chunks: int | None = No
     """Use documents/messages as citations while retaining chunks as evidence."""
     limit = max_chunks or settings.qa_max_chunks
     token_limit = max_tokens or settings.qa_max_context_tokens
+    # An attachment is a document even when the upstream source did not carry
+    # its filename.  Keeping the attachment identity here is what collapses
+    # multiple matching chunks from one document into one citation card.
     document_names = {
-        str(result.attachment_id): str(result.source.get("file_name"))
+        str(result.attachment_id): _document_name(result)
         for result in results
-        if result.attachment_id and str(result.source.get("file_name") or "").strip()
+        if result.attachment_id and _is_document_result(result)
     }
     groups: dict[str, dict[str, Any]] = {}
     used = 0
@@ -72,10 +75,11 @@ def assemble_context(results: list[SearchResult], *, max_chunks: int | None = No
 def _source_group(result: SearchResult, document_names: dict[str, str], summary: str) -> dict[str, Any]:
     source = result.source
     attachment_id = str(result.attachment_id or "")
-    if attachment_id and attachment_id in document_names:
+    if attachment_id and _is_document_result(result):
+        display_name = document_names.get(attachment_id) or "附件"
         return {
             "source_id": f"attachment:{attachment_id}", "source_kind": "document",
-            "display_name": document_names[attachment_id], "file_name": document_names[attachment_id],
+            "display_name": display_name, "file_name": display_name,
             "attachment_id": attachment_id, "knowledge_item_id": result.knowledge_item_id,
             "knowledge_base_id": source.get("knowledge_base_id"), "organization_id": source.get("organization_id"),
             "content_version": source.get("content_version"), "acl_version": source.get("auth_acl_version"),
@@ -94,6 +98,20 @@ def _source_group(result: SearchResult, document_names: dict[str, str], summary:
         "content_version": source.get("content_version"), "acl_version": source.get("auth_acl_version"),
         "evidence_chunk_ids": [], "evidence_relations": [], "tree_paths": [], "fact_ids": [], "fragments": [],
     }
+
+
+def _is_document_result(result: SearchResult) -> bool:
+    source = result.source
+    return str(source.get("part_kind") or "") in {"attachment_content", "attachment_metadata"} or str(source.get("source_type") or "") == "attachment"
+
+
+def _document_name(result: SearchResult) -> str:
+    source = result.source
+    for key in ("file_name", "document_name", "source_resource_name", "title"):
+        value = str(source.get(key) or "").strip()
+        if value:
+            return value
+    return "附件"
 
 
 def _summary(value: str) -> str:

@@ -91,7 +91,11 @@ class TreeSearchService:
                     fact_evidence.append({**source, "visibility": raw_fact.get("visibility"), "auth_object_key": auth_object_key,
                                           "auth_resource_type": auth_type, "auth_resource_part": auth_part, "auth_resource_id": auth_id,
                                           "conversation_group_id": source.get("conversation_key"), "message_id": source.get("message_id"),
-                                          "sent_at": source.get("observed_at")})
+                                          "sent_at": source.get("observed_at"),
+                                          **{key: value for key, value in (source.get("source_metadata") or {}).items() if key in {"file_name", "mime_type", "platform", "conversation_id"} and value},
+                                          "part_kind": (source.get("source_locator") or {}).get("part_kind"),
+                                          "file_name": source.get("file_name") or (source.get("source_locator") or {}).get("file_name"),
+                                          "mime_type": source.get("mime_type") or (source.get("source_locator") or {}).get("mime_type")})
                 authorized_direct = self._authorize_sources(request, fact_evidence, snapshot_id)
                 safe_sources.extend([{key: value for key, value in source.items() if key != "auth_object_key"} for source in authorized_direct])
                 direct_chunks = [{**source, "relation": "direct_evidence", "fact_id": fact.get("fact_id"), "tree_path": row.get("path")} for source in authorized_direct if str(source.get("content") or "").strip()]

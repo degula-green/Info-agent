@@ -40,6 +40,10 @@
       </div>
     </div>
 
+    <t-dialog v-model:visible="citationPreviewVisible" attach="body" width="min(920px, 94vw)" :footer="false" destroy-on-close header="文档预览">
+      <InfoAttachmentPreview v-if="activeCitationFile" :file="activeCitationFile" :active="citationPreviewVisible" />
+    </t-dialog>
+
     <div class="qa-composer-area">
       <div class="qa-composer" :class="{ 'qa-composer--focused': focused }">
         <t-textarea ref="textareaRef" v-model="question" class="qa-textarea" :autosize="{ minRows: 3, maxRows: 8 }" placeholder="请输入您想要咨询的问题或需要帮助的内容..." @focus="focused = true" @blur="focused = false" @keydown="handleTextareaKeydown" />
@@ -90,6 +94,9 @@ import { useInfoKnowledgeStore } from '@/stores/infoKnowledge'
 import { renderChatMarkdown } from '@/utils/chatMarkdownRenderer'
 import { getQaConversation, askQaStream } from '@/api/rag'
 import { getCurrentOrganization } from '@/api/core-organization'
+import { listKnowledgeConversationAttachments } from '@/api/info-knowledge'
+import InfoAttachmentPreview from '@/components/InfoAttachmentPreview.vue'
+import type { InfoFile } from '@/mock'
 
 type Scope = SourceKey | 'all'
 type Mode = 'quick' | 'deep'
@@ -123,6 +130,16 @@ function mergeCitations(values: any[]): QaCitation[] {
   return [...merged.values()]
 }
 
+async function hydrateCitationMetadata(citation: QaCitation) {
+  if (citation.type !== 'document' || !citation.attachment_id || citation.file_name && citation.file_name !== '附件' || !citation.conversation_id) return
+  try {
+    const response = await listKnowledgeConversationAttachments(String(citation.conversation_id))
+    const metadata: any = (response.items || []).find((item: any) => String(item.id || item.attachment_id || '') === String(citation.attachment_id) || String(item.external_attachment_id || '') === String(citation.attachment_id))
+    const name = String(metadata?.file_name || '').trim()
+    if (name) citation.file_name = name
+  } catch { /* the preview will show the Knowledge error state if metadata is unavailable */ }
+}
+
 const store = useInfoKnowledgeStore()
 const router = useRouter()
 const route = useRoute()
@@ -138,6 +155,8 @@ const scrollRef = ref<HTMLElement | null>(null)
 const textareaRef = ref<{ focus?: () => void } | null>(null)
 const loading = ref(false)
 const expandedCitations = ref<Record<number, boolean>>({})
+const citationPreviewVisible = ref(false)
+const activeCitationFile = ref<InfoFile | null>(null)
 type ConversationId = string | number
 function parseConversationId(value: unknown): ConversationId | null {
   const raw = Array.isArray(value) ? value[0] : value
@@ -234,12 +253,24 @@ function reportAnswer() {
   MessagePlugin.info('反馈功能将在接口接入后开放')
 }
 
-function openCitation(citation: QaCitation) {
-  if (citation.platform && citation.conversation_id) {
-    router.push(`/knowledge/${encodeURIComponent(citation.platform)}/conversations/${encodeURIComponent(String(citation.conversation_id))}`)
-  } else {
-    MessagePlugin.info('该引用暂无可打开的详情')
+async function openCitation(citation: QaCitation) {
+  if (citation.type === 'document' && citation.attachment_id) {
+    const fallbackName = citation.file_name && citation.file_name !== '附件' ? citation.file_name : '附件'
+    let metadata: any = null
+    if (citation.conversation_id) {
+      try { metadata = ((await listKnowledgeConversationAttachments(String(citation.conversation_id))).items || []).find((item: any) => String(item.id || item.attachment_id || '') === String(citation.attachment_id) || String(item.external_attachment_id || '') === String(citation.attachment_id)) } catch { /* content endpoint below provides the final error state */ }
+    }
+    const name = String(metadata?.file_name || metadata?.name || fallbackName)
+    const mimeType = String(metadata?.mime_type || metadata?.mimeType || '') || undefined
+    activeCitationFile.value = { id: String(citation.attachment_id), name, type: name.includes('.') ? name.split('.').pop() || 'file' : 'file', mimeType, size: metadata?.size_bytes ? `${metadata.size_bytes} bytes` : '-', time: '', uploadedAt: '', uploader: '', content: '', contentAccessRequired: Boolean(metadata?.content_access_required), documentStatus: 'completed', parseStatus: 'completed' }
+    citationPreviewVisible.value = true
+    return
   }
+  if (citation.platform && citation.conversation_id) {
+    router.push({ path: '/knowledge/' + encodeURIComponent(citation.platform) + '/conversations/' + encodeURIComponent(String(citation.conversation_id)), query: citation.message_id ? { message: citation.message_id } : undefined })
+    return
+  }
+  MessagePlugin.info('该引用暂无可打开的详情')
 }
 
 // TDesign textarea emits (value, context) rather than a native KeyboardEvent.
@@ -269,8 +300,8 @@ async function sendQuestion() {
     await askQaStream({ query: text, conversationId: conversationId.value ?? undefined, mode: mode.value, knowledgeBaseIds: selectedKnowledgeBaseIds.value, organizationId: organizationId.value }, {
       onMeta: (value) => { if (value.conversation_id && !conversationId.value) { conversationId.value = value.conversation_id; void router.replace({ path: '/chat', query: { session: String(value.conversation_id) } }) } },
       onToken: (delta) => { assistant.text += delta },
-      onCitation: (value) => { assistant.citations = mergeCitations([...(assistant.citations || []), value]) },
-      onDone: (value) => { if (!assistant.text && value.answer) assistant.text = value.answer; if (value.citations?.length) assistant.citations = mergeCitations(value.citations); assistant.streaming = false },
+      onCitation: (value) => { assistant.citations = mergeCitations([...(assistant.citations || []), value]); const citation = assistant.citations.find((item) => item.citation_id === (value?.citation_id || value?.source_id || `attachment:${value?.attachment_id}`)); if (citation) void hydrateCitationMetadata(citation) },
+      onDone: (value) => { if (!assistant.text && value.answer) assistant.text = value.answer; if (value.citations?.length) { assistant.citations = mergeCitations(value.citations); assistant.citations.forEach((citation) => { void hydrateCitationMetadata(citation) }) }; assistant.streaming = false },
       onError: () => { assistant.text = '本次回答失败，请稍后重试。'; assistant.streaming = false; MessagePlugin.error('问答服务暂时不可用') },
     })
   } catch { assistant.text = '检索服务暂时不可用，请稍后重试。'; assistant.streaming = false; MessagePlugin.error('问答请求失败') } finally { assistant.streaming = false; loading.value = false }
@@ -288,7 +319,11 @@ async function loadConversation() {
     const detail = await getQaConversation(String(conversationId.value))
     for (const record of detail.messages || []) {
       if (record.role === 'user') messages.value.push({ role: 'user', text: record.content })
-      if (record.role === 'assistant') messages.value.push({ role: 'assistant', text: record.content || (record.status === 'failed' ? '本次回答失败，请重试。' : ''), citations: mergeCitations(record.citations || []) })
+      if (record.role === 'assistant') {
+        const citations = mergeCitations(record.citations || [])
+        messages.value.push({ role: 'assistant', text: record.content || (record.status === 'failed' ? '本次回答失败，请重试。' : ''), citations })
+        citations.forEach((citation) => { void hydrateCitationMetadata(citation) })
+      }
     }
   } catch { MessagePlugin.error('加载历史会话失败') }
 }

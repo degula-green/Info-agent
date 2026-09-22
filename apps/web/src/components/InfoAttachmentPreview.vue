@@ -70,18 +70,24 @@ async function load() {
   const version = ++loadVersion; release(); textContent.value = ''; error.value = ''; loading.value = false
   isImage.value = false; isPdf.value = false; isWord.value = false; isSpreadsheet.value = false; isPresentation.value = false; isText.value = false; oversizedPresentation.value = false
   if (!props.active || props.file.contentAccessRequired) return
-  const ext = extension(); const mime = String(props.file.mimeType || '').toLowerCase()
-  isImage.value = mime.startsWith('image/') || ['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp'].includes(ext)
-  isPdf.value = mime === 'application/pdf' || ext === 'pdf'
-  isWord.value = ext === 'docx' || mime === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
-  isSpreadsheet.value = ['xlsx', 'xls', 'csv'].includes(ext) || mime.includes('spreadsheet') || mime.includes('excel')
-  isPresentation.value = ['pptx', 'ppt'].includes(ext) || mime.includes('presentation') || mime.includes('powerpoint')
-  isText.value = mime.startsWith('text/') || ['txt', 'md', 'csv', 'json', 'xml', 'log'].includes(ext)
+  const ext = extension(); let mime = String(props.file.mimeType || '').toLowerCase()
+  const setPresentationKind = () => {
+    isImage.value = mime.startsWith('image/') || ['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp'].includes(ext)
+    isPdf.value = mime === 'application/pdf' || ext === 'pdf'
+    isWord.value = ext === 'docx' || mime === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' || mime === 'application/msword'
+    isSpreadsheet.value = ['xlsx', 'xls', 'csv'].includes(ext) || mime.includes('spreadsheet') || mime.includes('excel')
+    isPresentation.value = ['pptx', 'ppt'].includes(ext) || mime.includes('presentation') || mime.includes('powerpoint')
+    isText.value = mime.startsWith('text/') || ['txt', 'md', 'csv', 'json', 'xml', 'log'].includes(ext)
+  }
+  setPresentationKind()
   oversizedPresentation.value = isPresentation.value && Number(props.file.fileSizeBytes || 0) > 30 * 1024 * 1024
   if (oversizedPresentation.value) return
   loading.value = true
   try {
     const blob = await getKnowledgeAttachmentContent(props.file.id); if (version !== loadVersion) return
+    // Metadata can be unavailable for older citations. The content response
+    // still carries the authoritative MIME type, so use it before rendering.
+    if (!props.file.mimeType && blob.type) { mime = blob.type.toLowerCase().split(';', 1)[0]; setPresentationKind() }
     if (!isImage.value && !isPdf.value && !isWord.value && !isSpreadsheet.value && !isPresentation.value && !isText.value && await sniffImageMime(blob)) isImage.value = true
     // The preview containers are behind the loading branch in the template, so
     // mount them before invoking a renderer that needs a real DOM element.

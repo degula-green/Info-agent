@@ -49,7 +49,7 @@ class RetrievalTests(unittest.TestCase):
     def test_citation_preserves_document_name_for_display_aggregation(self) -> None:
         bundle = assemble_context([SearchResult(
             "chunk-1", "document content", 1.0,
-            source={"knowledge_item_id": "ki-1", "attachment_id": "att-1", "file_name": "report.docx"},
+            source={"knowledge_item_id": "ki-1", "attachment_id": "att-1", "file_name": "report.docx", "part_kind": "attachment_content"},
         )])
         self.assertEqual(bundle.citations[0]["file_name"], "report.docx")
 
@@ -58,10 +58,10 @@ class RetrievalTests(unittest.TestCase):
             "knowledge_item_id": "message-1", "message_id": "message-1", "source_resource_id": "message-1",
         })
         document_fact = SearchResult("fact-1", "青云飞鹏小组有系统培养路线", 2.0, source={
-            "knowledge_item_id": "doc-1", "attachment_id": "att-1",
+            "knowledge_item_id": "doc-1", "attachment_id": "att-1", "part_kind": "attachment_content",
         })
         document_chunk = SearchResult("chunk-1", "常见问题正文第一段", 1.0, source={
-            "knowledge_item_id": "doc-1", "attachment_id": "att-1", "file_name": "常见问题.docx",
+            "knowledge_item_id": "doc-1", "attachment_id": "att-1", "file_name": "常见问题.docx", "part_kind": "attachment_content",
         })
         bundle = assemble_context([message, document_fact, document_chunk])
         self.assertEqual([citation["source_kind"] for citation in bundle.citations], ["message", "document"])
@@ -70,6 +70,25 @@ class RetrievalTests(unittest.TestCase):
         self.assertEqual(bundle.citations[1]["evidence_chunk_ids"], ["fact-1", "chunk-1"])
         self.assertIn("[资料 1] 飞书消息", bundle.text)
         self.assertEqual(bundle.text.count("[资料 2] 常见问题.docx"), 1)
+
+    def test_attachment_without_filename_still_uses_one_document_citation(self) -> None:
+        bundle = assemble_context([
+            SearchResult("chunk-1", "第一段", 2.0, source={"attachment_id": "att-9", "part_kind": "attachment_content"}),
+            SearchResult("chunk-2", "第二段", 1.0, source={"attachment_id": "att-9", "part_kind": "attachment_content"}),
+        ])
+        self.assertEqual(len(bundle.citations), 1)
+        self.assertEqual(bundle.citations[0]["source_kind"], "document")
+        self.assertEqual(bundle.citations[0]["source_id"], "attachment:att-9")
+        self.assertEqual(bundle.citations[0]["file_name"], "附件")
+        self.assertEqual(bundle.citations[0]["evidence_chunk_ids"], ["chunk-1", "chunk-2"])
+
+    def test_message_display_with_attachment_reference_stays_message(self) -> None:
+        bundle = assemble_context([SearchResult(
+            "message-1", "预计 10 月份进行招新", 1.0,
+            source={"message_id": "message-1", "attachment_id": "att-9", "part_kind": "message_display"},
+        )])
+        self.assertEqual(bundle.citations[0]["source_kind"], "message")
+        self.assertNotIn("attachment_id", bundle.citations[0])
 
     def test_protected_search_contains_authorization_terms_filter(self) -> None:
         store = _Store()

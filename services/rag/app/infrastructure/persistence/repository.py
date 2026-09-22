@@ -33,8 +33,9 @@ def _memory_plan(context: AttachmentContext, chunks: list[ChunkRecord], facts: l
     knowledge_base_id = _uuid(context.knowledge_base_id, "kb", context.knowledge_base_id or knowledge_item_id)
     organization_id = _uuid(context.organization_id, "org", context.organization_id) if context.organization_id else None
     owner_user_id = _uuid(context.owner_user_id, "user", context.owner_user_id) if context.owner_user_id and not organization_id else None
-    source_type = "message" if context.message_id else ("attachment" if context.attachment_id else "knowledge_item")
-    source_resource_id = context.message_id or context.attachment_id or knowledge_item_id
+    is_attachment_part = context.part_kind in {"attachment_content", "attachment_metadata"}
+    source_type = "attachment" if is_attachment_part else ("message" if context.message_id else "knowledge_item")
+    source_resource_id = (context.attachment_id if is_attachment_part else context.message_id) or knowledge_item_id
     source_id = _stable_uuid("source", source_type, source_resource_id, context.content_version, settings.memory_extraction_version)
     source_hash = (context.source_content_hash or hashlib.sha256("\n".join(chunk.content for chunk in chunks).encode()).hexdigest()).removeprefix("sha256:")
     visibility = "protected" if any(chunk.protected for chunk in chunks) else "display"
@@ -105,7 +106,7 @@ def _memory_plan(context: AttachmentContext, chunks: list[ChunkRecord], facts: l
             {"tree": entity_tree, "leaf_id": entity_leaf, "route": route},
             {"tree": session_tree, "leaf_id": session_leaf, "route": route},
         ))
-    return {"knowledge_item_id": knowledge_item_id, "knowledge_base_id": knowledge_base_id, "organization_id": organization_id, "owner_user_id": owner_user_id, "source_id": source_id, "source_type": source_type, "source_resource_id": source_resource_id, "source_hash": source_hash, "visibility": visibility, "auth_object_key": auth_object_key, "content_version": context.content_version, "acl_version": context.acl_version, "access_scope": context.access_scope, "sensitivity": context.sensitivity, "attachment_id": _uuid(context.attachment_id, "attachment", context.attachment_id) if context.attachment_id else None, "conversation_group_id": context.conversation_group_id or context.external_conversation_id, "message_id": context.message_id, "observed_at": context.sent_at or None, "processing_status": processing_status, "processing_error": processing_error or {}, "chunks": chunk_rows, "entities": list(entity_rows.values()), "facts": fact_rows, "trees": list(trees.values()), "mounts": mounts, "source_mounts": source_mounts}
+    return {"knowledge_item_id": knowledge_item_id, "knowledge_base_id": knowledge_base_id, "organization_id": organization_id, "owner_user_id": owner_user_id, "source_id": source_id, "source_type": source_type, "source_resource_id": source_resource_id, "source_hash": source_hash, "visibility": visibility, "auth_object_key": auth_object_key, "content_version": context.content_version, "acl_version": context.acl_version, "access_scope": context.access_scope, "sensitivity": context.sensitivity, "attachment_id": _uuid(context.attachment_id, "attachment", context.attachment_id) if is_attachment_part and context.attachment_id else None, "conversation_group_id": context.conversation_group_id or context.external_conversation_id, "message_id": context.message_id, "part_kind": context.part_kind, "file_name": context.file_name, "mime_type": context.mime_type, "observed_at": context.sent_at or None, "processing_status": processing_status, "processing_error": processing_error or {}, "chunks": chunk_rows, "entities": list(entity_rows.values()), "facts": fact_rows, "trees": list(trees.values()), "mounts": mounts, "source_mounts": source_mounts}
 
 
 def _graph_from_plan(plan: dict[str, Any], summaries: dict[str, str] | None = None) -> MemoryGraph:
@@ -300,7 +301,7 @@ class PostgresRagRepository:
                       sensitivity=EXCLUDED.sensitivity,
                       auth_object_key=EXCLUDED.auth_object_key,
                       updated_at=CURRENT_TIMESTAMP""",
-                    (plan["source_id"], plan["source_type"], str(plan["source_resource_id"]), plan["knowledge_item_id"], _uuid(context.message_id, "message", context.message_id) if context.message_id else None, _uuid(context.attachment_id, "attachment", context.attachment_id) if context.attachment_id else None, context.conversation_group_id or context.external_conversation_id, plan["observed_at"], plan["knowledge_base_id"], plan["organization_id"], plan["owner_user_id"], context.object_ref, context.content_version, plan["source_hash"], context.acl_version, plan["visibility"], context.access_scope, context.sensitivity, plan["auth_object_key"], settings.memory_extraction_version))
+                    (plan["source_id"], plan["source_type"], str(plan["source_resource_id"]), plan["knowledge_item_id"], _uuid(context.message_id, "message", context.message_id) if context.message_id else None, plan["attachment_id"], context.conversation_group_id or context.external_conversation_id, plan["observed_at"], plan["knowledge_base_id"], plan["organization_id"], plan["owner_user_id"], context.object_ref, context.content_version, plan["source_hash"], context.acl_version, plan["visibility"], context.access_scope, context.sensitivity, plan["auth_object_key"], settings.memory_extraction_version))
                 for row in plan["chunks"]:
                     chunk = row["chunk"]
                     cursor.execute(f"""INSERT INTO {self.schema}.memory_chunks
@@ -419,7 +420,10 @@ class PostgresRagRepository:
                 "attachment_id": row[4], "source_locator": row[5] or {},
                 "source_type": row[6], "source_resource_id": row[7],
                 "conversation_key": row[8], "observed_at": row[9], "message_id": row[10], "knowledge_base_id": row[11],
-                "organization_id": row[12],
+                    "organization_id": row[12],
+                    "file_name": (row[5] or {}).get("file_name"),
+                    "mime_type": (row[5] or {}).get("mime_type"),
+                    "part_kind": (row[5] or {}).get("part_kind"),
             })
         return output
 

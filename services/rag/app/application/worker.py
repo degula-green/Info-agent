@@ -244,9 +244,14 @@ class RAGEventHandler:
         knowledge_item_id = str(payload.get("knowledge_item_id") or "")
         if not knowledge_item_id:
             return []
+        # A message knowledge item can expose related attachments in its
+        # metadata. That does not make the message body attachment content.
+        # Only an event that explicitly carries an attachment should enter the
+        # attachment-content branch below.
+        event_attachment_id = str(payload.get("attachment_id") or payload.get("source_attachment_id") or "").strip()
         knowledge = self.knowledge.get_knowledge(knowledge_item_id, content_version=payload.get("content_version"), acl_version=payload.get("acl_version"))
         attachments = knowledge.get("attachments") if isinstance(knowledge, dict) else None
-        if isinstance(attachments, list) and attachments:
+        if event_attachment_id and isinstance(attachments, list) and attachments:
             base = {key: value for key, value in knowledge.items() if key != "attachments"}
             base.setdefault("organization_id", organization_id)
             contexts: list[AttachmentContext] = []
