@@ -32,6 +32,9 @@ class TreeSearchBody(BaseModel):
     organization_id: str | None = None
     knowledge_base_id: str | None = None
     knowledge_base_ids: list[str] = Field(default_factory=list, max_length=100)
-    tree_types: list[str] = Field(default_factory=lambda: ["session", "entity"])
+    tree_types: list[str] | None = Field(default=None, max_length=2)
     top_k: int = Field(default=8, ge=1, le=50)
     include_protected: bool = False
+    occurred_after: str | None = None
+    occurred_before: str | None = None
+    conversation_id: str | None = None

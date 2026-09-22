@@ -33,6 +33,8 @@ class HybridRetriever:
         plan = plan_query(request)
         if not plan.normalized_query:
             return [], RetrievalDiagnostics(plan, False, 0, 0, 0, ("empty_query",))
+        if plan.time_resolved:
+            request = SearchRequest(**{**request.__dict__, "occurred_after": plan.time_after, "occurred_before": plan.time_before})
         degraded: list[str] = []
         vector: list[float] | None = None
         display_filters = _display_filters(request)

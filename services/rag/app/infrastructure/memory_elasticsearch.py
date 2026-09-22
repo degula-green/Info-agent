@@ -73,12 +73,26 @@ class ElasticsearchMemoryStore:
         return len(documents)
 
     def search_tree(self, request: TreeSearchRequest, query_vector: list[float] | None) -> list[dict[str, Any]]:
+        tree_types = tuple(request.tree_types or ("session", "entity"))
         filters: list[dict[str, Any]] = [
             ({"terms": {"knowledge_base_id": list(request.knowledge_base_ids)}} if request.knowledge_base_ids else {"term": {"knowledge_base_id": request.knowledge_base_id}}) if request.knowledge_base_id or request.knowledge_base_ids else {"match_all": {}},
-            {"terms": {"tree_type": list(request.tree_types)}},
+            {"terms": {"tree_type": list(tree_types)}},
         ]
         if request.organization_id:
             filters.append({"term": {"organization_id": request.organization_id}})
+        if request.conversation_id:
+            # Session roots use the conversation group as subject_key.  Entity
+            # nodes have no conversation field, so this naturally narrows only
+            # the session branch when it is selected.
+            filters.append({"bool": {"should": [
+                {"term": {"subject_key": request.conversation_id}},
+                {"term": {"conversation_group_id": request.conversation_id}},
+            ], "minimum_should_match": 1}})
+        fact_time_filters: list[dict[str, Any]] = []
+        if request.occurred_after:
+            fact_time_filters.append({"range": {"observed_at": {"gte": request.occurred_after}}})
+        if request.occurred_before:
+            fact_time_filters.append({"range": {"observed_at": {"lte": request.occurred_before}}})
         output: list[dict[str, Any]] = []
         branches = [("display", filters)]
         if request.include_protected and request.authorized_object_keys:
@@ -92,7 +106,7 @@ class ElasticsearchMemoryStore:
                     leaves = self._search_nodes(request.query, query_vector, branch_filters + [{"term": {"parent_id": str(group["node_id"])}}], branch_k, visibility)
                     for leaf in leaves:
                         base_score = sum(float(value.get("_score", 0)) for value in (root, group, leaf))
-                        fact_filters = branch_filters + [{"term": {"node_id": leaf["node_id"]}}, {"term": {"fact_status": "active"}}]
+                        fact_filters = branch_filters + fact_time_filters + [{"term": {"node_id": leaf["node_id"]}}, {"term": {"fact_status": "active"}}]
                         fact_hits = self._search(self.indices[("fact", visibility)], "fact_text", request.query, query_vector, fact_filters, request.top_k)
                         common = {"tree": {"tree_id": root["tree_id"], "tree_type": root["tree_type"], "subject_key": root["subject_key"]}, "path": [self._path_node(root), self._path_node(group), self._path_node(leaf)], "leaf_node_id": leaf["node_id"], "visibility": visibility, "degraded": query_vector is None}
                         if not fact_hits:

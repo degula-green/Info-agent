@@ -85,9 +85,9 @@ def _memory_plan(context: AttachmentContext, chunks: list[ChunkRecord], facts: l
         internal_id = _stable_uuid("node", tree_id, "group", group_key)
         leaf_id = _stable_uuid("node", tree_id, "leaf", group_key, topic_key)
         tree = trees.setdefault((tree_type, subject_key), {"id": tree_id, "tree_type": tree_type, "subject_key": subject_key, "root_id": root_id, "nodes": {}})
-        tree["nodes"][root_id] = {"id": root_id, "parent_id": None, "node_type": "root", "level": 0, "node_key": "root", "title": subject_key, "topic_key": None, "phase_key": None}
-        tree["nodes"][internal_id] = {"id": internal_id, "parent_id": root_id, "node_type": "internal", "level": 1, "node_key": f"group:{group_key}", "title": group_key, "topic_key": None, "phase_key": group_key if tree_type == "entity" else None}
-        tree["nodes"][leaf_id] = {"id": leaf_id, "parent_id": internal_id, "node_type": "leaf", "level": 2, "node_key": f"leaf:{group_key}:{topic_key}", "title": topic_key, "topic_key": topic_key, "phase_key": group_key if tree_type == "entity" else None}
+        tree["nodes"][root_id] = {"id": root_id, "parent_id": None, "node_type": "root", "level": 0, "node_key": "root", "title": subject_key, "topic_key": None, "phase_key": None, "time_start": context.sent_at, "time_end": context.sent_at}
+        tree["nodes"][internal_id] = {"id": internal_id, "parent_id": root_id, "node_type": "internal", "level": 1, "node_key": f"group:{group_key}", "title": group_key, "topic_key": None, "phase_key": group_key if tree_type == "entity" else None, "time_start": context.sent_at, "time_end": context.sent_at}
+        tree["nodes"][leaf_id] = {"id": leaf_id, "parent_id": internal_id, "node_type": "leaf", "level": 2, "node_key": f"leaf:{group_key}:{topic_key}", "title": topic_key, "topic_key": topic_key, "phase_key": group_key if tree_type == "entity" else None, "time_start": context.sent_at, "time_end": context.sent_at}
         return tree, leaf_id
 
     for fact_row in fact_rows:
@@ -105,7 +105,7 @@ def _memory_plan(context: AttachmentContext, chunks: list[ChunkRecord], facts: l
             {"tree": entity_tree, "leaf_id": entity_leaf, "route": route},
             {"tree": session_tree, "leaf_id": session_leaf, "route": route},
         ))
-    return {"knowledge_item_id": knowledge_item_id, "knowledge_base_id": knowledge_base_id, "organization_id": organization_id, "owner_user_id": owner_user_id, "source_id": source_id, "source_type": source_type, "source_resource_id": source_resource_id, "source_hash": source_hash, "visibility": visibility, "auth_object_key": auth_object_key, "content_version": context.content_version, "acl_version": context.acl_version, "access_scope": context.access_scope, "sensitivity": context.sensitivity, "attachment_id": _uuid(context.attachment_id, "attachment", context.attachment_id) if context.attachment_id else None, "processing_status": processing_status, "processing_error": processing_error or {}, "chunks": chunk_rows, "entities": list(entity_rows.values()), "facts": fact_rows, "trees": list(trees.values()), "mounts": mounts, "source_mounts": source_mounts}
+    return {"knowledge_item_id": knowledge_item_id, "knowledge_base_id": knowledge_base_id, "organization_id": organization_id, "owner_user_id": owner_user_id, "source_id": source_id, "source_type": source_type, "source_resource_id": source_resource_id, "source_hash": source_hash, "visibility": visibility, "auth_object_key": auth_object_key, "content_version": context.content_version, "acl_version": context.acl_version, "access_scope": context.access_scope, "sensitivity": context.sensitivity, "attachment_id": _uuid(context.attachment_id, "attachment", context.attachment_id) if context.attachment_id else None, "conversation_group_id": context.conversation_group_id or context.external_conversation_id, "message_id": context.message_id, "observed_at": context.sent_at or None, "processing_status": processing_status, "processing_error": processing_error or {}, "chunks": chunk_rows, "entities": list(entity_rows.values()), "facts": fact_rows, "trees": list(trees.values()), "mounts": mounts, "source_mounts": source_mounts}
 
 
 def _graph_from_plan(plan: dict[str, Any], summaries: dict[str, str] | None = None) -> MemoryGraph:
@@ -113,12 +113,12 @@ def _graph_from_plan(plan: dict[str, Any], summaries: dict[str, str] | None = No
     nodes, facts, sources = [], [], []
     for tree in plan["trees"]:
         for node in tree["nodes"].values():
-            nodes.append({"node_id": node["id"], "tree_id": tree["id"], "tree_type": tree["tree_type"], "node_type": node["node_type"], "parent_id": node["parent_id"], "level": node["level"], "knowledge_base_id": plan["knowledge_base_id"], "organization_id": plan["organization_id"], "owner_user_id": plan["owner_user_id"], "subject_key": tree["subject_key"], "topic_key": node["topic_key"], "phase_key": node["phase_key"], "summary": summaries.get(node["id"]) or node["title"], "summary_version": 1, "summary_strategy_version": settings.memory_summary_strategy_version, "content_version": plan["content_version"], "visibility": plan["visibility"], "access_scope": plan["access_scope"], "sensitivity": plan["sensitivity"], "auth_object_key": plan["auth_object_key"], "acl_version": plan["acl_version"], "embedding_model": settings.embedding_model, "mapping_version": "v1", "lifecycle_status": "active", "created_at": now, "indexed_at": now})
+            nodes.append({"node_id": node["id"], "tree_id": tree["id"], "tree_type": tree["tree_type"], "node_type": node["node_type"], "parent_id": node["parent_id"], "level": node["level"], "knowledge_base_id": plan["knowledge_base_id"], "organization_id": plan["organization_id"], "owner_user_id": plan["owner_user_id"], "subject_key": tree["subject_key"], "topic_key": node["topic_key"], "phase_key": node["phase_key"], "summary": summaries.get(node["id"]) or node["title"], "summary_version": 1, "summary_strategy_version": settings.memory_summary_strategy_version, "content_version": plan["content_version"], "time_start": plan["observed_at"], "time_end": plan["observed_at"], "visibility": plan["visibility"], "access_scope": plan["access_scope"], "sensitivity": plan["sensitivity"], "auth_object_key": plan["auth_object_key"], "acl_version": plan["acl_version"], "embedding_model": settings.embedding_model, "mapping_version": "v1", "lifecycle_status": "active", "created_at": now, "indexed_at": now})
     for mount in plan["mounts"]:
         row, tree, fact = mount["fact"], mount["tree"], mount["fact"]["fact"]
         # Projection identity is stable across Fact versions, so a new current
         # version overwrites the old ES document instead of leaving stale hits.
-        facts.append({"fact_projection_id": _stable_uuid("projection", row["id"], mount["leaf_id"]), "fact_id": row["id"], "fact_version_id": row["version_id"], "tree_id": tree["id"], "tree_type": tree["tree_type"], "node_id": mount["leaf_id"], "parent_id": mount["leaf_id"], "level": 3, "node_type": "fact", "knowledge_base_id": plan["knowledge_base_id"], "organization_id": plan["organization_id"], "owner_user_id": plan["owner_user_id"], "subject_entity_id": row["entity_id"], "fact_type": fact.fact_type, "fact_text": fact.text, "dedupe_key": fact.dedupe_key, "fact_status": "active", "valid_from": fact.occurred_at, "source_chunk_ids": list(fact.chunk_ids), "knowledge_item_id": plan["knowledge_item_id"], "attachment_id": plan["attachment_id"], "visibility": plan["visibility"], "access_scope": plan["access_scope"], "sensitivity": plan["sensitivity"], "auth_object_key": plan["auth_object_key"], "acl_version": plan["acl_version"], "content_version": plan["content_version"], "embedding_model": settings.embedding_model, "mapping_version": "v1", "lifecycle_status": "active", "created_at": now, "indexed_at": now})
+        facts.append({"fact_projection_id": _stable_uuid("projection", row["id"], mount["leaf_id"]), "fact_id": row["id"], "fact_version_id": row["version_id"], "tree_id": tree["id"], "tree_type": tree["tree_type"], "node_id": mount["leaf_id"], "parent_id": mount["leaf_id"], "level": 3, "node_type": "fact", "knowledge_base_id": plan["knowledge_base_id"], "organization_id": plan["organization_id"], "owner_user_id": plan["owner_user_id"], "subject_entity_id": row["entity_id"], "fact_type": fact.fact_type, "fact_text": fact.text, "dedupe_key": fact.dedupe_key, "fact_status": "active", "valid_from": fact.occurred_at, "observed_at": plan["observed_at"], "conversation_group_id": plan["conversation_group_id"], "message_id": plan["message_id"], "source_chunk_ids": list(fact.chunk_ids), "knowledge_item_id": plan["knowledge_item_id"], "attachment_id": plan["attachment_id"], "visibility": plan["visibility"], "access_scope": plan["access_scope"], "sensitivity": plan["sensitivity"], "auth_object_key": plan["auth_object_key"], "acl_version": plan["acl_version"], "content_version": plan["content_version"], "embedding_model": settings.embedding_model, "mapping_version": "v1", "lifecycle_status": "active", "created_at": now, "indexed_at": now})
     for mount in plan.get("source_mounts", []):
         route, tree = mount["route"], mount["tree"]
         sources.append({
@@ -129,6 +129,7 @@ def _graph_from_plan(plan: dict[str, Any], summaries: dict[str, str] | None = No
             "relevance_score": route.confidence, "content_version": plan["content_version"],
             "acl_version": plan["acl_version"], "visibility": plan["visibility"],
             "auth_object_key": plan["auth_object_key"], "status": "active",
+            "observed_at": plan["observed_at"],
             "source_metadata": {
                 "processing_status": plan["processing_status"],
                 **plan["processing_error"],
@@ -281,8 +282,8 @@ class PostgresRagRepository:
         with self._connection() as connection:
             with connection.cursor() as cursor:
                 cursor.execute(f"""INSERT INTO {self.schema}.memory_sources
-                    (id,source_type,source_resource_id,knowledge_item_id,message_id,attachment_id,conversation_key,knowledge_base_id,organization_id,owner_user_id,source_ref,content_version,content_hash,acl_version,visibility,access_scope,sensitivity,auth_object_key,processing_version)
-                    VALUES (%s::uuid,%s,%s,%s::uuid,%s::uuid,%s::uuid,%s,%s::uuid,%s::uuid,%s::uuid,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    (id,source_type,source_resource_id,knowledge_item_id,message_id,attachment_id,conversation_key,observed_at,knowledge_base_id,organization_id,owner_user_id,source_ref,content_version,content_hash,acl_version,visibility,access_scope,sensitivity,auth_object_key,processing_version)
+                    VALUES (%s::uuid,%s,%s,%s::uuid,%s::uuid,%s::uuid,%s,%s::timestamptz,%s::uuid,%s::uuid,%s::uuid,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                     ON CONFLICT (source_type,source_resource_id,content_version,processing_version) DO UPDATE SET
                       knowledge_item_id=EXCLUDED.knowledge_item_id,
                       knowledge_base_id=EXCLUDED.knowledge_base_id,
@@ -291,6 +292,7 @@ class PostgresRagRepository:
                       message_id=EXCLUDED.message_id,
                       attachment_id=EXCLUDED.attachment_id,
                       conversation_key=EXCLUDED.conversation_key,
+                      observed_at=EXCLUDED.observed_at,
                       content_hash=EXCLUDED.content_hash,
                       acl_version=EXCLUDED.acl_version,
                       visibility=EXCLUDED.visibility,
@@ -298,7 +300,7 @@ class PostgresRagRepository:
                       sensitivity=EXCLUDED.sensitivity,
                       auth_object_key=EXCLUDED.auth_object_key,
                       updated_at=CURRENT_TIMESTAMP""",
-                    (plan["source_id"], plan["source_type"], str(plan["source_resource_id"]), plan["knowledge_item_id"], _uuid(context.message_id, "message", context.message_id) if context.message_id else None, _uuid(context.attachment_id, "attachment", context.attachment_id) if context.attachment_id else None, context.conversation_group_id or context.external_conversation_id, plan["knowledge_base_id"], plan["organization_id"], plan["owner_user_id"], context.object_ref, context.content_version, plan["source_hash"], context.acl_version, plan["visibility"], context.access_scope, context.sensitivity, plan["auth_object_key"], settings.memory_extraction_version))
+                    (plan["source_id"], plan["source_type"], str(plan["source_resource_id"]), plan["knowledge_item_id"], _uuid(context.message_id, "message", context.message_id) if context.message_id else None, _uuid(context.attachment_id, "attachment", context.attachment_id) if context.attachment_id else None, context.conversation_group_id or context.external_conversation_id, plan["observed_at"], plan["knowledge_base_id"], plan["organization_id"], plan["owner_user_id"], context.object_ref, context.content_version, plan["source_hash"], context.acl_version, plan["visibility"], context.access_scope, context.sensitivity, plan["auth_object_key"], settings.memory_extraction_version))
                 for row in plan["chunks"]:
                     chunk = row["chunk"]
                     cursor.execute(f"""INSERT INTO {self.schema}.memory_chunks
@@ -329,9 +331,9 @@ class PostgresRagRepository:
                         version_no = int(latest[1]) + 1 if latest else 1
                         row["version_id"] = _stable_uuid("fact-version", row["id"], version_no, hashlib.sha256(fact.text.encode()).hexdigest())
                         cursor.execute(f"""INSERT INTO {self.schema}.memory_fact_versions
-                            (id,fact_id,version_no,fact_text,normalized_value,valid_from,status,supersedes_version_id,confidence,extraction_version,content_version,visibility,access_scope,sensitivity,auth_object_key,acl_version)
-                            VALUES (%s::uuid,%s::uuid,%s,%s,%s::jsonb,%s::timestamptz,'active',%s::uuid,%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING""",
-                            (row["version_id"], row["id"], version_no, fact.text, json.dumps(fact.normalized_value, ensure_ascii=False), fact.occurred_at, latest[0] if latest else None, fact.confidence, settings.memory_extraction_version, context.content_version, plan["visibility"], context.access_scope, context.sensitivity, plan["auth_object_key"], context.acl_version))
+                            (id,fact_id,version_no,fact_text,normalized_value,valid_from,observed_at,status,supersedes_version_id,confidence,extraction_version,content_version,visibility,access_scope,sensitivity,auth_object_key,acl_version)
+                            VALUES (%s::uuid,%s::uuid,%s,%s,%s::jsonb,%s::timestamptz,%s::timestamptz,'active',%s::uuid,%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING""",
+                            (row["version_id"], row["id"], version_no, fact.text, json.dumps(fact.normalized_value, ensure_ascii=False), fact.occurred_at, plan["observed_at"], latest[0] if latest else None, fact.confidence, settings.memory_extraction_version, context.content_version, plan["visibility"], context.access_scope, context.sensitivity, plan["auth_object_key"], context.acl_version))
                         if latest:
                             cursor.execute(f"UPDATE {self.schema}.memory_fact_versions SET status='superseded',valid_to=CURRENT_TIMESTAMP WHERE id=%s::uuid", (latest[0],))
                         cursor.execute(f"UPDATE {self.schema}.memory_facts SET current_version_id=%s::uuid WHERE id=%s::uuid", (row["version_id"], row["id"]))
@@ -347,10 +349,10 @@ class PostgresRagRepository:
                     tree["id"] = cursor.fetchone()[0]
                     for node in sorted(tree["nodes"].values(), key=lambda value: value["level"]):
                         cursor.execute(f"""INSERT INTO {self.schema}.memory_nodes
-                            (id,tree_id,parent_id,node_type,level,node_key,topic_key,phase_key,dirty)
-                            VALUES (%s::uuid,%s::uuid,%s::uuid,%s,%s,%s,%s,%s,TRUE)
-                            ON CONFLICT (tree_id,node_key) DO UPDATE SET dirty=TRUE,updated_at=CURRENT_TIMESTAMP RETURNING id::text""",
-                            (node["id"], tree["id"], node["parent_id"], node["node_type"], node["level"], node["node_key"], node["topic_key"], node["phase_key"]))
+                            (id,tree_id,parent_id,node_type,level,node_key,topic_key,phase_key,time_start,time_end,dirty)
+                            VALUES (%s::uuid,%s::uuid,%s::uuid,%s,%s,%s,%s,%s,%s::timestamptz,%s::timestamptz,TRUE)
+                            ON CONFLICT (tree_id,node_key) DO UPDATE SET time_start=EXCLUDED.time_start,time_end=EXCLUDED.time_end,dirty=TRUE,updated_at=CURRENT_TIMESTAMP RETURNING id::text""",
+                            (node["id"], tree["id"], node["parent_id"], node["node_type"], node["level"], node["node_key"], node["topic_key"], node["phase_key"], node.get("time_start"), node.get("time_end")))
                         node["id"] = cursor.fetchone()[0]
                     cursor.execute(f"UPDATE {self.schema}.memory_trees SET root_node_id=%s::uuid WHERE id=%s::uuid", (tree["root_id"], tree["id"]))
                 for mount in plan["mounts"]:
@@ -374,16 +376,16 @@ class PostgresRagRepository:
                 for mount in source_mounts:
                     route = mount["route"]
                     cursor.execute(f"""INSERT INTO {self.schema}.memory_node_sources
-                        (node_id,source_id,relation_type,relevance_score,source_metadata,content_version,visibility,access_scope,sensitivity,auth_object_key,acl_version,mount_strategy_version,status)
-                        VALUES (%s::uuid,%s::uuid,%s,%s,%s::jsonb,%s,%s,%s,%s,%s,%s,%s,'active')
+                        (node_id,source_id,relation_type,relevance_score,source_metadata,content_version,visibility,access_scope,sensitivity,auth_object_key,acl_version,mount_strategy_version,observed_at,status)
+                        VALUES (%s::uuid,%s::uuid,%s,%s,%s::jsonb,%s,%s,%s,%s,%s,%s,%s,%s::timestamptz,'active')
                         ON CONFLICT (node_id,source_id) DO UPDATE SET
                           relation_type=EXCLUDED.relation_type,relevance_score=EXCLUDED.relevance_score,
                           source_metadata=EXCLUDED.source_metadata,
-                          mount_strategy_version=EXCLUDED.mount_strategy_version,status='active',updated_at=CURRENT_TIMESTAMP""",
+                          mount_strategy_version=EXCLUDED.mount_strategy_version,observed_at=EXCLUDED.observed_at,status='active',updated_at=CURRENT_TIMESTAMP""",
                         (mount["leaf_id"], plan["source_id"], route.relation_type, route.confidence,
                          json.dumps({"processing_status": plan["processing_status"], **plan["processing_error"]}, ensure_ascii=False),
                          plan["content_version"], plan["visibility"], plan["access_scope"], plan["sensitivity"],
-                         plan["auth_object_key"], plan["acl_version"], settings.memory_tree_strategy_version))
+                         plan["auth_object_key"], plan["acl_version"], settings.memory_tree_strategy_version, plan["observed_at"]))
         self._last_memory_plan = plan
         return _graph_from_plan(plan)
 
@@ -403,7 +405,7 @@ class PostgresRagRepository:
         with self._connection() as connection:
             with connection.cursor() as cursor:
                 cursor.execute(f"""SELECT fc.fact_id::text,c.external_chunk_id,c.chunk_text,c.knowledge_item_id::text,c.attachment_id::text,c.source_locator,
-                    s.source_type,s.source_resource_id,s.conversation_key,s.knowledge_base_id::text,s.organization_id::text
+                    s.source_type,s.source_resource_id,s.conversation_key,s.observed_at,s.message_id::text,s.knowledge_base_id::text,s.organization_id::text
                     FROM {self.schema}.memory_fact_chunks fc
                     JOIN {self.schema}.memory_chunks c ON c.id=fc.chunk_id
                     JOIN {self.schema}.memory_facts f ON f.id=fc.fact_id AND f.current_version_id=fc.fact_version_id
@@ -416,8 +418,8 @@ class PostgresRagRepository:
                 "chunk_id": row[1], "content": row[2], "knowledge_item_id": row[3],
                 "attachment_id": row[4], "source_locator": row[5] or {},
                 "source_type": row[6], "source_resource_id": row[7],
-                "conversation_key": row[8], "knowledge_base_id": row[9],
-                "organization_id": row[10],
+                "conversation_key": row[8], "observed_at": row[9], "message_id": row[10], "knowledge_base_id": row[11],
+                "organization_id": row[12],
             })
         return output
 
@@ -428,7 +430,7 @@ class PostgresRagRepository:
             with connection.cursor() as cursor:
                 cursor.execute(f"""SELECT ns.node_id::text,s.id::text,s.source_type,s.source_resource_id,
                     s.knowledge_item_id::text,s.attachment_id::text,s.content_version,s.acl_version,
-                    s.visibility,s.auth_object_key,ns.relation_type,ns.relevance_score,ns.source_metadata
+                    s.visibility,s.auth_object_key,ns.relation_type,ns.relevance_score,ns.source_metadata,ns.observed_at
                     FROM {self.schema}.memory_node_sources ns
                     JOIN {self.schema}.memory_sources s ON s.id=ns.source_id
                     WHERE ns.node_id=ANY(%s::uuid[]) AND ns.status='active'""", (node_ids,))
@@ -439,7 +441,7 @@ class PostgresRagRepository:
                 "source_id": row[1], "source_type": row[2], "source_resource_id": row[3],
                 "knowledge_item_id": row[4], "attachment_id": row[5], "content_version": row[6],
                 "acl_version": row[7], "visibility": row[8], "auth_object_key": row[9],
-                "relation_type": row[10], "relevance_score": float(row[11] or 0), "source_metadata": row[12] or {},
+                "relation_type": row[10], "relevance_score": float(row[11] or 0), "source_metadata": row[12] or {}, "observed_at": row[13],
             })
         return output
 
@@ -754,7 +756,9 @@ class InMemoryRagRepository:
                         "source_locator": chunk.source_locator,
                         "source_type": plan.get("source_type"),
                         "source_resource_id": plan.get("source_resource_id"),
-                        "conversation_key": next((value.get("conversation_group_id") for value in (plan.get("chunks") or []) if value.get("chunk") is chunk), None),
+                        "conversation_key": plan.get("conversation_group_id"),
+                        "observed_at": plan.get("observed_at"),
+                        "message_id": plan.get("message_id"),
                         "knowledge_base_id": chunk.knowledge_base_id,
                         "organization_id": chunk.organization_id,
                     })

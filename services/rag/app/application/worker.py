@@ -319,7 +319,7 @@ class RAGEventHandler:
         merged = dict(value)
         attachment_id = str(merged.get("attachment_id") or merged.get("id") or "")
         knowledge_item_id = str(merged.get("knowledge_item_id") or "")
-        if knowledge_item_id and fetch_knowledge:
+        if knowledge_item_id and fetch_knowledge and hasattr(self.knowledge, "get_knowledge"):
             knowledge = self.knowledge.get_knowledge(
                 knowledge_item_id,
                 content_version=merged.get("content_version"),

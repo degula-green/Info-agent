@@ -123,7 +123,14 @@ class RagSearchService:
         user_message_id = self._add_message(conversation_id=conversation_id, role="user", content=request.query)
         started = time.perf_counter()
         plan = plan_query(request)
-        mode = "fusion" if request.qa_mode == "deep" else plan.retrieval_mode
+        # Apply the same deterministic UTC bounds to any scoped Chunk fallback
+        # that follows Tree navigation.  Invalid/unresolved expressions stay
+        # unfiltered and are reported in diagnostics.
+        if plan.time_resolved:
+            request = SearchRequest(**{**request.__dict__, "occurred_after": plan.time_after, "occurred_before": plan.time_before})
+        # Deep controls candidate/context budgets only.  It no longer turns a
+        # tree-first question into an unscoped parallel fusion search.
+        mode = plan.retrieval_mode
         response = SearchResponse(
             [],
             RetrievalDiagnostics(plan, False, 0, 0, 0, ("qa_not_started",)),
@@ -149,8 +156,19 @@ class RagSearchService:
             fallback_reason: str | None = None
             if base_ids:
                 tree_service = self.tree_search_service or get_tree_search_service()
-                tree = tree_service.search(TreeSearchRequest(query=request.query, user_id=request.user_id, organization_id=request.organization_id, knowledge_base_id=base_ids[0], knowledge_base_ids=base_ids, top_k=min(50, request.top_k * (2 if request.qa_mode == "deep" else 1)), include_protected=request.include_protected))
+                tree = tree_service.search(TreeSearchRequest(
+                    query=request.query, user_id=request.user_id, organization_id=request.organization_id,
+                    knowledge_base_id=base_ids[0], knowledge_base_ids=base_ids,
+                    tree_types=(plan.preferred_tree_type,),
+                    occurred_after=plan.time_after, occurred_before=plan.time_before,
+                    top_k=min(50, request.top_k * (2 if request.qa_mode == "deep" else 1)),
+                    include_protected=request.include_protected,
+                    expand_context=True,
+                    context_window_minutes=30 if request.qa_mode == "deep" else 10,
+                    context_limit=12 if request.qa_mode == "deep" else 6,
+                ))
                 tree_diagnostics = tree.get("diagnostics") or {}
+                tree_diagnostics.update({"routing": tree.get("routing") or {}, "context_diagnostics": tree.get("context_diagnostics") or {}})
                 tree_items = list(tree.get("items") or [])
                 for item in tree_items:
                     for source in item.get("sources") or []:
@@ -163,51 +181,32 @@ class RagSearchService:
                             source_attachment_ids.add(str(source["attachment_id"]))
                         if source.get("knowledge_item_id"):
                             source_knowledge_item_ids.add(str(source["knowledge_item_id"]))
-                    fact = item.get("fact")
-                    if fact:
-                        sources = [dict(value) for value in (item.get("sources") or []) if isinstance(value, dict)]
-                        first_source = sources[0] if sources else {}
-                        attachment_id = fact.get("attachment_id") or first_source.get("attachment_id")
-                        knowledge_item_id = fact.get("knowledge_item_id") or first_source.get("knowledge_item_id")
-                        # A display Fact may carry an internal attachment_id
-                        # used for evidence linkage, but it is not a protected
-                        # attachment authorization object. Only protected
-                        # Facts use attachment/content ACL checks.
-                        protected = str(fact.get("visibility") or "display") == "protected"
-                        auth_type = first_source.get("auth_resource_type")
-                        auth_part = first_source.get("auth_resource_part")
-                        auth_id = first_source.get("auth_resource_id")
-                        if not (auth_type and auth_part and auth_id):
-                            if protected and attachment_id:
-                                auth_type, auth_part, auth_id = "attachment", "content", attachment_id
-                            else:
-                                auth_type, auth_part, auth_id = "knowledge_item", "display", knowledge_item_id or ""
+                    # Facts are navigation metadata.  Only authorized direct
+                    # and neighboring Chunks become formal prompt evidence.
+                    for context_chunk in item.get("context_chunks") or []:
+                        if not isinstance(context_chunk, dict) or not str(context_chunk.get("content") or "").strip():
+                            continue
+                        fact = item.get("fact") or {}
+                        protected = str(context_chunk.get("visibility") or fact.get("visibility") or "display") == "protected"
+                        attachment_id = context_chunk.get("attachment_id") or fact.get("attachment_id")
+                        knowledge_item_id = context_chunk.get("knowledge_item_id") or fact.get("knowledge_item_id")
+                        auth_type = context_chunk.get("auth_resource_type") or ("attachment" if protected and attachment_id else "knowledge_item")
+                        auth_part = context_chunk.get("auth_resource_part") or ("content" if protected and attachment_id else "display")
+                        auth_id = context_chunk.get("auth_resource_id") or attachment_id or knowledge_item_id or ""
                         final_results.append(SearchResult(
-                            chunk_id=str(fact.get("fact_id") or fact.get("fact_projection_id") or uuid.uuid4()),
-                            content=str(fact.get("fact_text") or ""),
-                            score=float(item.get("score") or 0),
+                            chunk_id=str(context_chunk.get("chunk_id") or uuid.uuid4()),
+                            content=str(context_chunk.get("content") or ""), score=float(item.get("score") or 0),
                             rank=len(final_results) + 1,
-                            source={
-                                **first_source,
-                                "sources": sources,
-                                "knowledge_item_id": knowledge_item_id,
-                                "knowledge_base_id": fact.get("knowledge_base_id"),
-                                "organization_id": fact.get("organization_id"),
-                                "attachment_id": attachment_id,
-                                "content_version": fact.get("content_version"),
-                                "auth_acl_version": fact.get("acl_version"),
-                                "auth_resource_type": auth_type,
-                                "auth_resource_part": auth_part,
-                                "auth_resource_id": auth_id,
-                                "title": fact.get("fact_type") or "fact",
-                                "fact_id": fact.get("fact_id"),
-                                "fact_version_id": fact.get("fact_version_id"),
-                                "tree": item.get("tree"),
-                                "tree_path": item.get("path"),
-                                "rag_eligible": True,
-                            },
+                            source={**context_chunk, "knowledge_item_id": knowledge_item_id,
+                                   "knowledge_base_id": context_chunk.get("knowledge_base_id") or fact.get("knowledge_base_id"),
+                                   "organization_id": context_chunk.get("organization_id") or fact.get("organization_id"),
+                                   "attachment_id": attachment_id, "auth_resource_type": auth_type,
+                                   "auth_resource_part": auth_part, "auth_resource_id": auth_id,
+                                   "fact_id": fact.get("fact_id"), "fact_version_id": fact.get("fact_version_id"),
+                                   "tree": item.get("tree"), "tree_path": item.get("path"),
+                                   "evidence_relation": context_chunk.get("relation") or "direct_evidence", "rag_eligible": True},
                         ))
-            needs_document_evidence = mode != "tree" or not final_results
+            needs_document_evidence = not final_results
             if needs_document_evidence and (source_attachment_ids or source_knowledge_item_ids):
                 scoped_request = SearchRequest(**{
                     **request.__dict__,
@@ -221,23 +220,21 @@ class RagSearchService:
                 })
                 chunk_response = self.search(scoped_request)
                 final_results.extend(chunk_response.results)
-            if needs_document_evidence and not chunk_response.results:
+            if needs_document_evidence and not chunk_response.results and base_ids:
                 fallback_level = 2
                 fallback_reason = "tree_sources_empty" if not (source_attachment_ids or source_knowledge_item_ids) else "source_chunks_empty"
+                # Keep the fallback inside the caller supplied knowledge-base
+                # and organization scope.  Never widen a tree miss globally.
                 chunk_response = self.search(SearchRequest(**{**request.__dict__, "conversation_id": None}))
                 final_results.extend(chunk_response.results)
-            if needs_document_evidence and not chunk_response.results and base_ids:
+            if needs_document_evidence and not chunk_response.results and not base_ids:
                 fallback_level = 3
-                fallback_reason = "knowledge_base_chunks_empty"
-                global_request = SearchRequest(**{
-                    **request.__dict__, "conversation_id": None, "knowledge_base_id": None, "knowledge_base_ids": (),
-                    "source_attachment_ids": (), "source_knowledge_item_ids": (),
-                })
-                chunk_response = self.search(global_request)
+                fallback_reason = "unscoped_chunk_search"
+                chunk_response = self.search(SearchRequest(**{**request.__dict__, "conversation_id": None}))
                 final_results.extend(chunk_response.results)
             tree_diagnostics = {
                 **tree_diagnostics,
-                "retrieval_stage": "tree_fact" if not needs_document_evidence else "source_chunk",
+                "retrieval_stage": "tree_evidence" if final_results and tree_items else "scoped_chunk_fallback",
                 "fallback_level": fallback_level,
                 "fallback_reason": fallback_reason,
                 "tree_candidate_count": len(tree_items),
@@ -245,6 +242,7 @@ class RagSearchService:
                 "chunk_candidate_count": len(chunk_response.results),
                 "pending_source_count": pending_source_count,
                 "failed_source_count": failed_source_count,
+                "execution_path": "tree_evidence" if final_results and tree_items else "scoped_chunk_fallback" if base_ids else "chunk",
                 "source_processing_notice": (
                     "相关资料已采集，但文档内容仍在处理中，暂不能引用正文。"
                     if pending_source_count else
@@ -316,6 +314,7 @@ class RagSearchService:
             "answer": answer, "error_code": error_code, "context": context.text,
             "citations": context.citations, "items": [item.as_dict() for item in results],
             "diagnostics": diagnostics, "retrieval_mode": retrieval_mode,
+            "execution_path": tree_diagnostics.get("execution_path") or (tree_diagnostics.get("routing") or {}).get("execution_path") or "chunk",
             "tree_diagnostics": tree_diagnostics,
         }
 

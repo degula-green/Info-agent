@@ -83,7 +83,13 @@ class TreeSearchRequest:
     organization_id: str | None
     knowledge_base_id: str | None = None
     knowledge_base_ids: tuple[str, ...] = ()
-    tree_types: tuple[str, ...] = ("session", "entity")
+    tree_types: tuple[str, ...] | None = None
     top_k: int = 8
     include_protected: bool = False
     authorized_object_keys: tuple[str, ...] = ()
+    occurred_after: str | None = None
+    occurred_before: str | None = None
+    conversation_id: str | None = None
+    expand_context: bool = True
+    context_window_minutes: int = 10
+    context_limit: int = 6

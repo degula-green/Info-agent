@@ -81,13 +81,13 @@ def tree_search(body: TreeSearchBody, x_user_id: str | None = Header(default=Non
     user_id = (x_user_id or body.user_id or "").strip()
     if not user_id:
         raise HTTPException(status_code=401, detail="user identity is required")
-    invalid = set(body.tree_types) - {"session", "entity"}
+    invalid = set(body.tree_types or ()) - {"session", "entity"}
     if invalid:
         raise HTTPException(status_code=422, detail="tree_types supports session and entity only")
     knowledge_base_ids = tuple(body.knowledge_base_ids) or ((body.knowledge_base_id,) if body.knowledge_base_id else ())
     if not knowledge_base_ids:
         raise HTTPException(status_code=422, detail="knowledge_base_id or knowledge_base_ids is required")
-    request = TreeSearchRequest(query=body.query, user_id=user_id, organization_id=body.organization_id, knowledge_base_id=body.knowledge_base_id, knowledge_base_ids=knowledge_base_ids, tree_types=tuple(body.tree_types), top_k=body.top_k, include_protected=body.include_protected)
+    request = TreeSearchRequest(query=body.query, user_id=user_id, organization_id=body.organization_id, knowledge_base_id=body.knowledge_base_id, knowledge_base_ids=knowledge_base_ids, tree_types=tuple(body.tree_types) if body.tree_types is not None else None, top_k=body.top_k, include_protected=body.include_protected, occurred_after=body.occurred_after, occurred_before=body.occurred_before, conversation_id=body.conversation_id)
     try:
         return get_tree_search_service().search(request)
     except ElasticsearchUnavailable as exc:
@@ -135,7 +135,7 @@ def ai_documents_stream(body: AIDocumentBody, x_user_id: str | None = Header(def
             if not answer:
                 raise QAUnavailable("QA provider returned an empty streamed answer")
             result = service.complete_answer(prepared, answer)
-            yield _sse("done", {"assistant_message_id": result.get("assistant_message_id"), "answer": answer, "citations": result.get("citations", []), "diagnostics": result.get("diagnostics", {}), "retrieval_mode": result.get("retrieval_mode")})
+            yield _sse("done", {"assistant_message_id": result.get("assistant_message_id"), "answer": answer, "citations": result.get("citations", []), "diagnostics": result.get("diagnostics", {}), "retrieval_mode": result.get("retrieval_mode"), "execution_path": result.get("execution_path")})
         except QAConversationNotFound:
             yield _sse("error", {"code": "conversation_not_found", "message": "问答会话不存在或无权访问"})
             yield _sse("done", {"assistant_message_id": None, "answer": None, "citations": [], "diagnostics": {}})

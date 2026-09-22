@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import time
+from datetime import datetime, timedelta, timezone
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeoutError
 from pathlib import Path
@@ -147,6 +148,60 @@ class ElasticsearchChunkStore(ChunkIndexer):
                 return []
             raise ElasticsearchUnavailable("Elasticsearch kNN search failed") from exc
         return _results_from_response(response)
+
+    def search_context_chunks(
+        self,
+        *,
+        conversation_id: str,
+        sent_at: str,
+        knowledge_base_ids: tuple[str, ...] = (),
+        organization_id: str | None = None,
+        window_minutes: int = 10,
+        size: int = 6,
+        authorized_object_keys: tuple[str, ...] = (),
+        include_protected: bool = False,
+    ) -> list[SearchResult]:
+        """Return bounded same-conversation chunks around a source timestamp.
+
+        This is deliberately metadata-only retrieval.  Final authorization is
+        still performed by the caller immediately before prompt assembly.
+        """
+        try:
+            anchor = datetime.fromisoformat(str(sent_at).replace("Z", "+00:00"))
+            if anchor.tzinfo is None:
+                anchor = anchor.replace(tzinfo=timezone.utc)
+        except (TypeError, ValueError):
+            return []
+        filters: list[dict[str, Any]] = [
+            {"term": {"lifecycle_status": "active"}},
+            {"term": {"conversation_group_id": conversation_id}},
+            {"range": {"sent_at": {"gte": (anchor - timedelta(minutes=max(1, window_minutes))).isoformat(), "lte": (anchor + timedelta(minutes=max(1, window_minutes))).isoformat()}}},
+        ]
+        if knowledge_base_ids:
+            filters.append({"terms": {"knowledge_base_id": list(knowledge_base_ids)}})
+        if organization_id:
+            filters.append({"term": {"organization_id": organization_id}})
+        branches: list[tuple[str, list[dict[str, Any]]]] = [(self.display_index, filters)]
+        if include_protected and authorized_object_keys:
+            branches.append((self.protected_index, filters + [{"terms": {"auth_object_key": list(authorized_object_keys)}}]))
+        output: list[SearchResult] = []
+        for index, branch_filters in branches:
+            try:
+                response = self._search_request({
+                    "index": index,
+                    "query": {"bool": {"filter": branch_filters}},
+                    "size": max(1, min(100, size)),
+                    "sort": [{"sent_at": {"order": "asc", "missing": "_last"}}, {"chunk_index": {"order": "asc"}}],
+                    "track_total_hits": False,
+                    "_source": {"excludes": ["embedding"]},
+                })
+            except Exception as exc:
+                if _is_not_found(exc):
+                    continue
+                raise ElasticsearchUnavailable("Elasticsearch context search failed") from exc
+            output.extend(_results_from_response(response))
+        output.sort(key=lambda value: (str(value.source.get("sent_at") or ""), int(value.source.get("chunk_index") or 0)))
+        return output[: max(1, min(100, size))]
 
     def parallel_search(
         self,

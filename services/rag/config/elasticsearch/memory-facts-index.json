@@ -14,6 +14,7 @@
       "fact_text": {"type": "text", "analyzer": "ik_max_word", "search_analyzer": "ik_smart"},
       "dedupe_key": {"type": "keyword"}, "fact_status": {"type": "keyword"},
       "valid_from": {"type": "date"}, "valid_to": {"type": "date"},
+      "observed_at": {"type": "date"}, "conversation_group_id": {"type": "keyword"}, "message_id": {"type": "keyword"},
       "source_chunk_ids": {"type": "keyword"}, "knowledge_item_id": {"type": "keyword"},
       "attachment_id": {"type": "keyword"}, "visibility": {"type": "keyword"},
       "access_scope": {"type": "keyword"}, "sensitivity": {"type": "keyword"},
