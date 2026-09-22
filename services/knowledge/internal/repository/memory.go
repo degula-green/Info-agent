@@ -2300,12 +2300,54 @@ func (s *MemoryStore) ListKnowledgeLibraries(_ context.Context, userID, organiza
 			}
 		}
 	}
+	// Conversations are directory entries in their own right. Keep them
+	// visible immediately after attach, before the first message creates a
+	// knowledge item, just like the PostgreSQL implementation does.
+	for _, conversation := range s.conversations {
+		for _, library := range definitions {
+			if !memoryLibraryMatchesConversation(library.value.ID, conversation, userID, organizationID) {
+				continue
+			}
+			if library.value.BaseType == "organization_private_shared" {
+				shared := false
+				for _, item := range s.knowledgeItems {
+					if item.ConversationID == conversation.ID && memoryLibraryMatchesItem(library.value.ID, item, userID, organizationID) {
+						shared = true
+						break
+					}
+				}
+				if !shared {
+					continue
+				}
+			}
+			library.conversations[conversation.ID] = struct{}{}
+			if conversation.UpdatedAt.After(library.updatedAt) {
+				library.updatedAt = conversation.UpdatedAt
+			}
+		}
+	}
 	now := time.Now().UTC()
 	out := make([]domain.KnowledgeLibrary, 0, len(definitions))
 	for _, definition := range definitions {
 		out = append(out, definition.finish(now))
 	}
 	return out, nil
+}
+
+func memoryLibraryMatchesConversation(libraryID string, conversation domain.ConversationIngestion, userID, organizationID string) bool {
+	if conversation.Status != domain.ConversationActive && conversation.Status != domain.ConversationPaused && conversation.Status != domain.ConversationDetached && conversation.Status != domain.ConversationError {
+		return false
+	}
+	switch {
+	case strings.HasPrefix(libraryID, personalPrivateLibraryPrefix):
+		return libraryID == personalPrivateLibraryPrefix+userID && conversation.OwnerUserID == userID && conversation.ConversationType == "private"
+	case strings.HasPrefix(libraryID, orgGroupsLibraryPrefix):
+		return libraryID == orgGroupsLibraryPrefix+organizationID && conversation.OrganizationID == organizationID && conversation.ConversationType == "group"
+	case strings.HasPrefix(libraryID, orgSharedLibraryPrefix):
+		return libraryID == orgSharedLibraryPrefix+organizationID && conversation.ConversationType == "private"
+	default:
+		return false
+	}
 }
 
 func memoryLibraryMatchesItem(libraryID string, item domain.KnowledgeItem, userID, organizationID string) bool {
@@ -2480,6 +2522,23 @@ func (s *MemoryStore) ListKnowledgeLibraryItems(_ context.Context, libraryID, us
 
 func (s *MemoryStore) memoryLibraryConversationsLocked(libraryID, userID, organizationID, platformName, needle string, limit int) []domain.KnowledgeLibraryItem {
 	conversationIDs := map[string]struct{}{}
+	for id, conversation := range s.conversations {
+		if memoryLibraryMatchesConversation(libraryID, conversation, userID, organizationID) {
+			if strings.HasPrefix(libraryID, orgSharedLibraryPrefix) {
+				shared := false
+				for _, item := range s.knowledgeItems {
+					if item.ConversationID == id && memoryLibraryMatchesItem(libraryID, item, userID, organizationID) {
+						shared = true
+						break
+					}
+				}
+				if !shared {
+					continue
+				}
+			}
+			conversationIDs[id] = struct{}{}
+		}
+	}
 	for _, item := range s.knowledgeItems {
 		if memoryLibraryMatchesItem(libraryID, item, userID, organizationID) && item.ConversationID != "" {
 			conversationIDs[item.ConversationID] = struct{}{}
