@@ -129,6 +129,16 @@ type publicMessage struct {
 	CreatedAt            time.Time          `json:"created_at"`
 }
 
+type publicConversationTimelineItem struct {
+	Kind              string            `json:"kind"`
+	CollectedAt       time.Time         `json:"collected_at"`
+	Message           *publicMessage    `json:"message,omitempty"`
+	Attachment        *publicAttachment `json:"attachment,omitempty"`
+	SenderIdentityID  string            `json:"sender_identity_id,omitempty"`
+	SenderDisplayName string            `json:"sender_display_name,omitempty"`
+	SentAt            *time.Time        `json:"sent_at,omitempty"`
+}
+
 type publicConversation struct {
 	ID                     string             `json:"id"`
 	Platform               string             `json:"platform"`
@@ -233,8 +243,8 @@ type publicKnowledgeLibraryItem struct {
 	RAGStatus              string     `json:"rag_status,omitempty"`
 	RAGContentVersion      int        `json:"rag_content_version,omitempty"`
 	RAGACLVersion          int64      `json:"rag_acl_version,omitempty"`
-	RAGLastError            string     `json:"rag_last_error,omitempty"`
-	Searchable              bool       `json:"searchable"`
+	RAGLastError           string     `json:"rag_last_error,omitempty"`
+	Searchable             bool       `json:"searchable"`
 }
 
 type publicAgentAssignment struct {

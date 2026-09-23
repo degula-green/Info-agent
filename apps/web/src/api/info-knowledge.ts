@@ -173,6 +173,22 @@ export interface AttachmentDTO {
   updated_at: string
 }
 
+export interface ConversationTimelineItemDTO {
+  kind: 'message' | 'attachment'
+  collected_at: string
+  message?: MessageDTO
+  attachment?: AttachmentDTO
+  sender_identity_id?: string
+  sender_display_name?: string
+  sent_at?: string | null
+}
+
+export interface ConversationTimelinePageDTO {
+  items: ConversationTimelineItemDTO[]
+  has_more: boolean
+  next_cursor?: string
+}
+
 export interface MessageDTO {
   id: string
   conversation_id: string
@@ -219,8 +235,7 @@ export interface ConversationDTO {
 
 export interface ConversationDetail {
   conversation: ConversationDTO
-  messages: MessageDTO[]
-  attachments: AttachmentDTO[]
+  timeline: ConversationTimelinePageDTO
 }
 
 export async function getConnectors() {
@@ -290,12 +305,17 @@ export async function setConversationStatus(conversationID: string, status: 'pau
 
 export async function getConversationDetail(conversationID: string, limit = 50): Promise<ConversationDetail> {
   const encodedID = encodeURIComponent(conversationID)
-  const [conversation, messageBody, attachmentBody] = await Promise.all([
+  const [conversation, timeline] = await Promise.all([
     knowledgeRequest<ConversationDTO>(`/conversations/${encodedID}`),
-    knowledgeRequest<{ items: MessageDTO[] }>(`/conversations/${encodedID}/messages?limit=${limit}`),
-    knowledgeRequest<{ items: AttachmentDTO[] }>(`/conversations/${encodedID}/attachments`),
+    knowledgeRequest<ConversationTimelinePageDTO>(`/conversations/${encodedID}/timeline?limit=${limit}`),
   ])
-  return { conversation, messages: messageBody.items || [], attachments: attachmentBody.items || [] }
+  return { conversation, timeline: { ...timeline, items: timeline.items || [] } }
+}
+
+export async function getConversationTimeline(conversationID: string, cursor: string, limit = 50): Promise<ConversationTimelinePageDTO> {
+  const query = new URLSearchParams({ limit: String(limit), before: cursor })
+  const page = await knowledgeRequest<ConversationTimelinePageDTO>(`/conversations/${encodeURIComponent(conversationID)}/timeline?${query}`)
+  return { ...page, items: page.items || [] }
 }
 
 export async function attachConversationByType(input: { type: 'group' | 'private'; platform: ConnectorPlatform; externalConversationID: string; conversationType: 'group' | 'private'; name?: string; discoveryID: string; organizationID?: string; requestedStartAt?: string | null }) {

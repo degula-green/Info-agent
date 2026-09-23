@@ -211,6 +211,7 @@ class Module2ReadyContractTests(unittest.TestCase):
         self.assertTrue(all("content_version=2" in call[1] and "acl_version=3" in call[1] for call in http.calls))
         self.assertIn("content_variant=display", http.calls[1][1])
         self.assertTrue(all(call[2]["token"] == "service-token" for call in http.calls))
+        self.assertTrue(all(call[2]["headers"]["X-Caller-Service"] == "rag" for call in http.calls))
 
     def test_unprotected_attachment_is_fetched_from_attachment_endpoint(self):
         knowledge = _Knowledge(protected=False)
@@ -265,6 +266,23 @@ class Module2ReadyContractTests(unittest.TestCase):
         worker.stream, worker.group, worker.consumer = "knowledge:ready", "rag-workers", "test"
         self.assertEqual(worker.run_once(), 1)
         self.assertEqual(len(client.acked), 1)
+
+    def test_redis_stream_processes_list_shaped_xautoclaim_response(self):
+        event = ready_event()
+
+        class ListClaimRedis(_Redis):
+            def xautoclaim(self, *_args, **_kwargs):
+                return [b"0-0", [(b"3-0", {b"event": json.dumps(event).encode()})], []]
+
+            def xreadgroup(self, *_args, **_kwargs):
+                return []
+
+        client = ListClaimRedis()
+        worker = RedisStreamWorker.__new__(RedisStreamWorker)
+        worker.client, worker.handler = client, lambda _event: None
+        worker.stream, worker.group, worker.consumer = "knowledge:ready", "rag-workers", "test"
+        self.assertEqual(worker.run_once(), 1)
+        self.assertEqual(client.acked, [("knowledge:ready", "rag-workers", b"3-0")])
 
 
 if __name__ == "__main__":

@@ -35,6 +35,7 @@ export interface InfoChat {
   collectionStatus: CollectionStatus; historyStart: string; interval: string
   lastSync: string; recentMessageTime: string; messages: InfoMessage[]; files: InfoFile[]
   externalId?: string; lastSeenAt?: string | null; messageCount?: number; attachmentCount?: number; selected?: boolean
+  timelineCursor?: string; timelineHasMore?: boolean; timelineLoading?: boolean
   historyStartAt?: string | null; lastStoppedAt?: string | null; remoteExists?: boolean
   isDirect?: boolean
   collectors?: InfoCollector[]

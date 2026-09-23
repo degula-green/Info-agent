@@ -1,5 +1,5 @@
 <template>
-  <InfoConversation v-if="chat && !loadError" :chat="chat" @back="router.push(backPath)" @toggle="toggleChat" @toast="toast" @share="shareSelected" />
+  <InfoConversation v-if="chat && !loadError" :chat="chat" @back="router.push(backPath)" @toggle="toggleChat" @toast="toast" @share="shareSelected" @load-more="loadOlder" />
   <div v-else-if="loading" class="conversation-missing"><t-icon name="loading" size="28px" /><h3>正在加载会话</h3><p>正在从 Knowledge 加载消息和附件。</p></div>
   <div v-else class="conversation-missing"><t-icon name="error-circle" size="28px" /><h3>{{ errorTitle }}</h3><p v-if="errorDescription">{{ errorDescription }}</p><t-button theme="primary" @click="router.push('/knowledge')">返回知识库</t-button></div>
 
@@ -110,6 +110,13 @@ async function loadCurrentConversation(platform: string, id: string, force = fal
     if (conversationLoads.get(loadKey) === request) conversationLoads.delete(loadKey)
   })
   return request
+}
+async function loadOlder() {
+  try {
+    await store.loadOlderConversation(sourceKey.value, conversationId.value)
+  } catch (error: any) {
+    MessagePlugin.error(error?.message || '加载更早内容失败，请稍后重试')
+  }
 }
 onMounted(() => {
   pollTimer.value = window.setInterval(() => {

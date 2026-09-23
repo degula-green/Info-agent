@@ -50,7 +50,7 @@
             </div>
           </button>
         </div>
-        <div v-else class="wk-empty wk-empty--small"><t-icon name="search" size="24px" /><p>没有匹配的知识库或内容</p></div>
+        <div v-else class="wk-empty wk-empty--small"><t-icon name="search" size="24px" /><p>{{ searchEmptyText }}</p></div>
       </template>
     </template>
 
@@ -156,7 +156,7 @@ import { sourceColor } from '@/mock'
 import { discoveryAction, isHistoryStartAllowed } from '@/knowledge-mapping'
 import { searchGlobal } from '@/api/rag'
 import InfoResultDrawer from '@/components/InfoResultDrawer.vue'
-import { resolveGlobalSearchScope } from '@/utils/info-search-scope'
+import { resolveGlobalSearchScope, searchEmptyHint } from '@/utils/info-search-scope'
 import { isAbortError, mapRagSearchItems } from '@/utils/info-search-result'
 
 const props = defineProps<{ sources: InfoSource[]; initialSourceKey?: InfoSource['key'] | null; accessLoading?: boolean; loadError?: string | null }>()
@@ -188,6 +188,7 @@ const collectStart = ref('')
 const searchResults = ref<SearchResult[]>([])
 const searchLoading = ref(false)
 const searchError = ref('')
+const searchEmptyText = ref('没有匹配的知识库或内容')
 const drawerVisible = ref(false)
 const drawerResult = ref<SearchResult | null>(null)
 let searchTimer: ReturnType<typeof setTimeout> | undefined
@@ -233,6 +234,7 @@ function clearContentSearch() {
   searchAbort?.abort()
   searchResults.value = []
   searchError.value = ''
+  searchEmptyText.value = '没有匹配的知识库或内容'
   searchLoading.value = false
 }
 
@@ -262,6 +264,9 @@ watch(query, (value) => {
       })
       if (seq !== searchSeq) return
       searchResults.value = mapRagSearchItems(response.items)
+      searchEmptyText.value = searchResults.value.length
+        ? '没有匹配的知识库或内容'
+        : searchEmptyHint(response.diagnostics)
       searchLoading.value = false
     } catch (error) {
       if (isAbortError(error) || seq !== searchSeq) return

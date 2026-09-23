@@ -71,7 +71,7 @@
       <div v-else class="library-empty">
         <span class="library-empty__icon"><t-icon name="search" /></span>
         <h2>没有匹配内容</h2>
-        <p>尝试更换关键词，或清除搜索后浏览目录。</p>
+        <p>{{ searchEmptyText }}</p>
       </div>
     </template>
 
@@ -179,7 +179,7 @@ import InfoAttachmentPreview from '@/components/InfoAttachmentPreview.vue'
 import InfoResultDrawer from '@/components/InfoResultDrawer.vue'
 import type { InfoFile, SearchResult } from '@/mock'
 import { useInfoKnowledgeStore } from '@/stores/infoKnowledge'
-import { resolveLibrarySearchScope } from '@/utils/info-search-scope'
+import { resolveLibrarySearchScope, searchEmptyHint } from '@/utils/info-search-scope'
 import { isAbortError, mapRagSearchItems } from '@/utils/info-search-result'
 
 const props = defineProps<{ libraryKind: string }>()
@@ -197,6 +197,7 @@ const items = ref<KnowledgeLibraryItemDTO[]>([]); const loading = ref(false); co
 const searchResults = ref<SearchResult[]>([])
 const searchLoading = ref(false)
 const searchError = ref('')
+const searchEmptyText = ref('尝试更换关键词，或清除搜索后浏览目录。')
 const drawerVisible = ref(false)
 const drawerResult = ref<SearchResult | null>(null)
 let searchAbort: AbortController | null = null
@@ -296,6 +297,7 @@ function clearLibrarySearch() {
   searchAbort?.abort()
   searchResults.value = []
   searchError.value = ''
+  searchEmptyText.value = '尝试更换关键词，或清除搜索后浏览目录。'
   searchLoading.value = false
 }
 
@@ -338,6 +340,9 @@ async function runLibrarySearch() {
     let mapped = mapRagSearchItems(response.items)
     if (platform.value) mapped = mapped.filter((item) => item.platform === platform.value || item.platform === 'all')
     searchResults.value = mapped
+    searchEmptyText.value = mapped.length
+      ? '尝试更换关键词，或清除搜索后浏览目录。'
+      : searchEmptyHint(response.diagnostics)
   } catch (e: any) {
     if (isAbortError(e)) return
     searchResults.value = []

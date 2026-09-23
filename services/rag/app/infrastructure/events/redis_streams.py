@@ -88,7 +88,10 @@ class RedisStreamWorker:
                     start_id="0-0",
                     count=settings.redis_batch_size,
                 )
-                if isinstance(claimed, tuple) and len(claimed) >= 2 and claimed[1]:
+                # redis-py has returned both tuples and lists for XAUTOCLAIM
+                # across supported releases. The wire shape is the same:
+                # [next_start_id, messages, deleted_ids].
+                if isinstance(claimed, (tuple, list)) and len(claimed) >= 2 and claimed[1]:
                     rows.append((self.stream, claimed[1]))
             except Exception:
                 pass

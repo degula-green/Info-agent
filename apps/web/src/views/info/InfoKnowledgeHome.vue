@@ -48,7 +48,7 @@
           <span class="knowledge-search-row__badge">{{ item.kind === 'file' ? '文件' : item.kind === 'chat' ? '群聊' : '消息' }}</span>
         </button>
       </div>
-      <div v-else class="library-empty">没有匹配的消息或附件，可尝试更短的关键词。</div>
+      <div v-else class="library-empty">{{ searchEmptyText }}</div>
     </div>
 
     <div v-if="store.loading && !store.libraries.length" class="knowledge-loading"><t-loading text="正在加载知识库目录..." /></div>
@@ -118,7 +118,7 @@ import { searchGlobal } from '@/api/rag'
 import InfoResultDrawer from '@/components/InfoResultDrawer.vue'
 import type { SearchResult } from '@/mock'
 import { useInfoKnowledgeStore } from '@/stores/infoKnowledge'
-import { resolveGlobalSearchScope } from '@/utils/info-search-scope'
+import { resolveGlobalSearchScope, searchEmptyHint } from '@/utils/info-search-scope'
 import { isAbortError, mapRagSearchItems } from '@/utils/info-search-result'
 
 const router = useRouter()
@@ -127,6 +127,7 @@ const query = ref('')
 const searchResults = ref<SearchResult[]>([])
 const searchLoading = ref(false)
 const searchError = ref('')
+const searchEmptyText = ref('没有匹配的消息或附件，可尝试更短的关键词。')
 const drawerVisible = ref(false)
 const drawerResult = ref<SearchResult | null>(null)
 let searchTimer: ReturnType<typeof setTimeout> | undefined
@@ -190,6 +191,7 @@ function clearSearch() {
   searchAbort?.abort()
   searchResults.value = []
   searchError.value = ''
+  searchEmptyText.value = '没有匹配的消息或附件，可尝试更短的关键词。'
   searchLoading.value = false
 }
 
@@ -219,6 +221,9 @@ watch(query, (value) => {
       })
       if (seq !== searchSeq) return
       searchResults.value = mapRagSearchItems(response.items)
+      searchEmptyText.value = searchResults.value.length
+        ? '没有匹配的消息或附件，可尝试更短的关键词。'
+        : searchEmptyHint(response.diagnostics)
       searchLoading.value = false
     } catch (error) {
       if (isAbortError(error) || seq !== searchSeq) return

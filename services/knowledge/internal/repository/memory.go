@@ -2855,6 +2855,106 @@ func (s *MemoryStore) ListAttachments(_ context.Context, conversationID string) 
 	return out, nil
 }
 
+func (s *MemoryStore) ListConversationTimeline(_ context.Context, conversationID string, limit int, before *domain.ConversationTimelineCursor) ([]domain.ConversationTimelineItem, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+	conversation := s.conversations[conversationID]
+	items := make([]domain.ConversationTimelineItem, 0)
+	for _, message := range s.messages {
+		if message.ConversationID != conversationID {
+			continue
+		}
+		collectedAt := message.CollectedAt
+		if collectedAt.IsZero() {
+			collectedAt = message.CreatedAt
+		}
+		if before != nil && !timelineItemBeforeCursor(collectedAt, "message", message.ID, *before) {
+			continue
+		}
+		if knowledgeItem := s.messageKnowledgeItemLocked(message.ID); knowledgeItem != nil {
+			if knowledgeItem.RAGStatus == "succeeded" && knowledgeItem.RAGContentVersion == knowledgeItem.ContentVersion && knowledgeItem.RAGACLVersion == knowledgeItem.ACLVersion {
+				message.VectorStatus = "ready"
+			} else if knowledgeItem.RAGStatus == "failed" {
+				message.VectorStatus = "failed"
+			}
+		}
+		senderExternalID := ""
+		if identity, ok := s.identities[message.SenderIdentityID]; ok {
+			senderExternalID = identity.ExternalUserID
+		}
+		message.SenderDisplayName = normalizePrivateWechatSender(conversation.ConversationType, conversation.Name, conversation.ExternalConversationID, senderExternalID, "", message.SenderDisplayName)
+		copy := cloneMessage(message)
+		items = append(items, domain.ConversationTimelineItem{Kind: "message", CollectedAt: collectedAt, Message: &copy})
+	}
+	for _, attachment := range s.attachments {
+		if attachment.ConversationID != conversationID {
+			continue
+		}
+		message, hasMessage := domain.Message{}, false
+		for _, candidate := range s.messages {
+			if candidate.ID == attachment.MessageID {
+				message, hasMessage = candidate, true
+				break
+			}
+		}
+		item := domain.ConversationTimelineItem{Kind: "attachment", CollectedAt: attachment.CreatedAt}
+		copy := cloneAttachment(attachment)
+		item.Attachment = &copy
+		if hasMessage {
+			item.SenderIdentityID = message.SenderIdentityID
+			item.SenderDisplayName = message.SenderDisplayName
+			sentAt := message.SentAt
+			item.SentAt = &sentAt
+			if identity, ok := s.identities[message.SenderIdentityID]; ok {
+				item.SenderDisplayName = normalizePrivateWechatSender(conversation.ConversationType, conversation.Name, conversation.ExternalConversationID, identity.ExternalUserID, "", item.SenderDisplayName)
+			}
+		}
+		if before != nil && !timelineItemBeforeCursor(item.CollectedAt, item.Kind, attachment.ID, *before) {
+			continue
+		}
+		items = append(items, item)
+	}
+	sort.Slice(items, func(i, j int) bool {
+		if !items[i].CollectedAt.Equal(items[j].CollectedAt) {
+			return items[i].CollectedAt.After(items[j].CollectedAt)
+		}
+		if items[i].Kind != items[j].Kind {
+			return items[i].Kind > items[j].Kind
+		}
+		return timelineItemID(items[i]) > timelineItemID(items[j])
+	})
+	if len(items) > limit+1 {
+		items = items[:limit+1]
+	}
+	return items, nil
+}
+
+func timelineItemID(item domain.ConversationTimelineItem) string {
+	if item.Message != nil {
+		return item.Message.ID
+	}
+	if item.Attachment != nil {
+		return item.Attachment.ID
+	}
+	return ""
+}
+
+func timelineItemBeforeCursor(collectedAt time.Time, kind, id string, cursor domain.ConversationTimelineCursor) bool {
+	if collectedAt.Before(cursor.CollectedAt) {
+		return true
+	}
+	if !collectedAt.Equal(cursor.CollectedAt) {
+		return false
+	}
+	if kind != cursor.Kind {
+		return kind < cursor.Kind
+	}
+	return id < cursor.ID
+}
+
 func (s *MemoryStore) GetOutbox(_ context.Context, limit int) ([]domain.OutboxEvent, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()

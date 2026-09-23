@@ -509,7 +509,7 @@ class PostgresRagRepository:
                 cursor.execute(f"""SELECT id::text,event_type,event_version,schema_version,organization_id,trace_id,payload
                     FROM {self.schema}.outbox_events
                     WHERE status IN ('pending','failed') AND available_at <= CURRENT_TIMESTAMP
-                    ORDER BY created_at LIMIT %s""", (max(1, limit),))
+                    ORDER BY CASE WHEN event_type LIKE 'knowledge.rag.%%' THEN 0 ELSE 1 END, created_at LIMIT %s""", (max(1, limit),))
                 rows = cursor.fetchall()
         return [{"event_id": row[0], "event_type": row[1], "event_version": row[2], "schema_version": row[3], "organization_id": str(row[4]) if row[4] else None, "trace_id": row[5], "producer": settings.service_name, "payload": row[6] or {}} for row in rows]
 
@@ -678,7 +678,9 @@ class InMemoryRagRepository:
         return event_id
 
     def pending_outbox(self, *, limit: int = 50) -> list[dict[str, Any]]:
-        return [{key: value for key, value in item.items() if key != "id" and key != "status"} for item in self.outbox_events if item.get("status") in {"pending", "failed"}][: max(1, limit)]
+        pending = [item for item in self.outbox_events if item.get("status") in {"pending", "failed"}]
+        pending.sort(key=lambda item: (not str(item.get("event_type") or "").startswith("knowledge.rag."),))
+        return [{key: value for key, value in item.items() if key != "id" and key != "status"} for item in pending][: max(1, limit)]
 
     def mark_outbox_published(self, event_id: str) -> None:
         for item in self.outbox_events:

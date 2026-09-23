@@ -624,6 +624,7 @@ type Repository interface {
 	FailAttachment(ctx context.Context, id, message string) error
 	ListMessages(ctx context.Context, conversationID string, limit int, before string) ([]domain.Message, error)
 	ListAttachments(ctx context.Context, conversationID string) ([]domain.Attachment, error)
+	ListConversationTimeline(ctx context.Context, conversationID string, limit int, before *domain.ConversationTimelineCursor) ([]domain.ConversationTimelineItem, error)
 	GetOutbox(ctx context.Context, limit int) ([]domain.OutboxEvent, error)
 	MarkOutboxPublished(ctx context.Context, id string, publishedAt time.Time) error
 	MarkOutboxFailed(ctx context.Context, id, failure string, availableAt time.Time) error

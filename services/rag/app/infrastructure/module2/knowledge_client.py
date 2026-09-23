@@ -33,6 +33,7 @@ class Module2KnowledgeClient(KnowledgeSource):
                 "GET",
                 with_query(join_url(self.base_url, path), content_version=content_version, acl_version=acl_version, content_variant=content_variant),
                 token=self.token,
+                headers={"X-Caller-Service": "rag"},
                 timeout=settings.knowledge_timeout_seconds,
             ).json()
         except IntegrationError as exc:

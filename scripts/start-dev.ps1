@@ -37,9 +37,52 @@ function Stop-PortProcess([int]$Port) {
     $listeners = Get-NetTCPConnection -State Listen -LocalPort $Port -ErrorAction SilentlyContinue
     foreach ($listener in $listeners) {
         $process = Get-Process -Id $listener.OwningProcess -ErrorAction SilentlyContinue
-        if ($process -and $process.Path -and $process.Path -match 'python|uvicorn') {
-            Write-Host "Stopping existing Python listener on port $Port (PID $($process.Id))..."
+        if ($process) {
+            Write-Host "Stopping existing project listener on port $Port (PID $($process.Id))..."
             Stop-Process -Id $process.Id -Force
+        }
+    }
+}
+
+function Stop-RagWorkerChain([string]$RagDirectory, [string]$RagInterpreter) {
+    $processes = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue)
+    if (-not $processes) { return }
+
+    $ragMarker = [IO.Path]::GetFullPath($RagDirectory).TrimEnd('\')
+    $interpreterMarker = [IO.Path]::GetFullPath($RagInterpreter)
+    $workerIDs = New-Object 'System.Collections.Generic.HashSet[int]'
+    foreach ($process in $processes) {
+        $commandLine = [string]$process.CommandLine
+        $executable = [string]$process.ExecutablePath
+        $isWorker = $commandLine -match '(?i)(^|[\s\\/])worker\.py([\s"'']|$)'
+        $isProjectWorker = $isWorker -and (
+            $commandLine.IndexOf($ragMarker, [StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+            $executable.Equals($interpreterMarker, [StringComparison]::OrdinalIgnoreCase)
+        )
+        if ($isProjectWorker) { [void]$workerIDs.Add([int]$process.ProcessId) }
+    }
+    if ($workerIDs.Count -eq 0) { return }
+
+    # Include the worker descendants (for example the system-Python child
+    # created by the virtualenv launcher). Do not walk upward to a terminal
+    # parent: doing so would also include unrelated sibling services.
+    $stopIDs = New-Object 'System.Collections.Generic.HashSet[int]'
+    foreach ($workerID in $workerIDs) {
+        [void]$stopIDs.Add($workerID)
+    }
+    $changed = $true
+    while ($changed) {
+        $changed = $false
+        foreach ($process in $processes) {
+            if ($stopIDs.Contains([int]$process.ParentProcessId) -and $stopIDs.Add([int]$process.ProcessId)) { $changed = $true }
+        }
+    }
+    $targets = $processes | Where-Object { $stopIDs.Contains([int]$_.ProcessId) } | Sort-Object { $_.ParentProcessId } -Descending
+    foreach ($target in $targets) {
+        $live = Get-Process -Id $target.ProcessId -ErrorAction SilentlyContinue
+        if ($live) {
+            Write-Host "Stopping existing RAG worker process (PID $($target.ProcessId))..."
+            Stop-Process -Id $target.ProcessId -Force -ErrorAction SilentlyContinue
         }
     }
 }
@@ -87,6 +130,16 @@ Write-Host 'Synchronizing WeChat Collector virtual environment...'
 & $uv sync --project $wechatCollectorPath
 if ($LASTEXITCODE -ne 0) { throw "WeChat Collector uv sync failed with exit code $LASTEXITCODE." }
 
+# Run each Python service with its project-local interpreter directly.  Using
+# `uv run` for the long-lived Windows processes can leave a launcher process
+# that respawns the service under the system Python interpreter.
+$ragPython = Join-Path $ragPath '.venv\Scripts\python.exe'
+$wechatPython = Join-Path $wechatCollectorPath '.venv\Scripts\python.exe'
+if (-not (Test-Path $ragPython)) { throw "RAG virtualenv interpreter not found: $ragPython" }
+if (-not (Test-Path $wechatPython)) { throw "WeChat Collector virtualenv interpreter not found: $wechatPython" }
+
+Stop-RagWorkerChain $ragPath $ragPython
+
 Import-EnvFile (Join-Path $corePath '.env')
 Import-EnvFile (Join-Path $knowledgePath '.env')
 Import-EnvFile (Join-Path $ragPath '.env')
@@ -108,15 +161,22 @@ if (-not $env:RAG_REDIS_URL) { $env:RAG_REDIS_URL = $env:KNOWLEDGE_REDIS_URL }
 if (-not $env:RAG_REDIS_DATABASE) { $env:RAG_REDIS_DATABASE = '1' }
 if (-not $env:RAG_REDIS_INBOUND_STREAM) { $env:RAG_REDIS_INBOUND_STREAM = $env:KNOWLEDGE_REDIS_OUTBOUND_STREAM }
 
+# Restart the complete local stack.  The previous script only stopped the
+# WeChat collector, leaving stale Core/Knowledge/RAG/Web/Nginx processes on
+# their ports and causing the frontend to report a unavailable Knowledge API.
+foreach ($port in @(80, 5173, 8000, 8080, 8090, 8091)) {
+    Stop-PortProcess $port
+}
+
 Start-ServiceWindow 'info-agent core :8080' $corePath "& '$go' run ./cmd/server"
 Start-ServiceWindow 'info-agent knowledge :8090' $knowledgePath "& '$go' run ./cmd/server"
-Start-ServiceWindow 'info-agent rag :8000' $ragPath "& '$uv' run --project '$ragPath' python -m uvicorn app.main:app --host 0.0.0.0 --port 8000"
+Start-ServiceWindow 'info-agent rag :8000' $ragPath "& '$ragPython' -m uvicorn app.main:app --host 0.0.0.0 --port 8000"
 if ($env:RAG_REDIS_URL) {
-    Start-ServiceWindow 'info-agent rag-worker' $ragPath "& '$uv' run --project '$ragPath' python worker.py"
+    Start-ServiceWindow 'info-agent rag-worker' $ragPath "& '$ragPython' worker.py"
 }
 Start-ServiceWindow 'info-agent web :5173' $webPath "& '$npm' run dev -- --host 0.0.0.0"
 Stop-PortProcess 8091
-Start-ServiceWindow 'info-agent wechat collector :8091' $projectRoot "& '$uv' run --project '$wechatCollectorPath' python -m services.collectors.wechat.main"
+Start-ServiceWindow 'info-agent wechat collector :8091' $projectRoot "& '$wechatPython' -m services.collectors.wechat.main"
 
 if ($nginx) {
     New-Item -ItemType Directory -Force -Path (Join-Path $nginxRuntime 'conf.d') | Out-Null

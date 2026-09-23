@@ -342,6 +342,31 @@ func TestMemoryMessageAttachmentIdempotenceAndCursorMonotonicity(t *testing.T) {
 	if current.LastCursor != "100" {
 		t.Fatalf("stale cursor advanced collector: %q", current.LastCursor)
 	}
+	var timelineCursor *domain.ConversationTimelineCursor
+	timelineItems := make([]domain.ConversationTimelineItem, 0, 3)
+	for len(timelineItems) < 3 {
+		page, pageErr := repo.ListConversationTimeline(ctx, conversation.ID, 1, timelineCursor)
+		if pageErr != nil || len(page) == 0 {
+			t.Fatalf("timeline page failed before all mixed items were returned: page=%+v err=%v", page, pageErr)
+		}
+		item := page[0]
+		if len(timelineItems) > 0 && item.CollectedAt.After(timelineItems[len(timelineItems)-1].CollectedAt) {
+			t.Fatalf("timeline page order moved forward: previous=%v current=%v", timelineItems[len(timelineItems)-1].CollectedAt, item.CollectedAt)
+		}
+		timelineItems = append(timelineItems, item)
+		timelineCursor = &domain.ConversationTimelineCursor{CollectedAt: item.CollectedAt, Kind: item.Kind, ID: timelineItemID(item)}
+	}
+	seen := map[string]bool{}
+	for _, item := range timelineItems {
+		key := item.Kind + ":" + timelineItemID(item)
+		if seen[key] {
+			t.Fatalf("timeline cursor repeated %s", key)
+		}
+		seen[key] = true
+		if item.Attachment != nil && (item.SenderDisplayName != "Correct sender" || item.SentAt == nil || !item.SentAt.Equal(now)) {
+			t.Fatalf("attachment timeline item lost its parent message metadata: %+v", item)
+		}
+	}
 }
 
 func TestNormalizePrivateWechatSenderUsesConversationNameForOtherParty(t *testing.T) {

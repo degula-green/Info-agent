@@ -273,6 +273,22 @@ type Message struct {
 	CreatedAt            time.Time    `json:"created_at"`
 }
 
+type ConversationTimelineCursor struct {
+	CollectedAt time.Time
+	Kind        string
+	ID          string
+}
+
+type ConversationTimelineItem struct {
+	Kind              string
+	CollectedAt       time.Time
+	Message           *Message
+	Attachment        *Attachment
+	SenderIdentityID  string
+	SenderDisplayName string
+	SentAt            *time.Time
+}
+
 // UnifiedMessage is the platform-neutral boundary created only after a raw
 // transport candidate has passed filtering and Redis deduplication.
 type UnifiedMessage struct {
@@ -434,7 +450,7 @@ type KnowledgeLibraryItem struct {
 	RAGContentVersion      int        `json:"rag_content_version,omitempty"`
 	RAGACLVersion          int64      `json:"rag_acl_version,omitempty"`
 	RAGLastError           string     `json:"rag_last_error,omitempty"`
-	Searchable              bool       `json:"searchable"`
+	Searchable             bool       `json:"searchable"`
 }
 
 type KnowledgeContent struct {

@@ -30,6 +30,117 @@ class RuntimeState:
 runtimes: dict[str, RuntimeState] = {}
 _default_runtime = RuntimeState()
 
+class MultiShardWeChatDB(WeChatDB):
+    """Read a conversation across every encrypted message shard."""
+
+    def _matching_tables(self, user: str):
+        conns = [self._open(rel) for rel in self._message_dbs()]
+        target = "Msg_" + hashlib.md5(user.encode()).hexdigest()
+        found = []
+        try:
+            for conn in conns:
+                if conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (target,)
+                ).fetchone():
+                    found.append((conn, target))
+                else:
+                    conn.close()
+            return found
+        except Exception:
+            for conn in conns:
+                conn.close()
+            raise
+
+    @staticmethod
+    def _close_tables(tables):
+        for conn, _ in tables:
+            conn.close()
+
+    def get_new_messages(self, user: str, since_seq: int = 0, limit: int = 200):
+        tables = self._matching_tables(user)
+        if not tables:
+            return []
+        try:
+            rows = []
+            for conn, table in tables:
+                rows.extend(conn.execute(
+                    "SELECT local_id, local_type, real_sender_id, create_time, "
+                    "message_content, source, packed_info_data, compress_content, sort_seq "
+                    f"FROM {table} WHERE sort_seq > ? ORDER BY sort_seq ASC LIMIT ?",
+                    (since_seq, limit),
+                ).fetchall())
+            rows.sort(key=lambda row: row["sort_seq"] or 0)
+            return [self._msg_row_to_dict(row) for row in rows[:limit]]
+        finally:
+            self._close_tables(tables)
+
+    def get_messages(self, user: str, limit: int = 20, offset: int = 0):
+        tables = self._matching_tables(user)
+        if not tables:
+            return []
+        try:
+            rows = []
+            for conn, table in tables:
+                rows.extend(conn.execute(
+                    "SELECT local_id, local_type, real_sender_id, create_time, "
+                    "message_content, source, packed_info_data, compress_content, sort_seq "
+                    f"FROM {table} ORDER BY sort_seq DESC LIMIT ?",
+                    (limit + offset,),
+                ).fetchall())
+            rows.sort(key=lambda row: row["sort_seq"] or 0, reverse=True)
+            return [self._msg_row_to_dict(row) for row in rows[offset:offset + limit]]
+        finally:
+            self._close_tables(tables)
+
+    def get_message_row(self, user: str, local_id: int):
+        tables = self._matching_tables(user)
+        if not tables:
+            return None
+        try:
+            for conn, table in tables:
+                row = conn.execute(
+                    "SELECT local_id, local_type, server_id, real_sender_id, create_time, "
+                    "message_content, source, packed_info_data, compress_content, sort_seq "
+                    f"FROM {table} WHERE local_id=? LIMIT 1", (local_id,),
+                ).fetchone()
+                if row:
+                    sender_id = row["real_sender_id"]
+                    sender_username = ""
+                    if sender_id and sender_id != 2:
+                        sender_username = self._sender_id_index().get(int(sender_id), "")
+                        if not sender_username:
+                            sender_username = self.get_nickname(str(sender_id))
+                    return {
+                        "local_id": row["local_id"], "local_type": row["local_type"],
+                        "server_id": row["server_id"], "sender_id": sender_id,
+                        "sender_username": sender_username, "create_time": row["create_time"],
+                        "content": self._msg_row_to_dict(row).get("content"),
+                        "source": row["source"], "packed_info": row["packed_info_data"],
+                        "compress_content": row["compress_content"], "sort_seq": row["sort_seq"],
+                    }
+            return None
+        finally:
+            self._close_tables(tables)
+
+    def _find_media_rows(self, user: str, types: set):
+        if not types:
+            return []
+        tables = self._matching_tables(user)
+        if not tables:
+            return []
+        try:
+            placeholders = ",".join("?" for _ in types)
+            rows = []
+            for conn, table in tables:
+                rows.extend(conn.execute(
+                    f"SELECT local_id, sort_seq FROM {table} WHERE local_type IN ({placeholders})",
+                    tuple(sorted(types)),
+                ).fetchall())
+            rows.sort(key=lambda row: row["sort_seq"] or 0, reverse=True)
+            return [row["local_id"] for row in rows]
+        finally:
+            self._close_tables(tables)
+
 def current_runtime() -> RuntimeState:
     return _runtime_var.get() or _default_runtime
 
@@ -742,7 +853,7 @@ def open_db(path_value: str, wxid: str) -> Any:
         if selected is None: raise ValueError("db_dir must contain one matching WeChat account directory")
         account = selected.name
     if not (root / account / "db_storage").is_dir(): raise ValueError("db_dir does not contain a readable WeChat db_storage directory")
-    opened = WeChatDB(account=account, db_dir=str(root)); opened.get_sessions(limit=1); return opened
+    opened = MultiShardWeChatDB(account=account, db_dir=str(root)); opened.get_sessions(limit=1); return opened
 
 @app.get("/health")
 def health() -> dict[str, Any]: return {"service": "wechat-collector", "status": "degraded" if bootstrap_error else "ok", "bound": bool(binding), "bootstrap_error": bootstrap_error}

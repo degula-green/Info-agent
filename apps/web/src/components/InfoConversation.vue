@@ -36,7 +36,7 @@
     <div class="conversation-list wk-panel">
       <div class="conversation-list__tabs">
         <button type="button" class="conversation-tab conversation-tab--active">
-          消息与文件 <span>（{{ items.length }}）</span>
+          消息与文件 <span>（{{ displayCount }}）</span>
         </button>
         <span class="conversation-list__hint">{{ collectionHint }}</span>
       </div>
@@ -82,6 +82,12 @@
         </button>
       </div>
       <div v-else class="wk-empty-inline">还没有采集到消息或文件</div>
+      <div v-if="chat.timelineHasMore || chat.timelineLoading" class="conversation-list__more">
+        <t-button variant="text" :loading="chat.timelineLoading" :disabled="chat.timelineLoading" @click="emit('load-more')">
+          <template #icon><t-icon name="arrow-down" /></template>
+          {{ chat.timelineLoading ? '正在加载' : '加载更早' }}
+        </t-button>
+      </div>
     </div>
 
     <t-dialog
@@ -204,6 +210,7 @@ const emit = defineEmits<{
   (event: 'toggle', chat: InfoChat): void
   (event: 'toast', text: string): void
   (event: 'share', payload: { conversationId: string; messageIDs: string[]; attachmentIDs: string[] }): void
+  (event: 'load-more'): void
 }>()
 
 const chat = computed(() => props.chat)
@@ -215,6 +222,9 @@ const fileDownloading = ref(false)
 const shareSelecting = ref(false)
 const selectedMessageIDs = ref<string[]>([])
 const selectedAttachmentIDs = ref<string[]>([])
+const displayCount = computed(() => chat.value.messageCount != null && chat.value.attachmentCount != null
+  ? chat.value.messageCount + chat.value.attachmentCount
+  : items.value.length)
 
 const items = computed<ConversationItem[]>(() => [
     ...chat.value.messages.filter((message) => !isAttachmentOnlyMessage(message)).map((message) => ({
@@ -453,6 +463,7 @@ async function downloadFile() {
 .conversation-table__head { min-height: 58px; padding: 0 20px; color: var(--td-text-color-secondary); font-size: 12px; }
 .conversation-row { width: 100%; min-height: 76px; padding: 12px 20px; border: 0; border-top: 1px solid var(--td-component-stroke); color: var(--td-text-color-primary); background: var(--td-bg-color-container); text-align: left; cursor: pointer; }
 .conversation-row:hover { background: var(--td-bg-color-container-hover); }
+.conversation-list__more { display: flex; justify-content: center; padding: 10px 16px; border-top: 1px solid var(--td-component-stroke); }
 .conversation-cell { min-width: 0; overflow: hidden; color: var(--td-text-color-secondary); font-size: 12px; }
 .conversation-cell--name { display: flex; align-items: center; gap: 11px; color: var(--td-text-color-primary); }
 .share-selection { width: 16px; height: 16px; flex: 0 0 16px; accent-color: var(--td-brand-color); cursor: pointer; }

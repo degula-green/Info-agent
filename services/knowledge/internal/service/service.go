@@ -2315,7 +2315,7 @@ func (s *Service) InternalKnowledge(ctx context.Context, id string, contentVersi
 	if err != nil {
 		return nil, nil, err
 	}
-	if item.LifecycleStatus != "ready" {
+	if !ragKnowledgeReady(item) {
 		return nil, nil, apperror.New("knowledge_not_ready", "knowledge item is not ready", 409, true)
 	}
 	if item.ContentVersion != contentVersion {
@@ -2346,7 +2346,7 @@ func (s *Service) InternalAttachment(ctx context.Context, id string, contentVers
 	if err != nil {
 		return nil, nil, err
 	}
-	if item.LifecycleStatus != "ready" {
+	if !ragKnowledgeReady(item) {
 		return nil, nil, apperror.New("knowledge_not_ready", "knowledge item is not ready", 409, true)
 	}
 	if item.ContentVersion != contentVersion || attachment.ContentVersion != contentVersion {
@@ -2359,6 +2359,16 @@ func (s *Service) InternalAttachment(ctx context.Context, id string, contentVers
 		return nil, nil, apperror.New("attachment_not_ready", "attachment content is not ready", 409, true)
 	}
 	return item, attachment, nil
+}
+
+// ragKnowledgeReady keeps lifecycle and processing concerns separate. Shared
+// conversation items remain active throughout their lifetime; processing_status
+// is the authoritative signal that their content is ready for RAG.
+func ragKnowledgeReady(item *domain.KnowledgeItem) bool {
+	if item == nil || (item.LifecycleStatus != "active" && item.LifecycleStatus != "ready") {
+		return false
+	}
+	return item.ProcessingStatus == "ready"
 }
 
 func (s *Service) OpenInternalAttachment(ctx context.Context, id string, contentVersion, aclVersion int) (*domain.Attachment, io.ReadCloser, error) {

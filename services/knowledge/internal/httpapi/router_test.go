@@ -679,6 +679,78 @@ func TestFixtureReplayHTTPRoundTripPersistsAndDeduplicates(t *testing.T) {
 	if len(attachments.Items) != 1 || attachments.Items[0].FileName != "采集验收说明.txt" || attachments.Items[0].ContentStatus != "ready" {
 		t.Fatalf("public attachment query returned unexpected data: %+v", attachments.Items)
 	}
+	var timelinePage struct {
+		Items      []publicConversationTimelineItem `json:"items"`
+		HasMore    bool                             `json:"has_more"`
+		NextCursor string                           `json:"next_cursor"`
+	}
+	get("/api/knowledge/v1/conversations/"+conversation.ID+"/timeline?limit=2", &timelinePage)
+	if len(timelinePage.Items) != 2 || !timelinePage.HasMore || timelinePage.NextCursor == "" {
+		t.Fatalf("timeline did not paginate a mixed first page: %+v", timelinePage)
+	}
+	seenTimelineIDs := map[string]bool{}
+	allTimeline := append([]publicConversationTimelineItem{}, timelinePage.Items...)
+	for _, item := range timelinePage.Items {
+		if item.Message != nil {
+			seenTimelineIDs["message:"+item.Message.ID] = true
+		}
+		if item.Attachment != nil {
+			seenTimelineIDs["attachment:"+item.Attachment.ID] = true
+		}
+	}
+	for timelinePage.HasMore {
+		cursorUsed := timelinePage.NextCursor
+		var nextPage struct {
+			Items      []publicConversationTimelineItem `json:"items"`
+			HasMore    bool                             `json:"has_more"`
+			NextCursor string                           `json:"next_cursor"`
+		}
+		get("/api/knowledge/v1/conversations/"+conversation.ID+"/timeline?limit=2&before="+cursorUsed, &nextPage)
+		timelinePage = nextPage
+		allTimeline = append(allTimeline, timelinePage.Items...)
+		for _, item := range timelinePage.Items {
+			if item.Message != nil {
+				key := "message:" + item.Message.ID
+				if seenTimelineIDs[key] {
+					t.Fatalf("timeline cursor repeated %s; cursor=%s page=%+v", key, cursorUsed, timelinePage.Items)
+				}
+				seenTimelineIDs[key] = true
+			}
+			if item.Attachment != nil {
+				key := "attachment:" + item.Attachment.ID
+				if seenTimelineIDs[key] {
+					t.Fatalf("timeline cursor repeated %s", key)
+				}
+				seenTimelineIDs[key] = true
+			}
+		}
+	}
+	if len(allTimeline) != 3 || len(seenTimelineIDs) != 3 {
+		t.Fatalf("mixed timeline omitted records across pages: %+v", allTimeline)
+	}
+	var timelineAttachment *publicConversationTimelineItem
+	for index := range allTimeline {
+		if allTimeline[index].Attachment != nil {
+			timelineAttachment = &allTimeline[index]
+		}
+	}
+	var parentMessage *publicMessage
+	if timelineAttachment != nil && timelineAttachment.Attachment != nil {
+		for index := range messages.Items {
+			if messages.Items[index].ID == timelineAttachment.Attachment.MessageID {
+				parentMessage = &messages.Items[index]
+				break
+			}
+		}
+	}
+	if timelineAttachment == nil || timelineAttachment.Attachment == nil || parentMessage == nil || timelineAttachment.SenderDisplayName != parentMessage.SenderDisplayName || timelineAttachment.SenderIdentityID != parentMessage.SenderIdentityID || timelineAttachment.SentAt == nil || !timelineAttachment.SentAt.Equal(parentMessage.SentAt) {
+		t.Fatalf("timeline attachment did not include its parent message metadata: attachment=%+v parent=%+v all=%+v", timelineAttachment, parentMessage, allTimeline)
+	}
+	invalidCursor := httptest.NewRecorder()
+	router.ServeHTTP(invalidCursor, httptest.NewRequest(http.MethodGet, "/api/knowledge/v1/conversations/"+conversation.ID+"/timeline?before=not-a-cursor", nil))
+	if invalidCursor.Code != http.StatusBadRequest {
+		t.Fatalf("invalid timeline cursor returned %d: %s", invalidCursor.Code, invalidCursor.Body.String())
+	}
 
 	replayAgain := httptest.NewRequest(http.MethodPost, "/api/knowledge/v1/internal/fixtures/replay", bytes.NewReader(payload))
 	replayAgain.Header.Set("Content-Type", "application/json")

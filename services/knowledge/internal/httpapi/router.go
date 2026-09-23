@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -909,6 +910,60 @@ func registerUserRoutes(r *gin.Engine, app *App, prefix string) {
 		}
 		c.JSON(http.StatusOK, gin.H{"items": items})
 	})
+	g.GET("/conversations/:conversation_id/timeline", func(c *gin.Context) {
+		p := principal(c)
+		conversationID := c.Param("conversation_id")
+		if _, err := app.Service.GetConversation(c, p.UserID, conversationID); err != nil {
+			writeError(c, err)
+			return
+		}
+		limit := 50
+		if raw := strings.TrimSpace(c.Query("limit")); raw != "" {
+			parsed, err := strconv.Atoi(raw)
+			if err != nil || parsed < 1 || parsed > 200 {
+				writeError(c, apperror.New("invalid_timeline_limit", "limit must be between 1 and 200", http.StatusBadRequest, false))
+				return
+			}
+			limit = parsed
+		}
+		var before *domain.ConversationTimelineCursor
+		if raw := strings.TrimSpace(c.Query("before")); raw != "" {
+			cursor, err := decodeTimelineCursor(raw, conversationID)
+			if err != nil {
+				writeError(c, apperror.New("invalid_timeline_cursor", "before cursor is invalid for this conversation", http.StatusBadRequest, false))
+				return
+			}
+			before = &cursor
+		}
+		out, err := app.Service.Repo.ListConversationTimeline(c, conversationID, limit, before)
+		if err != nil {
+			writeError(c, err)
+			return
+		}
+		hasMore := len(out) > limit
+		if hasMore {
+			out = out[:limit]
+		}
+		items := make([]publicConversationTimelineItem, 0, len(out))
+		for _, item := range out {
+			publicItem := publicConversationTimelineItem{Kind: item.Kind, CollectedAt: item.CollectedAt, SenderIdentityID: item.SenderIdentityID, SenderDisplayName: item.SenderDisplayName, SentAt: item.SentAt}
+			if item.Message != nil {
+				message := publicMessageFromDomain(*item.Message)
+				publicItem.Message = &message
+			}
+			if item.Attachment != nil {
+				attachment := publicAttachmentFromDomain(*item.Attachment)
+				publicItem.Attachment = &attachment
+			}
+			items = append(items, publicItem)
+		}
+		response := gin.H{"items": items, "has_more": hasMore}
+		if hasMore && len(out) > 0 {
+			last := out[len(out)-1]
+			response["next_cursor"] = encodeTimelineCursor(conversationID, domain.ConversationTimelineCursor{CollectedAt: last.CollectedAt, Kind: last.Kind, ID: timelineDomainItemID(last)})
+		}
+		c.JSON(http.StatusOK, response)
+	})
 	g.GET("/conversations/:conversation_id/attachments", func(c *gin.Context) {
 		p := principal(c)
 		if _, err := app.Service.GetConversation(c, p.UserID, c.Param("conversation_id")); err != nil {
@@ -1771,6 +1826,42 @@ func validTimestamp(value string, skew time.Duration) bool {
 	}
 	return time.Duration(delta)*time.Second <= skew
 }
+
+type conversationTimelineCursorPayload struct {
+	ConversationID string `json:"conversation_id"`
+	CollectedAt    string `json:"collected_at"`
+	Kind           string `json:"kind"`
+	ID             string `json:"id"`
+}
+
+func encodeTimelineCursor(conversationID string, cursor domain.ConversationTimelineCursor) string {
+	value, _ := json.Marshal(conversationTimelineCursorPayload{ConversationID: conversationID, CollectedAt: cursor.CollectedAt.UTC().Format(time.RFC3339Nano), Kind: cursor.Kind, ID: cursor.ID})
+	return base64.RawURLEncoding.EncodeToString(value)
+}
+
+func decodeTimelineCursor(value, conversationID string) (domain.ConversationTimelineCursor, error) {
+	var payload conversationTimelineCursorPayload
+	decoded, err := base64.RawURLEncoding.DecodeString(value)
+	if err != nil || json.Unmarshal(decoded, &payload) != nil || payload.ConversationID != conversationID || payload.ID == "" || (payload.Kind != "message" && payload.Kind != "attachment") {
+		return domain.ConversationTimelineCursor{}, errors.New("invalid cursor")
+	}
+	collectedAt, err := time.Parse(time.RFC3339Nano, payload.CollectedAt)
+	if err != nil || collectedAt.IsZero() {
+		return domain.ConversationTimelineCursor{}, errors.New("invalid cursor")
+	}
+	return domain.ConversationTimelineCursor{CollectedAt: collectedAt.UTC(), Kind: payload.Kind, ID: payload.ID}, nil
+}
+
+func timelineDomainItemID(item domain.ConversationTimelineItem) string {
+	if item.Message != nil {
+		return item.Message.ID
+	}
+	if item.Attachment != nil {
+		return item.Attachment.ID
+	}
+	return ""
+}
+
 func hashString(value string) string {
 	sum := sha256.Sum256([]byte(value))
 	return hex.EncodeToString(sum[:])

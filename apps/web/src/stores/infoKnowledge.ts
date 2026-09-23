@@ -9,6 +9,7 @@ import {
   discoverConversationsByType,
   getConnectors,
   getConversationDetail,
+  getConversationTimeline,
   getKnowledgeLibraries,
   type KnowledgeLibraryDTO,
   getWechatConfig,
@@ -21,6 +22,7 @@ import {
   type ConversationDTO,
   type DiscoveryDTO,
   type MessageDTO,
+  type ConversationTimelinePageDTO,
 } from '@/api/info-knowledge'
 import type { InfoAvailableSession, InfoChat, InfoCollector, InfoFile, InfoMessage, InfoSource, SearchResult, SourceKey } from '@/mock'
 import { discoveryAction, isPrivateConversation, mapAttachmentStatus, mapCollectionStatus, searchLoadedSources } from '@/knowledge-mapping'
@@ -161,6 +163,18 @@ function mapMessage(value: MessageDTO, attachments: AttachmentDTO[], senderNames
   }
 }
 
+function timelinePageRecords(page: ConversationTimelinePageDTO) {
+  const messages = page.items.flatMap((item) => item.kind === 'message' && item.message ? [item.message] : [])
+  const attachments = page.items.flatMap((item) => item.kind === 'attachment' && item.attachment ? [item.attachment] : [])
+  return { messages, attachments }
+}
+
+function mergeByID<T extends { id: string }>(newer: T[], older: T[], getID: (item: T) => string): T[] {
+  const merged = new Map<string, T>()
+  for (const item of [...older, ...newer]) merged.set(getID(item), item)
+  return [...merged.values()]
+}
+
 function isAttachmentOnlyMessage(value: MessageDTO, attachments: AttachmentDTO[]) {
 	if (!isDisplayableTextMessage(value.message_type, value.content)) return true
 	const content = String(value.content || '').trim()
@@ -180,7 +194,7 @@ function isAttachmentOnlyMessage(value: MessageDTO, attachments: AttachmentDTO[]
     && ['image', 'file', 'mixed'].includes(String(value.message_type || '').toLowerCase())
 }
 
-function mapConversation(value: ConversationDTO, messages: MessageDTO[] = [], attachments: AttachmentDTO[] = []): InfoChat {
+function mapConversation(value: ConversationDTO, messages: MessageDTO[] = [], attachments: AttachmentDTO[] = [], timeline?: ConversationTimelinePageDTO): InfoChat {
   const senderNames = new Map<string, string>((value.memberships || []).flatMap((member): Array<[string, string]> => {
     const name = member.display_name || member.external_user_id
     return [[member.id, name], ...(member.external_identity_id ? [[member.external_identity_id, name] as [string, string]] : [])]
@@ -191,7 +205,13 @@ function mapConversation(value: ConversationDTO, messages: MessageDTO[] = [], at
   const messageById = new Map(allMappedMessages.map((message) => [message.id, message]))
   const mappedFiles = attachments.map((item) => {
     const message = item.message_id ? messageById.get(item.message_id) : undefined
-    return mapAttachment(item, message?.sender || '', message?.time || '', message?.collectionTimestamp || '')
+    const timelineItem = timeline?.items.find((candidate) => candidate.kind === 'attachment' && candidate.attachment?.id === item.id)
+    return mapAttachment(
+      item,
+      timelineItem?.sender_display_name || message?.sender || '',
+      timelineItem?.sent_at ? displayTime(timelineItem.sent_at) : message?.time || '',
+      timelineItem?.collected_at || message?.collectionTimestamp || '',
+    )
   })
   const hasUnavailableCollector = (value.collectors || []).some((collector) => collector.status === 'unavailable')
   const hasActiveCollector = (value.collectors || []).some((collector) => collector.status === 'active')
@@ -214,6 +234,9 @@ function mapConversation(value: ConversationDTO, messages: MessageDTO[] = [], at
     recentMessageTime: mappedMessages.length ? mappedMessages[0].time : '尚未同步',
     messages: mappedMessages,
     files: mappedFiles,
+    timelineCursor: timeline?.next_cursor,
+    timelineHasMore: Boolean(timeline?.has_more),
+    timelineLoading: false,
     collectors: (value.collectors || []).map((collector) => ({
       id: collector.id,
       collectorUserId: collector.collector_user_id,
@@ -229,8 +252,8 @@ function mapConversation(value: ConversationDTO, messages: MessageDTO[] = [], at
       lastHeartbeatAt: collector.last_heartbeat_at,
     } satisfies InfoCollector)),
     knowledgeBaseId: value.knowledge_base_id,
-    messageCount: messages.length ? mappedMessages.length : (value.message_count || 0),
-    attachmentCount: attachments.length ? mappedFiles.length : (value.attachment_count || 0),
+    messageCount: value.message_count ?? mappedMessages.length,
+    attachmentCount: value.attachment_count ?? mappedFiles.length,
     lastSeenAt: value.last_synced_at,
   }
 }
@@ -424,7 +447,8 @@ export const useInfoKnowledgeStore = defineStore('infoKnowledge', () => {
       await addConversationCollector(available.attachedConversationId)
       await enableWechatConversation(platform, available.externalId || id)
       const detail = await getConversationDetail(available.attachedConversationId)
-      const chat = mapConversation(detail.conversation, detail.messages, detail.attachments)
+      const { messages, attachments } = timelinePageRecords(detail.timeline)
+      const chat = mapConversation(detail.conversation, messages, attachments, detail.timeline)
       source.chats = [chat, ...source.chats.filter((item) => item.id !== chat.id)]
       available.currentUserCollector = true
       source.selectedConversationCount = source.chats.length
@@ -509,14 +533,49 @@ export const useInfoKnowledgeStore = defineStore('infoKnowledge', () => {
     } catch (error) {
       throw error
     }
-    const mapped = mapConversation(detail.conversation, detail.messages, detail.attachments)
+    const { messages, attachments } = timelinePageRecords(detail.timeline)
+    const mapped = mapConversation(detail.conversation, messages, attachments, detail.timeline)
     const source = findSource(key)
     if (source) {
       const index = source.chats.findIndex((item) => item.id === mapped.id)
-      if (index >= 0) source.chats[index] = mapped
+      if (index >= 0) {
+        const existing = source.chats[index]
+        if (existing.timelineCursor && existing.timelineHasMore) {
+          mapped.messages = mergeByID(mapped.messages, existing.messages, (item) => item.id)
+            .sort((left, right) => Date.parse(right.timestamp) - Date.parse(left.timestamp))
+          mapped.files = mergeByID(mapped.files, existing.files, (item) => item.id)
+          mapped.timelineCursor = existing.timelineCursor
+          mapped.timelineHasMore = existing.timelineHasMore
+        }
+        source.chats[index] = mapped
+      }
       else source.chats = [mapped, ...source.chats]
     }
     return mapped
+  }
+
+  async function loadOlderConversation(platform: SourceKey | string, id: string) {
+    const key = normalizeSourceKey(platform)
+    const chat = key ? findConversation(key, id) : undefined
+    if (!chat || !chat.timelineHasMore || !chat.timelineCursor || chat.timelineLoading) return
+    chat.timelineLoading = true
+    try {
+      const page = await getConversationTimeline(chat.id, chat.timelineCursor)
+      const { messages, attachments } = timelinePageRecords(page)
+      const mappedMessages = messages
+        .filter((item) => !isAttachmentOnlyMessage(item, attachments))
+        .map((item) => mapMessage(item, attachments))
+      chat.messages = mergeByID(chat.messages, mappedMessages, (item) => item.id)
+        .sort((left, right) => Date.parse(right.timestamp) - Date.parse(left.timestamp))
+      chat.files = mergeByID(chat.files, attachments.map((item) => {
+        const timelineItem = page.items.find((candidate) => candidate.kind === 'attachment' && candidate.attachment?.id === item.id)
+        return mapAttachment(item, timelineItem?.sender_display_name || '', timelineItem?.sent_at ? displayTime(timelineItem.sent_at) : '', timelineItem?.collected_at || '')
+      }), (item) => item.id)
+      chat.timelineCursor = page.next_cursor
+      chat.timelineHasMore = page.has_more
+    } finally {
+      chat.timelineLoading = false
+    }
   }
 
   function updateMessage(chatId: string, messageId: string, content: string) {
@@ -537,5 +596,5 @@ export const useInfoKnowledgeStore = defineStore('infoKnowledge', () => {
     )]
   }
 
-  return { sources, allChats, loading, loadedAt, loadError, libraries, librariesLoadedAt, findSource, findConversation, ensureSources, refreshSources, ensureLibraries, refreshLibraries, refreshAvailableSessions, refreshTypedSessions, accessSession, accessTypedSession, pauseConversation, resumeConversation, removeCollector, loadConversation, search, updateMessage, updateFile, collectKnowledgeBaseIds }
+  return { sources, allChats, loading, loadedAt, loadError, libraries, librariesLoadedAt, findSource, findConversation, ensureSources, refreshSources, ensureLibraries, refreshLibraries, refreshAvailableSessions, refreshTypedSessions, accessSession, accessTypedSession, pauseConversation, resumeConversation, removeCollector, loadConversation, loadOlderConversation, search, updateMessage, updateFile, collectKnowledgeBaseIds }
 })

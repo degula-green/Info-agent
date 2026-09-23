@@ -1846,6 +1846,8 @@ func (s *PostgresStore) AdvanceCursor(ctx context.Context, collectorID, cursor s
 // endpoint fail while scanning into the domain's non-null Go fields.
 const attachmentColumns = `id::text,COALESCE(conversation_ingestion_id::text,''),COALESCE(message_id::text,''),COALESCE(external_attachment_id,''),COALESCE(file_name,''),COALESCE(mime_type,''),COALESCE(size_bytes,0),COALESCE(object_ref,''),COALESCE(content_hash,''),COALESCE(content_version,1),COALESCE(content_status,'pending'),COALESCE(access_scope,'conversation_members'),COALESCE(content_access_required,FALSE),COALESCE(preview_capability,''),COALESCE(last_error,''),COALESCE(created_at,CURRENT_TIMESTAMP),COALESCE(updated_at,CURRENT_TIMESTAMP),COALESCE(sensitive,FALSE),COALESCE(classification_status,'pending')`
 
+const timelineAttachmentColumns = `a.id::text,COALESCE(a.conversation_ingestion_id::text,''),COALESCE(a.message_id::text,''),COALESCE(a.external_attachment_id,''),COALESCE(a.file_name,''),COALESCE(a.mime_type,''),COALESCE(a.size_bytes,0),COALESCE(a.object_ref,''),COALESCE(a.content_hash,''),COALESCE(a.content_version,1),COALESCE(a.content_status,'pending'),COALESCE(a.access_scope,'conversation_members'),COALESCE(a.content_access_required,FALSE),COALESCE(a.preview_capability,''),COALESCE(a.last_error,''),COALESCE(a.created_at,CURRENT_TIMESTAMP),COALESCE(a.updated_at,CURRENT_TIMESTAMP),COALESCE(a.sensitive,FALSE),COALESCE(a.classification_status,'pending')`
+
 func scanAttachment(row rowScanner) (*domain.Attachment, error) {
 	var a domain.Attachment
 	err := row.Scan(&a.ID, &a.ConversationID, &a.MessageID, &a.ExternalAttachmentID, &a.FileName, &a.MIMEType, &a.SizeBytes, &a.ObjectRef, &a.ContentHash, &a.ContentVersion, &a.ContentStatus, &a.AccessScope, &a.ContentAccessRequired, &a.PreviewCapability, &a.LastError, &a.CreatedAt, &a.UpdatedAt, &a.Sensitive, &a.ClassificationStatus)
@@ -2071,6 +2073,111 @@ func (s *PostgresStore) ListAttachments(ctx context.Context, conversationID stri
 	return out, s.enrichAttachmentRAG(ctx, out)
 }
 
+func (s *PostgresStore) ListConversationTimeline(ctx context.Context, conversationID string, limit int, before *domain.ConversationTimelineCursor) ([]domain.ConversationTimelineItem, error) {
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+	var conversationType, conversationName, externalConversationID, accountExternalID string
+	err := s.pool.QueryRow(ctx, `SELECT ci.conversation_type,COALESCE(ci.name,''),COALESCE(ci.external_conversation_id,''),COALESCE(account.external_account_id,'') FROM knowledge.conversation_ingestions ci LEFT JOIN LATERAL (SELECT ca.external_account_id FROM knowledge.conversation_collectors cc JOIN knowledge.connector_accounts ca ON ca.id=cc.connector_account_id WHERE cc.conversation_ingestion_id=ci.id AND cc.status<>'removed' ORDER BY CASE WHEN cc.status='active' THEN 0 ELSE 1 END,cc.joined_at DESC LIMIT 1) account ON TRUE WHERE ci.id=$1`, conversationID).Scan(&conversationType, &conversationName, &externalConversationID, &accountExternalID)
+	if err != nil {
+		return nil, dbError(err)
+	}
+	collectedExpr := `COALESCE((SELECT MIN(ms.collected_at) FROM knowledge.message_sources ms WHERE ms.message_id=m.id),m.created_at)`
+	messageQuery := `SELECT m.id::text,m.conversation_ingestion_id::text,m.external_message_id,COALESCE(m.sender_identity_id::text,''),COALESCE(ei.external_user_id,''),COALESCE(NULLIF(ei.display_name,''),NULLIF(m.sender_display_name,''),''),m.message_type,COALESCE(m.normalized_content_ref,''),COALESCE(m.normalized_content,''),m.content_hash,m.content_version,m.sent_at,` + collectedExpr + `,m.lifecycle_status,CASE WHEN EXISTS (SELECT 1 FROM knowledge.knowledge_items ki WHERE ki.source_message_id=m.id AND ki.source_attachment_id IS NULL AND ki.source_type<>'shared_private_item' AND ki.rag_status='succeeded' AND ki.rag_content_version=ki.content_version AND ki.rag_acl_version=ki.acl_version) THEN 'ready' WHEN EXISTS (SELECT 1 FROM knowledge.knowledge_items ki WHERE ki.source_message_id=m.id AND ki.source_attachment_id IS NULL AND ki.source_type<>'shared_private_item' AND ki.rag_status='failed') THEN 'failed' ELSE m.vector_status END,m.created_at,m.sensitive,m.classification_status FROM knowledge.messages m LEFT JOIN knowledge.external_identities ei ON ei.id=m.sender_identity_id WHERE m.conversation_ingestion_id=$1`
+	messageArgs := []any{conversationID}
+	if before != nil {
+		messageQuery += ` AND (` + collectedExpr + ` < $2 OR (` + collectedExpr + ` = $2 AND ('message' < $3 OR ('message' = $3 AND m.id::text < $4))))`
+		messageArgs = append(messageArgs, before.CollectedAt, before.Kind, before.ID)
+	}
+	messageQuery += fmt.Sprintf(` ORDER BY %s DESC,m.id::text DESC LIMIT $%d`, collectedExpr, len(messageArgs)+1)
+	messageArgs = append(messageArgs, limit+1)
+	messageRows, err := s.pool.Query(ctx, messageQuery, messageArgs...)
+	if err != nil {
+		return nil, dbError(err)
+	}
+	items := make([]domain.ConversationTimelineItem, 0, (limit+1)*2)
+	for messageRows.Next() {
+		var message domain.Message
+		var senderExternalID string
+		var item domain.ConversationTimelineItem
+		if err := messageRows.Scan(&message.ID, &message.ConversationID, &message.ExternalMessageID, &message.SenderIdentityID, &senderExternalID, &message.SenderDisplayName, &message.MessageType, &message.NormalizedContentRef, &message.Content, &message.ContentHash, &message.ContentVersion, &message.SentAt, &item.CollectedAt, &message.LifecycleStatus, &message.VectorStatus, &message.CreatedAt, &message.Sensitive, &message.ClassificationStatus); err != nil {
+			messageRows.Close()
+			return nil, dbError(err)
+		}
+		message.SenderDisplayName = normalizePrivateWechatSender(conversationType, conversationName, externalConversationID, senderExternalID, accountExternalID, message.SenderDisplayName)
+		item.Kind = "message"
+		item.Message = &message
+		items = append(items, item)
+	}
+	if err := messageRows.Err(); err != nil {
+		messageRows.Close()
+		return nil, dbError(err)
+	}
+	messageRows.Close()
+
+	attachmentQuery := `SELECT ` + timelineAttachmentColumns + `,COALESCE(m.sender_identity_id::text,''),COALESCE(ei.external_user_id,''),COALESCE(NULLIF(ei.display_name,''),NULLIF(m.sender_display_name,''),''),m.sent_at FROM knowledge.attachments a LEFT JOIN knowledge.messages m ON m.id=a.message_id LEFT JOIN knowledge.external_identities ei ON ei.id=m.sender_identity_id WHERE a.conversation_ingestion_id=$1`
+	attachmentArgs := []any{conversationID}
+	if before != nil {
+		attachmentQuery += ` AND (a.created_at < $2 OR (a.created_at = $2 AND ('attachment' < $3 OR ('attachment' = $3 AND a.id::text < $4))))`
+		attachmentArgs = append(attachmentArgs, before.CollectedAt, before.Kind, before.ID)
+	}
+	attachmentQuery += fmt.Sprintf(` ORDER BY a.created_at DESC,a.id::text DESC LIMIT $%d`, len(attachmentArgs)+1)
+	attachmentArgs = append(attachmentArgs, limit+1)
+	attachmentRows, err := s.pool.Query(ctx, attachmentQuery, attachmentArgs...)
+	if err != nil {
+		return nil, dbError(err)
+	}
+	attachments := make([]domain.Attachment, 0, limit+1)
+	for attachmentRows.Next() {
+		var attachment domain.Attachment
+		var senderExternalID string
+		var item domain.ConversationTimelineItem
+		if err := attachmentRows.Scan(&attachment.ID, &attachment.ConversationID, &attachment.MessageID, &attachment.ExternalAttachmentID, &attachment.FileName, &attachment.MIMEType, &attachment.SizeBytes, &attachment.ObjectRef, &attachment.ContentHash, &attachment.ContentVersion, &attachment.ContentStatus, &attachment.AccessScope, &attachment.ContentAccessRequired, &attachment.PreviewCapability, &attachment.LastError, &attachment.CreatedAt, &attachment.UpdatedAt, &attachment.Sensitive, &attachment.ClassificationStatus, &item.SenderIdentityID, &senderExternalID, &item.SenderDisplayName, &item.SentAt); err != nil {
+			attachmentRows.Close()
+			return nil, dbError(err)
+		}
+		item.Kind = "attachment"
+		item.CollectedAt = attachment.CreatedAt
+		if item.SentAt != nil {
+			item.SenderDisplayName = normalizePrivateWechatSender(conversationType, conversationName, externalConversationID, senderExternalID, accountExternalID, item.SenderDisplayName)
+		}
+		item.Attachment = &attachment
+		attachments = append(attachments, attachment)
+		items = append(items, item)
+	}
+	if err := attachmentRows.Err(); err != nil {
+		attachmentRows.Close()
+		return nil, dbError(err)
+	}
+	attachmentRows.Close()
+	if err := s.enrichAttachmentRAG(ctx, attachments); err != nil {
+		return nil, err
+	}
+	attachmentByID := make(map[string]*domain.Attachment, len(attachments))
+	for index := range attachments {
+		attachmentByID[attachments[index].ID] = &attachments[index]
+	}
+	for index := range items {
+		if items[index].Attachment != nil {
+			items[index].Attachment = attachmentByID[items[index].Attachment.ID]
+		}
+	}
+	sort.Slice(items, func(i, j int) bool {
+		if !items[i].CollectedAt.Equal(items[j].CollectedAt) {
+			return items[i].CollectedAt.After(items[j].CollectedAt)
+		}
+		if items[i].Kind != items[j].Kind {
+			return items[i].Kind > items[j].Kind
+		}
+		leftID, rightID := timelineItemID(items[i]), timelineItemID(items[j])
+		return leftID > rightID
+	})
+	if len(items) > limit+1 {
+		items = items[:limit+1]
+	}
+	return items, nil
+}
+
 // enrichAttachmentRAG joins the authoritative KnowledgeItem RAG callback
 // state onto platform attachments. Attachment processing_status only means
 // that Knowledge can publish the item to RAG; it is not vectorization status.
@@ -2238,6 +2345,12 @@ func (s *PostgresStore) ListKnowledgePermissionSubjects(ctx context.Context, id 
 		SELECT owner_user_id::text AS subject FROM knowledge.knowledge_items WHERE id=$1 AND knowledge_scope='private' AND owner_user_id IS NOT NULL
 		UNION ALL SELECT ei.mapped_user_id::text FROM knowledge.knowledge_items ki JOIN knowledge.conversation_memberships cm ON cm.conversation_ingestion_id=ki.conversation_ingestion_id AND cm.status='active' JOIN knowledge.external_identities ei ON ei.id=cm.external_identity_id AND ei.mapping_status='mapped' AND ei.mapped_user_id IS NOT NULL WHERE ki.id=$1 AND ki.knowledge_scope='organization'
 		UNION ALL SELECT ci.owner_user_id::text FROM knowledge.knowledge_items ki JOIN knowledge.conversation_ingestions ci ON ci.id=ki.conversation_ingestion_id WHERE ki.id=$1 AND ki.knowledge_scope='organization' AND ci.owner_user_id IS NOT NULL
+		-- The account that attached/created the group is a first-class
+		-- participant even when provider identities have not been mapped yet.
+		-- Without this fallback a freshly collected group can be indexed and
+		-- marked ACL-synced with no participant tuple at all.
+		UNION ALL SELECT ci.created_by_user_id::text FROM knowledge.knowledge_items ki JOIN knowledge.conversation_ingestions ci ON ci.id=ki.conversation_ingestion_id WHERE ki.id=$1 AND ki.knowledge_scope='organization' AND ci.created_by_user_id IS NOT NULL
+		UNION ALL SELECT cc.collector_user_id::text FROM knowledge.knowledge_items ki JOIN knowledge.conversation_collectors cc ON cc.conversation_ingestion_id=ki.conversation_ingestion_id AND cc.status='active' WHERE ki.id=$1 AND ki.knowledge_scope='organization' AND cc.collector_user_id IS NOT NULL
 		UNION ALL SELECT shared_by_user_id::text FROM knowledge.knowledge_items WHERE id=$1 AND knowledge_scope='organization' AND shared_by_user_id IS NOT NULL
 		UNION ALL SELECT r.requester_user_id::text FROM knowledge.private_access_requests r
 		JOIN knowledge.knowledge_items source ON source.source_type='private_conversation'
