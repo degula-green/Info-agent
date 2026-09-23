@@ -35,11 +35,64 @@ export type QaCitation = Record<string, any>
 export type QaMessage = { id: string; role: 'user' | 'assistant' | 'system'; content: string; citations?: QaCitation[]; status: string; created_at?: string | null }
 export type QaConversation = { id: string; title: string; message_count: number; updated_at?: string | null; last_message_at?: string | null; messages?: QaMessage[] }
 
+export type RagSearchItem = Record<string, any>
+export type RagSearchResponse = {
+  request_id?: string
+  query?: string
+  items: RagSearchItem[]
+  diagnostics?: Record<string, any>
+}
+
+export type RagSearchInput = {
+  query: string
+  organizationId?: string
+  knowledgeBaseIds?: string[]
+  topK?: number
+  includeProtected?: boolean
+  signal?: AbortSignal
+}
+
+function cleanKnowledgeBaseIds(values?: string[], single?: string) {
+  return [...new Set([...(values || []), ...(single ? [single] : [])].map((value) => String(value || '').trim()).filter(Boolean))]
+}
+
 export function listQaConversations(page = 1, pageSize = 20) { return request<{ items: QaConversation[]; page: number; page_size: number; total: number }>(`/qa/conversations?page=${page}&page_size=${pageSize}`) }
 export function getQaConversation(id: string) { return request<QaConversation>(`/qa/conversations/${encodeURIComponent(id)}`) }
 export function createQaConversation(title = '新的对话') { return request<{ id: string; title: string }>(`/qa/conversations`, { method: 'POST', body: JSON.stringify({ title }) }) }
 export function renameQaConversation(id: string, title: string) { return request<{ id: string; title: string }>(`/qa/conversations/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify({ title }) }) }
 export function deleteQaConversation(id: string) { return request<{ status: string }>(`/qa/conversations/${encodeURIComponent(id)}`, { method: 'DELETE' }) }
+
+export function searchGlobal(input: RagSearchInput) {
+  const knowledgeBaseIds = cleanKnowledgeBaseIds(input.knowledgeBaseIds)
+  return request<RagSearchResponse>('/search/global', {
+    method: 'POST',
+    signal: input.signal,
+    body: JSON.stringify({
+      query: input.query,
+      organization_id: input.organizationId || undefined,
+      knowledge_base_ids: knowledgeBaseIds.length ? knowledgeBaseIds : undefined,
+      top_k: input.topK ?? 12,
+      include_protected: input.includeProtected ?? true,
+    }),
+  })
+}
+
+export function searchKnowledge(input: RagSearchInput & { knowledgeBaseId?: string; knowledgeBaseIds?: string[] }) {
+  const knowledgeBaseIds = cleanKnowledgeBaseIds(input.knowledgeBaseIds, input.knowledgeBaseId)
+  if (!knowledgeBaseIds.length) throw new Error('knowledge_base_id is required')
+  return request<RagSearchResponse>('/search/knowledge', {
+    method: 'POST',
+    signal: input.signal,
+    body: JSON.stringify({
+      query: input.query,
+      knowledge_base_id: knowledgeBaseIds.length === 1 ? knowledgeBaseIds[0] : undefined,
+      knowledge_base_ids: knowledgeBaseIds,
+      organization_id: input.organizationId || undefined,
+      top_k: input.topK ?? 20,
+      include_protected: input.includeProtected ?? true,
+    }),
+  })
+}
 
 export async function askQaStream(input: { query: string; conversationId?: string | number; mode?: 'quick' | 'deep'; knowledgeBaseIds?: string[]; organizationId?: string }, handlers: { onMeta?: (value: any) => void; onToken?: (value: string) => void; onCitation?: (value: any) => void; onDone?: (value: any) => void; onError?: (value: any) => void }) {
   const response = await fetch(`${baseURL}/ai/documents/stream`, { method: 'POST', headers: await headers('text/event-stream'), body: JSON.stringify({ query: input.query, conversation_id: input.conversationId ? String(input.conversationId) : undefined, mode: input.mode || 'quick', knowledge_base_ids: input.knowledgeBaseIds || [], organization_id: input.organizationId }) })

@@ -1,7 +1,7 @@
 <template>
-  <InfoConversation v-if="chat" :chat="chat" @back="router.push(backPath)" @toggle="toggleChat" @toast="toast" @share="shareSelected" />
+  <InfoConversation v-if="chat && !loadError" :chat="chat" @back="router.push(backPath)" @toggle="toggleChat" @toast="toast" @share="shareSelected" />
   <div v-else-if="loading" class="conversation-missing"><t-icon name="loading" size="28px" /><h3>正在加载会话</h3><p>正在从 Knowledge 加载消息和附件。</p></div>
-  <div v-else class="conversation-missing"><t-icon name="error-circle" size="28px" /><h3>找不到这个会话</h3><t-button theme="primary" @click="router.push('/knowledge')">返回知识库</t-button></div>
+  <div v-else class="conversation-missing"><t-icon name="error-circle" size="28px" /><h3>{{ errorTitle }}</h3><p v-if="errorDescription">{{ errorDescription }}</p><t-button theme="primary" @click="router.push('/knowledge')">返回知识库</t-button></div>
 
   <t-dialog
     v-model:visible="resumeDialogVisible"
@@ -35,6 +35,7 @@ const backPath = computed(() => {
   return chat.value?.isDirect ? '/knowledge/personal/private' : `/knowledge/${chat.value?.source || sourceKey.value}`
 })
 const loading = ref(true)
+const loadError = ref<any>(null)
 const pollTimer = ref<number | null>(null)
 const resumeDialogVisible = ref(false)
 const resumeLoading = ref(false)
@@ -90,11 +91,14 @@ async function loadCurrentConversation(platform: string, id: string, force = fal
   const request = (async () => {
   const hadChat = Boolean(store.findConversation(platform, id))
   loading.value = !hadChat
+  loadError.value = null
   try {
     // Detail pages refresh their own conversation. A directory refresh here
     // can replace the in-memory snapshot while a provider returns a partial
     // page, briefly turning a valid route into "conversation not found".
     await store.loadConversation(platform as 'feishu' | 'wecom' | 'wechat', id, force)
+  } catch (error) {
+    loadError.value = error
   } finally {
     loading.value = false
   }
@@ -112,6 +116,9 @@ onMounted(() => {
     void loadCurrentConversation(sourceKey.value, conversationId.value, true)
   }, 30000)
 })
+const errorCode = computed(() => String(loadError.value?.code || loadError.value?.error?.code || ''))
+const errorTitle = computed(() => errorCode.value === 'forbidden' ? '你没有权限查看这个群聊' : errorCode.value === 'conversation_not_found' ? '找不到这个会话' : '会话加载失败')
+const errorDescription = computed(() => errorCode.value === 'forbidden' ? '请联系组织管理员确认你的组织成员状态。' : errorCode.value === 'conversation_not_found' ? '' : loadError.value ? '请稍后重试。' : '')
 watch([sourceKey, conversationId], async ([platform, id]) => {
   await loadCurrentConversation(platform, id, true)
 }, { immediate: true })

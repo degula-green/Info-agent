@@ -17,7 +17,7 @@
           ref="inputRef"
           v-model="localQuery"
           class="cmdk__input"
-          placeholder="输入关键词，搜索当前已加载的会话、消息和附件。"
+          placeholder="输入关键词，搜索可见知识库中的消息和附件。"
           autocomplete="off"
           spellcheck="false"
           @keydown.stop="onInputKeyDown"
@@ -36,7 +36,7 @@
               :index="0"
               icon-name="search"
               title="输入关键词或问题描述开始检索"
-              subtitle="搜索当前已加载的群聊、消息和文件"
+              subtitle="跨知识库搜索消息和文件"
               :selected="selectedIndex === 0"
               @primary="focusInput"
               @hover="selectedIndex = $event"
@@ -58,7 +58,7 @@
         </template>
 
         <template v-else-if="loading">
-          <div class="cmdk__empty"><t-icon name="loading" size="32px" /><p>正在搜索…</p><span>正在查询个人微信知识库，请稍候</span></div>
+          <div class="cmdk__empty"><t-icon name="loading" size="32px" /><p>正在搜索…</p><span>正在检索可见知识库，请稍候</span></div>
         </template>
 
         <template v-else-if="results.length">
@@ -149,7 +149,7 @@
         <div v-else class="cmdk__empty">
           <t-icon name="search" size="32px" />
           <p>没有找到相关内容</p>
-          <span>试试更短的关键词，或搜索群聊名称、发送人和文件名</span>
+          <span>{{ emptyHint || '试试更短的关键词，或搜索群聊名称、发送人和文件名' }}</span>
         </div>
       </div>
 
@@ -158,7 +158,7 @@
         <span><kbd>Enter</kbd> 打开</span>
         <span><kbd>Tab</kbd> 切换结果</span>
         <span><kbd>Esc</kbd> 关闭</span>
-        <span class="cmdk__mode-label">当前已加载数据</span>
+        <span class="cmdk__mode-label">全库检索</span>
       </div>
     </div>
   </t-dialog>
@@ -172,7 +172,7 @@ import type { SearchResult } from '../mock'
 
 type SearchTab = 'knowledge' | 'history'
 
-const props = defineProps<{ visible: boolean; query: string; results: SearchResult[]; recentSearches?: string[]; loading?: boolean }>()
+const props = defineProps<{ visible: boolean; query: string; results: SearchResult[]; recentSearches?: string[]; loading?: boolean; emptyHint?: string }>()
 const emit = defineEmits<{
   (event: 'update:visible', value: boolean): void
   (event: 'search', query: string, committed?: boolean): void

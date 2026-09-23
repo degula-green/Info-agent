@@ -106,6 +106,11 @@ export interface KnowledgeLibraryItemDTO {
   can_view: boolean
   can_download: boolean
   content_access_required: boolean
+  rag_status?: string
+  rag_content_version?: number
+  rag_acl_version?: number
+  rag_last_error?: string | null
+  searchable?: boolean
 }
 
 export interface LocalUploadTaskDTO {
@@ -158,6 +163,12 @@ export interface AttachmentDTO {
   content_access_required: boolean
   preview_capability?: string
   last_error?: string | null
+  rag_status?: 'not_enqueued' | 'pending' | 'processing' | 'succeeded' | 'failed' | string
+  rag_content_version?: number
+  rag_acl_version?: number
+  rag_last_error?: string | null
+  rag_finished_at?: string | null
+  searchable?: boolean
   created_at: string
   updated_at: string
 }

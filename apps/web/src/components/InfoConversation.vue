@@ -116,8 +116,8 @@
 
         <footer class="detail-modal__footer">
           <div class="detail-modal__status">
-            <span class="status-dot status-dot--success" />
-            <span>已采集</span>
+            <span class="status-dot" :class="statusTone(messageDisplayStatus(activeMessage))" />
+            <span>{{ messageDisplayLabel(activeMessage) }}</span>
             <span class="record-id">消息 ID: {{ activeMessage.sourceMessageId || activeMessage.id }}</span>
           </div>
           <div class="detail-modal__actions">
@@ -161,7 +161,7 @@
 
         <footer class="detail-modal__footer document-modal__footer">
           <div class="detail-modal__status">
-            <span class="status-dot" :class="statusTone(activeFile.documentStatus || activeFile.parseStatus)" />
+            <span class="status-dot" :class="statusTone(attachmentDisplayStatus(activeFile))" />
             <span>{{ fileStatus(activeFile) }}</span>
             <span class="record-id">文档 ID: {{ activeFile.documentId ?? activeFile.id }}</span>
           </div>
@@ -180,6 +180,7 @@ import { getKnowledgeAttachmentContent } from '@/api/info-knowledge'
 import InfoAttachmentPreview from '@/components/InfoAttachmentPreview.vue'
 import type { CollectionStatus, InfoChat, InfoFile, InfoMessage } from '@/mock'
 import { sourceName } from '@/mock'
+import { knowledgeDisplayLabel, mapKnowledgeDisplayStatus, type KnowledgeDisplayStatus } from '@/knowledge-mapping'
 import { sanitizeHTML } from '@/utils/security'
 import { isDisplayableTextMessage } from '@/utils/message-visibility'
 
@@ -221,7 +222,7 @@ const items = computed<ConversationItem[]>(() => [
       kind: 'message' as const,
       name: messagePreview(message.content),
       detail: `${message.sender} · ${message.time}`,
-      status: '已采集',
+      status: messageDisplayLabel(message),
       size: '-',
       type: '消息',
       source: sourceName(chat.value.source),
@@ -233,7 +234,7 @@ const items = computed<ConversationItem[]>(() => [
       kind: 'file' as const,
       name: file.name,
       detail: `${file.uploader || '未知发送人'} · ${file.sentAt || '发送时间未知'}`,
-      status: file.contentAccessRequired ? '仅元数据' : file.documentStatus === 'failed' ? '解析失败' : file.documentStatus === 'completed' ? '解析完成' : file.documentStatus || file.parseStatus || '待解析',
+      status: attachmentStatus(file),
       size: file.size,
       type: file.type,
       source: sourceName(chat.value.source),
@@ -359,16 +360,30 @@ function displayMessageContent(content?: string | null) {
 }
 
 function fileStatus(file: InfoFile) {
-  if (file.contentAccessRequired) return '受保护，仅展示元数据'
-  const status = file.documentStatus || file.parseStatus
-  if (status === 'failed') return '解析失败'
-  if (status === 'completed') return '解析完成'
-  return status || '待解析'
+  return knowledgeDisplayLabel(attachmentDisplayStatus(file))
 }
 
-function statusTone(status?: string | null) {
+function attachmentStatus(file: InfoFile) {
+  return fileStatus(file)
+}
+
+function attachmentDisplayStatus(file: InfoFile): KnowledgeDisplayStatus {
+  return mapKnowledgeDisplayStatus({ contentStatus: file.documentStatus || file.parseStatus, ragStatus: file.vectorStatus, searchable: file.searchable })
+}
+
+function messageDisplayStatus(message: InfoMessage): KnowledgeDisplayStatus {
+  if (message.vectorStatus === 'ready' || message.vectorStatus === 'succeeded') return 'searchable'
+  if (message.vectorStatus === 'failed') return 'failed'
+  return 'collected'
+}
+
+function messageDisplayLabel(message: InfoMessage) {
+  return knowledgeDisplayLabel(messageDisplayStatus(message))
+}
+
+function statusTone(status?: KnowledgeDisplayStatus | null) {
   if (status === 'failed') return 'status-dot--error'
-  if (status === 'completed') return 'status-dot--success'
+  if (status === 'searchable' || status === 'parsed') return 'status-dot--success'
   return 'status-dot--pending'
 }
 

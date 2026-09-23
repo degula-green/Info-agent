@@ -164,11 +164,15 @@ class HybridRetriever:
 
 def _common_filters(request: SearchRequest) -> list[dict[str, Any]]:
     filters: list[dict[str, Any]] = [{"term": {"lifecycle_status": "active"}}]
-    if request.organization_id:
-        filters.append({"term": {"organization_id": request.organization_id}})
     knowledge_base_ids = tuple(request.knowledge_base_ids) or ((request.knowledge_base_id,) if request.knowledge_base_id else ())
+    # Explicit library ids are the ES scope. Do not also require organization_id,
+    # or private bases (owner-only, empty organization_id) are silently dropped
+    # when the caller passes both an org context and mixed kb ids — the same
+    # combination AI Q&A uses.
     if knowledge_base_ids:
         filters.append({"terms": {"knowledge_base_id": list(knowledge_base_ids)}})
+    elif request.organization_id:
+        filters.append({"term": {"organization_id": request.organization_id}})
     if request.resource_types:
         filters.append({"bool": {"should": [
             {"terms": {"part_kind": list(request.resource_types)}},

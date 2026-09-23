@@ -1,5 +1,6 @@
 export type CollectionStatus = 'not_started' | 'collecting' | 'paused' | 'detached' | 'missing' | 'error'
 export type DiscoveryAction = 'attach' | 'join' | 'attached'
+export type KnowledgeDisplayStatus = 'collected' | 'parsed' | 'searchable' | 'failed'
 
 export type LoadedSearchResult = {
   id: string
@@ -32,6 +33,17 @@ export function mapAttachmentStatus(status: string): 'completed' | 'failed' | 'p
   if (status === 'ready') return 'completed'
   if (status === 'failed') return 'failed'
   return 'processing'
+}
+
+export function mapKnowledgeDisplayStatus(input: { contentStatus?: string | null; ragStatus?: string | null; searchable?: boolean }): KnowledgeDisplayStatus {
+  if (input.contentStatus === 'failed' || input.ragStatus === 'failed') return 'failed'
+  if (input.ragStatus === 'succeeded' && input.searchable === true) return 'searchable'
+  if (input.contentStatus === 'ready') return 'parsed'
+  return 'collected'
+}
+
+export function knowledgeDisplayLabel(status: KnowledgeDisplayStatus): string {
+  return { collected: '已采集', parsed: '解析完成', searchable: '可检索', failed: '处理失败' }[status]
 }
 
 export function isPrivateConversation(conversationType: string): boolean {

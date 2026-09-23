@@ -83,24 +83,30 @@ type publicAvailableContact struct {
 }
 
 type publicAttachment struct {
-	ID                    string    `json:"id"`
-	ConversationID        string    `json:"conversation_id"`
-	MessageID             string    `json:"message_id,omitempty"`
-	ExternalAttachmentID  string    `json:"external_attachment_id"`
-	FileName              string    `json:"file_name"`
-	MIMEType              string    `json:"mime_type"`
-	SizeBytes             int64     `json:"size_bytes"`
-	ContentHash           string    `json:"content_hash,omitempty"`
-	ContentVersion        int       `json:"content_version"`
-	ContentStatus         string    `json:"content_status"`
-	AccessScope           string    `json:"access_scope"`
-	ContentAccessRequired bool      `json:"content_access_required"`
-	Sensitive             bool      `json:"sensitive"`
-	ClassificationStatus  string    `json:"classification_status,omitempty"`
-	PreviewCapability     string    `json:"preview_capability,omitempty"`
-	LastError             string    `json:"last_error,omitempty"`
-	CreatedAt             time.Time `json:"created_at"`
-	UpdatedAt             time.Time `json:"updated_at"`
+	ID                    string     `json:"id"`
+	ConversationID        string     `json:"conversation_id"`
+	MessageID             string     `json:"message_id,omitempty"`
+	ExternalAttachmentID  string     `json:"external_attachment_id"`
+	FileName              string     `json:"file_name"`
+	MIMEType              string     `json:"mime_type"`
+	SizeBytes             int64      `json:"size_bytes"`
+	ContentHash           string     `json:"content_hash,omitempty"`
+	ContentVersion        int        `json:"content_version"`
+	ContentStatus         string     `json:"content_status"`
+	AccessScope           string     `json:"access_scope"`
+	ContentAccessRequired bool       `json:"content_access_required"`
+	Sensitive             bool       `json:"sensitive"`
+	ClassificationStatus  string     `json:"classification_status,omitempty"`
+	PreviewCapability     string     `json:"preview_capability,omitempty"`
+	LastError             string     `json:"last_error,omitempty"`
+	RAGStatus             string     `json:"rag_status,omitempty"`
+	RAGContentVersion     int        `json:"rag_content_version,omitempty"`
+	RAGACLVersion         int64      `json:"rag_acl_version,omitempty"`
+	RAGLastError          string     `json:"rag_last_error,omitempty"`
+	RAGFinishedAt         *time.Time `json:"rag_finished_at,omitempty"`
+	Searchable            bool       `json:"searchable"`
+	CreatedAt             time.Time  `json:"created_at"`
+	UpdatedAt             time.Time  `json:"updated_at"`
 }
 
 type publicMessage struct {
@@ -224,6 +230,11 @@ type publicKnowledgeLibraryItem struct {
 	CanView                bool       `json:"can_view"`
 	CanDownload            bool       `json:"can_download"`
 	ContentAccessRequired  bool       `json:"content_access_required"`
+	RAGStatus              string     `json:"rag_status,omitempty"`
+	RAGContentVersion      int        `json:"rag_content_version,omitempty"`
+	RAGACLVersion          int64      `json:"rag_acl_version,omitempty"`
+	RAGLastError            string     `json:"rag_last_error,omitempty"`
+	Searchable              bool       `json:"searchable"`
 }
 
 type publicAgentAssignment struct {
@@ -318,7 +329,9 @@ func publicAttachmentFromDomain(value domain.Attachment) publicAttachment {
 		ContentStatus: value.ContentStatus, AccessScope: value.AccessScope,
 		ContentAccessRequired: value.ContentAccessRequired && value.Sensitive, PreviewCapability: preview,
 		Sensitive: value.Sensitive, ClassificationStatus: value.ClassificationStatus,
-		LastError: value.LastError, CreatedAt: value.CreatedAt, UpdatedAt: value.UpdatedAt,
+		LastError: value.LastError, RAGStatus: value.RAGStatus, RAGContentVersion: value.RAGContentVersion,
+		RAGACLVersion: value.RAGACLVersion, RAGLastError: value.RAGLastError, RAGFinishedAt: value.RAGFinishedAt,
+		Searchable: value.RAGSearchable, CreatedAt: value.CreatedAt, UpdatedAt: value.UpdatedAt,
 	}
 }
 
@@ -399,7 +412,7 @@ func publicKnowledgeLibraryFromDomain(value domain.KnowledgeLibrary) publicKnowl
 }
 
 func publicKnowledgeLibraryItemFromDomain(value domain.KnowledgeLibraryItem) publicKnowledgeLibraryItem {
-	return publicKnowledgeLibraryItem{ID: value.ID, LibraryID: value.LibraryID, Kind: value.Kind, Title: value.Title, Excerpt: value.Excerpt, Platform: value.Platform, ConversationID: value.ConversationID, ExternalConversationID: value.ExternalConversationID, ConversationType: value.ConversationType, ConversationName: value.ConversationName, CollectionStatus: value.CollectionStatus, SourceType: value.SourceType, SourceMessageID: value.SourceMessageID, SourceAttachmentID: value.SourceAttachmentID, ContentType: value.ContentType, ContentVisibility: value.ContentVisibility, AccessScope: value.AccessScope, ProcessingStatus: value.ProcessingStatus, ContentStatus: value.ContentStatus, FileName: value.FileName, MIMEType: value.MIMEType, SizeBytes: value.SizeBytes, MessageCount: value.MessageCount, AttachmentCount: value.AttachmentCount, MemberCount: value.MemberCount, SentAt: value.SentAt, CreatedAt: value.CreatedAt, UpdatedAt: value.UpdatedAt, SharedAt: value.SharedAt, ShareBatchID: value.ShareBatchID, CanView: value.CanView, CanDownload: value.CanDownload, ContentAccessRequired: value.ContentAccessRequired}
+	return publicKnowledgeLibraryItem{ID: value.ID, LibraryID: value.LibraryID, Kind: value.Kind, Title: value.Title, Excerpt: value.Excerpt, Platform: value.Platform, ConversationID: value.ConversationID, ExternalConversationID: value.ExternalConversationID, ConversationType: value.ConversationType, ConversationName: value.ConversationName, CollectionStatus: value.CollectionStatus, SourceType: value.SourceType, SourceMessageID: value.SourceMessageID, SourceAttachmentID: value.SourceAttachmentID, ContentType: value.ContentType, ContentVisibility: value.ContentVisibility, AccessScope: value.AccessScope, ProcessingStatus: value.ProcessingStatus, ContentStatus: value.ContentStatus, FileName: value.FileName, MIMEType: value.MIMEType, SizeBytes: value.SizeBytes, MessageCount: value.MessageCount, AttachmentCount: value.AttachmentCount, MemberCount: value.MemberCount, SentAt: value.SentAt, CreatedAt: value.CreatedAt, UpdatedAt: value.UpdatedAt, SharedAt: value.SharedAt, ShareBatchID: value.ShareBatchID, CanView: value.CanView, CanDownload: value.CanDownload, ContentAccessRequired: value.ContentAccessRequired, RAGStatus: value.RAGStatus, RAGContentVersion: value.RAGContentVersion, RAGACLVersion: value.RAGACLVersion, RAGLastError: value.RAGLastError, Searchable: value.Searchable}
 }
 
 func publicIngestResultFromDomain(value *repository.IngestResult) publicIngestResult {

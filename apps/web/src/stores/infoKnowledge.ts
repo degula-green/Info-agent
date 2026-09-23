@@ -136,6 +136,8 @@ function mapAttachment(value: AttachmentDTO, uploader = '', sentAt = '', collect
     content: '',
     documentStatus: mapAttachmentStatus(value.content_status),
     parseStatus: value.content_status,
+    vectorStatus: value.rag_status || 'not_enqueued',
+    searchable: Boolean(value.searchable),
     previewCapability: value.preview_capability,
     contentAccessRequired: value.content_access_required,
     fileSizeBytes: value.size_bytes,
@@ -505,7 +507,6 @@ export const useInfoKnowledgeStore = defineStore('infoKnowledge', () => {
     try {
       detail = await getConversationDetail(conversationID)
     } catch (error) {
-      if (!chat) return undefined
       throw error
     }
     const mapped = mapConversation(detail.conversation, detail.messages, detail.attachments)
@@ -527,5 +528,14 @@ export const useInfoKnowledgeStore = defineStore('infoKnowledge', () => {
     if (file) file.content = content
   }
 
-  return { sources, allChats, loading, loadedAt, loadError, libraries, librariesLoadedAt, findSource, findConversation, ensureSources, refreshSources, ensureLibraries, refreshLibraries, refreshAvailableSessions, refreshTypedSessions, accessSession, accessTypedSession, pauseConversation, resumeConversation, removeCollector, loadConversation, search, updateMessage, updateFile }
+  /** Physical RAG knowledge_base_id UUIDs from attached conversations (not logical library ids). */
+  function collectKnowledgeBaseIds(filter?: (chat: InfoChat) => boolean) {
+    return [...new Set(
+      allChats.value
+        .filter((chat) => Boolean(chat.knowledgeBaseId) && (!filter || filter(chat)))
+        .map((chat) => String(chat.knowledgeBaseId)),
+    )]
+  }
+
+  return { sources, allChats, loading, loadedAt, loadError, libraries, librariesLoadedAt, findSource, findConversation, ensureSources, refreshSources, ensureLibraries, refreshLibraries, refreshAvailableSessions, refreshTypedSessions, accessSession, accessTypedSession, pauseConversation, resumeConversation, removeCollector, loadConversation, search, updateMessage, updateFile, collectKnowledgeBaseIds }
 })

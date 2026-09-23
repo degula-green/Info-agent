@@ -20,7 +20,7 @@
       </header>
       <div class="info-shell__content"><RouterView /></div>
     </main>
-    <InfoCommandPalette :visible="paletteVisible" :query="paletteQuery" :results="paletteResults" :loading="paletteLoading" :recent-searches="store.recentSearches" @update:visible="paletteVisible = $event" @search="runPaletteSearch" @select="selectPaletteResult" />
+    <InfoCommandPalette :visible="paletteVisible" :query="paletteQuery" :results="paletteResults" :loading="paletteLoading" :empty-hint="paletteEmptyHint" :recent-searches="store.recentSearches" @update:visible="paletteVisible = $event" @search="runPaletteSearch" @select="selectPaletteResult" />
     <InfoResultDrawer v-model:visible="drawerVisible" :result="drawerResult" @toast="toast" />
     <t-dialog v-model:visible="toastDialogVisible" header="提示" :footer="false" width="360px"><p class="info-toast-dialog">{{ toastText }}</p></t-dialog>
     <t-dialog
@@ -79,6 +79,9 @@ import { useAuthStore } from '@/stores/auth'
 import { normalizeSourceKey, useInfoKnowledgeStore } from '@/stores/infoKnowledge'
 import { getProfile } from '@/mock-api/info-profile'
 import { downloadAvatar, getCurrentUser } from '@/api/core-auth'
+import { searchGlobal } from '@/api/rag'
+import { resolveGlobalSearchScope, searchEmptyHint } from '@/utils/info-search-scope'
+import { isAbortError, mapRagSearchItems } from '@/utils/info-search-result'
 import { listQaConversations, type QaConversation } from '@/mock-api/qa-history'
 import { renameQaConversation, deleteQaConversation } from '@/mock-api/qa-history'
 
@@ -143,8 +146,10 @@ onMounted(() => {
 })
 onBeforeUnmount(() => {
   if (knowledgePollTimer.value != null) window.clearInterval(knowledgePollTimer.value)
+  if (paletteSearchTimer) clearTimeout(paletteSearchTimer)
+  paletteAbort?.abort()
 })
-const sidebarCollapsed = ref(false); const paletteVisible = ref(false); const paletteQuery = ref(''); const paletteResults = ref<SearchResult[]>([]); const paletteLoading = ref(false); const drawerVisible = ref(false); const drawerResult = ref<SearchResult | null>(null); const toastText = ref(''); const toastDialogVisible = ref(false); const protocolDialogVisible = ref(false); const protocolType = ref<'terms' | 'privacy'>('terms'); let paletteSearchTimer: ReturnType<typeof setTimeout> | undefined; let paletteSearchSeq = 0
+const sidebarCollapsed = ref(false); const paletteVisible = ref(false); const paletteQuery = ref(''); const paletteResults = ref<SearchResult[]>([]); const paletteLoading = ref(false); const paletteEmptyHint = ref(''); const drawerVisible = ref(false); const drawerResult = ref<SearchResult | null>(null); const toastText = ref(''); const toastDialogVisible = ref(false); const protocolDialogVisible = ref(false); const protocolType = ref<'terms' | 'privacy'>('terms'); let paletteSearchTimer: ReturnType<typeof setTimeout> | undefined; let paletteSearchSeq = 0
 const activeKey = computed(() => {
   if (paletteVisible.value) return 'search'
   if (route.name === 'chat') return 'new-chat'; if (route.name === 'search') return 'search'; if (String(route.name || '').startsWith('knowledge') || route.name === 'conversation' || route.path.startsWith('/knowledge')) return 'knowledge'; if (route.name === 'organization') return 'organization'; if (route.name === 'contacts') return 'contacts'; if (route.name === 'profile') return 'profile'; return 'new-chat'
@@ -215,22 +220,47 @@ async function confirmDeleteQaSession() {
     qaDialogSubmitting.value = false
   }
 }
-function openSearch() { paletteQuery.value = ''; paletteResults.value = []; paletteVisible.value = true }
+let paletteAbort: AbortController | null = null
+function openSearch() { paletteQuery.value = ''; paletteResults.value = []; paletteEmptyHint.value = ''; paletteVisible.value = true }
 function runPaletteSearch(query: string, committed = false) {
   paletteQuery.value = query
   if (paletteSearchTimer) clearTimeout(paletteSearchTimer)
   const normalized = query.trim()
-  if (normalized.length < 2) { paletteResults.value = []; paletteLoading.value = false; return }
+  if (normalized.length < 2) {
+    paletteAbort?.abort()
+    paletteResults.value = []
+    paletteEmptyHint.value = ''
+    paletteLoading.value = false
+    return
+  }
   const seq = ++paletteSearchSeq
   paletteLoading.value = true
   paletteSearchTimer = setTimeout(async () => {
+    paletteAbort?.abort()
+    const controller = new AbortController()
+    paletteAbort = controller
     try {
-      await knowledgeStore.ensureSources()
+      const scope = await resolveGlobalSearchScope()
       if (seq !== paletteSearchSeq) return
+      const response = await searchGlobal({
+        query: normalized,
+        organizationId: scope.organizationId,
+        knowledgeBaseIds: scope.knowledgeBaseIds,
+        topK: 12,
+        signal: controller.signal,
+      })
+      if (seq !== paletteSearchSeq) return
+      paletteResults.value = mapRagSearchItems(response.items)
+      paletteEmptyHint.value = paletteResults.value.length ? '' : searchEmptyHint(response.diagnostics)
       paletteLoading.value = false
-      paletteResults.value = knowledgeStore.search(normalized).slice(0, 20)
       if (committed) store.addRecentSearch(normalized)
-    } catch { if (seq === paletteSearchSeq) { paletteResults.value = []; paletteLoading.value = false } }
+    } catch (error) {
+      if (isAbortError(error) || seq !== paletteSearchSeq) return
+      paletteResults.value = []
+      paletteEmptyHint.value = ''
+      paletteLoading.value = false
+      MessagePlugin.error((error as Error)?.message || '搜索服务暂不可用')
+    }
   }, 180)
 }
 function selectPaletteResult(result: SearchResult) {

@@ -38,6 +38,7 @@ class AttachmentContext:
     lifecycle_status: str = "active"
     part_kind: str = "attachment_content"
     source_locator: dict[str, Any] = field(default_factory=dict)
+    inline_text: str | None = None
 
     @classmethod
     def from_mapping(cls, value: dict[str, Any]) -> "AttachmentContext":

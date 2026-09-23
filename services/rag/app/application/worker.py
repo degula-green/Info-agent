@@ -1,11 +1,8 @@
 from __future__ import annotations
 
-import shutil
-import tempfile
 import uuid
 from dataclasses import replace
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any
 
 from app.application.ports import ProcessingInput, ProcessingOutput
@@ -39,7 +36,6 @@ class RAGEventHandler:
         self.repository = repository or (PostgresRagRepository() if settings.database_url else InMemoryRagRepository())
         self.publisher = publisher
         self.callback = callback or KnowledgeRAGCallbackClient()
-        self._inline_temp_dirs: list[Path] = []
         if preprocessor is not None:
             self.preprocessor = preprocessor
         else:
@@ -96,6 +92,8 @@ class RAGEventHandler:
                     parsed = ParsedDocument("", [], "metadata", "v1", manifest={"metadata_only": True})
                     output = ProcessingOutput(metadata_context, parsed, build_chunks(parsed, metadata_context))
                     context = metadata_context
+                elif context.part_kind == "message_display" and context.inline_text is not None:
+                    output = self.preprocessor.process_text(context.inline_text, context, vectorize=True)
                 else:
                     output = self.preprocessor.process(
                         ProcessingInput(attachment=context, processing_job_id=job_id, trace_id=envelope.get("trace_id")),
@@ -162,18 +160,13 @@ class RAGEventHandler:
             self.repository.update_processing_job(job_id, status="failed", retry_count=next_retry, last_error=type(exc).__name__, finished_at=_now())
             if terminal:
                 self._publish_callback(envelope, "failed", job_id, {"error_code": getattr(exc, "code", type(exc).__name__), "retryable": False})
-            try:
-                self._publish_result(envelope, "processing.failed", payload, {"processing_job_id": job_id, "error_code": getattr(exc, "code", type(exc).__name__), "retryable": bool(getattr(exc, "retryable", False))})
-            finally:
-                self._cleanup_inline_files()
+            self._publish_result(envelope, "processing.failed", payload, {"processing_job_id": job_id, "error_code": getattr(exc, "code", type(exc).__name__), "retryable": bool(getattr(exc, "retryable", False))})
             # Once the terminal callback has been durably queued, acknowledge
             # the Redis entry. Further redelivery would repeat a terminal job
             # forever and create duplicate compatibility events.
             if terminal:
                 return
             raise
-        finally:
-            self._cleanup_inline_files()
 
     def flush_outbox(self, *, limit: int = 50) -> int:
         if self.publisher is None and self.callback is None:
@@ -287,9 +280,6 @@ class RAGEventHandler:
         text = content.get("text") or content.get("content") or content.get("body") if isinstance(content, dict) else None
         if not isinstance(text, str) or not text.strip():
             return []
-        temp = Path(tempfile.mkdtemp(prefix="rag-inline-")) / f"{knowledge_item_id}.txt"
-        temp.write_text(text, encoding="utf-8")
-        self._inline_temp_dirs.append(temp.parent)
         variant = str(payload.get("content_variant") or content.get("content_variant") or "display")
         part_kind = "knowledge_original" if variant == "original" else "message_display"
         merged = {
@@ -298,8 +288,8 @@ class RAGEventHandler:
             **(content if isinstance(content, dict) else {}),
         }
         return [AttachmentContext(
-            attachment_id=f"message-{knowledge_item_id}", knowledge_item_id=knowledge_item_id,
-            file_name=temp.name, mime_type="text/plain", file_path=str(temp),
+            attachment_id=None, knowledge_item_id=knowledge_item_id,
+            file_name="", mime_type="", file_path=None, inline_text=text,
             content_version=int(payload.get("content_version") or content.get("content_version") or 1),
             acl_version=int(payload.get("acl_version") or content.get("acl_version") or 0),
             content_access_required=part_kind == "knowledge_original",
@@ -367,11 +357,6 @@ class RAGEventHandler:
             if "file_name" in str(exc):
                 raise SourceMetadataError("attachment metadata is missing file_name") from exc
             raise
-
-    def _cleanup_inline_files(self) -> None:
-        for directory in self._inline_temp_dirs:
-            shutil.rmtree(directory, ignore_errors=True)
-        self._inline_temp_dirs.clear()
 
     def _publish_result(self, source: dict[str, Any], event_type: str, payload: dict[str, Any], extra: dict[str, Any]) -> None:
         envelope = {

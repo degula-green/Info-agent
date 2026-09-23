@@ -123,6 +123,41 @@ class DocumentPreprocessor:
         finally:
             shutil.rmtree(work_dir, ignore_errors=True)
 
+    def process_text(self, text: str, context: AttachmentContext, *, vectorize: bool = True) -> ProcessingOutput:
+        """Process a message body without creating a synthetic file artifact."""
+        value = str(text or "").strip()
+        # A message may arrive with transport-level attachment metadata. It is
+        # not part of the message source identity and must not leak into the
+        # searchable Chunk metadata.
+        message_source_locator = {
+            key: item for key, item in context.source_locator.items()
+            if key not in {"attachment_id", "file_name", "mime_type", "file_path", "storage_key"}
+        }
+        message_context = replace(
+            context,
+            file_name="",
+            mime_type="",
+            attachment_id=None,
+            part_kind="message_display",
+            source_locator=message_source_locator,
+        )
+        parsed = ParsedDocument(
+            markdown=value,
+            blocks=[CanonicalBlock(None, 0, "text", value)] if value else [],
+            parser="inline-text",
+            parser_version="v1",
+        )
+        quality = self.quality_checker.check(parsed)
+        if quality.status == "failed":
+            raise ProcessingError("QUALITY_FAILED", "message returned no usable searchable content")
+        chunks = build_chunks(parsed, message_context)
+        if vectorize:
+            try:
+                vectorize_chunks(chunks, self.embedding_provider)
+            except VectorizationError as exc:
+                raise ProcessingError("EMBEDDING_FAILED", str(exc), retryable=True) from exc
+        return ProcessingOutput(message_context, parsed, chunks, status="succeeded")
+
     def _manifest(self, context: AttachmentContext, preflight: PreflightResult, parsed: ParsedDocument, parsed_hash: str, run_id: str, quality_status: str, quality_flags: tuple[str, ...]) -> dict[str, Any]:
         parser_options = self._parser_options(preflight)
         return {

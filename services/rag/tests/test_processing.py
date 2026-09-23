@@ -15,6 +15,32 @@ from app.infrastructure.storage.artifacts import LocalArtifactStore, MinioArtifa
 
 
 class ProcessingTests(unittest.TestCase):
+    def test_message_text_processing_does_not_create_file_metadata(self):
+        context = AttachmentContext(
+            attachment_id="message-placeholder", knowledge_item_id="message-1", file_name="", mime_type="",
+            message_id="message-1", part_kind="message_display", content_access_required=False,
+        )
+        preprocessor = DocumentPreprocessor(artifact_store=LocalArtifactStore(Path(tempfile.mkdtemp()) / "artifacts"), embedding_provider=HashEmbeddingProvider())
+        output = preprocessor.process_text("预计10月份进行招新", context, vectorize=False)
+        self.assertEqual(output.attachment.attachment_id, None)
+        self.assertIsNone(output.chunks[0].attachment_id)
+        self.assertIsNone(output.chunks[0].file_name)
+        self.assertEqual(output.chunks[0].part_kind, "message_display")
+        self.assertNotIn("file_name", output.chunks[0].source_locator)
+        self.assertNotIn("attachment_id", output.chunks[0].source_locator)
+
+    def test_message_processing_strips_transport_attachment_metadata(self):
+        context = AttachmentContext(
+            attachment_id="transport-attachment", knowledge_item_id="message-2", file_name="temp.txt",
+            mime_type="text/plain", part_kind="message_display",
+            source_locator={"attachment_id": "transport-attachment", "file_name": "temp.txt", "message_id": "m-2"},
+        )
+        output = DocumentPreprocessor(
+            artifact_store=LocalArtifactStore(Path(tempfile.mkdtemp()) / "artifacts"),
+            embedding_provider=HashEmbeddingProvider(),
+        ).process_text("普通消息正文", context, vectorize=False)
+        self.assertEqual(output.chunks[0].source_locator, {"message_id": "m-2", "part_kind": "message_display", "paragraph_index": 0})
+
     def test_derived_artifact_key_stays_short_for_windows_paths(self) -> None:
         context = AttachmentContext(
             attachment_id="message-0ed8e84a-3993-4c54-b2b3-796e27fa82e5",

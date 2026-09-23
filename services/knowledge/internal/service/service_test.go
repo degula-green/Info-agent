@@ -656,19 +656,8 @@ func TestDiscoverExposesExistingGroupForSupplementalJoin(t *testing.T) {
 	if len(discovery.Conversations) != 1 || discovery.Conversations[0].AttachedConversationID != conversation.ID || discovery.Conversations[0].CurrentUserCollector {
 		t.Fatalf("existing group was not exposed as joinable: %+v", discovery.Conversations)
 	}
-	collector, err := service.AddCollector(ctx, "u2", conversation.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if collector.CollectorRole != domain.CollectorSupplemental || collector.CollectorUserID != "u2" {
-		t.Fatalf("unexpected supplemental collector: %+v", collector)
-	}
-	discovery, err = service.Discover(ctx, "u2", domain.PlatformFeishu)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !discovery.Conversations[0].CurrentUserCollector {
-		t.Fatalf("joined group was not marked as current-user collection: %+v", discovery.Conversations[0])
+	if _, err := service.AddCollector(ctx, "u2", conversation.ID); apperror.From(err).Code != "forbidden" {
+		t.Fatalf("expected organization member without collector to be unable to manage collection, got %v", err)
 	}
 }
 

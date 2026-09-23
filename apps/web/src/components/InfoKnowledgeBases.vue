@@ -5,7 +5,7 @@
       <header class="kb-home-header">
         <h1>知识库</h1>
         <div class="kb-home-tools">
-          <t-input v-model="query" class="kb-home-search" clearable placeholder="搜索知识库和文档内容...">
+          <t-input v-model="query" class="kb-home-search" clearable placeholder="搜索知识库和文档内容..." @clear="clearContentSearch">
             <template #prefix-icon><t-icon name="search" /></template>
           </t-input>
           <div class="kb-home-stats" aria-label="知识库统计">
@@ -14,6 +14,22 @@
           </div>
         </div>
       </header>
+
+      <div v-if="query.trim()" class="kb-content-search">
+        <div class="kb-content-search__summary">
+          <strong>{{ searchLoading ? '正在搜索…' : searchResults.length ? `找到 ${searchResults.length} 条内容` : '没有匹配内容' }}</strong>
+          <span>全库检索</span>
+        </div>
+        <div v-if="searchError" class="wk-error" role="alert"><t-icon name="error-circle" /><span>{{ searchError }}</span></div>
+        <div v-else-if="searchLoading" class="wk-empty wk-empty--small"><t-loading size="small" text="正在检索…" /></div>
+        <div v-else-if="searchResults.length" class="kb-content-list">
+          <button v-for="item in searchResults" :key="item.id" type="button" class="kb-content-row" @click="selectSearchResult(item)">
+            <span class="kb-content-row__icon"><t-icon :name="item.kind === 'file' ? 'file' : 'chat-bubble'" /></span>
+            <span class="kb-content-row__main"><strong>{{ item.title }}</strong><small>{{ item.subtitle }}</small></span>
+            <span class="kb-content-row__badge">{{ item.kind === 'file' ? '文件' : item.kind === 'chat' ? '群聊' : '消息' }}</span>
+          </button>
+        </div>
+      </div>
 
       <div v-if="accessLoading" class="wk-empty wk-empty--small"><t-loading size="small" text="正在加载连接状态..." /></div>
       <template v-else>
@@ -127,14 +143,21 @@
     <t-dialog v-model:visible="collectDialogVisible" :header="pendingSession ? '设置采集起点' : '开启会话采集'" :confirm-btn="'开始采集'" :cancel-btn="'取消'" @confirm="confirmCollect">
       <div v-if="collectingChat || pendingSession" class="collect-dialog"><p v-if="collectingChat?.collectionStatus === 'missing'" class="collect-dialog__warning">飞书中暂时找不到这个群聊。确认开始采集时会再次检查群聊是否存在。</p><p>为「{{ collectingChat?.name || pendingSession?.name }}」选择采集起点。留空则默认回溯最近 7 天。</p><t-form-item label="采集开始时间"><t-input v-model="collectStart" type="datetime-local" :min="historyStartMin" :max="historyStartMax" clearable /></t-form-item><div class="collect-dialog__note"><t-icon name="info-circle" />历史起点最多回溯 7 天，再次开启时默认参考上次停止采集的时间。</div></div>
     </t-dialog>
+
+    <InfoResultDrawer v-model:visible="drawerVisible" :result="drawerResult" @toast="(text) => emit('toast', text)" />
   </section>
 </template>
 
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
-import type { CollectionStatus, InfoAvailableSession, InfoChat, InfoCollector, InfoSource } from '@/mock'
+import { computed, onBeforeUnmount, ref, watch } from 'vue'
+import { useRouter } from 'vue-router'
+import type { CollectionStatus, InfoAvailableSession, InfoChat, InfoCollector, InfoSource, SearchResult } from '@/mock'
 import { sourceColor } from '@/mock'
 import { discoveryAction, isHistoryStartAllowed } from '@/knowledge-mapping'
+import { searchGlobal } from '@/api/rag'
+import InfoResultDrawer from '@/components/InfoResultDrawer.vue'
+import { resolveGlobalSearchScope } from '@/utils/info-search-scope'
+import { isAbortError, mapRagSearchItems } from '@/utils/info-search-result'
 
 const props = defineProps<{ sources: InfoSource[]; initialSourceKey?: InfoSource['key'] | null; accessLoading?: boolean; loadError?: string | null }>()
 const loadError = computed(() => props.loadError || '')
@@ -151,6 +174,7 @@ const emit = defineEmits<{
   (event: 'refresh-access'): void
 }>()
 
+const router = useRouter()
 const query = ref('')
 const activeSourceKey = ref<InfoSource['key'] | null>(null)
 const activeSource = computed(() => activeSourceKey.value ? props.sources.find((source) => source.key === activeSourceKey.value) ?? null : null)
@@ -161,6 +185,15 @@ const collectDialogVisible = ref(false)
 const collectingChat = ref<InfoChat | null>(null)
 const pendingSession = ref<InfoAvailableSession | null>(null)
 const collectStart = ref('')
+const searchResults = ref<SearchResult[]>([])
+const searchLoading = ref(false)
+const searchError = ref('')
+const drawerVisible = ref(false)
+const drawerResult = ref<SearchResult | null>(null)
+let searchTimer: ReturnType<typeof setTimeout> | undefined
+let searchAbort: AbortController | null = null
+let searchSeq = 0
+
 function localDateTimeInput(value: Date | string) {
   const date = value instanceof Date ? value : new Date(value)
   if (Number.isNaN(date.getTime())) return ''
@@ -190,15 +223,64 @@ const filteredSources = computed(() => {
   const normalizedQuery = query.value.trim().toLowerCase()
   if (!normalizedQuery) return props.sources
   return props.sources.filter((source) => {
-    const searchable = [
-      source.name,
-      source.kbName,
-      source.description,
-      ...source.chats.flatMap((chat) => [chat.name, ...chat.messages.map((message) => message.content), ...chat.files.map((file) => `${file.name} ${file.content}`)]),
-    ].join(' ').toLowerCase()
+    const searchable = [source.name, source.kbName, source.description].join(' ').toLowerCase()
     return searchable.includes(normalizedQuery)
   })
 })
+
+function clearContentSearch() {
+  if (searchTimer) clearTimeout(searchTimer)
+  searchAbort?.abort()
+  searchResults.value = []
+  searchError.value = ''
+  searchLoading.value = false
+}
+
+watch(query, (value) => {
+  if (searchTimer) clearTimeout(searchTimer)
+  const normalized = value.trim()
+  if (!normalized) {
+    clearContentSearch()
+    return
+  }
+  const seq = ++searchSeq
+  searchLoading.value = true
+  searchError.value = ''
+  searchTimer = setTimeout(async () => {
+    searchAbort?.abort()
+    const controller = new AbortController()
+    searchAbort = controller
+    try {
+      const scope = await resolveGlobalSearchScope()
+      if (seq !== searchSeq) return
+      const response = await searchGlobal({
+        query: normalized,
+        organizationId: scope.organizationId,
+        knowledgeBaseIds: scope.knowledgeBaseIds,
+        topK: 20,
+        signal: controller.signal,
+      })
+      if (seq !== searchSeq) return
+      searchResults.value = mapRagSearchItems(response.items)
+      searchLoading.value = false
+    } catch (error) {
+      if (isAbortError(error) || seq !== searchSeq) return
+      searchResults.value = []
+      searchError.value = (error as Error)?.message || '搜索服务暂不可用'
+      searchLoading.value = false
+    }
+  }, 250)
+})
+
+function selectSearchResult(result: SearchResult) {
+  if (result.kind === 'chat' && result.chatId) {
+    const platformKey = result.platform === 'all' ? 'feishu' : result.platform
+    router.push(`/knowledge/${platformKey}/conversations/${result.chatId}`)
+    return
+  }
+  drawerResult.value = result
+  drawerVisible.value = true
+}
 
 function contentCount(chat: InfoChat) { return (chat.messageCount ?? chat.messages.length) + (chat.attachmentCount ?? chat.files.length) }
 function activeCollectors(chat: InfoChat) { return (chat.collectors || []).filter((collector) => collector.status !== 'removed') }
@@ -263,12 +345,30 @@ function accessSession(sessionId: string) {
   collectStart.value = ''
   collectDialogVisible.value = true
 }
+
+onBeforeUnmount(() => {
+  if (searchTimer) clearTimeout(searchTimer)
+  searchAbort?.abort()
+})
 </script>
 
 <style lang="less" scoped>
 .wk-page { width: min(1240px, 100%); margin: 0 auto; padding: 34px 38px 60px; }
 .wk-error { display: flex; align-items: center; gap: 8px; margin-bottom: 16px; padding: 10px 12px; border: 1px solid var(--td-error-color-3); border-radius: 6px; color: var(--td-error-color); background: var(--td-error-color-1); font-size: 12px; }
 .kb-home-header { margin-bottom: 38px; }.kb-home-header h1, .kb-platform-header h1 { margin: 0; color: var(--td-text-color-primary); font-size: 28px; font-weight: 600; line-height: 1.25; }.kb-home-tools { display: flex; align-items: center; justify-content: space-between; gap: 28px; margin-top: 24px; }.kb-home-search { width: min(520px, 100%); }.kb-home-search :deep(.t-input) { border-color: transparent; border-radius: 12px; background: var(--td-bg-color-secondarycontainer); box-shadow: none; }.kb-home-search :deep(.t-input:hover), .kb-home-search :deep(.t-input.t-is-focused) { border-color: var(--td-brand-color); background: var(--td-bg-color-container); }.kb-home-stats { display: flex; align-items: center; justify-content: flex-end; gap: 28px; color: var(--td-text-color-secondary); font-size: 13px; white-space: nowrap; }.kb-home-stats span { display: inline-flex; align-items: center; gap: 6px; }.kb-home-stats svg { width: 16px; height: 16px; color: var(--td-text-color-placeholder); }
+.kb-content-search { margin-bottom: 28px; }
+.kb-content-search__summary { display: flex; align-items: baseline; gap: 10px; margin-bottom: 10px; }
+.kb-content-search__summary strong { font-size: 14px; }
+.kb-content-search__summary span { color: var(--td-text-color-placeholder); font-size: 11px; }
+.kb-content-list { overflow: hidden; border: 1px solid var(--td-component-stroke); border-radius: 10px; background: var(--td-bg-color-container); }
+.kb-content-row { display: flex; align-items: center; gap: 12px; width: 100%; min-height: 62px; padding: 11px 14px; border: 0; border-bottom: 1px solid var(--td-component-stroke); color: var(--td-text-color-primary); background: transparent; text-align: left; cursor: pointer; }
+.kb-content-row:last-child { border-bottom: 0; }
+.kb-content-row:hover { background: var(--td-bg-color-container-hover); }
+.kb-content-row__icon { display: inline-grid; flex: 0 0 32px; place-items: center; width: 32px; height: 32px; border-radius: 8px; color: var(--td-brand-color-7); background: var(--td-brand-color-1); }
+.kb-content-row__main { display: flex; min-width: 0; flex: 1; flex-direction: column; }
+.kb-content-row__main strong { overflow: hidden; font-size: 13px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.kb-content-row__main small { margin-top: 4px; overflow: hidden; color: var(--td-text-color-secondary); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.kb-content-row__badge { flex: 0 0 auto; color: var(--td-text-color-placeholder); font-size: 11px; }
 .kb-section-label { display: flex; align-items: center; gap: 9px; margin-bottom: 16px; font-size: 15px; font-weight: 600; }.kb-section-label small { color: var(--td-text-color-placeholder); font-size: 12px; font-weight: 400; }.kb-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 18px; }.kb-card { min-height: 184px; padding: 19px; border: 1px solid var(--td-component-stroke); border-radius: 14px; background: var(--td-bg-color-container); color: var(--td-text-color-primary); text-align: left; cursor: pointer; transition: border-color .18s ease, box-shadow .18s ease, transform .18s ease; }.kb-card:hover { border-color: var(--td-brand-color); box-shadow: 0 9px 22px rgba(0, 0, 0, .06); transform: translateY(-2px); }.kb-card__head { display: flex; align-items: center; justify-content: space-between; }.kb-card__icon { display: inline-grid; place-items: center; width: 36px; height: 36px; border-radius: 8px; color: #fff; font-size: 13px; font-weight: 600; }.kb-card__name { margin-top: 19px; font-size: 16px; font-weight: 600; }.kb-card p { min-height: 37px; margin: 7px 0 14px; color: var(--td-text-color-secondary); font-size: 12px; line-height: 1.55; }.kb-card__foot { display: flex; align-items: center; justify-content: space-between; color: var(--td-text-color-placeholder); font-size: 11px; }.kb-card__foot span { display: inline-flex; align-items: center; gap: 5px; }.kb-card__foot svg { width: 14px; }
 .kb-breadcrumb { display: flex; align-items: center; gap: 5px; margin-bottom: 18px; color: var(--td-text-color-secondary); font-size: 12px; }.kb-breadcrumb button { padding: 0; border: 0; color: var(--td-brand-color); background: transparent; font: inherit; cursor: pointer; }.kb-breadcrumb svg { width: 14px; }.kb-platform-header { display: flex; align-items: flex-end; justify-content: space-between; gap: 20px; margin-bottom: 34px; }.kb-platform-header p { margin: 8px 0 0; color: var(--td-text-color-secondary); font-size: 13px; }.kb-platform-header :deep(.t-button) { min-width: 108px; }
 .kb-subhead { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; margin-bottom: 16px; }.kb-subhead h2 { margin: 0 0 6px; color: var(--td-text-color-primary); font-size: 18px; font-weight: 600; }.kb-subhead p { margin: 0; color: var(--td-text-color-secondary); font-size: 13px; }.kb-session-count { color: var(--td-text-color-placeholder); font-size: 12px; white-space: nowrap; }.chat-kb-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 18px; }.chat-kb-card { display: flex; min-height: 178px; flex-direction: column; overflow: hidden; border: 1px solid var(--td-component-stroke); border-radius: 14px; background: var(--td-bg-color-container); transition: border-color .18s ease, box-shadow .18s ease, transform .18s ease; }.chat-kb-card:hover { border-color: var(--td-component-border); box-shadow: 0 9px 22px rgba(0, 0, 0, .05); transform: translateY(-2px); }.chat-kb-card__main { display: flex; align-items: flex-start; gap: 11px; width: 100%; padding: 19px 18px 14px; border: 0; color: var(--td-text-color-primary); background: transparent; text-align: left; cursor: pointer; }.chat-kb-card__main:focus-visible { outline: 2px solid var(--td-brand-color); outline-offset: -2px; }.chat-kb-card__icon, .access-session__icon { display: inline-grid; place-items: center; flex: 0 0 36px; width: 36px; height: 36px; border-radius: 8px; color: #fff; }.chat-kb-card__icon svg, .access-session__icon svg { width: 19px; height: 19px; }.chat-kb-card__body { flex: 1; min-width: 0; }.chat-kb-card__body strong, .chat-kb-card__body small { display: block; }.chat-kb-card__body strong { overflow: hidden; font-size: 15px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }.chat-kb-card__body small { display: -webkit-box; min-height: 37px; margin-top: 5px; overflow: hidden; color: var(--td-text-color-secondary); font-size: 12px; line-height: 1.55; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }.chat-kb-card__arrow { flex: 0 0 16px; width: 16px; margin-top: 7px; color: var(--td-text-color-placeholder); }.chat-kb-card__footer { display: flex; align-items: flex-end; justify-content: space-between; gap: 12px; margin-top: auto; padding: 12px 18px 15px; border-top: 1px solid var(--td-component-stroke); }.chat-kb-card__meta { display: grid; min-width: 0; gap: 6px; }.chat-kb-card__meta small { display: inline-flex; align-items: center; gap: 4px; overflow: hidden; color: var(--td-text-color-placeholder); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }.chat-kb-card__meta small svg { flex: 0 0 13px; width: 13px; }.chat-status { display: inline-flex; align-items: center; gap: 5px; color: var(--td-text-color-placeholder); font-size: 12px; white-space: nowrap; }.chat-status i { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }.chat-status--collecting { color: var(--td-success-color); }.chat-status--paused { color: var(--td-warning-color); }.chat-status--missing { color: var(--td-error-color); }.chat-kb-card__footer :deep(.t-button) { flex: 0 0 auto; }

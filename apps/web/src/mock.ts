@@ -27,7 +27,7 @@ export interface InfoMessage {
 export interface InfoFile {
   id: string; name: string; type: string; mimeType?: string; size: string; time: string
     uploadedAt: string; uploader: string; content: string; timestamp?: string; sentAt?: string; collectedAt?: string; collectionTimestamp?: string; documentId?: number | null; documentStatus?: string | null
-  parseStatus?: string; previewCapability?: string; contentAccessRequired?: boolean; isDeleted?: boolean; fileSizeBytes?: number | null
+    parseStatus?: string; vectorStatus?: string; searchable?: boolean; previewCapability?: string; contentAccessRequired?: boolean; isDeleted?: boolean; fileSizeBytes?: number | null
 }
 
 export interface InfoChat {

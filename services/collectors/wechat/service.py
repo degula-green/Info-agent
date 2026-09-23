@@ -3,17 +3,76 @@ import hashlib, html, json, mimetypes, os, re, shutil, tempfile, threading, time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from contextvars import ContextVar
+from contextlib import contextmanager
 from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel, Field
 from wechatauto import MediaDownloader, WeChatDB
 
 app = FastAPI(title="info-agent-wechat-collector")
-lock = threading.Lock(); binding: dict[str, Any] = {}; db: Any = None
-config: dict[str, Any] = {"selected_conversations": [], "history_start_at": None, "enabled": True, "listen_mode": "whitelist", "connector_id": ""}
-checkpoints: dict[str, int] = {}; replayed_media: dict[str, set[str]] = {}; worker_thread: threading.Thread | None = None; discovery_thread: threading.Thread | None = None
-media: Any = None; bootstrap_error: str | None = None
-last_discovery_at = 0.0; last_bootstrap_at = 0.0
+lock = threading.Lock()
+_runtime_var: ContextVar["RuntimeState | None"] = ContextVar("wechat_runtime", default=None)
+
+class RuntimeState:
+    def __init__(self, connector_id: str = "") -> None:
+        self.connector_id = connector_id
+        self.binding: dict[str, Any] = {}
+        self.config: dict[str, Any] = {"selected_conversations": [], "history_start_at": None, "enabled": True, "listen_mode": "whitelist", "connector_id": connector_id}
+        self.db: Any = None
+        self.media: Any = None
+        self.bootstrap_error: str | None = None
+        self.last_discovery_at = 0.0
+        self.last_bootstrap_at = 0.0
+        self.discovery_lock = threading.Lock()
+        self.discovery_thread: threading.Thread | None = None
+        self.worker_thread: threading.Thread | None = None
+
+runtimes: dict[str, RuntimeState] = {}
+_default_runtime = RuntimeState()
+
+def current_runtime() -> RuntimeState:
+    return _runtime_var.get() or _default_runtime
+
+@contextmanager
+def use_runtime(runtime: RuntimeState):
+    token = _runtime_var.set(runtime)
+    try:
+        yield runtime
+    finally:
+        _runtime_var.reset(token)
+
+class _RuntimeDictProxy:
+    def __getattr__(self, name: str) -> Any:
+        return getattr(current_runtime().binding, name)
+    def __getitem__(self, key: str) -> Any: return current_runtime().binding[key]
+    def __setitem__(self, key: str, value: Any) -> None: current_runtime().binding[key] = value
+    def __delitem__(self, key: str) -> None: del current_runtime().binding[key]
+    def __iter__(self): return iter(current_runtime().binding)
+    def __len__(self): return len(current_runtime().binding)
+    def get(self, *args): return current_runtime().binding.get(*args)
+    def update(self, *args, **kwargs): return current_runtime().binding.update(*args, **kwargs)
+    def clear(self): return current_runtime().binding.clear()
+    def pop(self, *args): return current_runtime().binding.pop(*args)
+
+class _RuntimeObjectProxy:
+    def __init__(self, field: str): self.field = field
+    def _value(self): return getattr(current_runtime(), self.field)
+    def __getattr__(self, name: str) -> Any: return getattr(self._value(), name)
+    def __bool__(self): return bool(self._value())
+
+binding = _RuntimeDictProxy()
+config = _RuntimeDictProxy()
+db = _RuntimeObjectProxy("db")
+media = _RuntimeObjectProxy("media")
+checkpoints: dict[str, int] = {}; replayed_media: dict[str, set[str]] = {}
+bootstrap_error = _RuntimeObjectProxy("bootstrap_error")
 discovery_lock = threading.Lock()
+# Legacy single-runtime loop state. These remain until the connector-scoped
+# worker manager replaces the module-level collection loop completely.
+last_bootstrap_at = 0.0
+last_discovery_at = 0.0
+worker_thread: threading.Thread | None = None
+discovery_thread: threading.Thread | None = None
 
 class BindRequest(BaseModel):
     wxid: str = Field(min_length=3)

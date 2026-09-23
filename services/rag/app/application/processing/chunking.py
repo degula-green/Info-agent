@@ -74,8 +74,9 @@ def build_chunks(parsed: ParsedDocument, context: AttachmentContext) -> list[Chu
         else:
             auth_type, auth_part, auth_id, auth_key = "knowledge_item", "display", context.knowledge_item_id or context.attachment_id, f"knowledge_item:{context.knowledge_item_id or context.attachment_id}"
         source_locator = dict(context.source_locator)
-        source_locator.setdefault("file_name", context.file_name)
-        source_locator.setdefault("mime_type", context.mime_type)
+        if is_attachment:
+            source_locator.setdefault("file_name", context.file_name)
+            source_locator.setdefault("mime_type", context.mime_type)
         source_locator.setdefault("part_kind", context.part_kind)
         if block.page_number is not None:
             source_locator.setdefault("page_number", block.page_number)
@@ -115,8 +116,8 @@ def build_chunks(parsed: ParsedDocument, context: AttachmentContext) -> list[Chu
                 embedding_model=None,
                 vectorized=False,
                 rag_eligible=bool(content.strip()) and context.part_kind != "attachment_metadata",
-                file_name=context.file_name,
-                mime_type=context.mime_type,
+                file_name=context.file_name if is_attachment else None,
+                mime_type=context.mime_type if is_attachment else None,
                 size_bytes=context.size_bytes,
                 source_locator=source_locator,
                 conversation_ingestion_id=context.conversation_ingestion_id,

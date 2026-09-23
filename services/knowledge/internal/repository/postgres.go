@@ -1967,7 +1967,7 @@ func (s *PostgresStore) ListMessages(ctx context.Context, conversationID string,
 	if metadataErr != nil && !errors.Is(metadataErr, pgx.ErrNoRows) {
 		return nil, dbError(metadataErr)
 	}
-	query := `SELECT m.id::text,m.conversation_ingestion_id::text,m.external_message_id,COALESCE(m.sender_identity_id::text,''),COALESCE(ei.external_user_id,''),COALESCE(NULLIF(ei.display_name,''),NULLIF(m.sender_display_name,''),''),m.message_type,COALESCE(m.normalized_content_ref,''),COALESCE(m.normalized_content,''),m.content_hash,m.content_version,m.sent_at,COALESCE((SELECT MIN(ms.collected_at) FROM knowledge.message_sources ms WHERE ms.message_id=m.id),m.created_at),m.lifecycle_status,m.vector_status,m.created_at,m.sensitive,m.classification_status FROM knowledge.messages m LEFT JOIN knowledge.external_identities ei ON ei.id=m.sender_identity_id WHERE m.conversation_ingestion_id=$1`
+	query := `SELECT m.id::text,m.conversation_ingestion_id::text,m.external_message_id,COALESCE(m.sender_identity_id::text,''),COALESCE(ei.external_user_id,''),COALESCE(NULLIF(ei.display_name,''),NULLIF(m.sender_display_name,''),''),m.message_type,COALESCE(m.normalized_content_ref,''),COALESCE(m.normalized_content,''),m.content_hash,m.content_version,m.sent_at,COALESCE((SELECT MIN(ms.collected_at) FROM knowledge.message_sources ms WHERE ms.message_id=m.id),m.created_at),m.lifecycle_status,CASE WHEN EXISTS (SELECT 1 FROM knowledge.knowledge_items ki WHERE ki.source_message_id=m.id AND ki.source_attachment_id IS NULL AND ki.source_type<>'shared_private_item' AND ki.rag_status='succeeded' AND ki.rag_content_version=ki.content_version AND ki.rag_acl_version=ki.acl_version) THEN 'ready' WHEN EXISTS (SELECT 1 FROM knowledge.knowledge_items ki WHERE ki.source_message_id=m.id AND ki.source_attachment_id IS NULL AND ki.source_type<>'shared_private_item' AND ki.rag_status='failed') THEN 'failed' ELSE m.vector_status END,m.created_at,m.sensitive,m.classification_status FROM knowledge.messages m LEFT JOIN knowledge.external_identities ei ON ei.id=m.sender_identity_id WHERE m.conversation_ingestion_id=$1`
 	args := []any{conversationID}
 	if !cutoff.IsZero() {
 		if cutoffID != "" {
@@ -2046,7 +2046,10 @@ func (s *PostgresStore) ListAttachmentsForMessage(ctx context.Context, messageID
 		}
 		out = append(out, *a)
 	}
-	return out, dbError(rows.Err())
+	if err := rows.Err(); err != nil {
+		return nil, dbError(err)
+	}
+	return out, s.enrichAttachmentRAG(ctx, out)
 }
 func (s *PostgresStore) ListAttachments(ctx context.Context, conversationID string) ([]domain.Attachment, error) {
 	rows, err := s.pool.Query(ctx, `SELECT `+attachmentColumns+` FROM knowledge.attachments WHERE conversation_ingestion_id=$1 ORDER BY created_at`, conversationID)
@@ -2062,7 +2065,60 @@ func (s *PostgresStore) ListAttachments(ctx context.Context, conversationID stri
 		}
 		out = append(out, *a)
 	}
-	return out, dbError(rows.Err())
+	if err := rows.Err(); err != nil {
+		return nil, dbError(err)
+	}
+	return out, s.enrichAttachmentRAG(ctx, out)
+}
+
+// enrichAttachmentRAG joins the authoritative KnowledgeItem RAG callback
+// state onto platform attachments. Attachment processing_status only means
+// that Knowledge can publish the item to RAG; it is not vectorization status.
+func (s *PostgresStore) enrichAttachmentRAG(ctx context.Context, attachments []domain.Attachment) error {
+	if len(attachments) == 0 {
+		return nil
+	}
+	ids := make([]string, 0, len(attachments))
+	byID := make(map[string]*domain.Attachment, len(attachments))
+	for i := range attachments {
+		attachments[i].RAGStatus = "not_enqueued"
+		ids = append(ids, attachments[i].ID)
+		byID[attachments[i].ID] = &attachments[i]
+	}
+	rows, err := s.pool.Query(ctx, `
+		SELECT DISTINCT ON (source_attachment_id)
+			source_attachment_id::text, COALESCE(rag_status,'pending'),
+			COALESCE(rag_content_version,0), COALESCE(rag_acl_version,0),
+			COALESCE(rag_last_error,''), rag_finished_at,
+			(content_version = COALESCE(rag_content_version,0)
+			 AND acl_version = COALESCE(rag_acl_version,0)
+			 AND rag_status = 'succeeded')
+		FROM knowledge.knowledge_items
+		WHERE source_attachment_id = ANY($1::uuid[])
+		ORDER BY source_attachment_id, content_version DESC, updated_at DESC`, ids)
+	if err != nil {
+		return dbError(err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id, status, lastError string
+		var contentVersion int
+		var aclVersion int64
+		var finishedAt *time.Time
+		var searchable bool
+		if err := rows.Scan(&id, &status, &contentVersion, &aclVersion, &lastError, &finishedAt, &searchable); err != nil {
+			return dbError(err)
+		}
+		if attachment := byID[id]; attachment != nil {
+			attachment.RAGStatus = status
+			attachment.RAGContentVersion = contentVersion
+			attachment.RAGACLVersion = aclVersion
+			attachment.RAGLastError = lastError
+			attachment.RAGFinishedAt = finishedAt
+			attachment.RAGSearchable = searchable
+		}
+	}
+	return dbError(rows.Err())
 }
 
 func (s *PostgresStore) ListContactIdentities(ctx context.Context, userID, platform string) ([]ExternalIdentity, error) {
@@ -2147,7 +2203,7 @@ func (s *PostgresStore) ApplyRAGResult(ctx context.Context, id string, input RAG
 		return &RAGResultApply{Applied: false, Status: status, Reason: "terminal_state"}, nil
 	}
 	resultJSON, _ := json.Marshal(input.Result)
-	_, err = tx.Exec(ctx, `UPDATE knowledge.knowledge_items SET rag_status=$2,rag_source_event_id=$3::uuid,rag_job_id=$4::uuid,rag_content_version=$5,rag_acl_version=$6,rag_started_at=CASE WHEN $2='processing' THEN COALESCE(rag_started_at,$7) ELSE rag_started_at END,rag_finished_at=CASE WHEN $2 IN ('succeeded','failed') THEN $7 ELSE NULL END,rag_last_error=CASE WHEN $2='failed' THEN NULLIF($8,'') ELSE NULL END,rag_result=CASE WHEN $2='succeeded' THEN $9::jsonb ELSE rag_result END,updated_at=now() WHERE id=$1`, id, input.Status, input.SourceEventID, input.RAGJobID, input.ContentVersion, input.ACLVersion, input.OccurredAt, input.ErrorCode, resultJSON)
+	_, err = tx.Exec(ctx, `UPDATE knowledge.knowledge_items SET rag_status=$2::text,rag_source_event_id=$3::uuid,rag_job_id=$4::uuid,rag_content_version=$5,rag_acl_version=$6,rag_started_at=CASE WHEN $2::text='processing' THEN COALESCE(rag_started_at,$7) ELSE rag_started_at END,rag_finished_at=CASE WHEN $2::text IN ('succeeded','failed') THEN $7 ELSE NULL END,rag_last_error=CASE WHEN $2::text='failed' THEN NULLIF($8,'') ELSE NULL END,rag_result=CASE WHEN $2::text='succeeded' THEN $9::jsonb ELSE rag_result END,updated_at=now() WHERE id=$1`, id, input.Status, input.SourceEventID, input.RAGJobID, input.ContentVersion, input.ACLVersion, input.OccurredAt, input.ErrorCode, resultJSON)
 	if err != nil {
 		return nil, dbError(err)
 	}
@@ -2605,7 +2661,7 @@ func (s *PostgresStore) ListKnowledgeLibraryItems(ctx context.Context, libraryID
 		}
 		return out, dbError(rows.Err())
 	}
-	selectSQL := `SELECT ki.id::text,ki.knowledge_scope,ki.access_scope,ki.source_type,COALESCE(ki.source_message_id::text,''),COALESCE(ki.source_attachment_id::text,''),COALESCE(ki.conversation_ingestion_id::text,''),COALESCE(ci.platform,''),COALESCE(ci.external_conversation_id,''),COALESCE(ci.conversation_type,''),COALESCE(ci.name,''),COALESCE(ki.content_type,''),COALESCE(ki.content_visibility,''),COALESCE(ki.processing_status,''),COALESCE(ki.original_access_required,FALSE),COALESCE(ki.share_batch_id::text,''),ki.shared_at,ki.created_at,ki.updated_at,COALESCE(m.sender_display_name,''),COALESCE(m.normalized_content,''),m.sent_at,COALESCE(a.file_name,''),COALESCE(a.mime_type,''),COALESCE(a.size_bytes,0),COALESCE(a.content_status,'') FROM knowledge.knowledge_items ki LEFT JOIN knowledge.conversation_ingestions ci ON ci.id=ki.conversation_ingestion_id LEFT JOIN knowledge.messages m ON m.id=ki.source_message_id LEFT JOIN knowledge.attachments a ON a.id=ki.source_attachment_id WHERE ` + strings.Join(conditions, " AND ") + ` ORDER BY ki.updated_at DESC LIMIT ` + strconv.Itoa(limit)
+	selectSQL := `SELECT ki.id::text,ki.knowledge_scope,ki.access_scope,ki.source_type,COALESCE(ki.source_message_id::text,''),COALESCE(ki.source_attachment_id::text,''),COALESCE(ki.conversation_ingestion_id::text,''),COALESCE(ci.platform,''),COALESCE(ci.external_conversation_id,''),COALESCE(ci.conversation_type,''),COALESCE(ci.name,''),COALESCE(ki.content_type,''),COALESCE(ki.content_visibility,''),COALESCE(ki.processing_status,''),COALESCE(ki.original_access_required,FALSE),COALESCE(ki.share_batch_id::text,''),ki.shared_at,ki.created_at,ki.updated_at,COALESCE(m.sender_display_name,''),COALESCE(m.normalized_content,''),m.sent_at,COALESCE(a.file_name,''),COALESCE(a.mime_type,''),COALESCE(a.size_bytes,0),COALESCE(a.content_status,''),COALESCE(ki.rag_status,'pending'),COALESCE(ki.rag_content_version,0),COALESCE(ki.rag_acl_version,0),COALESCE(ki.rag_last_error,''),(COALESCE(ki.rag_status,'pending')='succeeded' AND COALESCE(ki.rag_content_version,0)=ki.content_version AND COALESCE(ki.rag_acl_version,0)=ki.acl_version) FROM knowledge.knowledge_items ki LEFT JOIN knowledge.conversation_ingestions ci ON ci.id=ki.conversation_ingestion_id LEFT JOIN knowledge.messages m ON m.id=ki.source_message_id LEFT JOIN knowledge.attachments a ON a.id=ki.source_attachment_id WHERE ` + strings.Join(conditions, " AND ") + ` ORDER BY ki.updated_at DESC LIMIT ` + strconv.Itoa(limit)
 	rows, err := s.pool.Query(ctx, selectSQL, args...)
 	if err != nil {
 		return nil, dbError(err)
@@ -2615,13 +2671,15 @@ func (s *PostgresStore) ListKnowledgeLibraryItems(ctx context.Context, libraryID
 	for rows.Next() {
 		var item domain.KnowledgeLibraryItem
 		var scope, accessScope, sourceType, sourceMessageID, sourceAttachmentID, conversationID, platformValue, externalConversationID, conversationType, conversationName, contentType, visibility, processingStatus, shareBatchID, sender, excerpt, fileName, mimeType, contentStatus string
+		var ragStatus, ragLastError string
 		var sentAt, sharedAt *time.Time
-		if err := rows.Scan(&item.ID, &scope, &accessScope, &sourceType, &sourceMessageID, &sourceAttachmentID, &conversationID, &platformValue, &externalConversationID, &conversationType, &conversationName, &contentType, &visibility, &processingStatus, &item.ContentAccessRequired, &shareBatchID, &sharedAt, &item.CreatedAt, &item.UpdatedAt, &sender, &excerpt, &sentAt, &fileName, &mimeType, &item.SizeBytes, &contentStatus); err != nil {
+		if err := rows.Scan(&item.ID, &scope, &accessScope, &sourceType, &sourceMessageID, &sourceAttachmentID, &conversationID, &platformValue, &externalConversationID, &conversationType, &conversationName, &contentType, &visibility, &processingStatus, &item.ContentAccessRequired, &shareBatchID, &sharedAt, &item.CreatedAt, &item.UpdatedAt, &sender, &excerpt, &sentAt, &fileName, &mimeType, &item.SizeBytes, &contentStatus, &ragStatus, &item.RAGContentVersion, &item.RAGACLVersion, &ragLastError, &item.Searchable); err != nil {
 			return nil, dbError(err)
 		}
 		item.LibraryID, item.SourceType, item.SourceMessageID, item.SourceAttachmentID = libraryID, sourceType, sourceMessageID, sourceAttachmentID
 		item.ConversationID, item.Platform, item.ExternalConversationID, item.ConversationType, item.ConversationName = conversationID, platformValue, externalConversationID, conversationType, conversationName
 		item.ContentType, item.ContentVisibility, item.AccessScope, item.ProcessingStatus = contentType, visibility, accessScope, processingStatus
+		item.RAGStatus, item.RAGLastError = ragStatus, ragLastError
 		item.ShareBatchID, item.SharedAt, item.SentAt = shareBatchID, sharedAt, sentAt
 		item.CanView = true
 		if sourceAttachmentID != "" {

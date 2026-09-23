@@ -51,47 +51,48 @@ func (s *Service) BindWechat(ctx context.Context, userID, wxid, dbDir, organizat
 	if strings.TrimSpace(wxid) == "" || strings.TrimSpace(dbDir) == "" {
 		return nil, apperror.New("invalid_request", "wxid and db_dir are required", 400, false)
 	}
-	out, err := s.WechatCollector().Bind(ctx, strings.TrimSpace(wxid), strings.TrimSpace(dbDir), rebind)
+	wxid, dbDir = strings.TrimSpace(wxid), strings.TrimSpace(dbDir)
+	previous, previousErr := s.Repo.GetConnectorForOAuth(ctx, userID, domain.PlatformWechat)
+	if previousErr != nil && apperror.From(previousErr).Code != "connector_not_found" {
+		return nil, previousErr
+	}
+	if previous != nil && previous.LastError == "wechat_stop_failed" {
+		return nil, apperror.New("wechat_cleanup_pending", "微信采集器尚未停止，请先重试解绑", 409, true)
+	}
+	if existing, findErr := s.Repo.FindConnectorByExternal(ctx, domain.PlatformWechat, "", wxid); findErr == nil && (previous == nil || existing.ID != previous.ID) {
+		return nil, apperror.New("connector_already_bound", "该微信账号已被其他账号绑定", 409, false)
+	} else if findErr != nil && apperror.From(findErr).Code != "connector_not_found" {
+		return nil, findErr
+	}
+	if previous != nil && previous.Status != domain.ConnectorRevoked && !strings.EqualFold(previous.ExternalAccountID, wxid) && !rebind {
+		return nil, apperror.New("connector_already_bound", "个人微信平台已经绑定其他账号，请先解绑", 409, false)
+	}
+	out, err := s.WechatCollector().Bind(ctx, wxid, dbDir, rebind)
 	if err != nil {
 		return nil, apperror.Wrap("wechat_collector_unavailable", "wechat collector binding failed", 502, true, err)
 	}
 	now := s.Now()
-	account := domain.ConnectorAccount{OwnerUserID: userID, Platform: domain.PlatformWechat, ExternalAccountID: strings.TrimSpace(wxid), DisplayName: strings.TrimSpace(wxid), DatabaseRef: strings.TrimSpace(dbDir), DefaultOrganizationID: strings.TrimSpace(organizationID), Status: domain.ConnectorActive, CreatedAt: now, UpdatedAt: now}
-	if rebind {
-		if previous, findErr := s.Repo.GetConnector(ctx, userID, domain.PlatformWechat); findErr == nil {
-			var saved *domain.ConnectorAccount
-			var saveErr error
-			if strings.EqualFold(strings.TrimSpace(previous.ExternalAccountID), strings.TrimSpace(wxid)) {
-				// Rebinding the same account should not create a second row. This
-				// also keeps existing conversation collectors attached to it.
-				saved = previous
-				if organizationID != "" {
-					saved, saveErr = s.Repo.SetConnectorDefaultOrganization(ctx, previous.ID, userID, organizationID)
-				}
-				if saveErr == nil {
-					saveErr = s.Repo.UpdateConnectorStatus(ctx, previous.ID, domain.ConnectorActive, "")
-				}
-			} else {
-				saved, saveErr = s.Repo.ReplaceConnector(ctx, previous.ID, account)
-			}
-			if saveErr != nil {
-				return nil, saveErr
-			}
-			out["connector_id"] = saved.ID
-			_, _ = s.Repo.SaveWechatConfig(ctx, domain.WechatCollectionConfig{ConnectorID: saved.ID, SelectedConversations: []string{}, Enabled: true, ListenMode: "whitelist"})
-			_, _ = s.Repo.UpsertWechatRuntime(ctx, domain.WechatCollectorRuntime{ConnectorID: saved.ID, Status: "running"})
-			_, _ = s.WechatCollector().SaveConfig(ctx, map[string]any{"connector_id": saved.ID})
+	account := domain.ConnectorAccount{OwnerUserID: userID, Platform: domain.PlatformWechat, ExternalAccountID: wxid, DisplayName: wxid, DatabaseRef: dbDir, DefaultOrganizationID: strings.TrimSpace(organizationID), Status: domain.ConnectorActive, CreatedAt: now, UpdatedAt: now}
+	if previous != nil && strings.EqualFold(previous.ExternalAccountID, wxid) {
+		account.ID, account.CreatedAt = previous.ID, previous.CreatedAt
+		if organizationID == "" {
+			account.DefaultOrganizationID = previous.DefaultOrganizationID
+		}
+	}
+	saved, saveErr := s.Repo.SaveConnector(ctx, account)
+	if saveErr != nil {
+		return nil, saveErr
+	}
+	out["connector_id"] = saved.ID
+	if previous != nil && previous.ID == saved.ID {
+		if err := s.Repo.RestoreAuthorizationCollectors(ctx, saved.ID, now); err != nil {
+			return nil, err
 		}
 	} else {
-		saved, saveErr := s.Repo.SaveConnector(ctx, account)
-		if saveErr != nil {
-			return nil, saveErr
-		}
-		out["connector_id"] = saved.ID
 		_, _ = s.Repo.SaveWechatConfig(ctx, domain.WechatCollectionConfig{ConnectorID: saved.ID, SelectedConversations: []string{}, Enabled: true, ListenMode: "whitelist"})
-		_, _ = s.Repo.UpsertWechatRuntime(ctx, domain.WechatCollectorRuntime{ConnectorID: saved.ID, Status: "running"})
-		_, _ = s.WechatCollector().SaveConfig(ctx, map[string]any{"connector_id": saved.ID})
 	}
+	_, _ = s.Repo.UpsertWechatRuntime(ctx, domain.WechatCollectorRuntime{ConnectorID: saved.ID, Status: "running"})
+	_, _ = s.WechatCollector().SaveConfig(ctx, map[string]any{"connector_id": saved.ID})
 	return out, nil
 }
 func (s *Service) WechatStatus(ctx context.Context, userID string) (map[string]any, error) {
@@ -311,7 +312,14 @@ func New(repo repository.Repository, store kv.Store, vaultStore *vault.Vault, ob
 }
 
 func (s *Service) ListConnectors(ctx context.Context, userID string) ([]domain.ConnectorView, error) {
-	return s.Repo.ListConnectorViews(ctx, userID)
+	views, err := s.Repo.ListConnectorViews(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	for i := range views {
+		views[i].CleanupPending = views[i].Platform == domain.PlatformWechat && views[i].LastError == "wechat_stop_failed"
+	}
+	return views, nil
 }
 func (s *Service) GetConnector(ctx context.Context, userID, platformName string) (*domain.ConnectorAccount, error) {
 	if !supportedPlatform(platformName) {
@@ -626,6 +634,18 @@ func (s *Service) RevokeConnector(ctx context.Context, userID, platformName stri
 	account, err := s.Repo.GetConnector(ctx, userID, platformName)
 	if err != nil {
 		return err
+	}
+	if platformName == domain.PlatformWechat {
+		status, statusErr := s.WechatCollector().Status(ctx)
+		if statusErr == nil {
+			if boundID, ok := status["connector_id"].(string); ok && boundID != "" && boundID != account.ID {
+				return apperror.New("wechat_collector_mismatch", "微信采集器当前绑定了其他连接器，请先处理采集器状态", 409, true)
+			}
+		}
+		if stopErr := s.WechatCollector().Stop(ctx); stopErr != nil {
+			_ = s.Repo.UpdateConnectorStatus(ctx, account.ID, domain.ConnectorError, "wechat_stop_failed")
+			return apperror.Wrap("wechat_cleanup_pending", "微信采集器尚未停止，请重试解绑", 409, true, stopErr)
+		}
 	}
 	if err := s.Repo.RevokeConnector(ctx, userID, platformName); err != nil {
 		return err
@@ -1169,6 +1189,9 @@ func (s *Service) AddCollector(ctx context.Context, userID, conversationID strin
 	if err != nil {
 		return nil, err
 	}
+	if !canManageConversation(conversation, userID) {
+		return nil, apperror.Clone(apperror.ErrForbidden)
+	}
 	if conversation.ConversationType != "group" {
 		return nil, apperror.New("collector_not_allowed", "supplemental collectors are only allowed for group conversations", 400, false)
 	}
@@ -1277,6 +1300,21 @@ func conversationOwner(conversation *domain.ConversationIngestion) string {
 		return conversation.OwnerUserID
 	}
 	return conversation.CreatedByUserID
+}
+
+func canManageConversation(conversation *domain.ConversationIngestion, userID string) bool {
+	if conversation == nil {
+		return false
+	}
+	if conversationOwner(conversation) == userID {
+		return true
+	}
+	for _, collector := range conversation.Collectors {
+		if collector.CollectorUserID == userID && collector.Status != domain.CollectorRemoved {
+			return true
+		}
+	}
+	return false
 }
 
 // RemoveCollector enforces ownership before delegating the state transition to
@@ -1639,18 +1677,17 @@ func (s *Service) GetConversation(ctx context.Context, userID, id string) (*doma
 	if err != nil {
 		return nil, err
 	}
-	if conversation.OwnerUserID != userID {
-		allowed := false
-		for _, c := range conversation.Collectors {
-			if c.CollectorUserID == userID && c.Status != domain.CollectorRemoved {
-				allowed = true
-			}
-		}
-		if !allowed {
-			return nil, apperror.Clone(apperror.ErrForbidden)
+	if canManageConversation(conversation, userID) {
+		return conversation, nil
+	}
+	if conversation.ConversationType == "group" && strings.TrimSpace(conversation.OrganizationID) != "" {
+		if err := s.requireOrganizationMember(ctx, userID, conversation.OrganizationID); err == nil {
+			return conversation, nil
+		} else {
+			return nil, err
 		}
 	}
-	return conversation, nil
+	return nil, apperror.Clone(apperror.ErrForbidden)
 }
 
 func (s *Service) IngestMessage(ctx context.Context, input repository.IngestMessageInput) (*repository.IngestResult, error) {

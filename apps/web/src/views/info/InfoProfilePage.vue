@@ -145,7 +145,12 @@ const feishuBinding = ref(false)
 const wechatBinding = ref(false)
 const avatarLabel = computed(() => (form.nickname.trim().slice(0, 1) || '我'))
 
-function errorMessage(cause: any, fallback: string) { return cause?.message || cause?.error?.message || fallback }
+function errorMessage(cause: any, fallback: string) {
+  const code = cause?.code || cause?.error?.code
+  if (code === 'connector_already_bound') return '该微信账号已被其他账号绑定'
+  if (code === 'wechat_cleanup_pending') return '微信采集器尚未停止，请重试解绑'
+  return cause?.message || cause?.error?.message || fallback
+}
 function syncProfile(value: Profile) {
   profile.value = value
   form.nickname = value.nickname

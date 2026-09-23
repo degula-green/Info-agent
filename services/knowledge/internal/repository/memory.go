@@ -2333,6 +2333,7 @@ func memoryLibraryItemFromKnowledge(item domain.KnowledgeItem, libraryID string,
 		ExternalConversationID: item.ExternalConversationID, SourceType: item.SourceType, SourceMessageID: item.SourceMessageID,
 		SourceAttachmentID: item.SourceAttachmentID, ContentType: item.ContentType, ContentVisibility: item.ContentVisibility,
 		AccessScope: item.AccessScope, ProcessingStatus: item.ProcessingStatus, CreatedAt: item.CreatedAt, UpdatedAt: item.UpdatedAt,
+		RAGStatus: item.RAGStatus, RAGContentVersion: item.RAGContentVersion, RAGACLVersion: item.RAGACLVersion, RAGLastError: item.RAGLastError,
 		CanView: true, ContentAccessRequired: item.ContentAccessRequired, ShareBatchID: item.ShareBatchID, SharedAt: item.SharedAt,
 	}
 	if conversation != nil {
@@ -2741,6 +2742,13 @@ func (s *MemoryStore) ListMessages(_ context.Context, conversationID string, lim
 			beforeCursor = m.ID < cutoffID
 		}
 		if beforeCursor {
+			if item := s.messageKnowledgeItemLocked(m.ID); item != nil {
+				if item.RAGStatus == "succeeded" && item.RAGContentVersion == item.ContentVersion && item.RAGACLVersion == item.ACLVersion {
+					m.VectorStatus = "ready"
+				} else if item.RAGStatus == "failed" {
+					m.VectorStatus = "failed"
+				}
+			}
 			m.Attachments = s.attachmentsForMessageLocked(m.ID)
 			senderExternalID := ""
 			if identity, ok := s.identities[m.SenderIdentityID]; ok {
@@ -2763,6 +2771,16 @@ func (s *MemoryStore) ListMessages(_ context.Context, conversationID string, lim
 		out = out[len(out)-limit:]
 	}
 	return out, nil
+}
+
+func (s *MemoryStore) messageKnowledgeItemLocked(messageID string) *domain.KnowledgeItem {
+	for _, item := range s.knowledgeItems {
+		if item.SourceMessageID == messageID && item.SourceAttachmentID == "" && item.SourceType != "shared_private_item" {
+			copy := item
+			return &copy
+		}
+	}
+	return nil
 }
 
 func (s *MemoryStore) ListAttachments(_ context.Context, conversationID string) ([]domain.Attachment, error) {
