@@ -236,8 +236,16 @@ func TestMemoryKnowledgeLibrariesKeepPrivateAndOrganizationItemsSeparate(t *test
 	if err != nil || len(orgItems) != 1 || orgItems[0].FileName != "org.txt" {
 		t.Fatalf("organization file library mismatch: %+v err=%v", orgItems, err)
 	}
+	groupLibraryItems, err := repo.ListKnowledgeLibraryItems(ctx, orgGroupsLibraryPrefix+"org-1", "u1", "org-1", "conversations", "", "", 50)
+	if err != nil || len(groupLibraryItems) != 1 || groupLibraryItems[0].Kind != "conversation" || groupLibraryItems[0].ConversationID != group.ID {
+		t.Fatalf("attached group conversation should be visible before ingestion: %+v err=%v", groupLibraryItems, err)
+	}
+	for _, library := range libraries {
+		if library.ID == orgGroupsLibraryPrefix+"org-1" && library.ConversationCount != 1 {
+			t.Fatalf("attached group conversation was not counted: %+v", library)
+		}
+	}
 	_ = private
-	_ = group
 }
 
 func TestMemoryMessageAttachmentIdempotenceAndCursorMonotonicity(t *testing.T) {
