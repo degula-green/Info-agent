@@ -27,10 +27,22 @@ class ElasticsearchMemoryStore:
         for (kind, visibility), read_alias in self.indices.items():
             physical = f"memory_{visibility}_{kind}s_v1"
             write_alias = read_alias[:-5] + "_write" if read_alias.endswith("_read") else read_alias + "_write"
+            mapping = self._mapping(kind)
             if not bool(self.client.indices.exists(index=physical)):
-                mapping = self._mapping(kind)
                 self.client.indices.create(index=physical, settings=mapping["settings"], mappings=mapping["mappings"])
                 created.append(physical)
+            else:
+                # Create-if-missing is not enough.  The document shape grows with
+                # the product — observed_at, conversation_group_id and message_id
+                # were all added after the first index was created — and with
+                # dynamic:strict an existing index silently rejects every
+                # document carrying a field it does not map.  Both indices share
+                # one bulk request, so the rejected half disappears while the
+                # accepted half is written, and the failure looks like a
+                # successful ingest.  Re-applying the mapping (ES merges new
+                # properties and raises on a genuine type conflict) keeps the
+                # live index in step with the document the writer produces.
+                self.client.indices.put_mapping(index=physical, properties=mapping["mappings"]["properties"])
             actions = []
             for alias, is_write in ((read_alias, False), (write_alias, True)):
                 if not bool(self.client.indices.exists_alias(name=alias)):
@@ -42,7 +54,7 @@ class ElasticsearchMemoryStore:
                 self.client.indices.update_aliases(actions=actions)
         return created
 
-    def index_graph(self, graph: MemoryGraph, vectors: dict[str, list[float]]) -> int:
+    def index_graph(self, graph: MemoryGraph, vectors: dict[str, list[float]], *, prune_stale: bool = True) -> int:
         operations: list[dict[str, Any]] = []
         documents = [("node", row, "node_id") for row in graph.nodes] + [("fact", row, "fact_projection_id") for row in graph.fact_projections]
         desired_by_fact: dict[tuple[str, str], list[str]] = {}
@@ -50,7 +62,10 @@ class ElasticsearchMemoryStore:
             visibility = "protected" if row.get("visibility") == "protected" else "display"
             desired_by_fact.setdefault((visibility, str(row["fact_id"])), []).append(str(row["fact_projection_id"]))
         delete_by_query = getattr(self.client, "delete_by_query", None)
-        if callable(delete_by_query):
+        # Backfills rebuild projections that are deterministic by construction,
+        # so the stale-projection sweep can only be a no-op there; each call
+        # refreshes, which dominates the cost of a full reindex.
+        if prune_stale and callable(delete_by_query):
             for (visibility, fact_id), desired_ids in desired_by_fact.items():
                 delete_by_query(
                     index=self.indices[("fact", visibility)], conflicts="proceed", refresh=True,
@@ -97,22 +112,49 @@ class ElasticsearchMemoryStore:
         branches = [("display", filters)]
         if request.include_protected and request.authorized_object_keys:
             branches.append(("protected", filters + [{"terms": {"auth_object_key": list(request.authorized_object_keys)}}]))
-        branch_k = max(1, min(3, request.top_k))
+        # One request per level, pruned against a global budget.  Resolving the
+        # frontier with a single terms query replaces the per-parent descent
+        # that multiplied both the request count and the candidate set by the
+        # branching factor (roots x groups x leaves), and that made a root
+        # chosen by its aggregate summary impossible to correct downstream.
         for visibility, branch_filters in branches:
             roots = self._search_nodes(request.query, query_vector, branch_filters + [{"term": {"node_type": "root"}}], request.top_k, visibility)
-            for root in roots:
-                groups = self._search_nodes(request.query, query_vector, branch_filters + [{"term": {"parent_id": str(root["node_id"])}}], branch_k, visibility)
-                for group in groups:
-                    leaves = self._search_nodes(request.query, query_vector, branch_filters + [{"term": {"parent_id": str(group["node_id"])}}], branch_k, visibility)
-                    for leaf in leaves:
-                        base_score = sum(float(value.get("_score", 0)) for value in (root, group, leaf))
-                        fact_filters = branch_filters + fact_time_filters + [{"term": {"node_id": leaf["node_id"]}}, {"term": {"fact_status": "active"}}]
-                        fact_hits = self._search(self.indices[("fact", visibility)], "fact_text", request.query, query_vector, fact_filters, request.top_k)
-                        common = {"tree": {"tree_id": root["tree_id"], "tree_type": root["tree_type"], "subject_key": root["subject_key"]}, "path": [self._path_node(root), self._path_node(group), self._path_node(leaf)], "leaf_node_id": leaf["node_id"], "visibility": visibility, "degraded": query_vector is None}
-                        if not fact_hits:
-                            output.append({**common, "fact": None, "score": base_score})
-                        for fact_hit in fact_hits:
-                            output.append({**common, "fact": fact_hit["source"], "score": fact_hit["score"] + base_score})
+            if not roots:
+                continue
+            roots_by_id = {str(root["node_id"]): root for root in roots}
+            groups = self._search_nodes(request.query, query_vector, branch_filters + [{"terms": {"parent_id": list(roots_by_id)}}], request.top_k, visibility)
+            if not groups:
+                continue
+            groups_by_id = {str(group["node_id"]): group for group in groups}
+            leaves = self._search_nodes(request.query, query_vector, branch_filters + [{"terms": {"parent_id": list(groups_by_id)}}], request.top_k, visibility)
+            if not leaves:
+                continue
+            leaves_by_id = {str(leaf["node_id"]): leaf for leaf in leaves}
+            fact_filters = branch_filters + fact_time_filters + [{"terms": {"node_id": list(leaves_by_id)}}, {"term": {"fact_status": "active"}}]
+            for fact_hit in self._search(self.indices[("fact", visibility)], "fact_text", request.query, query_vector, fact_filters, request.top_k):
+                fact = fact_hit["source"]
+                leaf = leaves_by_id.get(str(fact.get("node_id")))
+                group = groups_by_id.get(str(leaf.get("parent_id"))) if leaf else None
+                root = roots_by_id.get(str(group.get("parent_id"))) if group else None
+                if leaf is None or group is None or root is None:
+                    continue
+                # A leaf contributes evidence only through its facts.  The old
+                # fact-less row carried a Leaf's provenance with no fact behind
+                # it, so a narrowed date window (which filters facts, never
+                # nodes) turned "what happened in September" into an arbitrary
+                # attachment body from that leaf.  Facts from different leaves
+                # now share one query and one index, so their scores are
+                # directly comparable: the old score summed unbounded BM25
+                # scores from three indices before adding the fact score.
+                output.append({
+                    "tree": {"tree_id": root["tree_id"], "tree_type": root["tree_type"], "subject_key": root["subject_key"]},
+                    "path": [self._path_node(root), self._path_node(group), self._path_node(leaf)],
+                    "leaf_node_id": leaf["node_id"],
+                    "visibility": visibility,
+                    "degraded": query_vector is None,
+                    "fact": fact,
+                    "score": fact_hit["score"],
+                })
         output.sort(key=lambda item: item["score"], reverse=True)
         return output[: request.top_k]
 
@@ -124,7 +166,12 @@ class ElasticsearchMemoryStore:
         return [{**hit["source"], "_score": hit["score"]} for hit in self._search(self.indices[("node", visibility)], "summary", query, vector, filters, size)]
 
     def _search(self, index: str, field: str, query: str, vector: list[float] | None, filters: list[dict[str, Any]], size: int) -> list[dict[str, Any]]:
-        body: dict[str, Any] = {"index": index, "query": {"bool": {"should": [{"match": {field: {"query": query}}}], "minimum_should_match": 0, "filter": filters}}, "size": size, "_source": {"excludes": ["embedding"]}}
+        # minimum_should_match defaults to 1 for a should-only bool, which is
+        # what we want: the text query must match.  Setting it to 0 made the
+        # bool match every document, so when the vector was unavailable the tree
+        # answered with an arbitrary top-k scored 0.0 instead of reporting that
+        # it had nothing to navigate on.
+        body: dict[str, Any] = {"index": index, "query": {"bool": {"should": [{"match": {field: {"query": query}}}], "filter": filters}}, "size": size, "_source": {"excludes": ["embedding"]}}
         if vector is not None:
             body["knn"] = {"field": "embedding", "query_vector": vector, "k": size, "num_candidates": max(size * 4, 20), "filter": {"bool": {"filter": filters}}}
         try:

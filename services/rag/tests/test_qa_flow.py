@@ -108,7 +108,7 @@ class QAFlowTests(unittest.TestCase):
         with self.assertRaises(QAConversationNotFound):
             service.answer(SearchRequest("越权问题", "user-b", knowledge_base_id="kb-1", conversation_id=first["conversation_id"]))
 
-    def test_document_question_searches_only_tree_sources(self):
+    def test_document_question_runs_scoped_and_global_branches(self):
         store = _Store()
         service = RagSearchService(
             store=store, authorization=_Authorization(), embedding=_Embedding(),
@@ -122,6 +122,15 @@ class QAFlowTests(unittest.TestCase):
             {"terms": {"attachment_id": ["att-7"]}},
             {"terms": {"knowledge_item_id": ["ki-7"]}},
         ])
+        # The tree no longer gates retrieval. The tree-scoped branch and the
+        # unscoped Chunk branch both run and are fused, instead of the unscoped
+        # branch being reachable only when the tree produced nothing.
+        self.assertEqual(len(store.calls), 2)
+        self.assertEqual(result["diagnostics"]["fused_branches"], ["global", "tree_sources"])
+        self.assertFalse(any(
+            any("attachment_id" in part.get("terms", {}) for part in value.get("bool", {}).get("should", []))
+            for value in store.calls[1]["display_filters"]
+        ))
 
 
 if __name__ == "__main__":

@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from app.application.retrieval.context_assembler import assemble_context
+from app.application.retrieval.fusion import reciprocal_rank_fusion
 from app.application.retrieval.query_planner import plan_query
 from app.application.retrieval.fulltext_retriever import FullTextRetriever
 from app.application.retrieval.hybrid_retriever import HybridRetriever, RetrievalDiagnostics
@@ -206,43 +207,78 @@ class RagSearchService:
                                    "tree": item.get("tree"), "tree_path": item.get("path"),
                                    "evidence_relation": context_chunk.get("relation") or "direct_evidence", "rag_eligible": True},
                         ))
-            needs_document_evidence = not final_results
-            if needs_document_evidence and (source_attachment_ids or source_knowledge_item_ids):
-                scoped_request = SearchRequest(**{
-                    **request.__dict__,
+            # The tree navigates and filters; it is no longer the only channel
+            # that may answer. Its facts resolve to Chunk ids, which scope a
+            # branch-T search over the Chunk index, and the unscoped branch-G
+            # search always runs alongside it. Previously the two were mutually
+            # exclusive (`needs_document_evidence = not final_results`), so one
+            # tree hit physically disabled BM25, kNN, RRF and rerank.
+            tree_evidence = final_results
+            tree_chunk_ids = list(dict.fromkeys(
+                str(item.chunk_id) for item in tree_evidence if str(item.chunk_id or "").strip()
+            ))
+            branches: dict[str, list[SearchResult]] = {}
+            if tree_evidence:
+                branches["tree_evidence"] = tree_evidence
+            chunk_response = SearchResponse(
+                [], RetrievalDiagnostics(plan, False, 0, 0, 0, ("chunk_not_started",)), uuid.uuid4().hex,
+            )
+            if base_ids:
+                if tree_chunk_ids:
+                    # Rank inside the candidate set the tree navigated to.
+                    tree_scope_response = self.search(SearchRequest(**{
+                        **request.__dict__, "conversation_id": None,
+                        "source_chunk_ids": tuple(tree_chunk_ids),
+                    }))
+                    if tree_scope_response.results:
+                        branches["tree_scope"] = tree_scope_response.results
+                if not tree_evidence and (source_attachment_ids or source_knowledge_item_ids):
                     # The QA conversation id is a history record id, not the
                     # source message's conversation_group_id. Passing it into
                     # chunk filters incorrectly excludes attachments when the
                     # user asks a follow-up in an existing QA conversation.
-                    "conversation_id": None,
-                    "source_attachment_ids": tuple(sorted(source_attachment_ids)),
-                    "source_knowledge_item_ids": tuple(sorted(source_knowledge_item_ids)),
-                })
-                chunk_response = self.search(scoped_request)
-                final_results.extend(chunk_response.results)
-            if needs_document_evidence and not chunk_response.results and base_ids:
-                fallback_level = 2
-                fallback_reason = "tree_sources_empty" if not (source_attachment_ids or source_knowledge_item_ids) else "source_chunks_empty"
-                # Keep the fallback inside the caller supplied knowledge-base
-                # and organization scope.  Never widen a tree miss globally.
+                    chunk_response = self.search(SearchRequest(**{
+                        **request.__dict__,
+                        "conversation_id": None,
+                        "source_attachment_ids": tuple(sorted(source_attachment_ids)),
+                        "source_knowledge_item_ids": tuple(sorted(source_knowledge_item_ids)),
+                    }))
+                    if chunk_response.results:
+                        branches["tree_sources"] = chunk_response.results
+                if not tree_evidence and "tree_sources" not in branches:
+                    fallback_level = 2
+                    fallback_reason = "tree_sources_empty" if not (source_attachment_ids or source_knowledge_item_ids) else "source_chunks_empty"
+                # Branch G. Keep it inside the caller supplied knowledge-base
+                # and organization scope; it is unscoped only with respect to
+                # the tree, never with respect to the library.
                 chunk_response = self.search(SearchRequest(**{**request.__dict__, "conversation_id": None}))
-                final_results.extend(chunk_response.results)
-            if needs_document_evidence and not chunk_response.results and not base_ids:
+                if chunk_response.results:
+                    branches["global"] = chunk_response.results
+            elif not tree_evidence:
                 fallback_level = 3
                 fallback_reason = "unscoped_chunk_search"
                 chunk_response = self.search(SearchRequest(**{**request.__dict__, "conversation_id": None}))
-                final_results.extend(chunk_response.results)
+                if chunk_response.results:
+                    branches["global"] = chunk_response.results
+            final_results = _fuse_branches(branches)
+            if getattr(request, "trace_branches", False):
+                tree_diagnostics["branch_chunk_ids"] = {
+                    name: [item.chunk_id for item in values] for name, values in branches.items()
+                }
             tree_diagnostics = {
                 **tree_diagnostics,
-                "retrieval_stage": "tree_evidence" if final_results and tree_items else "scoped_chunk_fallback",
+                "retrieval_stage": "tree_evidence" if tree_evidence else "chunk_fusion" if final_results else "empty",
                 "fallback_level": fallback_level,
                 "fallback_reason": fallback_reason,
                 "tree_candidate_count": len(tree_items),
+                "tree_evidence_chunk_count": len(tree_evidence),
+                "tree_scope_chunk_count": len(tree_chunk_ids),
+                "fused_branches": sorted(branches),
                 "source_candidate_count": len(source_attachment_ids | source_knowledge_item_ids),
                 "chunk_candidate_count": len(chunk_response.results),
                 "pending_source_count": pending_source_count,
                 "failed_source_count": failed_source_count,
-                "execution_path": "tree_evidence" if final_results and tree_items else "scoped_chunk_fallback" if base_ids else "chunk",
+                "execution_path": "tree_evidence" if tree_evidence else "chunk_fusion" if final_results else "chunk",
                 "source_processing_notice": (
                     "相关资料已采集，但文档内容仍在处理中，暂不能引用正文。"
                     if pending_source_count else
@@ -387,6 +423,25 @@ def _diagnostics(value: RetrievalDiagnostics) -> dict[str, Any]:
         "use_vector": value.plan.use_vector,
         "retrieval_mode": value.plan.retrieval_mode,
     }
+
+
+def _fuse_branches(branches: dict[str, list[SearchResult]]) -> list[SearchResult]:
+    """Fuse the tree branches with the always-on unscoped Chunk branch.
+
+    Reciprocal rank fusion rather than score comparison: the branches score
+    against different index families whose scales are unrelated. The weights
+    only express a preference for the navigated branch, so branch G stays in
+    the result set and a navigation miss cannot drop the answer.
+    """
+    if not branches:
+        return []
+    if len(branches) == 1:
+        return list(next(iter(branches.values())))
+    weights = {
+        name: settings.global_branch_weight if name == "global" else settings.tree_branch_weight
+        for name in branches
+    }
+    return reciprocal_rank_fusion(branches, k=settings.rrf_k, weights=weights)
 
 
 def _dedupe_results(results: list[SearchResult], limit: int) -> list[SearchResult]:

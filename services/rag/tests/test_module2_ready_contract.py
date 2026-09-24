@@ -4,6 +4,7 @@ import json
 import sys
 import unittest
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import Mock, patch
 
 from app.application.ports import ProcessingOutput
@@ -12,7 +13,7 @@ from app.domain.models import ParsedDocument
 from app.infrastructure.events.redis_streams import RedisStreamPublisher, RedisStreamWorker
 from app.infrastructure.events import redis_streams
 from app.infrastructure.module2.knowledge_client import Module2KnowledgeClient
-from app.infrastructure.persistence.repository import InMemoryRagRepository
+from app.infrastructure.persistence.repository import InMemoryRagRepository, PostgresRagRepository
 
 
 def ready_event(*, event_id: str = "00000000-0000-0000-0000-000000000001", protected: bool = False) -> dict:
@@ -278,11 +279,256 @@ class Module2ReadyContractTests(unittest.TestCase):
                 return []
 
         client = ListClaimRedis()
-        worker = RedisStreamWorker.__new__(RedisStreamWorker)
-        worker.client, worker.handler = client, lambda _event: None
-        worker.stream, worker.group, worker.consumer = "knowledge:ready", "rag-workers", "test"
+        worker = _stream_worker(client, lambda _event: None)
         self.assertEqual(worker.run_once(), 1)
         self.assertEqual(client.acked, [("knowledge:ready", "rag-workers", b"3-0")])
+
+    def test_redis_stream_creates_the_consumer_group_once_per_connection(self):
+        """A failing XGROUP CREATE must not cost every iteration a round trip."""
+
+        class CountingRedis(_Redis):
+            def __init__(self):
+                super().__init__()
+                self.group_creates = 0
+
+            def xgroup_create(self, *_args, **_kwargs):
+                self.group_creates += 1
+                return True
+
+            def xreadgroup(self, *_args, **_kwargs):
+                return []
+
+        client = CountingRedis()
+        worker = _stream_worker(client, lambda _event: None)
+        worker.run_once()
+        worker.run_once()
+        worker.run_once()
+        self.assertEqual(client.group_creates, 1)
+        # Reconnect drops the connection the group was created on, so the next
+        # iteration must create it again.
+        worker._group_ready = False
+        worker.run_once()
+        self.assertEqual(client.group_creates, 2)
+
+    def test_redis_stream_follows_the_xautoclaim_cursor_into_later_pages(self):
+        """XAUTOCLAIM must be re-issued from `next_start_id` until it returns 0-0."""
+        event = ready_event()
+
+        class PagedRedis(_Redis):
+            def __init__(self):
+                super().__init__()
+                self.starts = []
+                self.pages = [
+                    [b"4-0", [(b"2-0", {b"event": json.dumps(event).encode()})], []],
+                    [b"5-0", [(b"3-0", {b"event": json.dumps(event).encode()})], []],
+                    [b"0-0", [(b"4-0", {b"event": json.dumps(event).encode()})], []],
+                ]
+
+            def xautoclaim(self, _stream, _group, _consumer, *, start_id, **_kwargs):
+                self.starts.append(start_id)
+                return self.pages.pop(0)
+
+            def xreadgroup(self, *_args, **_kwargs):
+                return []
+
+        client = PagedRedis()
+        worker = _stream_worker(client, lambda _event: None)
+        self.assertEqual(worker.run_once(), 3)
+        self.assertEqual(client.starts, ["0-0", "4-0", "5-0"])
+        self.assertEqual(
+            sorted(client.acked),
+            sorted(("knowledge:ready", "rag-workers", mid) for mid in (b"2-0", b"3-0", b"4-0")),
+        )
+
+    def test_redis_stream_dead_letters_an_entry_that_exhausted_its_deliveries(self):
+        event = ready_event()
+        client = _FailingRedis(event, times_delivered=3)
+        worker = _stream_worker(client, lambda _event: (_ for _ in ()).throw(RuntimeError("boom")))
+        with patch.object(redis_streams, "settings", _stream_settings()):
+            self.assertEqual(worker.run_once(), 0)
+        self.assertEqual(len(client.acked), 1)
+        self.assertEqual(len(client.added), 1)
+        dlq_stream, payload, maxlen = client.added[0]
+        self.assertEqual(dlq_stream, "knowledge:ready.dlq")
+        self.assertEqual(payload["dlq_source_message_id"], "2-0")
+        self.assertIn("boom", payload["dlq_error"])
+        # The original entry travels with the dead letter so it can be replayed.
+        # The value stays bytes: the client is built with decode_responses=False.
+        self.assertEqual(payload["event"], json.dumps(event).encode())
+
+    def test_redis_stream_keeps_an_entry_pending_below_the_delivery_budget(self):
+        event = ready_event()
+        client = _FailingRedis(event, times_delivered=1)
+        worker = _stream_worker(client, lambda _event: (_ for _ in ()).throw(RuntimeError("boom")))
+        with patch.object(redis_streams, "settings", _stream_settings()):
+            self.assertEqual(worker.run_once(), 0)
+        self.assertEqual(client.acked, [])
+        self.assertEqual(client.added, [])
+
+    def test_redis_stream_keeps_an_entry_pending_when_delivery_count_is_unknown(self):
+        """No XPENDING support must mean "retry", never "dead-letter on a guess"."""
+        event = ready_event()
+        client = _FailingRedis(event, times_delivered=None)
+        worker = _stream_worker(client, lambda _event: (_ for _ in ()).throw(RuntimeError("boom")))
+        with patch.object(redis_streams, "settings", _stream_settings()):
+            self.assertEqual(worker.run_once(), 0)
+        self.assertEqual(client.acked, [])
+        self.assertEqual(client.added, [])
+
+    def test_redis_stream_does_not_dead_letter_a_job_whose_ack_failed(self):
+        """A successful job with a failed ACK must not be treated as a failure."""
+
+        class AckFailingRedis(_FailingRedis):
+            def __init__(self, event):
+                super().__init__(event, times_delivered=9)
+
+            def xack(self, stream, group, message_id):
+                raise RuntimeError("connection reset")
+
+        client = AckFailingRedis(ready_event())
+        worker = _stream_worker(client, lambda _event: None)
+        with patch.object(redis_streams, "settings", _stream_settings()):
+            self.assertEqual(worker.run_once(), 1)
+        self.assertEqual(client.added, [])
+        self.assertEqual(client.acked, [])
+
+    def test_private_knowledge_without_organization_creates_a_job(self):
+        """Private knowledge has no organization and Knowledge sends "" for it.
+
+        PostgreSQL rejects an empty string cast to uuid, and that exception used
+        to escape `handle()` before the retry accounting, so every private-chat
+        event failed forever with no processing_jobs row and no ACK.
+        """
+        cursor = _RecordingCursor()
+        repository = PostgresRagRepository(connection_factory=lambda: _RecordingConnection(cursor))
+        envelope = {**ready_event(), "organization_id": ""}
+
+        job_id = repository.create_processing_job(envelope, job_type="full_process")
+        self.assertIsNotNone(job_id)
+        params = cursor.executed[0][1]
+        self.assertEqual(params[3], None, "blank organization_id must reach %s::uuid as NULL")
+
+        repository.add_outbox_event(
+            {**ready_event(), "event_type": "knowledge.rag.processing", "organization_id": ""},
+            aggregate_type="knowledge_item",
+            aggregate_id="00000000-0000-0000-0000-000000000020",
+        )
+        outbox_params = cursor.executed[1][1]
+        self.assertEqual(outbox_params[6], None)
+
+    def test_redis_stream_logs_every_silently_dropped_entry(self):
+        """An ACKed drop leaves no trace unless it is logged."""
+
+        class PoisonRedis(_Redis):
+            def xautoclaim(self, *_args, **_kwargs):
+                return [b"0-0", [], []]
+
+            def xreadgroup(self, *_args, **_kwargs):
+                return [(b"knowledge:ready", [
+                    (b"7-0", {b"event": b"{not json"}),
+                    (b"8-0", {b"payload": b"{}"}),
+                ])]
+
+        client = PoisonRedis()
+        worker = _stream_worker(client, lambda _event: (_ for _ in ()).throw(AssertionError("poison dispatched")))
+        with self.assertLogs("rag.stream", level="WARNING") as captured:
+            self.assertEqual(worker.run_once(), 2)
+        logged = "\n".join(captured.output)
+        self.assertIn("7-0", logged)
+        self.assertIn("8-0", logged)
+        self.assertEqual(len(client.acked), 2)
+
+
+class _RecordingCursor:
+    """Minimal psycopg cursor stand-in that records the SQL parameters."""
+
+    def __init__(self):
+        self.executed: list[tuple[str, Any]] = []
+        self._row: tuple | None = None
+
+    def execute(self, sql, params=None):
+        self.executed.append((sql, params))
+        # create_processing_job validates RETURNING payload_hash against the one
+        # it computed, so echo it back as the second column.
+        self._row = ("29fc35d8-0000-0000-0000-000000000000", params[2])
+
+    def fetchone(self):
+        return self._row
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_exc):
+        return False
+
+
+class _RecordingConnection:
+    def __init__(self, cursor):
+        self._cursor = cursor
+
+    def cursor(self):
+        return self._cursor
+
+    # The repository's _connection context manager commits on success and
+    # closes unconditionally.
+    def commit(self):
+        pass
+
+    def rollback(self):
+        pass
+
+    def close(self):
+        pass
+
+
+def _stream_worker(client, handler):
+    """Build a worker the way the existing stream tests do.
+
+    ``__new__`` skips ``__init__``, so ``_group_ready`` is absent and
+    ``_ensure_group_once`` has to tolerate that via ``getattr``.
+    """
+    worker = RedisStreamWorker.__new__(RedisStreamWorker)
+    worker.client, worker.handler = client, handler
+    worker.stream, worker.group, worker.consumer = "knowledge:ready", "rag-workers", "test"
+    return worker
+
+
+def _stream_settings(**overrides):
+    values = {
+        "redis_claim_idle_ms": 60000,
+        "redis_batch_size": 10,
+        "redis_block_ms": 0,
+        "redis_max_retries": 3,
+        "redis_claim_max_rounds": 8,
+        "redis_dlq_maxlen": 10000,
+        "redis_dlq_stream_name": "knowledge:ready.dlq",
+    }
+    values.update(overrides)
+    return SimpleNamespace(**values)
+
+
+class _FailingRedis(_Redis):
+    """One entry that always fails handling, with a settable delivery count."""
+
+    def __init__(self, event, *, times_delivered):
+        super().__init__()
+        self.payload = {b"event": json.dumps(event).encode()}
+        self.times_delivered = times_delivered
+        self.delivered = False
+
+    def xautoclaim(self, *_args, **_kwargs):
+        return [b"0-0", [], []]
+
+    def xreadgroup(self, *_args, **_kwargs):
+        if self.delivered:
+            return []
+        self.delivered = True
+        return [(b"knowledge:ready", [(b"2-0", self.payload)])]
+
+    def xpending_range(self, *_args, **_kwargs):
+        if self.times_delivered is None:
+            raise RuntimeError("XPENDING unsupported")
+        return [{"message_id": b"2-0", "times_delivered": self.times_delivered}]
 
 
 if __name__ == "__main__":

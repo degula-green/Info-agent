@@ -1,13 +1,18 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import socket
 import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any, Callable, Iterable
 
 from app.config import settings
+
+
+logger = logging.getLogger("rag.stream")
 
 
 class StreamUnavailable(RuntimeError):
@@ -18,7 +23,10 @@ def validate_envelope(value: dict[str, Any]) -> dict[str, Any]:
     required = ("event_id", "event_type", "schema_version", "occurred_at", "trace_id", "organization_id", "producer", "payload")
     if not isinstance(value, dict) or any(name not in value for name in required):
         raise ValueError("event envelope is missing required fields")
-    if any(not value.get(name) for name in ("event_id", "event_type", "schema_version", "occurred_at", "trace_id", "producer")):
+    # Presence is checked above; here only the string fields are checked for a
+    # non-empty value. `schema_version` is a number, so folding it into this
+    # test rejected a valid `schema_version: 0` as "empty".
+    if any(not value.get(name) for name in ("event_id", "event_type", "occurred_at", "trace_id", "producer")):
         raise ValueError("event envelope has empty required fields")
     if not isinstance(value["payload"], dict):
         raise ValueError("event payload must be an object")
@@ -62,6 +70,7 @@ class RedisStreamWorker:
         self.stream = settings.redis_inbound_stream
         self.group = settings.redis_consumer_group
         self.consumer = settings.redis_consumer_name or f"{socket.gethostname()}-{os.getpid()}"
+        self._group_ready = False
         if not self.stream:
             raise StreamUnavailable("RAG_REDIS_INBOUND_STREAM is not configured")
 
@@ -71,6 +80,20 @@ class RedisStreamWorker:
         except Exception as exc:
             if "BUSYGROUP" not in str(exc):
                 raise StreamUnavailable("could not create Redis consumer group") from exc
+        self._group_ready = True
+
+    def _ensure_group_once(self) -> None:
+        """Create the consumer group at most once per Redis connection.
+
+        XGROUP CREATE is idempotent but it is still a round trip, and when Redis
+        is unreachable it fails *before* anything has been read, so a transient
+        connect timeout aborted the whole iteration. The group only has to be
+        created when it might not exist yet; `reconnect` clears the flag so a
+        fresh connection re-creates it after a Redis restart.
+        """
+        if getattr(self, "_group_ready", False):
+            return
+        self.ensure_group()
 
     def reconnect(self) -> None:
         """Drop stale pooled sockets so the next iteration reconnects cleanly."""
@@ -82,61 +105,174 @@ class RedisStreamWorker:
             except Exception:
                 pass
         self.client = _build_redis()
+        self._group_ready = False
 
-    def run_once(self) -> int:
-        self.ensure_group()
-        rows = []
-        # Reclaim entries left pending by a crashed/previous consumer. This is
-        # deliberately best-effort so Redis versions without XAUTOCLAIM still
-        # work; new entries are read below regardless.
+    def _claim_pending(self) -> list[tuple[str, list]]:
+        """Reclaim entries left pending by a crashed or previous consumer.
+
+        XAUTOCLAIM answers with ``[next_start_id, messages, deleted_ids]`` and
+        the caller is expected to ask again from ``next_start_id`` until it
+        comes back as ``0-0``. Discarding that cursor (as this did) meant every
+        iteration re-scanned the head of the PEL: once a permanently failing
+        entry sat in the first page it was re-claimed, re-processed and
+        re-failed forever, and entries behind it were never reached.
+
+        Still best-effort, so Redis versions without XAUTOCLAIM keep working;
+        new entries are read by ``run_once`` regardless.
+
+        Note the coupling with ``redis_claim_idle_ms``: XAUTOCLAIM takes any
+        entry idle longer than that threshold, and a MinerU job can legally run
+        for ``mineru_task_max_wait_seconds``, far beyond it. An in-flight job is
+        therefore reclaimed and processed a second time. That is pre-existing,
+        and the handler absorbs it by resuming the existing job rather than
+        starting a new one, but the sweep should not make it larger: the round
+        cap bounds how many entries one iteration can pull in.
+        """
         xautoclaim = getattr(self.client, "xautoclaim", None)
-        if callable(xautoclaim):
+        if not callable(xautoclaim):
+            return []
+        rows: list[tuple[str, list]] = []
+        cursor = "0-0"
+        for _ in range(max(1, settings.redis_claim_max_rounds)):
             try:
                 claimed = xautoclaim(
                     self.stream,
                     self.group,
                     self.consumer,
                     min_idle_time=settings.redis_claim_idle_ms,
-                    start_id="0-0",
+                    start_id=cursor,
                     count=settings.redis_batch_size,
                 )
-                # redis-py has returned both tuples and lists for XAUTOCLAIM
-                # across supported releases. The wire shape is the same:
-                # [next_start_id, messages, deleted_ids].
-                if isinstance(claimed, (tuple, list)) and len(claimed) >= 2 and claimed[1]:
-                    rows.append((self.stream, claimed[1]))
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning("XAUTOCLAIM failed; skipping pending sweep: %s", exc)
+                break
+            # redis-py has returned both tuples and lists for XAUTOCLAIM across
+            # supported releases. The wire shape is the same.
+            if not isinstance(claimed, (tuple, list)) or len(claimed) < 2:
+                break
+            messages = claimed[1] or []
+            if messages:
+                rows.append((self.stream, messages))
+            next_cursor = claimed[0]
+            next_cursor = next_cursor.decode() if isinstance(next_cursor, bytes) else str(next_cursor or "0-0")
+            if next_cursor == "0-0" or next_cursor == cursor:
+                break
+            cursor = next_cursor
+        return rows
+
+    def _delivery_count(self, message_id: Any) -> int:
+        """How many times Redis has delivered this entry to the group.
+
+        Read only on the failure path, so the extra round trip costs nothing in
+        the normal case. Returns 0 when the client cannot answer, which keeps a
+        message pending rather than dead-lettering it on a guess.
+        """
+        xpending_range = getattr(self.client, "xpending_range", None)
+        if not callable(xpending_range):
+            return 0
+        try:
+            entries = xpending_range(self.stream, self.group, min=message_id, max=message_id, count=1)
+        except Exception:
+            return 0
+        for entry in entries or []:
+            if isinstance(entry, dict):
+                return int(entry.get("times_delivered") or 0)
+        return 0
+
+    def _dead_letter(self, message_id: str, fields: Any, exc: BaseException) -> bool:
+        """Move an exhausted entry to the DLQ so it stops being redelivered."""
+        dlq = settings.redis_dlq_stream_name
+        if not dlq:
+            return False
+        payload = {
+            "dlq_source_stream": self.stream,
+            "dlq_source_message_id": message_id,
+            "dlq_consumer_group": self.group,
+            "dlq_error": f"{type(exc).__name__}: {exc}"[:500],
+            "dlq_failed_at": datetime.now(timezone.utc).isoformat(),
+        }
+        # Carry the original entry through untouched so an operator can replay
+        # it verbatim after the cause is fixed. Keys are normalized to text
+        # (the client is built with decode_responses=False) and `setdefault`
+        # keeps a payload field from clobbering the dlq_* metadata.
+        if isinstance(fields, dict):
+            for key, value in fields.items():
+                name = key.decode("utf-8", "replace") if isinstance(key, bytes) else str(key)
+                payload.setdefault(name, value)
+        try:
+            self.client.xadd(dlq, payload, maxlen=settings.redis_dlq_maxlen)
+        except Exception as dlq_exc:
+            logger.error("could not write message_id=%s to DLQ %s: %s", message_id, dlq, dlq_exc)
+            return False
+        return True
+
+    def run_once(self) -> int:
+        self._ensure_group_once()
+        rows = self._claim_pending()
         rows.extend(self.client.xreadgroup(self.group, self.consumer, {self.stream: ">"}, count=settings.redis_batch_size, block=settings.redis_block_ms) or [])
         handled = 0
         for _, messages in rows:
             for message_id, fields in messages:
                 mid = message_id.decode() if isinstance(message_id, bytes) else str(message_id)
+                # Prepare the entry, separating "this payload is unusable" from
+                # "handling it failed". Only the latter may be retried; the
+                # former is ACKed and logged because keeping it pending would
+                # block the head of the PEL forever.
                 try:
                     raw = (fields.get("event") or fields.get(b"event")) if isinstance(fields, dict) else None
                     if isinstance(raw, bytes):
                         raw = raw.decode("utf-8")
-                    # Old module-2 internal events used a `payload` field and
-                    # are not part of the service-three contract. ACK these
-                    # poison entries rather than leaving them pending forever.
                     if not raw:
-                        self.client.xack(self.stream, self.group, message_id)
+                        logger.warning(
+                            "dropping stream entry with no `event` field: stream=%s message_id=%s keys=%s",
+                            self.stream, mid, sorted(k for k in fields) if isinstance(fields, dict) else None,
+                        )
+                        self._ack(message_id, mid)
                         handled += 1
                         continue
-                    try:
-                        envelope = validate_envelope(json.loads(raw))
-                    except (TypeError, ValueError, json.JSONDecodeError):
-                        self.client.xack(self.stream, self.group, message_id)
-                        handled += 1
-                        continue
-                    self.handler(envelope)
-                    self.client.xack(self.stream, self.group, message_id)
+                    envelope = validate_envelope(json.loads(raw))
+                except (TypeError, ValueError, json.JSONDecodeError) as exc:
+                    # ACK means this payload is gone for good, so it must be
+                    # visible: an unlogged drop here is indistinguishable from
+                    # "the event never arrived".
+                    logger.warning(
+                        "dropping invalid event envelope: stream=%s message_id=%s error=%s payload=%s",
+                        self.stream, mid, exc, str(raw)[:500],
+                    )
+                    self._ack(message_id, mid)
                     handled += 1
-                except Exception:
-                    # Leave the pending entry for a later reclaim/DLQ worker;
-                    # never ACK a failed processing task.
                     continue
+                try:
+                    self.handler(envelope)
+                except Exception as exc:
+                    # Never ACK a failed processing task, but stop redelivering
+                    # it once the delivery budget is spent: an entry that always
+                    # fails otherwise occupies the head of the PEL forever and
+                    # starves everything behind it.
+                    if self._delivery_count(mid) >= max(1, settings.redis_max_retries) and self._dead_letter(mid, fields, exc):
+                        logger.error(
+                            "message_id=%s exceeded %s deliveries; moved to DLQ %s",
+                            mid, settings.redis_max_retries, settings.redis_dlq_stream_name,
+                        )
+                        self._ack(message_id, mid)
+                        continue
+                    logger.warning("handler failed; leaving message_id=%s pending for redelivery: %s", mid, exc)
+                    continue
+                # Acked outside the handler's scope on purpose: a successful
+                # job whose ACK fails must not be mistaken for a failed job and
+                # dead-lettered. It stays pending and is redelivered, where the
+                # handler's own idempotency check ends it.
+                self._ack(message_id, mid)
+                handled += 1
         return handled
+
+    def _ack(self, message_id: Any, mid: str) -> None:
+        try:
+            self.client.xack(self.stream, self.group, message_id)
+        except Exception as exc:
+            # The entry stays pending and comes back; say so rather than letting
+            # a successful job look like it never ran.
+            logger.warning("XACK failed for message_id=%s (entry stays pending): %s", mid, exc)
 
     def run_forever(self, *, stop: Callable[[], bool] | None = None) -> None:
         while not (stop and stop()):

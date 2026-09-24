@@ -294,6 +294,15 @@ class SearchRequest:
     qa_mode: str | None = None
     source_attachment_ids: tuple[str, ...] = ()
     source_knowledge_item_ids: tuple[str, ...] = ()
+    # Chunk-level candidate set. The tree resolves to facts, facts resolve to
+    # chunk ids, and those ids are what let the tree filter the Chunk index
+    # instead of only the memory index.
+    source_chunk_ids: tuple[str, ...] = ()
+    # Opt-in: include the per-branch Chunk id sets in the tree diagnostics.
+    # Off by default so normal responses do not carry the full candidate trace;
+    # the retrieval evaluation needs it to compare the tree branches against
+    # the always-on unscoped branch.
+    trace_branches: bool = False
 
 
 @dataclass(frozen=True)
