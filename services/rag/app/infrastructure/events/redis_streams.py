@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import socket
 import time
 from dataclasses import dataclass
@@ -60,7 +61,7 @@ class RedisStreamWorker:
         self.handler = handler
         self.stream = settings.redis_inbound_stream
         self.group = settings.redis_consumer_group
-        self.consumer = settings.redis_consumer_name or socket.gethostname()
+        self.consumer = settings.redis_consumer_name or f"{socket.gethostname()}-{os.getpid()}"
         if not self.stream:
             raise StreamUnavailable("RAG_REDIS_INBOUND_STREAM is not configured")
 
@@ -70,6 +71,17 @@ class RedisStreamWorker:
         except Exception as exc:
             if "BUSYGROUP" not in str(exc):
                 raise StreamUnavailable("could not create Redis consumer group") from exc
+
+    def reconnect(self) -> None:
+        """Drop stale pooled sockets so the next iteration reconnects cleanly."""
+        pool = getattr(self.client, "connection_pool", None)
+        disconnect = getattr(pool, "disconnect", None)
+        if callable(disconnect):
+            try:
+                disconnect()
+            except Exception:
+                pass
+        self.client = _build_redis()
 
     def run_once(self) -> int:
         self.ensure_group()
@@ -154,6 +166,9 @@ def _build_redis() -> Any:
         username=settings.redis_username or None,
         password=settings.redis_password or None,
         decode_responses=False,
-        socket_connect_timeout=max(0.1, settings.authz_connect_timeout_seconds),
+        socket_connect_timeout=max(0.1, getattr(settings, "redis_connect_timeout_seconds", 5.0)),
         socket_timeout=read_timeout,
+        socket_keepalive=True,
+        health_check_interval=30,
+        retry_on_timeout=True,
     )

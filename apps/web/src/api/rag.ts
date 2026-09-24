@@ -1,15 +1,26 @@
-import { getAccessToken, getCurrentUser } from './core-auth'
+import { getAccessToken, getCurrentUser } from './core-auth.ts'
 
 const env = ((import.meta as ImportMeta & { env?: Record<string, string> }).env || {})
 const baseURL = String(env.VITE_RAG_BASE_URL || '/api/rag/api/v1').replace(/\/$/, '')
 let userIDPromise: Promise<string> | null = null
 
+function isUserID(value: unknown): value is string {
+  return typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value.trim())
+}
+
 async function currentUserID() {
-  const configured = String(env.VITE_RAG_USER_ID || env.VITE_KNOWLEDGE_DEV_USER_ID || '').trim()
-  if (configured) return configured
-  // RAG's QA tables store user_id as UUID. Keep an explicit UUID fallback for
-  // local development when Core authentication is not running.
-  if (!userIDPromise) userIDPromise = getCurrentUser().then((user) => user.id).catch(() => '00000000-0000-0000-0000-000000000001')
+  if (!userIDPromise) {
+    userIDPromise = getCurrentUser().then((user) => {
+      const userID = String(user?.id || '').trim()
+      if (!isUserID(userID)) throw new Error('authenticated user identity is unavailable')
+      return userID
+    }).catch((error) => {
+      // A failed identity lookup must never poison the cache or turn into a
+      // search request made as a different user.
+      userIDPromise = null
+      throw error
+    })
+  }
   return userIDPromise
 }
 

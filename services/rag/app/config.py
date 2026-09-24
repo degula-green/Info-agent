@@ -201,6 +201,7 @@ class Settings:
     redis_batch_size: int = _int("RAG_REDIS_BATCH_SIZE", 10)
     redis_max_retries: int = _int("RAG_REDIS_MAX_RETRIES", 3)
     redis_claim_idle_ms: int = _int("RAG_REDIS_CLAIM_IDLE_MS", 60000)
+    redis_connect_timeout_seconds: float = _float("RAG_REDIS_CONNECT_TIMEOUT_SECONDS", 5.0)
 
     # QA and optional reranking providers.
     qa_api_base_url: str = _text("QA_API_BASE_URL")
