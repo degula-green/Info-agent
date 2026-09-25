@@ -3,10 +3,12 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 from app.application.ports import ProcessingInput
 from app.application.processing.chunking import build_chunks
 from app.application.processing.preprocessor import DocumentPreprocessor, ProcessingError
+from app.application.processing.vectorization import vectorize_chunks, vectorization_report
 from app.application.worker import RAGEventHandler
 from app.application.ports import ProcessingOutput
 from app.domain.models import AttachmentContext, CanonicalBlock, ParsedDocument
@@ -116,6 +118,36 @@ class ProcessingTests(unittest.TestCase):
         self.assertEqual(len(chunks), 1)
         self.assertFalse(chunks[0].rag_eligible)
         self.assertEqual(chunks[0].auth_object_key, "attachment_meta:att-3")
+
+    def test_vectorization_report_separates_intentional_skips_from_loss(self) -> None:
+        def chunk(*, eligible=True, content="text", vectorized=False):
+            return SimpleNamespace(rag_eligible=eligible, content=content, vectorized=vectorized)
+
+        report = vectorization_report([
+            chunk(vectorized=True),
+            chunk(eligible=False),
+            chunk(content="   "),
+            chunk(),  # eligible, non-empty, no vector: the only real omission
+        ])
+        self.assertEqual(report.total, 4)
+        self.assertEqual(report.vectorized, 1)
+        self.assertEqual(report.skipped_ineligible, 1)
+        self.assertEqual(report.skipped_empty, 1)
+        self.assertEqual(report.omitted, 1)
+        self.assertEqual(report.skipped, 3)
+        self.assertEqual(
+            report.reasons(),
+            {"ineligible": 1, "empty_content": 1, "embedding_not_attempted": 1},
+        )
+
+    def test_vectorize_chunks_warns_when_it_embeds_nothing(self) -> None:
+        chunks = build_chunks(
+            ParsedDocument("", [], "fixture", "1"),
+            AttachmentContext(attachment_id="att-5", file_name="a.pdf", mime_type="application/pdf", part_kind="attachment_metadata"),
+        )
+        with self.assertLogs("rag.vectorize", level="WARNING") as captured:
+            self.assertEqual(vectorize_chunks(chunks, HashEmbeddingProvider(dimensions=1536)), chunks)
+        self.assertIn("no chunk was vectorized", "\n".join(captured.output))
 
     def test_quality_review_does_not_index_replacement_text(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

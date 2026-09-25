@@ -28,6 +28,24 @@ def _uuid(value: str | None, *fallback: Any) -> str:
         return _stable_uuid(*(fallback or (value,)))
 
 
+def _optional_uuid(value: Any) -> str | None:
+    """Normalize a UUID field that arrives from an event or HTTP envelope.
+
+    Private (personal) knowledge belongs to no organization, and Knowledge
+    publishes that as ``organization_id: ""`` — the key is present and empty,
+    not absent. PostgreSQL rejects an empty string cast to uuid
+    ("invalid input syntax for type uuid"), and these values go straight into
+    ``%s::uuid``, so the blank case has to become NULL here. Every
+    organization_id column in this schema is nullable, so NULL is the correct
+    representation and is what the context path already produces via
+    ``models._optional_text``.
+    """
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
 def _memory_plan(context: AttachmentContext, chunks: list[ChunkRecord], facts: list[FactCandidate], routes: list[SourceRouteCandidate] | None = None, processing_status: str = "ready", processing_error: dict[str, Any] | None = None) -> dict[str, Any]:
     knowledge_item_id = _uuid(context.knowledge_item_id or context.attachment_id, "item", context.knowledge_item_id or context.attachment_id)
     knowledge_base_id = _uuid(context.knowledge_base_id, "kb", context.knowledge_base_id or knowledge_item_id)
@@ -237,7 +255,7 @@ class PostgresRagRepository:
                     ON CONFLICT (source_event_id) DO UPDATE
                       SET payload_hash={self.schema}.processing_jobs.payload_hash
                     RETURNING id::text,payload_hash""",
-                    (event_id, str(envelope.get("event_type") or ""), payload_hash, envelope.get("organization_id"), knowledge_item_id, int(payload.get("content_version") or 1), int(payload.get("acl_version") or 0), job_type),
+                    (event_id, str(envelope.get("event_type") or ""), payload_hash, _optional_uuid(envelope.get("organization_id")), knowledge_item_id, int(payload.get("content_version") or 1), int(payload.get("acl_version") or 0), job_type),
                 )
                 row = cursor.fetchone()
         if row and str(row[1]) != payload_hash:
@@ -499,7 +517,7 @@ class PostgresRagRepository:
                     (id,aggregate_type,aggregate_id,event_type,event_version,schema_version,organization_id,trace_id,payload)
                     VALUES (%s::uuid,%s,%s::uuid,%s,%s,%s,%s::uuid,%s,%s::jsonb)
                     ON CONFLICT DO NOTHING""",
-                    (event_id, aggregate_type, aggregate_id, event_type, event_version, int(envelope.get("schema_version") or 1), envelope.get("organization_id"), str(envelope.get("trace_id") or ""), json.dumps(envelope.get("payload") or {}, ensure_ascii=False)),
+                    (event_id, aggregate_type, aggregate_id, event_type, event_version, int(envelope.get("schema_version") or 1), _optional_uuid(envelope.get("organization_id")), str(envelope.get("trace_id") or ""), json.dumps(envelope.get("payload") or {}, ensure_ascii=False)),
                 )
         return event_id
 

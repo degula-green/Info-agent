@@ -187,6 +187,11 @@ def _common_filters(request: SearchRequest) -> list[dict[str, Any]]:
         source_should.append({"terms": {"knowledge_item_id": list(request.source_knowledge_item_ids)}})
     if source_should:
         filters.append({"bool": {"should": source_should, "minimum_should_match": 1}})
+    if request.source_chunk_ids:
+        # Branch-T scope: the Chunk ids the tree navigated to. This is a plain
+        # AND filter, deliberately not folded into source_should above, so a
+        # tree scope can never be widened by a sibling attachment/item clause.
+        filters.append({"terms": {"chunk_id": list(request.source_chunk_ids)}})
     return filters
 
 

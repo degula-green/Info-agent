@@ -4,6 +4,8 @@ node_modules/
 dist/
 __pycache__/
 *.pyc
+# Retrieval evaluation artifacts: derived from real facts and chunk text.
+.eval/
 .venv/
 .deps/
 .deps311/

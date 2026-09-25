@@ -201,6 +201,13 @@ class Settings:
     redis_batch_size: int = _int("RAG_REDIS_BATCH_SIZE", 10)
     redis_max_retries: int = _int("RAG_REDIS_MAX_RETRIES", 3)
     redis_claim_idle_ms: int = _int("RAG_REDIS_CLAIM_IDLE_MS", 60000)
+    redis_connect_timeout_seconds: float = _float("RAG_REDIS_CONNECT_TIMEOUT_SECONDS", 5.0)
+    # Bounds the pending-entry sweep: XAUTOCLAIM pages must be followed by their
+    # `next_start_id` until it returns 0-0, so a deep PEL costs several round
+    # trips per iteration. Capping the rounds keeps one stuck entry from
+    # monopolising the loop while still reaching entries past the first page.
+    redis_claim_max_rounds: int = _int("RAG_REDIS_CLAIM_MAX_ROUNDS", 8)
+    redis_dlq_maxlen: int = _int("RAG_REDIS_DLQ_MAXLEN", 10000)
 
     # QA and optional reranking providers.
     qa_api_base_url: str = _text("QA_API_BASE_URL")
@@ -234,6 +241,12 @@ class Settings:
     rrf_vector_weight: float = _float("RAG_RRF_VECTOR_WEIGHT", 0.5)
     final_top_k: int = _int("RAG_FINAL_TOP_K", 8)
     max_chunks_per_item: int = _int("RAG_MAX_CHUNKS_PER_ITEM", 2)
+    # The tree defines a candidate set (branch T) and the unscoped Chunk search
+    # always runs alongside it (branch G). These weights are the RRF votes that
+    # express "prefer the navigated branch" without ever excluding branch G, so
+    # a navigation miss cannot drop the answer.
+    tree_branch_weight: float = _float("RAG_TREE_BRANCH_WEIGHT", 1.0)
+    global_branch_weight: float = _float("RAG_GLOBAL_BRANCH_WEIGHT", 0.5)
     query_rewrite_enabled: bool = _bool("RAG_QUERY_REWRITE_ENABLED", False)
     query_rewrite_max: int = _int("RAG_QUERY_REWRITE_MAX", 1)
     highlight_final_only: bool = _bool("RAG_HIGHLIGHT_FINAL_ONLY", True)
@@ -258,6 +271,21 @@ class Settings:
     otel_enabled: bool = _bool("RAG_OTEL_ENABLED", False)
     otel_exporter_otlp_endpoint: str = _text("RAG_OTEL_EXPORTER_OTLP_ENDPOINT")
     metrics_enabled: bool = _bool("RAG_METRICS_ENABLED", True)
+
+    @property
+    def redis_dlq_stream_name(self) -> str:
+        """Effective DLQ stream, defaulting to ``<inbound stream>.dlq``.
+
+        Left unset, the dead-letter path is inert: an entry that always fails
+        keeps its position at the head of the consumer group's PEL and is
+        redelivered on every sweep, which is exactly the "consumption is stuck"
+        symptom. Deriving the name from the inbound stream enables the path
+        without requiring a new variable, and puts the dead letters next to the
+        stream they came from.
+        """
+        if self.redis_dlq_stream:
+            return self.redis_dlq_stream
+        return f"{self.redis_inbound_stream}.dlq" if self.redis_inbound_stream else ""
 
     @property
     def elasticsearch_index(self) -> str:

@@ -1,14 +1,16 @@
 from __future__ import annotations
 
+import logging
 import uuid
 from dataclasses import replace
 from datetime import datetime, timezone
 from typing import Any
 
+from app.application.memory.pipeline import MemoryPipeline
 from app.application.ports import ProcessingInput, ProcessingOutput
 from app.application.processing.chunking import build_chunks
 from app.application.processing.preprocessor import DocumentPreprocessor
-from app.application.memory.pipeline import MemoryPipeline
+from app.application.processing.vectorization import vectorization_report
 from app.config import settings
 from app.domain.models import AttachmentContext, ParsedDocument
 from app.infrastructure.embedding.client import EmbeddingClient
@@ -20,6 +22,9 @@ from app.infrastructure.module2.knowledge_client import Module2KnowledgeClient
 from app.infrastructure.module2.rag_callback import KnowledgeRAGCallbackClient
 from app.infrastructure.persistence.repository import InMemoryRagRepository, PostgresRagRepository
 from app.infrastructure.storage.artifacts import build_artifact_store
+
+
+logger = logging.getLogger("rag.worker")
 
 
 class SourceMetadataError(ValueError):
@@ -70,6 +75,9 @@ class RAGEventHandler:
             if not contexts:
                 raise RuntimeError("event contained no processable attachment or content")
             total = 0
+            vectorized_total = 0
+            skipped_total = 0
+            skip_reasons: dict[str, int] = {}
             memory_completed = False
             fact_ids: set[str] = set()
             tree_ids: set[str] = set()
@@ -118,6 +126,21 @@ class RAGEventHandler:
                         content_version=context.content_version,
                     )
                 total += self.indexer.index_chunks(output.chunks)
+                # A chunk that reaches the index without a vector is still
+                # findable by BM25 and silently invisible to kNN. Record the
+                # reason per chunk so "recall dropped" is traceable to a count
+                # rather than to an absence of logs.
+                report = vectorization_report(output.chunks)
+                vectorized_total += report.vectorized
+                skipped_total += report.skipped
+                for reason, count in report.reasons().items():
+                    if count:
+                        skip_reasons[reason] = skip_reasons.get(reason, 0) + count
+                if report.omitted:
+                    logger.warning(
+                        "chunks left unvectorized although eligible: job_id=%s attachment_id=%s omitted=%d of %d",
+                        job_id, context.attachment_id, report.omitted, report.total,
+                    )
                 self.repository.upsert_index_record(
                     knowledge_item_id=context.knowledge_item_id or context.attachment_id,
                     organization_id=context.organization_id,
@@ -140,8 +163,13 @@ class RAGEventHandler:
                     tree_ids.update(str(row.get("tree_id")) for row in memory_graph.fact_projections if row.get("tree_id"))
                     node_ids.update(str(row.get("node_id")) for row in memory_graph.nodes if row.get("node_id"))
             self.repository.update_processing_job(job_id, status="succeeded", current_stage="memory_index" if memory_completed else "index", finished_at=_now())
-            self._publish_callback(envelope, "succeeded", job_id, {"chunk_count": total, "fact_count": len(fact_ids), "tree_count": len(tree_ids), "node_count": len(node_ids), "retryable": False})
-            self._publish_result(envelope, "processing.completed", payload, {"processing_job_id": job_id, "chunk_count": total, "parsed_artifact_ref": output.parsed.artifact_ref if 'output' in locals() else None})
+            self._publish_callback(envelope, "succeeded", job_id, {"chunk_count": total, "fact_count": len(fact_ids), "tree_count": len(tree_ids), "node_count": len(node_ids), "vectorized_chunk_count": vectorized_total, "skipped_chunk_count": skipped_total, "skip_reasons": skip_reasons, "retryable": False})
+            if skipped_total:
+                logger.warning(
+                    "job_id=%s succeeded with partial vectorization: chunks=%d vectorized=%d skipped=%d reasons=%s",
+                    job_id, total, vectorized_total, skipped_total, skip_reasons,
+                )
+            self._publish_result(envelope, "processing.completed", payload, {"processing_job_id": job_id, "chunk_count": total, "vectorized_chunk_count": vectorized_total, "skipped_chunk_count": skipped_total, "skip_reasons": skip_reasons, "parsed_artifact_ref": output.parsed.artifact_ref if 'output' in locals() else None})
         except Exception as exc:
             for failed_context in locals().get("contexts", []):
                 try:
@@ -205,7 +233,12 @@ class RAGEventHandler:
             "source_event_id": source.get("event_id"), "rag_job_id": job_id,
             "content_version": payload.get("content_version", 1), "acl_version": payload.get("acl_version", 0),
             "status": status, "occurred_at": occurred_at,
-            "result": {key: value for key, value in extra.items() if key in {"chunk_count", "fact_count", "tree_count", "node_count"}},
+            # Knowledge binds this as a free-form object and stores it as JSONB,
+            # so the skip breakdown rides along without a schema change on
+            # either side. `vectorized_chunk_count` is the field that makes
+            # "indexed but not searchable by vector" visible in the item's
+            # own RAG result instead of only in the worker log.
+            "result": {key: value for key, value in extra.items() if key in {"chunk_count", "fact_count", "tree_count", "node_count", "vectorized_chunk_count", "skipped_chunk_count", "skip_reasons"}},
             "error_code": extra.get("error_code"), "retryable": bool(extra.get("retryable", False)),
         }
         callback_event_id = str(uuid.uuid5(

@@ -143,22 +143,30 @@ class MemoryTreeTests(unittest.TestCase):
         class FakeClient:
             def __init__(self):
                 self.operations = []
+                self.requests = []
 
             def bulk(self, *, operations, refresh):
                 self.operations = operations
                 return {"errors": False}
 
             def search(self, **kwargs):
+                self.requests.append(kwargs)
                 filters = kwargs["query"]["bool"]["filter"]
-                terms = {next(iter(item["term"])): next(iter(item["term"].values())) for item in filters if "term" in item}
+                terms: dict = {}
+                for item in filters:
+                    terms.update(item.get("term") or {})
+                    terms.update(item.get("terms") or {})
+                parents = terms.get("parent_id") or []
                 if "facts" in kwargs["index"]:
                     source = {"fact_id": "f1", "fact_text": "完成验收", "node_id": "leaf", "tree_type": "session"}
                 elif terms.get("node_type") == "root":
-                    source = {"node_id": "root", "tree_id": "tree", "tree_type": "session", "subject_key": "s", "node_type": "root", "summary": "项目"}
-                elif terms.get("parent_id") == "root":
-                    source = {"node_id": "group", "tree_id": "tree", "tree_type": "session", "node_type": "internal", "summary": "2026-09"}
+                    source = {"node_id": "root", "tree_id": "tree", "tree_type": "session", "subject_key": "s", "node_type": "root", "parent_id": None, "summary": "项目"}
+                elif "root" in parents:
+                    source = {"node_id": "group", "tree_id": "tree", "tree_type": "session", "node_type": "internal", "parent_id": "root", "summary": "2026-09"}
+                elif "group" in parents:
+                    source = {"node_id": "leaf", "tree_id": "tree", "tree_type": "session", "node_type": "leaf", "parent_id": "group", "summary": "验收"}
                 else:
-                    source = {"node_id": "leaf", "tree_id": "tree", "tree_type": "session", "node_type": "leaf", "summary": "验收"}
+                    return {"hits": {"hits": []}}
                 return {"hits": {"hits": [{"_score": 1.0, "_source": source}]}}
 
         client = FakeClient()
@@ -169,6 +177,11 @@ class MemoryTreeTests(unittest.TestCase):
         rows = store.search_tree(TreeSearchRequest(query="验收", user_id="u", organization_id=context().organization_id, knowledge_base_id=context().knowledge_base_id or ""), None)
         self.assertEqual([part["node_type"] for part in rows[0]["path"]], ["root", "internal", "leaf"])
         self.assertEqual(rows[0]["fact"]["fact_id"], "f1")
+        # The frontier is resolved one request per level instead of one request
+        # per parent at every level, and a fact-less leaf no longer emits a row
+        # with no fact behind it.
+        self.assertEqual(len(client.requests), 4)
+        self.assertTrue(all(row["fact"] for row in rows))
 
 
 if __name__ == "__main__":
