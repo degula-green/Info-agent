@@ -30,7 +30,9 @@ func TestHealth(t *testing.T) {
 	request.Header.Set("X-Request-ID", "req-health")
 	request.Header.Set("X-Trace-ID", "trace-health")
 
-	NewRouter().ServeHTTP(recorder, request)
+	// Build the application from an explicit config so this assertion never
+	// depends on whichever .env happens to sit next to the package under test.
+	NewRouterWithApp(newApp(config.Config{})).ServeHTTP(recorder, request)
 
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("expected status %d, got %d", http.StatusOK, recorder.Code)

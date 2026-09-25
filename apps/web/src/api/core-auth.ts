@@ -85,6 +85,11 @@ function parseFreshRefreshResult(raw: string): RefreshEnvelope | null {
 function requestID() { return globalThis.crypto?.randomUUID?.() || `web-${Date.now()}-${Math.random().toString(16).slice(2)}` }
 export function getAccessToken() { try { return localStorage.getItem('access_token') || sessionStorage.getItem('access_token') || '' } catch { return '' } }
 export function saveAccessToken(token: string) { try { sessionStorage.setItem('access_token', token); localStorage.setItem('access_token', token) } catch { /* ignore unavailable storage */ } }
+export function clearAccessToken() { try { sessionStorage.removeItem('access_token'); localStorage.removeItem('access_token') } catch { /* ignore */ } }
+// Set by main.ts so a dead Core session routes the user to the login page.
+let unauthorizedHandler: (() => void) | null = null
+export function setCoreUnauthorizedHandler(handler: () => void) { unauthorizedHandler = handler }
+function notifyUnauthorized() { try { clearAccessToken(); unauthorizedHandler?.() } catch { /* ignore */ } }
 async function request<T>(path: string, init: RequestInit = {}, retried = false): Promise<T> {
   const headers = new Headers(init.headers); headers.set('Accept', 'application/json'); headers.set('Content-Type', 'application/json'); headers.set('X-Request-ID', requestID()); headers.set('X-Trace-ID', requestID())
   // Core's authenticated endpoints use the access token persisted after login.
@@ -98,7 +103,7 @@ async function request<T>(path: string, init: RequestInit = {}, retried = false)
   }
   const response = await fetch(`${baseURL}${path}`, { ...init, credentials: 'include', headers })
   const raw = await response.text(); let body: any = null; if (raw) { try { body = JSON.parse(raw) } catch { body = raw } }
-  if (response.status === 401 && !retried && path !== '/auth/refresh' && path !== '/auth/login' && path !== '/auth/register') { try { const token = await refresh(); if (token?.access_token) return request<T>(path, init, true) } catch { /* fall through with the original auth error */ } }
+  if (response.status === 401 && !retried && path !== '/auth/refresh' && path !== '/auth/login' && path !== '/auth/register') { try { const token = await refresh(); if (token?.access_token) return request<T>(path, init, true) } catch { notifyUnauthorized() } }
   if (!response.ok) { const e = body && typeof body === 'object' ? body : {}; throw new CoreAuthError(e.message || `Core request failed (${response.status})`, e.code || 'request_failed', response.status, Boolean(e.retryable)) }
   return body as T
 }

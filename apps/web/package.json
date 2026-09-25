@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "test": "node --experimental-strip-types --test tests/*.test.ts",
+    "test": "node --experimental-strip-types --import ./tests/alias-hooks.mjs --test tests/*.test.ts",
     "build": "vue-tsc --noEmit && vite build",
     "preview": "vite preview"
   },

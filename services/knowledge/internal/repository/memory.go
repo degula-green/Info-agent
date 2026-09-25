@@ -2855,6 +2855,34 @@ func (s *MemoryStore) ListAttachments(_ context.Context, conversationID string) 
 	return out, nil
 }
 
+// ListSharedPrivateResources resolves the explicit share scope of a private
+func (s *MemoryStore) ListSharedPrivateResources(_ context.Context, conversationID, organizationID string) (SharedPrivateResources, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := SharedPrivateResources{Messages: map[string]struct{}{}, Attachments: map[string]struct{}{}}
+	organizationID = strings.TrimSpace(organizationID)
+	if organizationID == "" {
+		return out, nil
+	}
+	for _, item := range s.knowledgeItems {
+		if item.SourceType != "shared_private_item" || item.OrganizationID != organizationID || item.ConversationID != conversationID {
+			continue
+		}
+		if item.SourceMessageID != "" && item.SourceAttachmentID == "" {
+			out.Messages[item.SourceMessageID] = struct{}{}
+		}
+		if item.SourceAttachmentID != "" {
+			out.Attachments[item.SourceAttachmentID] = struct{}{}
+			if item.SourceMessageID != "" {
+				// The parent message stays visible so the shared attachment has
+				// sender/time metadata, but it only carries the shared file.
+				out.Messages[item.SourceMessageID] = struct{}{}
+			}
+		}
+	}
+	return out, nil
+}
+
 func (s *MemoryStore) ListConversationTimeline(_ context.Context, conversationID string, limit int, before *domain.ConversationTimelineCursor) ([]domain.ConversationTimelineItem, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()

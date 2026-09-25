@@ -1672,6 +1672,46 @@ func containsIdentity(values []domain.ContactIdentity, id string) bool {
 	return false
 }
 
+// SharedPrivateView is the authorized share scope used by the shared-library
+// detail endpoints. It is only non-nil when the conversation is private and
+// the viewer is a member of an organization that has explicitly shared
+// resources from it.
+type SharedPrivateView struct {
+	OrganizationID string
+	Scope          repository.SharedPrivateResources
+}
+
+// ResolveSharedPrivateView authorizes the "shared" read scope. The share
+// records themselves are the permission boundary: an organization that never
+// received shared items cannot resolve a view.
+func (s *Service) ResolveSharedPrivateView(ctx context.Context, userID, conversationID, claimedOrganizationID string, authorization ...string) (*SharedPrivateView, error) {
+	organizationID, err := s.ResolveCurrentOrganization(ctx, userID, claimedOrganizationID, firstAuthorization(authorization))
+	if err != nil {
+		return nil, err
+	}
+	if organizationID == "" {
+		return nil, apperror.Clone(apperror.ErrForbidden)
+	}
+	if err := s.requireOrganizationMember(ctx, userID, organizationID, authorization...); err != nil {
+		return nil, err
+	}
+	conversation, err := s.Repo.GetConversation(ctx, conversationID)
+	if err != nil {
+		return nil, err
+	}
+	if conversation.ConversationType != "private" {
+		return nil, apperror.New("invalid_request", "shared scope is only available for private conversations", 400, false)
+	}
+	scope, err := s.Repo.ListSharedPrivateResources(ctx, conversationID, organizationID)
+	if err != nil {
+		return nil, err
+	}
+	if len(scope.Messages) == 0 && len(scope.Attachments) == 0 {
+		return nil, apperror.Clone(apperror.ErrForbidden)
+	}
+	return &SharedPrivateView{OrganizationID: organizationID, Scope: scope}, nil
+}
+
 func (s *Service) GetConversation(ctx context.Context, userID, id string) (*domain.ConversationIngestion, error) {
 	conversation, err := s.Repo.GetConversation(ctx, id)
 	if err != nil {
