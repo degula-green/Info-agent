@@ -1,4 +1,5 @@
 import { refresh as refreshCoreToken } from './core-auth.ts'
+import { resolveOrganizationId } from '@/utils/info-search-scope'
 
 export class ApiError extends Error {
   code: string
@@ -64,6 +65,32 @@ function accessToken() {
   }
 }
 
+// Single shared sign-out path: clear every persisted token and route the user
+// to the login page. Used by any API layer that hits a hard 401 after a failed
+// refresh so the app never keeps polling while unauthenticated.
+let signOutHandler: (() => void) | null = null
+export function setUnauthorizedHandler(handler: () => void) { signOutHandler = handler }
+function forceSignOut() {
+  try {
+    sessionStorage.removeItem('access_token')
+    localStorage.removeItem('access_token')
+  } catch { /* storage unavailable */ }
+  if (signOutHandler) signOutHandler()
+}
+
+let organizationHeaderID: string | undefined
+let organizationHeaderPromise: Promise<string | undefined> | null = null
+function organizationHeader() {
+  if (organizationHeaderID) return Promise.resolve(organizationHeaderID)
+  if (!organizationHeaderPromise) {
+    organizationHeaderPromise = resolveOrganizationId().then((id) => {
+      organizationHeaderID = id
+      return id
+    }).catch(() => undefined).finally(() => { organizationHeaderPromise = null })
+  }
+  return organizationHeaderPromise
+}
+
 export function knowledgeHeaders(initial?: HeadersInit, accept = 'application/json') {
   const headers = new Headers(initial)
   headers.set('Accept', accept)
@@ -71,10 +98,7 @@ export function knowledgeHeaders(initial?: HeadersInit, accept = 'application/js
   if (!headers.has('X-Trace-ID')) headers.set('X-Trace-ID', requestIdentifier())
   const token = accessToken()
   if (token) headers.set('Authorization', `Bearer ${token}`)
-  else {
-    headers.set('X-User-ID', appEnv.VITE_KNOWLEDGE_DEV_USER_ID || 'dev-user')
-    headers.set('X-Organization-ID', appEnv.VITE_KNOWLEDGE_DEV_ORGANIZATION_ID || 'dev-org')
-  }
+
   return headers
 }
 
@@ -89,6 +113,8 @@ function requestIdentifier() {
 
 async function performKnowledgeRequest<T>(path: string, init: RequestInit, retried: boolean): Promise<T> {
   const headers = knowledgeHeaders(init.headers)
+  const organizationID = await organizationHeader()
+  if (organizationID && !headers.has('X-Organization-ID')) headers.set('X-Organization-ID', organizationID)
   if (init.body && !(init.body instanceof FormData) && !headers.has('Content-Type')) headers.set('Content-Type', 'application/json')
   const response = await enqueueRequest(() => fetch(`${baseURL}${path.startsWith('/') ? path : `/${path}`}`, { ...init, headers }))
   const raw = await response.text()
@@ -102,7 +128,10 @@ async function performKnowledgeRequest<T>(path: string, init: RequestInit, retri
         await refreshCoreToken()
         return performKnowledgeRequest<T>(path, init, true)
       } catch {
-        // Preserve the original Knowledge error when the Core session expired.
+        // The Core session is gone (refresh cookie expired or revoked). Clear
+        // stale tokens and send the user to the login page instead of silently
+        // continuing without authentication.
+        forceSignOut()
       }
     }
     const error = body && typeof body === 'object' ? body : {}

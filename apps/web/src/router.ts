@@ -30,7 +30,13 @@ const router = createRouter({
 
 router.beforeEach((to) => {
   const store = useAuthStore()
-  if (to.meta.requiresAuth && !store.isAuthenticated) return { name: 'login', query: { redirect: to.fullPath } }
+  // Pick up cross-tab logins/logouts and locally-detectable token expiry.
+  store.sync()
+  if (to.meta.requiresAuth && !store.isAuthenticated) {
+    // An expired or missing token must never keep a protected route mounted.
+    if (store.accessToken) store.clear()
+    return { name: 'login', query: { redirect: to.fullPath } }
+  }
   if ((to.name === 'login' || to.name === 'register') && store.isAuthenticated) return '/chat'
   return true
 })

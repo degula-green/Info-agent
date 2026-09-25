@@ -4,7 +4,7 @@
       <div class="wk-breadcrumb">
         <button type="button" @click="emit('back')">知识库</button>
         <t-icon name="chevron-right" />
-        <span>{{ sourceName(chat.source) }}</span>
+        <span>{{ sharedView ? '组织知识库 · 共享私聊' : sourceName(chat.source) }}</span>
         <t-icon name="chevron-right" />
         <span>{{ chat.name }}</span>
       </div>
@@ -15,15 +15,15 @@
           <p>{{ sourceName(chat.source) }} · {{ chat.isDirect ? '私聊' : `${chat.members} 位成员` }} · 最近同步 {{ chat.lastSync }}</p>
         </div>
         <span class="chat-status" :class="`chat-status--${chat.collectionStatus}`"><i />{{ statusLabel(chat.collectionStatus) }}</span>
-        <t-button variant="outline" :theme="chat.collectionStatus === 'collecting' ? 'warning' : 'primary'" :disabled="chat.collectionStatus === 'detached'" @click="emit('toggle', chat)">
+        <t-button v-if="!sharedView" variant="outline" :theme="chat.collectionStatus === 'collecting' ? 'warning' : 'primary'" :disabled="chat.collectionStatus === 'detached'" @click="emit('toggle', chat)">
           <template #icon><t-icon :name="chat.collectionStatus === 'detached' ? 'stop-circle' : chat.collectionStatus === 'collecting' ? 'pause-circle' : 'play-circle'" /></template>
           {{ chat.collectionStatus === 'detached' ? '已解除接入' : chat.collectionStatus === 'collecting' ? '停止采集' : chat.collectionStatus === 'missing' || chat.collectionStatus === 'paused' ? '继续采集' : '开始采集' }}
         </t-button>
-        <t-button v-if="chat.isDirect" variant="outline" theme="primary" :disabled="shareSelecting && !selectedCount" @click="shareConversation">
+        <t-button v-if="chat.isDirect && !sharedView" variant="outline" theme="primary" :disabled="shareSelecting && !selectedCount" @click="shareConversation">
           <template #icon><t-icon :name="shareSelecting ? 'check' : 'share'" /></template>
           {{ shareSelecting ? `共享已选（${selectedCount}）` : '选择内容并共享' }}
         </t-button>
-        <t-button v-if="chat.isDirect && shareSelecting" variant="text" @click="cancelShareSelection">取消选择</t-button>
+        <t-button v-if="chat.isDirect && !sharedView && shareSelecting" variant="text" @click="cancelShareSelection">取消选择</t-button>
       </div>
     </div>
 
@@ -60,7 +60,7 @@
         >
           <span class="conversation-cell conversation-cell--name" data-label="名称">
             <input
-              v-if="chat.isDirect && shareSelecting"
+              v-if="chat.isDirect && !sharedView && shareSelecting"
               class="share-selection"
               type="checkbox"
               :checked="isSelected(item)"
@@ -204,7 +204,7 @@ type ConversationItem = {
   file?: InfoFile
 }
 
-const props = defineProps<{ chat: InfoChat }>()
+const props = defineProps<{ chat: InfoChat; sharedView?: boolean }>()
 const emit = defineEmits<{
   (event: 'back'): void
   (event: 'toggle', chat: InfoChat): void
@@ -295,7 +295,7 @@ function cancelShareSelection() {
 }
 
 function shareConversation() {
-  if (!chat.value.isDirect) return
+  if (!chat.value.isDirect || props.sharedView) return
   if (!shareSelecting.value) {
     shareSelecting.value = true
     selectedMessageIDs.value = []

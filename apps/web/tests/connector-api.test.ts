@@ -71,7 +71,10 @@ test('connector, conversation, and attachment calls use the Knowledge contract',
   await getConversationDetail('c1')
   assert.equal(await (await getKnowledgeAttachmentContent('a1', true)).text(), 'attachment')
 
-  assert.ok(calls.every((call) => call.url.startsWith('/api/knowledge/v1/')))
+  // A Knowledge request may first resolve the current organization through Core
+  // so it can send X-Organization-ID; every other call stays on the Knowledge
+  // contract.
+  assert.ok(calls.every((call) => call.url.startsWith('/api/knowledge/v1/') || call.url === '/api/core/organizations/current'))
   assert.ok(calls.every((call) => call.headers.get('Authorization') === 'Bearer jwt-token'))
   assert.ok(calls.every((call) => call.headers.get('X-Request-ID')))
   assert.ok(calls.every((call) => call.headers.get('X-Trace-ID')))
@@ -126,14 +129,19 @@ test('bounds concurrent detail loads to avoid a pending-request burst', async ()
     peak = Math.max(peak, active)
     await new Promise((resolve) => setTimeout(resolve, 15))
     active -= 1
-    if (/\/conversations\/c[12]$/.test(url)) return json(conversation(url.endsWith('/c1') ? 'c1' : 'c2'))
+    if (/\/conversations\/c[12](\?|$)/.test(url)) return json(conversation(url.includes('/c1') ? 'c1' : 'c2'))
+    if (url.includes('/organizations/current')) return json({ id: 'org-1', organization_id: 'org-1', name: 'org-1' })
     if (url.includes('/messages')) return json({ items: [] })
     if (url.includes('/attachments')) return json({ items: [] })
     return json({ items: [] })
   }
   await Promise.all([getConversationDetail('c1'), getConversationDetail('c2')])
   assert.equal(peak <= 2, true, `request peak was ${peak}`)
-  assert.equal(calls, 4)
+  // One shared organization lookup, then a conversation + timeline request per
+  // conversation: the timeline endpoint now returns messages and attachments
+  // together, so a detail load no longer issues separate messages/attachments
+  // requests.
+  assert.equal(calls, 5)
 })
 
 test('contact detail and access request calls use profile, facts, and scoped requests', async () => {

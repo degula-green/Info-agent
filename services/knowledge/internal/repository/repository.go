@@ -507,6 +507,13 @@ type PrivateShareResult struct {
 	ShareAlreadyExists    bool   `json:"share_already_exists,omitempty"`
 }
 
+// SharedPrivateResources is the explicit share scope of one private
+// conversation inside one organization.
+type SharedPrivateResources struct {
+	Messages    map[string]struct{}
+	Attachments map[string]struct{}
+}
+
 type PrivateAccessRequestInput struct {
 	RequesterUserID  string    `json:"-"`
 	ShareReferenceID string    `json:"share_reference_id"`
@@ -655,6 +662,11 @@ type Repository interface {
 	ListMessages(ctx context.Context, conversationID string, limit int, before string) ([]domain.Message, error)
 	ListAttachments(ctx context.Context, conversationID string) ([]domain.Attachment, error)
 	ListConversationTimeline(ctx context.Context, conversationID string, limit int, before *domain.ConversationTimelineCursor) ([]domain.ConversationTimelineItem, error)
+	// SharedPrivateResources returns the message/attachment IDs that were
+	// explicitly shared to an organization for a private conversation. The
+	// shared-view endpoints use it so a shared library card never exposes the
+	// full private timeline.
+	ListSharedPrivateResources(ctx context.Context, conversationID, organizationID string) (SharedPrivateResources, error)
 	GetOutbox(ctx context.Context, limit int) ([]domain.OutboxEvent, error)
 	MarkOutboxPublished(ctx context.Context, id string, publishedAt time.Time) error
 	MarkOutboxFailed(ctx context.Context, id, failure string, availableAt time.Time) error

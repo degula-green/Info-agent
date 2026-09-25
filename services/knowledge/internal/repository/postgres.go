@@ -1463,7 +1463,10 @@ func (s *PostgresStore) SharePrivateResources(ctx context.Context, input Private
 		}
 		sharedID := uuid.NewString()
 		sharedAt := now
-		_, err = tx.Exec(ctx, `INSERT INTO knowledge.knowledge_items (id,knowledge_base_id,knowledge_scope,access_scope,owner_user_id,organization_id,conversation_ingestion_id,source_type,source_message_id,source_attachment_id,source_private_item_id,share_request_id,share_batch_id,shared_by_user_id,shared_at,content_type,content_ref,original_content_ref,content_hash,content_version,content_visibility,original_access_required,security_status,sensitivity,content_saved,ownership_ready,security_ready,permission_ready,acl_version,acl_sync_status,processing_status,lifecycle_status) VALUES ($1,$2,'organization','organization_members',NULL,$3,$4,'shared_private_item',NULLIF($5,''),NULLIF($6,''),$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,'not_required',COALESCE(NULLIF($19,''),'internal'),TRUE,TRUE,TRUE,FALSE,0,'pending','ready','active')`, sharedID, baseID, input.OrganizationID, input.PrivateConversationID, sourceMessageID, sourceAttachmentID, sourceItemID, input.RequestID, req.ShareBatchID, input.RequesterUserID, sharedAt, contentType, contentRef, originalRef, contentHash, version, contentVisibility, originalAccess, sensitivity)
+		// source_* columns are uuid. NULLIF($n,'') resolves to text, so the
+		// empty-string guard needs an explicit cast or PostgreSQL rejects the
+		// insert with SQLSTATE 42804.
+		_, err = tx.Exec(ctx, `INSERT INTO knowledge.knowledge_items (id,knowledge_base_id,knowledge_scope,access_scope,owner_user_id,organization_id,conversation_ingestion_id,source_type,source_message_id,source_attachment_id,source_private_item_id,share_request_id,share_batch_id,shared_by_user_id,shared_at,content_type,content_ref,original_content_ref,content_hash,content_version,content_visibility,original_access_required,security_status,sensitivity,content_saved,ownership_ready,security_ready,permission_ready,acl_version,acl_sync_status,processing_status,lifecycle_status) VALUES ($1,$2,'organization','organization_members',NULL,$3,$4,'shared_private_item',NULLIF($5,'')::uuid,NULLIF($6,'')::uuid,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,'not_required',COALESCE(NULLIF($19,''),'internal'),TRUE,TRUE,TRUE,FALSE,0,'pending','ready','active')`, sharedID, baseID, input.OrganizationID, input.PrivateConversationID, sourceMessageID, sourceAttachmentID, sourceItemID, input.RequestID, req.ShareBatchID, input.RequesterUserID, sharedAt, contentType, contentRef, originalRef, contentHash, version, contentVisibility, originalAccess, sensitivity)
 		if err != nil {
 			return dbError(err)
 		}
@@ -2371,6 +2374,40 @@ func (s *PostgresStore) ListAttachments(ctx context.Context, conversationID stri
 		return nil, dbError(err)
 	}
 	return out, s.enrichAttachmentRAG(ctx, out)
+}
+
+// ListSharedPrivateResources resolves the explicit share scope of a private
+// conversation for one organization. Both maps are non-nil so callers can
+// filter without nil checks.
+func (s *PostgresStore) ListSharedPrivateResources(ctx context.Context, conversationID, organizationID string) (SharedPrivateResources, error) {
+	out := SharedPrivateResources{Messages: map[string]struct{}{}, Attachments: map[string]struct{}{}}
+	organizationID = strings.TrimSpace(organizationID)
+	if organizationID == "" {
+		return out, nil
+	}
+	rows, err := s.pool.Query(ctx, `SELECT COALESCE(ki.source_message_id::text,''),COALESCE(ki.source_attachment_id::text,'') FROM knowledge.knowledge_items ki WHERE ki.conversation_ingestion_id=$1 AND ki.source_type='shared_private_item' AND ki.organization_id=$2::uuid AND ki.lifecycle_status='active'`, conversationID, organizationID)
+	if err != nil {
+		return out, dbError(err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var messageID, attachmentID string
+		if err := rows.Scan(&messageID, &attachmentID); err != nil {
+			return out, dbError(err)
+		}
+		if messageID != "" && attachmentID == "" {
+			out.Messages[messageID] = struct{}{}
+		}
+		if attachmentID != "" {
+			out.Attachments[attachmentID] = struct{}{}
+			if messageID != "" {
+				// The parent message stays visible so the shared attachment has
+				// sender/time metadata, but it only carries the shared file.
+				out.Messages[messageID] = struct{}{}
+			}
+		}
+	}
+	return out, dbError(rows.Err())
 }
 
 func (s *PostgresStore) ListConversationTimeline(ctx context.Context, conversationID string, limit int, before *domain.ConversationTimelineCursor) ([]domain.ConversationTimelineItem, error) {

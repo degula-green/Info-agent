@@ -605,7 +605,13 @@ def upload_attachment(collector_id: str, attachment_id: str, path: Path, name: s
     request = urllib.request.Request(f"{base}/api/knowledge/v1/internal/collectors/{collector_id}/attachments", data=body, method="POST", headers={"Content-Type": f"multipart/form-data; boundary={boundary}", "X-Service-Token": token, "Accept": "application/json"})
     with urllib.request.urlopen(request, timeout=60) as response: return json.loads(response.read().decode() or "{}")
 
-def messages_after(db_instance: Any, chat_id: str, since: int, limit: int = 200) -> list[dict[str, Any]]:
+def messages_after(
+    db_instance: Any,
+    chat_id: str,
+    since: int,
+    limit: int = 200,
+    start_at: Any = None,
+) -> list[dict[str, Any]]:
     """Read an incremental page, tolerating a concurrently rewritten shard.
 
     WeChat may rewrite one encrypted message shard while the desktop client is
@@ -615,7 +621,14 @@ def messages_after(db_instance: Any, chat_id: str, since: int, limit: int = 200)
     cursor contract; the next poll will retry any rows that were not returned.
     """
     if not since:
-        return list(reversed(db_instance.get_messages(chat_id, limit=1000, offset=0)))
+        rows = list(reversed(db_instance.get_messages(chat_id, limit=1000, offset=0)))
+        # A new attachment has no cursor yet. Restrict that initial historical
+        # page to the requested start time; otherwise private-chat collection
+        # replays the entire database and appears to move ever earlier.
+        if start_at:
+            start = parse_time(start_at)
+            rows = [row for row in rows if parse_time(row.get("create_time")) >= start]
+        return rows
     try:
         return db_instance.get_new_messages(chat_id, since_seq=since, limit=limit)
     except Exception as first_error:
@@ -666,9 +679,8 @@ def collect_once() -> None:
                     continue
             try: since = int(str(collector.get("last_cursor") or "0"))
             except ValueError: since = checkpoints.get(collector_id, 0)
-            rows = messages_after(db, chat_id, since, limit=200)
             start_at = conversation.get("effective_start_at") or conversation.get("requested_start_at") or config.get("history_start_at")
-            if not since and start_at: rows = [row for row in rows if parse_time(row.get("create_time")) >= parse_time(start_at)]
+            rows = messages_after(db, chat_id, since, limit=200, start_at=start_at)
             # Reconcile media rows already ingested before the provider-aware
             # parser was introduced. WeChat stores forwarded files as type=57;
             # replaying only rows that now classify as media lets Knowledge

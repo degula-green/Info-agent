@@ -43,10 +43,7 @@ type App struct {
 }
 
 func NewRouter() *gin.Engine {
-	cfg := config.Load()
-	cfg.AllowDevAuth = true
-	cfg.JWTRequired = false
-	return NewRouterWithConfig(cfg)
+	return NewRouterWithConfig(config.Load())
 }
 
 func NewRouterWithConfig(cfg config.Config) *gin.Engine {
@@ -881,10 +878,17 @@ func registerUserRoutes(r *gin.Engine, app *App, prefix string) {
 	})
 	g.GET("/conversations/:conversation_id", func(c *gin.Context) {
 		p := principal(c)
-		out, err := app.Service.GetConversation(c, p.UserID, c.Param("conversation_id"))
+		conversationID := c.Param("conversation_id")
+		out, err := app.Service.GetConversation(c, p.UserID, conversationID)
 		if err != nil {
 			writeError(c, err)
 			return
+		}
+		if strings.TrimSpace(c.Query("scope")) == "shared" {
+			if view, viewErr := app.Service.ResolveSharedPrivateView(c, p.UserID, conversationID, c.GetHeader("X-Organization-ID"), c.GetHeader("Authorization")); viewErr == nil {
+				out.MessageCount = len(view.Scope.Messages)
+				out.AttachmentCount = len(view.Scope.Attachments)
+			}
 		}
 		c.JSON(http.StatusOK, publicConversationFromDomain(*out))
 	})
@@ -928,10 +932,25 @@ func registerUserRoutes(r *gin.Engine, app *App, prefix string) {
 			return
 		}
 		limit, _ := strconv.Atoi(c.DefaultQuery("limit", "100"))
-		out, err := app.Service.Repo.ListMessages(c, c.Param("conversation_id"), limit, c.Query("before"))
+		conversationID := c.Param("conversation_id")
+		out, err := app.Service.Repo.ListMessages(c, conversationID, limit, c.Query("before"))
 		if err != nil {
 			writeError(c, err)
 			return
+		}
+		if strings.TrimSpace(c.Query("scope")) == "shared" {
+			view, viewErr := app.Service.ResolveSharedPrivateView(c, p.UserID, conversationID, c.GetHeader("X-Organization-ID"), c.GetHeader("Authorization"))
+			if viewErr != nil {
+				writeError(c, viewErr)
+				return
+			}
+			filtered := make([]domain.Message, 0, len(out))
+			for _, message := range out {
+				if _, ok := view.Scope.Messages[message.ID]; ok {
+					filtered = append(filtered, message)
+				}
+			}
+			out = filtered
 		}
 		items := make([]publicMessage, 0, len(out))
 		for _, message := range out {
@@ -969,6 +988,28 @@ func registerUserRoutes(r *gin.Engine, app *App, prefix string) {
 			writeError(c, err)
 			return
 		}
+		if strings.TrimSpace(c.Query("scope")) == "shared" {
+			view, viewErr := app.Service.ResolveSharedPrivateView(c, p.UserID, conversationID, c.GetHeader("X-Organization-ID"), c.GetHeader("Authorization"))
+			if viewErr != nil {
+				writeError(c, viewErr)
+				return
+			}
+			filtered := make([]domain.ConversationTimelineItem, 0, len(out))
+			for _, item := range out {
+				if item.Message != nil {
+					if _, ok := view.Scope.Messages[item.Message.ID]; !ok {
+						continue
+					}
+				}
+				if item.Attachment != nil {
+					if _, ok := view.Scope.Attachments[item.Attachment.ID]; !ok {
+						continue
+					}
+				}
+				filtered = append(filtered, item)
+			}
+			out = filtered
+		}
 		hasMore := len(out) > limit
 		if hasMore {
 			out = out[:limit]
@@ -999,10 +1040,25 @@ func registerUserRoutes(r *gin.Engine, app *App, prefix string) {
 			writeError(c, err)
 			return
 		}
-		out, err := app.Service.Repo.ListAttachments(c, c.Param("conversation_id"))
+		conversationID := c.Param("conversation_id")
+		out, err := app.Service.Repo.ListAttachments(c, conversationID)
 		if err != nil {
 			writeError(c, err)
 			return
+		}
+		if strings.TrimSpace(c.Query("scope")) == "shared" {
+			view, viewErr := app.Service.ResolveSharedPrivateView(c, p.UserID, conversationID, c.GetHeader("X-Organization-ID"), c.GetHeader("Authorization"))
+			if viewErr != nil {
+				writeError(c, viewErr)
+				return
+			}
+			filtered := make([]domain.Attachment, 0, len(out))
+			for _, attachment := range out {
+				if _, ok := view.Scope.Attachments[attachment.ID]; ok {
+					filtered = append(filtered, attachment)
+				}
+			}
+			out = filtered
 		}
 		items := make([]publicAttachment, 0, len(out))
 		for _, attachment := range out {

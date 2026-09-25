@@ -278,7 +278,11 @@ function openItem(item: KnowledgeLibraryItemDTO) {
     return
   }
   if (item.conversation_id) {
-    void router.push({ path: `/knowledge/${item.platform || 'wechat'}/conversations/${item.conversation_id}`, query: { return: route.fullPath } })
+    const query: Record<string, string> = { return: route.fullPath }
+    // The shared library must open a share-scoped detail view so private-only
+    // controls never appear there and counts stay limited to shared items.
+    if (props.libraryKind === 'organization_private_shared') query.view = 'shared'
+    void router.push({ path: `/knowledge/${item.platform || 'wechat'}/conversations/${item.conversation_id}`, query })
   }
 }
 
@@ -385,13 +389,9 @@ async function loadDiscovery() {
 }
 async function attach(session: AvailableConversationDTO) {
   if (!discovery.value) return
-  if (!isPrivateLibrary.value) {
-    pendingGroupSession.value = session
-    collectStart.value = ''
-    collectDialogVisible.value = true
-    return
-  }
-  await attachSession(session)
+  pendingGroupSession.value = session
+  collectStart.value = ''
+  collectDialogVisible.value = true
 }
 async function attachSession(session: AvailableConversationDTO, requestedStartAt: string | null = null) {
   if (!discovery.value) return

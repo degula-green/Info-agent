@@ -515,7 +515,7 @@ export const useInfoKnowledgeStore = defineStore('infoKnowledge', () => {
     return searchLoadedSources(query, platform, sources.value) as SearchResult[]
   }
 
-  async function loadConversation(platform: SourceKey | string, id: string, _force = false) {
+  async function loadConversation(platform: SourceKey | string, id: string, _force = false, options: { shared?: boolean } = {}) {
     const key = normalizeSourceKey(platform)
     if (!key) return undefined
     let chat = findConversation(key, id)
@@ -529,7 +529,7 @@ export const useInfoKnowledgeStore = defineStore('infoKnowledge', () => {
     const conversationID = chat?.id || String(id)
     let detail: Awaited<ReturnType<typeof getConversationDetail>>
     try {
-      detail = await getConversationDetail(conversationID)
+      detail = await getConversationDetail(conversationID, 50, options)
     } catch (error) {
       throw error
     }
@@ -554,13 +554,13 @@ export const useInfoKnowledgeStore = defineStore('infoKnowledge', () => {
     return mapped
   }
 
-  async function loadOlderConversation(platform: SourceKey | string, id: string) {
+  async function loadOlderConversation(platform: SourceKey | string, id: string, options: { shared?: boolean } = {}) {
     const key = normalizeSourceKey(platform)
     const chat = key ? findConversation(key, id) : undefined
     if (!chat || !chat.timelineHasMore || !chat.timelineCursor || chat.timelineLoading) return
     chat.timelineLoading = true
     try {
-      const page = await getConversationTimeline(chat.id, chat.timelineCursor)
+      const page = await getConversationTimeline(chat.id, chat.timelineCursor, 50, options)
       const { messages, attachments } = timelinePageRecords(page)
       const mappedMessages = messages
         .filter((item) => !isAttachmentOnlyMessage(item, attachments))
