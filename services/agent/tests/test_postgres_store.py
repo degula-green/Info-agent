@@ -99,3 +99,24 @@ def test_idempotency_key_prevents_duplicate_tasks(store) -> None:
     store.created_task_ids.append(second.task_id)
     assert first.task_id == second.task_id
     assert store.find_task_by_idempotency_key("chat:user-1:msg-1").task_id == first.task_id
+
+
+def test_task_payload_survives_a_round_trip(store) -> None:
+    """input / source_ref / constraints must be persisted, not just kept in memory."""
+
+    task = _record()
+    task.input = {"text": "明天晚上八点开个评审会"}
+    task.source_ref = {"knowledge_item_id": "item-1", "content_version": 3}
+    task.constraints = {"timezone": "Asia/Shanghai"}
+    store.create_task(task, events=[], outbox_events=[])
+    store.created_task_ids.append(task.task_id)
+
+    reloaded = store.get_task(task.task_id)
+    assert reloaded.input == {"text": "明天晚上八点开个评审会"}
+    assert reloaded.source_ref == {"knowledge_item_id": "item-1", "content_version": 3}
+    assert reloaded.constraints == {"timezone": "Asia/Shanghai"}
+
+    # A later commit (user supplied input) must persist the merged payload too.
+    reloaded.input = {**reloaded.input, "text": "明天晚上九点"}
+    store.commit(reloaded)
+    assert store.get_task(task.task_id).input == {"text": "明天晚上九点"}

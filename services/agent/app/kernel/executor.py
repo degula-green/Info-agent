@@ -34,13 +34,19 @@ class CapabilityExecutor:
         self.store = store
 
     @staticmethod
-    def idempotency_key(task_id: str, plan_id: str, step_id: str, attempt: int) -> str:
-        return f"{task_id}|{plan_id}|{step_id}|{attempt}"
+    def idempotency_key(task_id: str, plan_id: str, step_id: str) -> str:
+        """Stable for the whole Step, not per attempt.
+
+        An external write must be deduplicated across retries, so every attempt
+        of the same Step reuses one CapabilityCall and one ``request_id``.
+        """
+
+        return f"{task_id}|{plan_id}|{step_id}"
 
     def execute(
         self, task: TaskRecord, plan: Plan, step: PlanStep, attempt: int
     ) -> CapabilityCallRecord:
-        key = self.idempotency_key(task.task_id, plan.plan_id, step.step_id, attempt)
+        key = self.idempotency_key(task.task_id, plan.plan_id, step.step_id)
         existing = self.store.get_capability_call(key)
         if existing is not None and existing.status == "succeeded":
             return existing

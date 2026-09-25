@@ -44,6 +44,27 @@ def test_create_task_is_idempotent_on_client_message_id() -> None:
     assert len(store.list_unfinished_tasks()) == 1
 
 
+def test_list_tasks_returns_only_the_callers_tasks() -> None:
+    container, _store, _publisher, _registry = build_test_container()
+    client = TestClient(make_app(container))
+
+    mine = client.post("/api/agent/v1/tasks", json={"text": "mine"}, headers=USER).json()["task_id"]
+    client.post("/api/agent/v1/tasks", json={"text": "theirs"}, headers={"X-Agent-User-Id": "user-2"})
+    client.post(f"/api/agent/v1/tasks/{mine}/run", headers=USER)
+
+    listed = client.get("/api/agent/v1/tasks", headers=USER).json()["items"]
+    assert [item["task_id"] for item in listed] == [mine]
+    assert listed[0]["status"] == "succeeded"
+
+    # The status filter is what a client uses to show only what still needs it.
+    assert client.get("/api/agent/v1/tasks?status=waiting_approval", headers=USER).json()["items"] == []
+    waiting = client.get("/api/agent/v1/tasks?status=succeeded,waiting_input", headers=USER).json()["items"]
+    assert [item["task_id"] for item in waiting] == [mine]
+
+    others = client.get("/api/agent/v1/tasks", headers={"X-Agent-User-Id": "user-2"}).json()["items"]
+    assert [item["owner_user_id"] for item in others] == ["user-2"]
+
+
 def test_task_is_scoped_to_owner() -> None:
     container, _store, _publisher, _registry = build_test_container()
     client = TestClient(make_app(container))

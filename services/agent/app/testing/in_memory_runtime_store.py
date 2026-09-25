@@ -104,6 +104,23 @@ class InMemoryAgentStore:
             tasks.sort(key=lambda item: item.created_at)
             return [task.model_copy(deep=True) for task in tasks[:limit]]
 
+    def list_tasks_for_owner(
+        self,
+        owner_user_id: str,
+        *,
+        statuses: list[str] | None = None,
+        limit: int = 50,
+    ) -> list[TaskRecord]:
+        with self._lock:
+            wanted = {status for status in (statuses or []) if status}
+            tasks = [
+                task
+                for task in self.tasks.values()
+                if task.owner_user_id == owner_user_id and (not wanted or task.status in wanted)
+            ]
+            tasks.sort(key=lambda item: item.created_at, reverse=True)
+            return [task.model_copy(deep=True) for task in tasks[: max(0, limit)]]
+
     def acquire_lease(self, task_id: str, owner: str, seconds: float) -> bool:
         with self._lock:
             task = self.tasks.get(task_id)
@@ -184,6 +201,10 @@ class InMemoryAgentStore:
     ) -> None:
         with self._lock:
             stored = step.model_copy(deep=True)
+            # The PostgreSQL store persists these columns; the double must do the
+            # same or retry accounting silently diverges from production.
+            if attempt_count is not None:
+                stored.attempt_count = attempt_count
             self.steps[step.step_id] = stored
             plan = self.plans.get(step.plan_id)
             if plan is not None:

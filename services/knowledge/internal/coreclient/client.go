@@ -158,6 +158,110 @@ type PermissionSyncResult struct {
 	Status          string `json:"status"`
 }
 
+type AuthorizationCheck struct {
+	ResourceType string `json:"resource_type"`
+	ResourcePart string `json:"resource_part"`
+	ResourceID   string `json:"resource_id"`
+	Action       string `json:"action"`
+}
+
+type AuthorizationDecision struct {
+	CheckID string `json:"check_id"`
+	Allowed bool   `json:"allowed"`
+}
+
+// CheckBatch asks Core to evaluate a bounded set of resource permissions.
+// Decisions are returned in the same order as the requested checks.
+func (c *Client) CheckBatch(ctx context.Context, userID, organizationID string, checks []AuthorizationCheck) ([]AuthorizationDecision, error) {
+	if c == nil || c.BaseURL == "" || c.ServiceToken == "" {
+		return nil, errors.New("core authorization service is not configured")
+	}
+	userID = strings.TrimSpace(userID)
+	if userID == "" {
+		return nil, errors.New("authorization subject is required")
+	}
+	if len(checks) == 0 {
+		return []AuthorizationDecision{}, nil
+	}
+	if len(checks) > 100 {
+		return nil, errors.New("authorization check batch exceeds 100 items")
+	}
+	payloadChecks := make([]map[string]string, 0, len(checks))
+	for index, check := range checks {
+		check.ResourceType = strings.TrimSpace(check.ResourceType)
+		check.ResourcePart = strings.TrimSpace(check.ResourcePart)
+		check.ResourceID = strings.TrimSpace(check.ResourceID)
+		check.Action = strings.TrimSpace(check.Action)
+		if check.ResourceType == "" || check.ResourcePart == "" || check.ResourceID == "" || check.Action == "" {
+			return nil, fmt.Errorf("authorization check %d is incomplete", index+1)
+		}
+		payloadChecks = append(payloadChecks, map[string]string{
+			"check_id":      fmt.Sprintf("c%d", index+1),
+			"resource_type": check.ResourceType,
+			"resource_part": check.ResourcePart,
+			"resource_id":   check.ResourceID,
+			"action":        check.Action,
+		})
+	}
+	body, err := json.Marshal(map[string]any{
+		"subject_type":    "user",
+		"subject_id":      userID,
+		"organization_id": organizationID,
+		"checks":          payloadChecks,
+	})
+	if err != nil {
+		return nil, err
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, c.BaseURL+"/internal/v1/authorization/check-batch", bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Authorization", "Bearer "+c.ServiceToken)
+	request.Header.Set("X-Caller-Service", "knowledge")
+	propagateTraceHeaders(ctx, request)
+	response, err := c.HTTP.Do(request)
+	if err != nil {
+		return nil, err
+	}
+	defer response.Body.Close()
+	if response.StatusCode == http.StatusUnauthorized || response.StatusCode == http.StatusForbidden {
+		return nil, errors.New("core rejected knowledge authorization check")
+	}
+	if response.StatusCode >= 500 {
+		return nil, errors.New("core authorization service is unavailable")
+	}
+	if response.StatusCode >= 400 {
+		return nil, fmt.Errorf("core authorization check failed: status %d", response.StatusCode)
+	}
+	var result struct {
+		Decisions []AuthorizationDecision `json:"decisions"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&result); err != nil {
+		return nil, err
+	}
+	if len(result.Decisions) != len(checks) {
+		return nil, errors.New("core authorization check response is incomplete")
+	}
+	byID := make(map[string]bool, len(result.Decisions))
+	for _, decision := range result.Decisions {
+		if _, exists := byID[decision.CheckID]; exists {
+			return nil, errors.New("core authorization check response contains duplicate decisions")
+		}
+		byID[decision.CheckID] = decision.Allowed
+	}
+	decisions := make([]AuthorizationDecision, 0, len(checks))
+	for index := range checks {
+		checkID := fmt.Sprintf("c%d", index+1)
+		allowed, ok := byID[checkID]
+		if !ok {
+			return nil, errors.New("core authorization check response is incomplete")
+		}
+		decisions = append(decisions, AuthorizationDecision{CheckID: checkID, Allowed: allowed})
+	}
+	return decisions, nil
+}
+
 func (c *Client) SyncKnowledgePermissions(ctx context.Context, item domain.KnowledgeItem, participantUserIDs []string) (PermissionSyncResult, error) {
 	if c == nil || c.BaseURL == "" || c.ServiceToken == "" {
 		return PermissionSyncResult{}, errors.New("core permission service is not configured")

@@ -28,6 +28,7 @@ type MemoryStore struct {
 	conversations      map[string]domain.ConversationIngestion
 	collectors         map[string]domain.Collector
 	messages           map[string]domain.Message
+	contactFacts       map[string][]domain.ContactFact
 	privateContent     map[string]string
 	sources            map[string]domain.MessageSource
 	attachments        map[string]domain.Attachment
@@ -36,6 +37,7 @@ type MemoryStore struct {
 	attachmentReceipts map[string]attachmentCursorReceipt
 	identities         map[string]ExternalIdentity
 	contactRelations   map[string]ContactRelation
+	contactProfiles    map[string]domain.ContactProfile
 	memberships        map[string]domain.ConversationMembership
 	outbox             map[string]domain.OutboxEvent
 	shareRequests      map[string]domain.PrivateShareRequest
@@ -43,6 +45,8 @@ type MemoryStore struct {
 	accessRequests     map[string]domain.PrivateAccessRequest
 	wechatConfigs      map[string]domain.WechatCollectionConfig
 	wechatRuntime      map[string]domain.WechatCollectorRuntime
+	calendarAuths      map[string]domain.CalendarAuthorization
+	calendarRequests   map[string]domain.CalendarEventRequest
 }
 
 type attachmentCursorReceipt struct {
@@ -55,15 +59,16 @@ func NewMemoryStore() *MemoryStore {
 		connectors: map[string]domain.ConnectorAccount{}, pairings: map[string]domain.Pairing{},
 		devices: map[string]domain.AgentDevice{}, discoveries: map[string]domain.Discovery{},
 		conversations: map[string]domain.ConversationIngestion{}, collectors: map[string]domain.Collector{},
-		messages: map[string]domain.Message{}, sources: map[string]domain.MessageSource{},
+		messages: map[string]domain.Message{}, contactFacts: map[string][]domain.ContactFact{}, sources: map[string]domain.MessageSource{},
 		privateContent: map[string]string{},
-		attachments:    map[string]domain.Attachment{}, identities: map[string]ExternalIdentity{}, contactRelations: map[string]ContactRelation{},
+		attachments:    map[string]domain.Attachment{}, identities: map[string]ExternalIdentity{}, contactRelations: map[string]ContactRelation{}, contactProfiles: map[string]domain.ContactProfile{},
 		knowledgeItems: map[string]domain.KnowledgeItem{},
 		cursorReceipts: map[string]time.Time{}, attachmentReceipts: map[string]attachmentCursorReceipt{},
 		memberships:   map[string]domain.ConversationMembership{},
 		outbox:        map[string]domain.OutboxEvent{},
 		shareRequests: map[string]domain.PrivateShareRequest{}, shareRefs: map[string]domain.PrivateShareReference{}, accessRequests: map[string]domain.PrivateAccessRequest{},
 		wechatConfigs: map[string]domain.WechatCollectionConfig{}, wechatRuntime: map[string]domain.WechatCollectorRuntime{},
+		calendarAuths: map[string]domain.CalendarAuthorization{}, calendarRequests: map[string]domain.CalendarEventRequest{},
 	}
 }
 
@@ -1406,6 +1411,7 @@ func (s *MemoryStore) IngestMessage(ctx context.Context, input IngestMessageInpu
 			legacyTypeCorrection = true
 			legacyAttachmentCleanup = strings.EqualFold(message.MessageType, "file") && strings.EqualFold(input.MessageType, "text")
 			message.ContentHash = input.ContentHash
+			message.ContactFactsStatus = "pending"
 			if conversation.IngestionScope == "private" {
 				message.Content = input.Content
 			}
@@ -1419,6 +1425,7 @@ func (s *MemoryStore) IngestMessage(ctx context.Context, input IngestMessageInpu
 			legacyTypeCorrection = true
 			legacyAttachmentCleanup = strings.EqualFold(message.MessageType, "file") && strings.EqualFold(input.MessageType, "text")
 			message.MessageType = input.MessageType
+			message.ContactFactsStatus = "pending"
 			s.messages[key] = message
 		}
 		if input.SenderExternalID != "" {
@@ -1441,7 +1448,7 @@ func (s *MemoryStore) IngestMessage(ctx context.Context, input IngestMessageInpu
 		if conversation.IngestionScope == "private" {
 			content, classificationStatus = input.Content, "succeeded"
 		}
-		message = domain.Message{ID: uuid.NewString(), ConversationID: conversation.ID, ExternalMessageID: input.ExternalMessageID, SenderIdentityID: identityID, SenderDisplayName: senderName, MessageType: input.MessageType, Content: content, Sensitive: false, ClassificationStatus: classificationStatus, ContentHash: input.ContentHash, ContentVersion: 1, SentAt: input.SentAt.UTC(), CollectedAt: now, LifecycleStatus: "active", VectorStatus: "pending", CreatedAt: now}
+		message = domain.Message{ID: uuid.NewString(), ConversationID: conversation.ID, ExternalMessageID: input.ExternalMessageID, SenderIdentityID: identityID, SenderDisplayName: senderName, MessageType: input.MessageType, Content: content, Sensitive: false, ClassificationStatus: classificationStatus, ContactFactsStatus: "pending", ContentHash: input.ContentHash, ContentVersion: 1, SentAt: input.SentAt.UTC(), CollectedAt: now, LifecycleStatus: "active", VectorStatus: "pending", CreatedAt: now}
 		s.messages[key] = message
 		s.privateContent[message.ID] = input.Content
 		if conversation.IngestionScope != "private" && strings.TrimSpace(input.Content) != "" {
@@ -1525,12 +1532,42 @@ func (s *MemoryStore) ListPendingMessages(_ context.Context, limit int) ([]Pendi
 	return out, nil
 }
 
+func (s *MemoryStore) ListPendingContactFactMessages(_ context.Context, limit int) ([]domain.Message, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := []domain.Message{}
+	for _, message := range s.messages {
+		if message.ContactFactsStatus != "pending" && message.ContactFactsStatus != "" {
+			continue
+		}
+		if message.ClassificationStatus != "succeeded" || message.SenderIdentityID == "" || message.LifecycleStatus != "active" {
+			continue
+		}
+		item := cloneMessage(message)
+		if content := s.privateContent[message.ID]; content != "" {
+			item.Content = content
+		}
+		out = append(out, item)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].CreatedAt.Equal(out[j].CreatedAt) {
+			return out[i].ID < out[j].ID
+		}
+		return out[i].CreatedAt.Before(out[j].CreatedAt)
+	})
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
+}
+
 func (s *MemoryStore) CompleteMessageClassification(ctx context.Context, id, displayContent string, sensitive bool) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for key, m := range s.messages {
 		if m.ID == id {
 			m.Content, m.Sensitive, m.ClassificationStatus = displayContent, sensitive, "succeeded"
+			m.ContactFactsStatus = "pending"
 			s.messages[key] = m
 			for itemID, item := range s.knowledgeItems {
 				if item.SourceMessageID != id || item.SourceAttachmentID != "" {
@@ -1553,6 +1590,350 @@ func (s *MemoryStore) CompleteMessageClassification(ctx context.Context, id, dis
 		}
 	}
 	return apperror.New("message_not_found", "message not found", 404, false)
+}
+
+func (s *MemoryStore) CompleteContactFactExtraction(_ context.Context, messageID string, inputs []ContactFactInput, status string) error {
+	if status != "succeeded" && status != "failed" {
+		return apperror.New("invalid_contact_fact_status", "contact fact status must be succeeded or failed", 400, false)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var key string
+	var message domain.Message
+	for candidateKey, candidate := range s.messages {
+		if candidate.ID == messageID {
+			key, message = candidateKey, candidate
+			break
+		}
+	}
+	if key == "" {
+		return apperror.New("message_not_found", "message not found", 404, false)
+	}
+	seen := map[string]struct{}{}
+	facts := []domain.ContactFact{}
+	for _, input := range inputs {
+		input.FactType = strings.TrimSpace(input.FactType)
+		input.Label = strings.TrimSpace(input.Label)
+		input.RawValue = strings.TrimSpace(input.RawValue)
+		input.ValueHash = strings.TrimSpace(input.ValueHash)
+		if input.FactType == "" || input.Label == "" || input.RawValue == "" || input.ValueHash == "" {
+			return apperror.New("invalid_contact_fact", "contact fact fields are required", 400, false)
+		}
+		factKey := input.FactType + "\x00" + input.ValueHash
+		if _, exists := seen[factKey]; exists {
+			continue
+		}
+		seen[factKey] = struct{}{}
+		facts = append(facts, domain.ContactFact{
+			ID:               uuid.NewString(),
+			MessageID:        message.ID,
+			ConversationID:   message.ConversationID,
+			SenderIdentityID: message.SenderIdentityID,
+			FactType:         input.FactType,
+			Label:            input.Label,
+			RawValue:         input.RawValue,
+			ValueHash:        input.ValueHash,
+			OccurredAt:       message.SentAt,
+			CreatedAt:        time.Now().UTC(),
+		})
+	}
+	delete(s.contactFacts, messageID)
+	s.contactFacts[messageID] = facts
+	message.ContactFactsStatus = status
+	s.messages[key] = message
+	return nil
+}
+
+func (s *MemoryStore) ListContactFacts(_ context.Context, senderIdentityIDs []string) ([]domain.ContactFact, error) {
+	if len(senderIdentityIDs) == 0 {
+		return []domain.ContactFact{}, nil
+	}
+	allowed := make(map[string]struct{}, len(senderIdentityIDs))
+	for _, id := range senderIdentityIDs {
+		if id = strings.TrimSpace(id); id != "" {
+			allowed[id] = struct{}{}
+		}
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := []domain.ContactFact{}
+	for _, facts := range s.contactFacts {
+		for _, fact := range facts {
+			if _, ok := allowed[fact.SenderIdentityID]; ok {
+				out = append(out, fact)
+			}
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].OccurredAt.Equal(out[j].OccurredAt) {
+			return out[i].CreatedAt.After(out[j].CreatedAt)
+		}
+		return out[i].OccurredAt.After(out[j].OccurredAt)
+	})
+	return out, nil
+}
+
+func (s *MemoryStore) ListContactMessages(_ context.Context, userID, organizationID string, senderIdentityIDs []string, limit int) ([]domain.Message, error) {
+	if len(senderIdentityIDs) == 0 {
+		return []domain.Message{}, nil
+	}
+	if limit <= 0 || limit > 500 {
+		limit = 200
+	}
+	allowed := make(map[string]struct{}, len(senderIdentityIDs))
+	for _, id := range senderIdentityIDs {
+		if id = strings.TrimSpace(id); id != "" {
+			allowed[id] = struct{}{}
+		}
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := []domain.Message{}
+	for _, message := range s.messages {
+		if _, ok := allowed[message.SenderIdentityID]; !ok {
+			continue
+		}
+		conversation, ok := s.conversations[message.ConversationID]
+		if !ok {
+			continue
+		}
+		direct := conversation.OwnerUserID == userID
+		if !direct {
+			for _, collector := range s.collectors {
+				if collector.ConversationID == conversation.ID && collector.CollectorUserID == userID && collector.Status != domain.CollectorRemoved {
+					direct = true
+					break
+				}
+			}
+		}
+		shared := false
+		if !direct && organizationID != "" {
+			for _, source := range s.knowledgeItems {
+				if source.SourceType != "private_conversation" || source.SourceMessageID != message.ID || source.SourceAttachmentID != "" {
+					continue
+				}
+				for _, candidate := range s.knowledgeItems {
+					if candidate.SourceType == "shared_private_item" && candidate.SourcePrivateItemID == source.ID && candidate.OrganizationID == organizationID && candidate.LifecycleStatus == "active" {
+						shared = true
+						break
+					}
+				}
+				if shared {
+					break
+				}
+			}
+		}
+		groupVisible := conversation.ConversationType == "group" && conversation.OrganizationID != "" && conversation.OrganizationID == organizationID
+		if !direct && !shared && !groupVisible {
+			continue
+		}
+		item := cloneMessage(message)
+		if content := s.privateContent[message.ID]; content != "" {
+			item.Content = content
+		}
+		out = append(out, item)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].SentAt.Equal(out[j].SentAt) {
+			return out[i].ID > out[j].ID
+		}
+		return out[i].SentAt.After(out[j].SentAt)
+	})
+	if len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
+}
+
+func (s *MemoryStore) ListAttachmentsForMessages(_ context.Context, messageIDs []string) ([]domain.Attachment, error) {
+	if len(messageIDs) == 0 {
+		return []domain.Attachment{}, nil
+	}
+	allowed := make(map[string]struct{}, len(messageIDs))
+	for _, id := range messageIDs {
+		if id = strings.TrimSpace(id); id != "" {
+			allowed[id] = struct{}{}
+		}
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := []domain.Attachment{}
+	for _, attachment := range s.attachments {
+		if _, ok := allowed[attachment.MessageID]; ok {
+			out = append(out, cloneAttachment(attachment))
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].CreatedAt.Equal(out[j].CreatedAt) {
+			return out[i].ID < out[j].ID
+		}
+		return out[i].CreatedAt.Before(out[j].CreatedAt)
+	})
+	return out, nil
+}
+
+func (s *MemoryStore) GetContactKnowledgeItem(_ context.Context, messageID, attachmentID, organizationID string) (string, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var sourceID string
+	for id, item := range s.knowledgeItems {
+		if item.SourceType == "shared_private_item" {
+			continue
+		}
+		if messageID != "" && item.SourceMessageID == messageID && item.SourceAttachmentID == "" {
+			sourceID = id
+			break
+		}
+		if attachmentID != "" && item.SourceAttachmentID == attachmentID {
+			sourceID = id
+			break
+		}
+	}
+	if sourceID == "" {
+		return "", nil
+	}
+	for id, item := range s.knowledgeItems {
+		if item.SourceType == "shared_private_item" && item.SourcePrivateItemID == sourceID && item.OrganizationID == organizationID && item.LifecycleStatus == "active" {
+			return id, nil
+		}
+	}
+	return sourceID, nil
+}
+
+func (s *MemoryStore) GetPrivateShareReference(_ context.Context, resourceID, resourceType string) (*domain.PrivateShareReference, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, reference := range s.shareRefs {
+		if reference.SourcePrivateResourceID == resourceID && reference.SourceResourceType == resourceType && reference.Status == "ready" {
+			copy := reference
+			return &copy, nil
+		}
+	}
+	return nil, nil
+}
+
+func (s *MemoryStore) ListPrivateAccessRequests(_ context.Context, userID, scope string) ([]domain.PrivateAccessRequest, error) {
+	if scope != "mine" && scope != "inbox" {
+		return nil, apperror.New("invalid_scope", "scope must be mine or inbox", 400, false)
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := []domain.PrivateAccessRequest{}
+	for _, request := range s.accessRequests {
+		include := false
+		if scope == "mine" {
+			include = request.RequesterUserID == userID
+		} else if request.Status == "pending" {
+			var reference domain.PrivateShareReference
+			found := false
+			for _, candidate := range s.shareRefs {
+				if candidate.ID == request.ShareReferenceID {
+					reference, found = candidate, true
+					break
+				}
+			}
+			if found {
+				if message, ok := s.messageByIDLocked(reference.SourcePrivateResourceID); ok {
+					include = s.conversations[message.ConversationID].OwnerUserID == userID
+				} else if attachment, ok := s.attachmentByIDLocked(reference.SourcePrivateResourceID); ok {
+					include = s.conversations[attachment.ConversationID].OwnerUserID == userID
+				}
+			}
+		}
+		if include {
+			out = append(out, request)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.After(out[j].CreatedAt) })
+	if len(out) > 100 {
+		out = out[:100]
+	}
+	return out, nil
+}
+
+func (s *MemoryStore) GetContactProfile(_ context.Context, ownerUserID, contactKey string) (*domain.ContactProfile, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	profile, ok := s.contactProfiles[ownerUserID+"\x00"+contactKey]
+	if !ok {
+		return nil, nil
+	}
+	copy := profile
+	return &copy, nil
+}
+
+func (s *MemoryStore) ListContactProfileCandidates(_ context.Context, limit int) ([]ContactProfileCandidate, error) {
+	if limit <= 0 || limit > 500 {
+		limit = 200
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	type candidateState struct {
+		updatedAt time.Time
+		ids       []string
+	}
+	byKey := map[string]*candidateState{}
+	for _, relation := range s.contactRelations {
+		if relation.Status != "active" {
+			continue
+		}
+		identity := s.identityByIDLocked(relation.ExternalIdentity.ID)
+		if identity.ID == "" {
+			continue
+		}
+		contactKey := strings.TrimSpace(identity.MappedUserID)
+		if contactKey == "" {
+			contactKey = identity.ID
+		}
+		key := relation.OwnerUserID + "\x00" + contactKey
+		current := byKey[key]
+		if current == nil {
+			current = &candidateState{}
+			byKey[key] = current
+		}
+		current.ids = append(current.ids, identity.ID)
+		if relation.UpdatedAt.After(current.updatedAt) {
+			current.updatedAt = relation.UpdatedAt
+		}
+	}
+	out := make([]ContactProfileCandidate, 0, len(byKey))
+	for key, state := range byKey {
+		parts := strings.SplitN(key, "\x00", 2)
+		sort.Strings(state.ids)
+		out = append(out, ContactProfileCandidate{OwnerUserID: parts[0], ContactKey: parts[1], IdentityIDs: state.ids})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		left, right := byKey[out[i].OwnerUserID+"\x00"+out[i].ContactKey], byKey[out[j].OwnerUserID+"\x00"+out[j].ContactKey]
+		if left == nil || right == nil {
+			return out[i].ContactKey < out[j].ContactKey
+		}
+		if left.updatedAt.Equal(right.updatedAt) {
+			return out[i].ContactKey < out[j].ContactKey
+		}
+		return left.updatedAt.After(right.updatedAt)
+	})
+	if len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
+}
+
+func (s *MemoryStore) UpsertContactProfile(_ context.Context, profile domain.ContactProfile) error {
+	if strings.TrimSpace(profile.OwnerUserID) == "" || strings.TrimSpace(profile.ContactKey) == "" {
+		return apperror.New("invalid_contact_profile", "owner and contact key are required", 400, false)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	key := profile.OwnerUserID + "\x00" + profile.ContactKey
+	if profile.ID == "" {
+		if existing, ok := s.contactProfiles[key]; ok {
+			profile.ID = existing.ID
+		} else {
+			profile.ID = uuid.NewString()
+		}
+	}
+	s.contactProfiles[key] = profile
+	return nil
 }
 
 func (s *MemoryStore) messageByIDLocked(id string) (domain.Message, bool) {
@@ -3224,6 +3605,123 @@ func (s *MemoryStore) identityByIDLocked(id string) ExternalIdentity {
 	}
 	return ExternalIdentity{}
 }
+
+// -- Agent calendar support ------------------------------------------------
+
+func (s *MemoryStore) GetAgentMessageContext(_ context.Context, messageID string) (*domain.AgentMessageContext, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	// Messages are keyed by conversation|external id, so look up by ID.
+	var message domain.Message
+	found := false
+	for _, candidate := range s.messages {
+		if candidate.ID == messageID {
+			message, found = candidate, true
+			break
+		}
+	}
+	if !found {
+		return nil, apperror.New("message_not_found", "message was not found", 404, false)
+	}
+	text := message.Content
+	if text == "" {
+		text = s.privateContent[messageID]
+	}
+	return &domain.AgentMessageContext{
+		MessageID:      message.ID,
+		ConversationID: message.ConversationID,
+		MessageType:    message.MessageType,
+		Text:           text,
+		SentAt:         message.SentAt,
+		Sensitive:      message.Sensitive,
+	}, nil
+}
+
+func (s *MemoryStore) ListAgentConversationMembers(_ context.Context, conversationID string) ([]domain.AgentConversationMember, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if _, ok := s.conversations[conversationID]; !ok {
+		return nil, apperror.New("conversation_not_found", "conversation not found", 404, false)
+	}
+	out := make([]domain.AgentConversationMember, 0)
+	for _, membership := range s.memberships {
+		if membership.ConversationID != conversationID {
+			continue
+		}
+		identity := s.identityByIDLocked(membership.ExternalIdentityID)
+		displayName := membership.DisplayName
+		if displayName == "" {
+			displayName = identity.DisplayName
+		}
+		out = append(out, domain.AgentConversationMember{
+			ExternalUserID: identity.ExternalUserID,
+			DisplayName:    displayName,
+			MemberRole:     membership.MemberRole,
+			Active:         membership.Status == "active",
+			MappedUserID:   identity.MappedUserID,
+			MappingStatus:  identity.MappingStatus,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ExternalUserID < out[j].ExternalUserID })
+	return out, nil
+}
+
+func calendarAuthorizationKey(ownerUserID, provider string) string {
+	return ownerUserID + "|" + provider
+}
+
+func (s *MemoryStore) GetCalendarAuthorization(_ context.Context, ownerUserID, provider string) (*domain.CalendarAuthorization, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	item, ok := s.calendarAuths[calendarAuthorizationKey(ownerUserID, provider)]
+	if !ok {
+		return nil, apperror.New("calendar_not_bound", "the user has no calendar authorization", 404, false)
+	}
+	return &item, nil
+}
+
+func (s *MemoryStore) UpsertCalendarAuthorization(_ context.Context, item domain.CalendarAuthorization, now time.Time) (*domain.CalendarAuthorization, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	key := calendarAuthorizationKey(item.OwnerUserID, item.Provider)
+	if existing, ok := s.calendarAuths[key]; ok {
+		item.ID = existing.ID
+		item.CreatedAt = existing.CreatedAt
+	}
+	if item.ID == "" {
+		item.ID = uuid.NewString()
+	}
+	if item.Status == "" {
+		item.Status = domain.CalendarAuthorizationActive
+	}
+	item.UpdatedAt = now
+	if item.CreatedAt.IsZero() {
+		item.CreatedAt = now
+	}
+	s.calendarAuths[key] = item
+	return &item, nil
+}
+
+func (s *MemoryStore) GetCalendarEventRequest(_ context.Context, requestID string) (*domain.CalendarEventRequest, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	item, ok := s.calendarRequests[requestID]
+	if !ok {
+		return nil, nil
+	}
+	return &item, nil
+}
+
+func (s *MemoryStore) SaveCalendarEventRequest(_ context.Context, item domain.CalendarEventRequest) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.calendarRequests[item.RequestID]; ok {
+		return nil
+	}
+	s.calendarRequests[item.RequestID] = item
+	return nil
+}
+
 func (s *MemoryStore) addEventLocked(ctx context.Context, eventType string, c domain.ConversationIngestion, payload map[string]any) {
 	traceID := trace.TraceID(ctx)
 	if traceID == "" {

@@ -64,6 +64,35 @@
           </div>
         </div>
       </section>
+
+      <section class="profile-panel access-panel" aria-labelledby="access-title">
+        <div class="profile-panel__heading">
+          <span class="profile-panel__icon"><t-icon name="lock-on" /></span>
+          <div>
+            <h2 id="access-title">权限申请</h2>
+            <p>查看我发起的申请，或处理待我审批的申请</p>
+          </div>
+        </div>
+        <t-tabs v-model="accessScope" @change="loadAccessRequests">
+          <t-tab-panel value="mine" label="我发起的" />
+          <t-tab-panel value="inbox" label="待我审批" />
+        </t-tabs>
+        <div class="access-request-list">
+          <div v-if="accessLoading" class="access-request-state"><t-icon name="loading" />正在加载权限申请…</div>
+          <div v-else-if="!accessRequests.length" class="access-request-state">{{ accessScope === 'mine' ? '暂无我发起的申请' : '暂无待我审批的申请' }}</div>
+          <article v-for="request in accessRequests" v-else :key="request.id" class="access-request">
+            <div class="access-request__main">
+              <strong>{{ accessResourceLabel(request) }} · {{ accessActionLabel(request) }}</strong>
+              <small>{{ request.reason || '未填写申请说明' }} · {{ formatDateTime(request.created_at) }}</small>
+            </div>
+            <t-tag :theme="accessStatusTheme(request.status)" variant="light">{{ accessStatusLabel(request.status) }}</t-tag>
+            <div v-if="accessScope === 'inbox' && request.status === 'pending'" class="access-request__actions">
+              <t-button size="small" theme="primary" @click="reviewAccess(request, 'approve')">通过</t-button>
+              <t-button size="small" theme="danger" variant="outline" @click="reviewAccess(request, 'reject')">拒绝</t-button>
+            </div>
+          </article>
+        </div>
+      </section>
     </div>
 
     <div class="profile-actions">
@@ -119,6 +148,7 @@ import { oauthCallbackNotice } from '@/knowledge-mapping'
 import { downloadAvatar, getCurrentUser, updateCurrentUser, uploadAvatar as uploadCoreAvatar } from '@/api/core-auth'
 import { acceptOrganizationInvitation, createOrganization, getCurrentOrganization, type CoreOrganizationResponse } from '@/api/core-organization'
 import { CoreAuthError } from '@/api/core-auth'
+import { approvePrivateAccessRequest, listPrivateAccessRequests, rejectPrivateAccessRequest, type PrivateAccessRequestDTO } from '@/api/info-knowledge'
 
 const store = useInfoMockStore()
 const authStore = useAuthStore()
@@ -138,6 +168,10 @@ const organizationSubmitting = ref(false)
 const organizationName = ref('')
 const invitationToken = ref('')
 const organization = ref<CoreOrganizationResponse | null>(null)
+const accessScope = ref<'mine' | 'inbox'>('mine')
+const accessRequests = ref<PrivateAccessRequestDTO[]>([])
+const accessLoading = ref(false)
+let accessRequestSequence = 0
 const wechatRebind = ref(false)
 const wechatForm = reactive({ wxid: '', db_dir: '' })
 const connectorPending = reactive<Record<ConnectorPlatform, boolean>>({ feishu: false, wecom: false, wechat: false })
@@ -181,9 +215,45 @@ async function loadPage() {
     if (cause instanceof CoreAuthError && cause.status === 401) return
     MessagePlugin.error(errorMessage(cause, '组织信息加载失败'))
   })
-  await Promise.all([coreProfileRequest, connectorRequest, organizationRequest])
+  const accessRequest = loadAccessRequests()
+  await Promise.all([coreProfileRequest, connectorRequest, organizationRequest, accessRequest])
   organizationLoading.value = false
 }
+async function loadAccessRequests() {
+  const sequence = ++accessRequestSequence
+  accessLoading.value = true
+  try {
+    const items = await listPrivateAccessRequests(accessScope.value)
+    if (sequence === accessRequestSequence) accessRequests.value = items
+  } catch (cause) {
+    if (sequence === accessRequestSequence) accessRequests.value = []
+    MessagePlugin.error(errorMessage(cause, '权限申请加载失败'))
+  } finally {
+    if (sequence === accessRequestSequence) accessLoading.value = false
+  }
+}
+async function reviewAccess(request: PrivateAccessRequestDTO, action: 'approve' | 'reject') {
+  try {
+    if (action === 'approve') await approvePrivateAccessRequest(request.id)
+    else await rejectPrivateAccessRequest(request.id)
+    await loadAccessRequests()
+    MessagePlugin.success(action === 'approve' ? '已通过权限申请' : '已拒绝权限申请')
+  } catch (cause) {
+    MessagePlugin.error(errorMessage(cause, action === 'approve' ? '审批失败' : '拒绝失败'))
+  }
+}
+function accessResourceLabel(request: PrivateAccessRequestDTO) { return request.resource_type === 'attachment' ? '附件' : '信息条目' }
+function accessActionLabel(request: PrivateAccessRequestDTO) { return request.requested_action === 'download' ? '下载' : '查看' }
+function accessStatusLabel(status: string) {
+  return ({ pending: '待处理', approved: '已通过', rejected: '已拒绝', expired: '已过期', revoked: '已撤销' } as Record<string, string>)[status] || status
+}
+function accessStatusTheme(status: string) {
+  if (status === 'approved') return 'success'
+  if (status === 'rejected') return 'danger'
+  if (status === 'pending') return 'warning'
+  return 'default'
+}
+function formatDateTime(value?: string) { if (!value) return ''; return new Date(value).toLocaleString('zh-CN', { dateStyle: 'short', timeStyle: 'short' }) }
 async function submitCreateOrganization() {
   const name = organizationName.value.trim()
   if (!name || name.length > 200 || organizationSubmitting.value) return
@@ -584,6 +654,57 @@ onMounted(async () => {
   white-space: nowrap;
 }
 
+.access-request-list {
+  margin-top: 4px;
+}
+
+.access-request-state {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 88px;
+  color: var(--td-text-color-secondary);
+  font-size: 13px;
+}
+
+.access-request {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 68px;
+  padding: 12px 24px;
+  border-bottom: 1px solid var(--td-component-stroke);
+}
+
+.access-request:last-child {
+  border-bottom: 0;
+}
+
+.access-request__main {
+  flex: 1;
+  min-width: 0;
+}
+
+.access-request__main strong,
+.access-request__main small {
+  display: block;
+}
+
+.access-request__main small {
+  margin-top: 4px;
+  overflow: hidden;
+  color: var(--td-text-color-secondary);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.access-request__actions {
+  display: flex;
+  gap: 8px;
+}
+
 .profile-actions {
   display: flex;
   align-items: center;
@@ -685,9 +806,15 @@ onMounted(async () => {
 
   .profile-panel__heading,
   .profile-setting-row,
-  .connector-row {
+  .connector-row,
+  .access-request {
     padding-right: 18px;
     padding-left: 18px;
+  }
+
+  .access-request {
+    align-items: flex-start;
+    flex-wrap: wrap;
   }
 
   .profile-setting-row {

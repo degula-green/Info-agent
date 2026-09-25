@@ -180,8 +180,43 @@ type ContactView struct {
 
 type ContactDetail struct {
 	ContactView
-	Messages    []Message    `json:"messages"`
-	Attachments []Attachment `json:"attachments"`
+	Profile     ContactProfile `json:"profile"`
+	Facts       []ContactFact  `json:"facts"`
+	Attachments []Attachment   `json:"attachments"`
+}
+
+type ContactAccess struct {
+	Status           string `json:"status"`
+	ShareReferenceID string `json:"share_reference_id,omitempty"`
+	ResourceType     string `json:"resource_type,omitempty"`
+	ResourceID       string `json:"resource_id,omitempty"`
+	RequestedAction  string `json:"requested_action,omitempty"`
+}
+
+type ContactFact struct {
+	ID               string        `json:"id"`
+	MessageID        string        `json:"message_id"`
+	ConversationID   string        `json:"conversation_id"`
+	SenderIdentityID string        `json:"sender_identity_id"`
+	FactType         string        `json:"fact_type"`
+	Label            string        `json:"label"`
+	RawValue         string        `json:"raw_value,omitempty"`
+	ValueHash        string        `json:"value_hash,omitempty"`
+	OccurredAt       time.Time     `json:"occurred_at"`
+	CreatedAt        time.Time     `json:"created_at"`
+	Access           ContactAccess `json:"access"`
+}
+
+type ContactProfile struct {
+	ID                string     `json:"id"`
+	OwnerUserID       string     `json:"owner_user_id"`
+	ContactKey        string     `json:"contact_key"`
+	Summary           string     `json:"summary"`
+	SourceFingerprint string     `json:"source_fingerprint"`
+	Status            string     `json:"status"`
+	LastError         string     `json:"last_error,omitempty"`
+	GeneratedAt       *time.Time `json:"generated_at,omitempty"`
+	UpdatedAt         time.Time  `json:"updated_at"`
 }
 
 type Discovery struct {
@@ -262,6 +297,7 @@ type Message struct {
 	Content              string       `json:"content,omitempty"`
 	Sensitive            bool         `json:"sensitive"`
 	ClassificationStatus string       `json:"classification_status,omitempty"`
+	ContactFactsStatus   string       `json:"-"`
 	NormalizedContentRef string       `json:"normalized_content_ref,omitempty"`
 	ContentHash          string       `json:"content_hash"`
 	ContentVersion       int          `json:"content_version"`
@@ -519,42 +555,45 @@ type MessageSource struct {
 }
 
 type Attachment struct {
-	ID                    string     `json:"id"`
-	RequestID             string     `json:"request_id,omitempty"`
-	TraceID               string     `json:"trace_id,omitempty"`
-	ResourceID            string     `json:"resource_id,omitempty"`
-	ConversationID        string     `json:"conversation_id"`
-	MessageID             string     `json:"message_id,omitempty"`
-	UploadedByUserID      string     `json:"uploaded_by_user_id,omitempty"`
-	UploadDestination     string     `json:"upload_destination,omitempty"`
-	OrganizationID        string     `json:"organization_id,omitempty"`
-	ExternalAttachmentID  string     `json:"external_attachment_id"`
-	FileName              string     `json:"file_name"`
-	MIMEType              string     `json:"mime_type"`
-	SizeBytes             int64      `json:"size_bytes"`
-	ObjectRef             string     `json:"object_ref,omitempty"`
-	ContentHash           string     `json:"content_hash,omitempty"`
-	ContentVersion        int        `json:"content_version"`
-	ContentStatus         string     `json:"content_status"`
-	AccessScope           string     `json:"access_scope"`
-	MetadataAccessScope   string     `json:"metadata_access_scope,omitempty"`
-	ContentAccessScope    string     `json:"content_access_scope,omitempty"`
-	ContentAccessRequired bool       `json:"content_access_required"`
-	Sensitive             bool       `json:"sensitive"`
-	ClassificationStatus  string     `json:"classification_status,omitempty"`
-	UploadStatus          string     `json:"upload_status,omitempty"`
-	UploadError           string     `json:"upload_error,omitempty"`
-	ProcessingStatus      string     `json:"processing_status,omitempty"`
-	PreviewCapability     string     `json:"preview_capability,omitempty"`
-	LastError             string     `json:"last_error,omitempty"`
-	RAGStatus             string     `json:"rag_status,omitempty"`
-	RAGContentVersion     int        `json:"rag_content_version,omitempty"`
-	RAGACLVersion         int64      `json:"rag_acl_version,omitempty"`
-	RAGLastError          string     `json:"rag_last_error,omitempty"`
-	RAGFinishedAt         *time.Time `json:"rag_finished_at,omitempty"`
-	RAGSearchable         bool       `json:"searchable"`
-	CreatedAt             time.Time  `json:"created_at"`
-	UpdatedAt             time.Time  `json:"updated_at"`
+	ID                    string        `json:"id"`
+	RequestID             string        `json:"request_id,omitempty"`
+	TraceID               string        `json:"trace_id,omitempty"`
+	ResourceID            string        `json:"resource_id,omitempty"`
+	ConversationID        string        `json:"conversation_id"`
+	MessageID             string        `json:"message_id,omitempty"`
+	UploadedByUserID      string        `json:"uploaded_by_user_id,omitempty"`
+	UploadDestination     string        `json:"upload_destination,omitempty"`
+	OrganizationID        string        `json:"organization_id,omitempty"`
+	ExternalAttachmentID  string        `json:"external_attachment_id"`
+	FileName              string        `json:"file_name"`
+	MIMEType              string        `json:"mime_type"`
+	SizeBytes             int64         `json:"size_bytes"`
+	ObjectRef             string        `json:"object_ref,omitempty"`
+	ContentHash           string        `json:"content_hash,omitempty"`
+	ContentVersion        int           `json:"content_version"`
+	ContentStatus         string        `json:"content_status"`
+	AccessScope           string        `json:"access_scope"`
+	MetadataAccessScope   string        `json:"metadata_access_scope,omitempty"`
+	ContentAccessScope    string        `json:"content_access_scope,omitempty"`
+	ContentAccessRequired bool          `json:"content_access_required"`
+	Sensitive             bool          `json:"sensitive"`
+	ClassificationStatus  string        `json:"classification_status,omitempty"`
+	UploadStatus          string        `json:"upload_status,omitempty"`
+	UploadError           string        `json:"upload_error,omitempty"`
+	ProcessingStatus      string        `json:"processing_status,omitempty"`
+	PreviewCapability     string        `json:"preview_capability,omitempty"`
+	LastError             string        `json:"last_error,omitempty"`
+	RAGStatus             string        `json:"rag_status,omitempty"`
+	RAGContentVersion     int           `json:"rag_content_version,omitempty"`
+	RAGACLVersion         int64         `json:"rag_acl_version,omitempty"`
+	RAGLastError          string        `json:"rag_last_error,omitempty"`
+	RAGFinishedAt         *time.Time    `json:"rag_finished_at,omitempty"`
+	RAGSearchable         bool          `json:"searchable"`
+	CreatedAt             time.Time     `json:"created_at"`
+	UpdatedAt             time.Time     `json:"updated_at"`
+	Access                ContactAccess `json:"access"`
+	ContentAccess         ContactAccess `json:"content_access"`
+	DownloadAccess        ContactAccess `json:"download_access"`
 }
 
 type LocalUploadTaskInput struct {

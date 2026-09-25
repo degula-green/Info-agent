@@ -60,7 +60,7 @@ func newRouter(authentication Authentication, cookies RefreshCookieConfig, logge
 		}
 	}
 	if authorization != nil && authorization.Provider != nil {
-		authzHandler := NewAuthorizationHandler(authorization.Provider, authorization.Token)
+		authzHandler := NewAuthorizationHandler(authorization.Provider, authorization.Token, authorization.KnowledgeToken)
 		authz := router.Group("/internal/v1/authorization")
 		authz.POST("/search-scope", authzHandler.Scope)
 		authz.POST("/check-batch", authzHandler.CheckBatch)

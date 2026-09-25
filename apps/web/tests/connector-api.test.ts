@@ -2,17 +2,22 @@ import assert from 'node:assert/strict'
 import { afterEach, test } from 'node:test'
 import {
   addConversationCollector,
+  approvePrivateAccessRequest,
   attachConversation,
+  createPrivateAccessRequest,
   createLocalUploadTask,
   discoverConversations,
   getConnectors,
   getConversationDetail,
   getFeishuAuthorizeURL,
   getKnowledgeAttachmentContent,
+  listPrivateAccessRequests,
+  rejectPrivateAccessRequest,
   removeConversationCollector,
   setConversationStatus,
   unbindConnector,
 } from '../src/api/info-knowledge.ts'
+import { getContact, refreshContactProfile } from '../src/api/contacts.ts'
 
 const originalFetch = globalThis.fetch
 const originalSessionStorage = Object.getOwnPropertyDescriptor(globalThis, 'sessionStorage')
@@ -50,7 +55,7 @@ test('connector, conversation, and attachment calls use the Knowledge contract',
     if (url.endsWith('/conversations/c1')) return json(conversation)
     if (url.includes('/conversations/c1/messages')) return json({ items: [] })
     if (url.endsWith('/conversations/c1/attachments')) return json({ items: [] })
-    if (url.endsWith('/attachments/a1/content')) return new Response('attachment', { status: 200 })
+    if (url.endsWith('/attachments/a1/content?action=download')) return new Response('attachment', { status: 200 })
     return json({ status: 'ok', id: 'collector' })
   }
 
@@ -72,7 +77,7 @@ test('connector, conversation, and attachment calls use the Knowledge contract',
   assert.ok(calls.every((call) => call.headers.get('X-Trace-ID')))
   assert.equal(calls.find((call) => call.url.endsWith('/connectors/feishu/authorize'))?.body, '{"intent":"rebind"}')
   assert.ok(calls.some((call) => call.url.endsWith('/conversations/c1/collectors/collector%20id') && call.method === 'DELETE'))
-  assert.equal(calls.find((call) => call.url.endsWith('/attachments/a1/content'))?.headers.get('Accept'), 'application/octet-stream')
+  assert.equal(calls.find((call) => call.url.endsWith('/attachments/a1/content?action=download'))?.headers.get('Accept'), 'application/octet-stream')
 })
 
 test('attachment content errors preserve the backend permission code', async () => {
@@ -128,5 +133,40 @@ test('bounds concurrent detail loads to avoid a pending-request burst', async ()
   }
   await Promise.all([getConversationDetail('c1'), getConversationDetail('c2')])
   assert.equal(peak <= 2, true, `request peak was ${peak}`)
-  assert.equal(calls, 6)
+  assert.equal(calls, 4)
+})
+
+test('contact detail and access request calls use profile, facts, and scoped requests', async () => {
+  Object.defineProperty(globalThis, 'sessionStorage', { configurable: true, value: storage('jwt-token') })
+  const calls: Array<{ url: string; method: string; body: string }> = []
+  const profile = { contact_key: 'contact-1', summary: '画像简介', status: 'ready' }
+  const access = { status: 'locked', share_reference_id: 'share-1', resource_type: 'message', resource_id: 'message-1', requested_action: 'view' }
+  globalThis.fetch = async (input, init = {}) => {
+    const url = String(input)
+    const method = init.method || 'GET'
+    calls.push({ url, method, body: String(init.body || '') })
+    if (url.endsWith('/contacts/contact-1/profile/refresh')) return json(profile)
+    if (url.endsWith('/contacts/contact-1')) return json({ contact: { id: 'contact-1', kind: 'external', identities: [] }, profile, facts: [{ id: 'fact-1', conversation_id: 'conversation-1', fact_type: 'phone', label: '手机号', occurred_at: '2026-09-25T00:00:00Z', created_at: '2026-09-25T00:00:00Z', access }], attachments: [] })
+    if (url.includes('/private-access-requests?scope=mine')) return json({ items: [] })
+    if (url.endsWith('/private-access-requests')) return json({ id: 'request-1', requester_user_id: 'u1', share_reference_id: 'share-1', resource_id: 'message-1', resource_type: 'message', requested_action: 'view', status: 'pending', created_at: '2026-09-25T00:00:00Z' }, 201)
+    if (url.endsWith('/private-share-requests/request-1/approve')) return json({ id: 'request-1', status: 'approved' })
+    if (url.endsWith('/private-share-requests/request-1/reject')) return json({ id: 'request-1', status: 'rejected' })
+    return json({})
+  }
+
+  const detail = await getContact('contact-1')
+  assert.equal(detail.profile.summary, '画像简介')
+  assert.equal(detail.facts[0]?.access.status, 'locked')
+  await refreshContactProfile('contact-1')
+  await listPrivateAccessRequests('mine')
+  await createPrivateAccessRequest({ shareReferenceID: 'share-1', resourceID: 'message-1', resourceType: 'message', requestedAction: 'view', reason: 'work' })
+  await approvePrivateAccessRequest('request-1')
+  await rejectPrivateAccessRequest('request-1')
+
+  assert.equal(calls.find((call) => call.url.endsWith('/private-access-requests?scope=mine'))?.method, 'GET')
+  const createCall = calls.find((call) => call.url.endsWith('/private-access-requests') && call.method === 'POST')
+  assert.deepEqual(JSON.parse(createCall?.body || '{}'), { share_reference_id: 'share-1', resource_id: 'message-1', resource_type: 'message', requested_action: 'view', reason: 'work' })
+  assert.ok(calls.some((call) => call.url.endsWith('/contacts/contact-1/profile/refresh') && call.method === 'POST'))
+  assert.ok(calls.some((call) => call.url.endsWith('/private-share-requests/request-1/approve') && call.method === 'POST'))
+  assert.ok(calls.some((call) => call.url.endsWith('/private-share-requests/request-1/reject') && call.method === 'POST'))
 })

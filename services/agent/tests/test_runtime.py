@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
+
 import pytest
 
 from app.kernel.errors import (
@@ -12,6 +14,7 @@ from app.kernel.errors import (
 )
 from app.kernel.limits import ExecutionLimits
 from app.kernel.models import CapabilityDescriptor
+from app.kernel.runtime import AgentRuntime
 from app.kernel.states import ensure_task_transition
 from tests.support import (
     CountingReadCapability,
@@ -221,6 +224,12 @@ def test_retryable_error_is_retried_with_same_idempotency_key() -> None:
     assert status == "succeeded"
     assert flaky.calls == 2
     assert "task.retrying" in event_types(store, task.task_id)
+    # One Step keeps one CapabilityCall: the retry reuses the same idempotency
+    # key and therefore the same external request id.
+    calls = list(store.calls.values())
+    assert len(calls) == 1
+    assert calls[0].attempt == 2
+    assert calls[0].idempotency_key == f"{task.task_id}|{calls[0].plan_id}|{calls[0].step_id}"
 
 
 def test_permanent_error_fails_task_without_retry() -> None:
@@ -376,3 +385,75 @@ def test_task_lease_prevents_two_workers_running_the_same_step() -> None:
 
     store.release_lease(task.task_id, "worker-a")
     assert container.execution_service.run_task(task.task_id) == "succeeded"
+
+
+def test_waiting_for_approval_does_not_consume_the_execution_budget() -> None:
+    """A human may take longer than the budget to confirm without failing the Task."""
+
+    container, store, _publisher, _registry = build_test_container()
+    task = create_task(container, steps=[{"capability": "fake.write", "arguments": {"value": "x"}}])
+    assert container.execution_service.run_task(task.task_id) == "waiting_approval"
+
+    # The Task entered waiting_approval well before the user confirmed it.
+    record = store.get_task(task.task_id)
+    record.created_at = datetime.now(timezone.utc) - timedelta(seconds=600)
+    store.commit(record)
+
+    approval = store.list_approvals(task_id=task.task_id)[0]
+    container.execution_service.approval_gateway.decide(
+        approval.approval_id, owner_user_id="user-1", approve=True
+    )
+
+    assert container.execution_service.run_task(task.task_id) == "succeeded"
+
+
+def test_execution_budget_still_bounds_a_single_drive() -> None:
+    container, store, _publisher, registry = build_test_container()
+    task = create_task(container, steps=[{"capability": "fake.read", "arguments": {"value": "a"}}])
+
+    base = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    ticks = iter([0.0, 400.0])
+    runtime = AgentRuntime(
+        store=store,
+        registry=registry,
+        planner=container.planner,
+        policy=container.policy,
+        clock=lambda: base + timedelta(seconds=next(ticks, 400.0)),
+    )
+
+    result = runtime.run_task(task.task_id)
+
+    assert result.status == "failed"
+    error = store.get_task(task.task_id).last_error
+    assert error["message"] == "execution time limit exceeded"
+
+
+def test_execution_service_uses_a_process_specific_lease_owner() -> None:
+    """A fixed lease owner would let the API race the worker process."""
+
+    import os
+
+    from app.application.execution_service import ExecutionService
+
+    container, store, publisher, _registry = build_test_container()
+    default_service = ExecutionService(
+        store=store,
+        registry=container.registry,
+        planner=container.planner,
+        policy=container.policy,
+        publisher=publisher,
+        settings=container.settings,
+    )
+    explicit = ExecutionService(
+        store=store,
+        registry=container.registry,
+        planner=container.planner,
+        policy=container.policy,
+        publisher=publisher,
+        settings=container.settings,
+        lease_owner="worker-1",
+    )
+
+    assert default_service.lease_owner != "worker"
+    assert str(os.getpid()) in default_service.lease_owner
+    assert explicit.lease_owner != default_service.lease_owner

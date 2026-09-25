@@ -10,15 +10,17 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from app.application.execution_service import ExecutionService
+from app.application.knowledge_events import KnowledgeEventService
 from app.application.task_service import TaskService
+from app.capabilities.calendar import CalendarCreateCapability
 from app.config import Settings, settings as default_settings
+from app.infrastructure.knowledge.client import HttpKnowledgeClient, KnowledgeClient
 from app.ingress.knowledge_events import KnowledgeEventIngress
 from app.kernel.models import OutboxEvent
 from app.kernel.protocols import AgentStore, TaskEventPublisher
 from app.kernel.registry import CapabilityRegistry
-from app.testing.fake_capabilities import FakeReadCapability, FakeWriteCapability
-from app.testing.fake_planner import InputDrivenFakePlanner
-from app.testing.fake_policy import FakePolicy
+from app.planning.deterministic import DeterministicPlanner
+from app.policy.descriptor import DescriptorPolicy
 from app.testing.in_memory_runtime_store import InMemoryAgentStore
 
 
@@ -40,6 +42,8 @@ class AgentContainer:
     task_service: TaskService
     execution_service: ExecutionService
     knowledge_ingress: KnowledgeEventIngress
+    knowledge_client: KnowledgeClient
+    knowledge_events: KnowledgeEventService
 
     def close(self) -> None:
         pool = getattr(self.store, "pool", None)
@@ -47,8 +51,28 @@ class AgentContainer:
             pool.close()
 
 
-def build_registry() -> CapabilityRegistry:
-    return CapabilityRegistry([FakeReadCapability(), FakeWriteCapability()])
+def build_knowledge_client(settings: Settings) -> KnowledgeClient:
+    return HttpKnowledgeClient(
+        base_url=settings.knowledge_base_url,
+        token=settings.knowledge_service_token,
+        timeout_seconds=settings.knowledge_timeout_seconds,
+    )
+
+
+def build_registry(settings: Settings, knowledge: KnowledgeClient) -> CapabilityRegistry:
+    return CapabilityRegistry(
+        [
+            CalendarCreateCapability(
+                knowledge,
+                default_timezone=settings.default_timezone,
+                default_duration_minutes=settings.calendar_default_duration_minutes,
+            )
+        ]
+    )
+
+
+def build_planner(settings: Settings) -> DeterministicPlanner:
+    return DeterministicPlanner(default_timezone=settings.default_timezone)
 
 
 def build_store(settings: Settings) -> AgentStore:
@@ -77,13 +101,20 @@ def build_container(
     registry: CapabilityRegistry | None = None,
     planner=None,
     policy=None,
+    knowledge: KnowledgeClient | None = None,
+    ingress: KnowledgeEventIngress | None = None,
 ) -> AgentContainer:
     resolved = settings or default_settings
     resolved_store = store or build_store(resolved)
-    registry = registry or build_registry()
-    resolved_planner = planner or InputDrivenFakePlanner()
-    resolved_policy = policy or FakePolicy(registry)
+    resolved_knowledge = knowledge or build_knowledge_client(resolved)
+    registry = registry or build_registry(resolved, resolved_knowledge)
+    resolved_planner = planner or build_planner(resolved)
+    resolved_policy = policy or DescriptorPolicy(registry)
     resolved_publisher = publisher or build_publisher(resolved)
+    resolved_ingress = ingress or KnowledgeEventIngress(
+        platforms=resolved.knowledge_platform_allowlist
+    )
+    task_service = TaskService(resolved_store)
 
     return AgentContainer(
         settings=resolved,
@@ -92,7 +123,7 @@ def build_container(
         planner=resolved_planner,
         policy=resolved_policy,
         publisher=resolved_publisher,
-        task_service=TaskService(resolved_store),
+        task_service=task_service,
         execution_service=ExecutionService(
             store=resolved_store,
             registry=registry,
@@ -101,5 +132,11 @@ def build_container(
             publisher=resolved_publisher,
             settings=resolved,
         ),
-        knowledge_ingress=KnowledgeEventIngress(platforms=resolved.knowledge_platform_allowlist),
+        knowledge_ingress=resolved_ingress,
+        knowledge_client=resolved_knowledge,
+        knowledge_events=KnowledgeEventService(
+            ingress=resolved_ingress,
+            knowledge=resolved_knowledge,
+            task_service=task_service,
+        ),
     )

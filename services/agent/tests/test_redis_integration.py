@@ -28,7 +28,9 @@ def test_wakeup_travels_through_redis_and_completes_the_task() -> None:
     from app.infrastructure.postgres.store import PostgresAgentStore
     from app.infrastructure.redis.connection import build_redis
     from app.infrastructure.redis.streams import RedisTaskPublisher, RedisTaskWorker
+    from app.kernel.registry import CapabilityRegistry
     from app.testing.fake_capabilities import FakeReadCapability
+    from app.testing.fake_planner import InputDrivenFakePlanner
 
     suffix = uuid.uuid4().hex[:8]
     settings = Settings(
@@ -44,7 +46,14 @@ def test_wakeup_travels_through_redis_and_completes_the_task() -> None:
     store = PostgresAgentStore(pool, schema="agent")
     client = build_redis(settings)
     publisher = RedisTaskPublisher(client, settings.redis_inbound_stream)
-    container = build_container(settings=settings, store=store, publisher=publisher)
+    registry = CapabilityRegistry([FakeReadCapability()])
+    container = build_container(
+        settings=settings,
+        store=store,
+        publisher=publisher,
+        registry=registry,
+        planner=InputDrivenFakePlanner(),
+    )
 
     task_id = ""
     try:
@@ -54,21 +63,25 @@ def test_wakeup_travels_through_redis_and_completes_the_task() -> None:
         )
         task_id = task.task_id
 
-        assert container.execution_service.dispatch_outbox() >= 1
-
+        # A real worker process may dispatch the wake-up first, so assert on the
+        # outcome (the signal travels and the Task completes) instead of on who
+        # published it.
+        container.execution_service.dispatch_outbox()
         worker = RedisTaskWorker(
             container.execution_service.handle_wakeup, client=client, settings=settings
         )
-        handled = worker.run_once()
-        assert handled >= 1
-
-        stored = store.get_task(task_id)
+        stored = None
+        for _ in range(40):
+            worker.run_once()
+            stored = store.get_task(task_id)
+            if stored is not None and stored.status in {"succeeded", "failed"}:
+                break
         assert stored is not None
         assert stored.status == "succeeded"
         events = [event.event_type for event in store.list_events(task_id)]
         assert events[0] == "task.accepted"
         assert events[-1] == "task.completed"
-        assert isinstance(FakeReadCapability(), object)
+        assert [item.capability for item in store.list_observations(task_id)] == ["fake.read"]
     finally:
         if task_id:
             with pool.connection() as connection:
@@ -92,6 +105,10 @@ def test_unacked_message_is_reclaimed_after_worker_crash() -> None:
     from app.infrastructure.redis.connection import build_redis
     from app.infrastructure.redis.streams import RedisTaskPublisher, RedisTaskWorker
 
+    from app.kernel.registry import CapabilityRegistry
+    from app.testing.fake_capabilities import FakeReadCapability
+    from app.testing.fake_planner import InputDrivenFakePlanner
+
     suffix = uuid.uuid4().hex[:8]
     settings = Settings(
         database_url=TEST_DATABASE_URL,
@@ -107,7 +124,14 @@ def test_unacked_message_is_reclaimed_after_worker_crash() -> None:
     store = PostgresAgentStore(pool, schema="agent")
     client = build_redis(settings)
     publisher = RedisTaskPublisher(client, settings.redis_inbound_stream)
-    container = build_container(settings=settings, store=store, publisher=publisher)
+    registry = CapabilityRegistry([FakeReadCapability()])
+    container = build_container(
+        settings=settings,
+        store=store,
+        publisher=publisher,
+        registry=registry,
+        planner=InputDrivenFakePlanner(),
+    )
 
     task_id = ""
     try:
@@ -144,6 +168,7 @@ def test_unacked_message_is_reclaimed_after_worker_crash() -> None:
         stored = store.get_task(task_id)
         assert stored is not None
         assert stored.status == "succeeded"
+        assert [item.capability for item in store.list_observations(task_id)] == ["fake.read"]
         assert client.xpending(settings.redis_inbound_stream, settings.redis_consumer_group)["pending"] == 0
     finally:
         if task_id:
@@ -156,3 +181,49 @@ def test_unacked_message_is_reclaimed_after_worker_crash() -> None:
         except Exception:  # noqa: BLE001 - cleanup is best effort
             pass
         pool.close()
+
+
+def test_knowledge_consumer_does_not_replay_the_historical_backlog() -> None:
+    """The Agent group is created at "$": only messages published after it are seen."""
+
+    import json
+
+    from app.infrastructure.redis.connection import build_redis
+    from app.infrastructure.redis.knowledge_consumer import RedisKnowledgeEventWorker
+    from tests.support import knowledge_event
+
+    suffix = uuid.uuid4().hex[:8]
+    settings = Settings(
+        database_url=TEST_DATABASE_URL,
+        database_schema="agent",
+        redis_url=TEST_REDIS_URL,
+        redis_block_ms=200,
+    )
+    stream = f"knowledge:ready:test-{suffix}"
+    group = f"agent-workers-test-{suffix}"
+    client = build_redis(settings)
+    seen: list[str] = []
+    try:
+        # Published before the Agent group exists: this is the historical backlog.
+        client.xadd(stream, {"event": json.dumps(knowledge_event(knowledge_item_id="item-historical"))})
+
+        worker = RedisKnowledgeEventWorker(
+            lambda payload: seen.append(payload["payload"]["knowledge_item_id"]) is None,
+            client=client,
+            stream=stream,
+            group=group,
+            consumer="test-consumer",
+            block_ms=200,
+        )
+        assert worker.run_once() == 0
+        assert seen == []
+
+        client.xadd(stream, {"event": json.dumps(knowledge_event(knowledge_item_id="item-fresh"))})
+        assert worker.run_once() == 1
+        assert seen == ["item-fresh"]
+        assert client.xpending(stream, group)["pending"] == 0
+    finally:
+        try:
+            client.delete(stream)
+        except Exception:  # noqa: BLE001 - cleanup is best effort
+            pass

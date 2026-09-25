@@ -123,6 +123,20 @@ class Settings:
         "AGENT_KNOWLEDGE_PLATFORMS",
         "agent_KNOWLEDGE_PLATFORMS",
     )
+    knowledge_ready_stream: str = _text(
+        "knowledge:ready", "AGENT_KNOWLEDGE_READY_STREAM", "agent_KNOWLEDGE_READY_STREAM"
+    )
+    knowledge_consumer_group: str = _text(
+        "agent-workers", "AGENT_KNOWLEDGE_CONSUMER_GROUP", "agent_KNOWLEDGE_CONSUMER_GROUP"
+    )
+    default_timezone: str = _text(
+        "Asia/Shanghai", "AGENT_DEFAULT_TIMEZONE", "agent_DEFAULT_TIMEZONE"
+    )
+    calendar_default_duration_minutes: int = _int(
+        60,
+        "AGENT_CALENDAR_DEFAULT_DURATION_MINUTES",
+        "agent_CALENDAR_DEFAULT_DURATION_MINUTES",
+    )
 
     # Execution budgets from the step-1 specification.
     task_max_steps: int = _int(8, "AGENT_TASK_MAX_STEPS", "agent_TASK_MAX_STEPS")

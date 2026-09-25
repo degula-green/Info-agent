@@ -1224,7 +1224,7 @@ func (s *PostgresStore) IngestMessage(ctx context.Context, input IngestMessageIn
 			}
 			legacyTypeCorrection = true
 			legacyAttachmentCleanup = strings.EqualFold(existingType, "file") && strings.EqualFold(input.MessageType, "text")
-			if _, err = tx.Exec(ctx, `UPDATE knowledge.messages SET message_type=$2,normalized_content=$3,content_hash=$4 WHERE id=$1`, messageID, input.MessageType, nilString(input.Content), input.ContentHash); err != nil {
+			if _, err = tx.Exec(ctx, `UPDATE knowledge.messages SET message_type=$2,normalized_content=$3,content_hash=$4,contact_facts_status='pending' WHERE id=$1`, messageID, input.MessageType, nilString(input.Content), input.ContentHash); err != nil {
 				return nil, dbError(err)
 			}
 		} else if existingType != input.MessageType {
@@ -1233,7 +1233,7 @@ func (s *PostgresStore) IngestMessage(ctx context.Context, input IngestMessageIn
 			}
 			legacyTypeCorrection = true
 			legacyAttachmentCleanup = strings.EqualFold(existingType, "file") && strings.EqualFold(input.MessageType, "text")
-			if _, err = tx.Exec(ctx, `UPDATE knowledge.messages SET message_type=$2 WHERE id=$1`, messageID, input.MessageType); err != nil {
+			if _, err = tx.Exec(ctx, `UPDATE knowledge.messages SET message_type=$2,contact_facts_status='pending' WHERE id=$1`, messageID, input.MessageType); err != nil {
 				return nil, dbError(err)
 			}
 		}
@@ -1922,6 +1922,306 @@ func (s *PostgresStore) ListPendingMessages(ctx context.Context, limit int) ([]P
 	return out, dbError(rows.Err())
 }
 
+func (s *PostgresStore) ListPendingContactFactMessages(ctx context.Context, limit int) ([]domain.Message, error) {
+	if limit <= 0 || limit > 200 {
+		limit = 200
+	}
+	rows, err := s.pool.Query(ctx, `SELECT m.id::text,m.conversation_ingestion_id::text,m.external_message_id,COALESCE(m.sender_identity_id::text,''),COALESCE(m.sender_display_name,''),m.message_type,COALESCE(p.content,m.normalized_content,''),m.content_hash,m.content_version,m.sent_at,COALESCE((SELECT MIN(ms.collected_at) FROM knowledge.message_sources ms WHERE ms.message_id=m.id),m.created_at),m.lifecycle_status,m.vector_status,m.created_at,m.sensitive,m.classification_status FROM knowledge.messages m LEFT JOIN knowledge.message_private_content p ON p.message_id=m.id WHERE m.contact_facts_status='pending' AND m.classification_status='succeeded' AND m.sender_identity_id IS NOT NULL AND m.lifecycle_status='active' ORDER BY m.created_at LIMIT $1`, limit)
+	if err != nil {
+		return nil, dbError(err)
+	}
+	defer rows.Close()
+	out := []domain.Message{}
+	for rows.Next() {
+		var message domain.Message
+		if err := rows.Scan(&message.ID, &message.ConversationID, &message.ExternalMessageID, &message.SenderIdentityID, &message.SenderDisplayName, &message.MessageType, &message.Content, &message.ContentHash, &message.ContentVersion, &message.SentAt, &message.CollectedAt, &message.LifecycleStatus, &message.VectorStatus, &message.CreatedAt, &message.Sensitive, &message.ClassificationStatus); err != nil {
+			return nil, dbError(err)
+		}
+		message.ContactFactsStatus = "pending"
+		out = append(out, message)
+	}
+	return out, dbError(rows.Err())
+}
+
+func (s *PostgresStore) CompleteContactFactExtraction(ctx context.Context, messageID string, facts []ContactFactInput, status string) error {
+	if status != "succeeded" && status != "failed" {
+		return apperror.New("invalid_contact_fact_status", "contact fact status must be succeeded or failed", 400, false)
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return dbError(err)
+	}
+	defer tx.Rollback(ctx)
+	if _, err = tx.Exec(ctx, `DELETE FROM knowledge.contact_facts WHERE message_id=$1`, messageID); err != nil {
+		return dbError(err)
+	}
+	for _, fact := range facts {
+		fact.FactType = strings.TrimSpace(fact.FactType)
+		fact.Label = strings.TrimSpace(fact.Label)
+		fact.RawValue = strings.TrimSpace(fact.RawValue)
+		fact.ValueHash = strings.TrimSpace(fact.ValueHash)
+		if fact.FactType == "" || fact.Label == "" || fact.RawValue == "" || fact.ValueHash == "" {
+			return apperror.New("invalid_contact_fact", "contact fact fields are required", 400, false)
+		}
+		tag, insertErr := tx.Exec(ctx, `INSERT INTO knowledge.contact_facts (id,message_id,conversation_ingestion_id,sender_identity_id,fact_type,label,raw_value,value_hash,occurred_at)
+			SELECT $1,m.id,m.conversation_ingestion_id,m.sender_identity_id,$3,$4,$5,$6,m.sent_at
+			FROM knowledge.messages m
+			WHERE m.id=$2 AND m.sender_identity_id IS NOT NULL
+			ON CONFLICT DO NOTHING`, uuid.NewString(), messageID, fact.FactType, fact.Label, fact.RawValue, fact.ValueHash)
+		if insertErr != nil {
+			return dbError(insertErr)
+		}
+		if tag.RowsAffected() == 0 {
+			var exists bool
+			if err = tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM knowledge.messages WHERE id=$1)`, messageID).Scan(&exists); err != nil {
+				return dbError(err)
+			}
+			if !exists {
+				return apperror.New("message_not_found", "message was not found", 404, false)
+			}
+		}
+	}
+	tag, err := tx.Exec(ctx, `UPDATE knowledge.messages SET contact_facts_status=$2 WHERE id=$1`, messageID, status)
+	if err != nil {
+		return dbError(err)
+	}
+	if tag.RowsAffected() == 0 {
+		return apperror.New("message_not_found", "message was not found", 404, false)
+	}
+	return dbError(tx.Commit(ctx))
+}
+
+func (s *PostgresStore) ListContactFacts(ctx context.Context, senderIdentityIDs []string) ([]domain.ContactFact, error) {
+	if len(senderIdentityIDs) == 0 {
+		return []domain.ContactFact{}, nil
+	}
+	rows, err := s.pool.Query(ctx, `SELECT id::text,message_id::text,conversation_ingestion_id::text,sender_identity_id::text,fact_type,label,raw_value,value_hash,occurred_at,created_at FROM knowledge.contact_facts WHERE sender_identity_id = ANY($1::uuid[]) ORDER BY occurred_at DESC,created_at DESC`, senderIdentityIDs)
+	if err != nil {
+		return nil, dbError(err)
+	}
+	defer rows.Close()
+	out := []domain.ContactFact{}
+	for rows.Next() {
+		var fact domain.ContactFact
+		if err := rows.Scan(&fact.ID, &fact.MessageID, &fact.ConversationID, &fact.SenderIdentityID, &fact.FactType, &fact.Label, &fact.RawValue, &fact.ValueHash, &fact.OccurredAt, &fact.CreatedAt); err != nil {
+			return nil, dbError(err)
+		}
+		out = append(out, fact)
+	}
+	return out, dbError(rows.Err())
+}
+
+func (s *PostgresStore) ListContactMessages(ctx context.Context, userID, organizationID string, senderIdentityIDs []string, limit int) ([]domain.Message, error) {
+	if len(senderIdentityIDs) == 0 {
+		return []domain.Message{}, nil
+	}
+	if limit <= 0 || limit > 500 {
+		limit = 200
+	}
+	rows, err := s.pool.Query(ctx, `SELECT m.id::text,m.conversation_ingestion_id::text,m.external_message_id,COALESCE(m.sender_identity_id::text,''),COALESCE(m.sender_display_name,''),m.message_type,COALESCE(m.normalized_content,''),m.content_hash,m.content_version,m.sent_at,COALESCE((SELECT MIN(ms.collected_at) FROM knowledge.message_sources ms WHERE ms.message_id=m.id),m.created_at),m.lifecycle_status,m.vector_status,m.created_at,m.sensitive,m.classification_status,COALESCE(m.contact_facts_status,'pending')
+		FROM knowledge.messages m
+		JOIN knowledge.conversation_ingestions ci ON ci.id=m.conversation_ingestion_id
+		WHERE m.sender_identity_id=ANY($3::uuid[]) AND m.lifecycle_status='active'
+		  AND (
+		    ci.owner_user_id=NULLIF($1,'')::uuid
+		    OR EXISTS (SELECT 1 FROM knowledge.conversation_collectors cc WHERE cc.conversation_ingestion_id=ci.id AND cc.collector_user_id=NULLIF($1,'')::uuid AND cc.status<>'removed')
+		    OR (ci.conversation_type='group' AND ci.organization_id=NULLIF($2,'')::uuid)
+		    OR EXISTS (
+		      SELECT 1
+		      FROM knowledge.knowledge_items source
+		      JOIN knowledge.knowledge_items shared ON shared.source_type='shared_private_item' AND shared.source_private_item_id=source.id
+		      WHERE source.source_type='private_conversation'
+		        AND source.source_message_id=m.id AND source.source_attachment_id IS NULL
+		        AND shared.organization_id=NULLIF($2,'')::uuid
+		        AND shared.lifecycle_status='active'
+		    )
+		  )
+		ORDER BY m.sent_at DESC,m.id DESC
+		LIMIT $4`, userID, organizationID, senderIdentityIDs, limit)
+	if err != nil {
+		return nil, dbError(err)
+	}
+	defer rows.Close()
+	out := []domain.Message{}
+	for rows.Next() {
+		var message domain.Message
+		if err := rows.Scan(&message.ID, &message.ConversationID, &message.ExternalMessageID, &message.SenderIdentityID, &message.SenderDisplayName, &message.MessageType, &message.Content, &message.ContentHash, &message.ContentVersion, &message.SentAt, &message.CollectedAt, &message.LifecycleStatus, &message.VectorStatus, &message.CreatedAt, &message.Sensitive, &message.ClassificationStatus, &message.ContactFactsStatus); err != nil {
+			return nil, dbError(err)
+		}
+		out = append(out, message)
+	}
+	return out, dbError(rows.Err())
+}
+
+func (s *PostgresStore) ListAttachmentsForMessages(ctx context.Context, messageIDs []string) ([]domain.Attachment, error) {
+	if len(messageIDs) == 0 {
+		return []domain.Attachment{}, nil
+	}
+	rows, err := s.pool.Query(ctx, `SELECT `+attachmentColumns+` FROM knowledge.attachments WHERE message_id=ANY($1::uuid[]) ORDER BY created_at`, messageIDs)
+	if err != nil {
+		return nil, dbError(err)
+	}
+	defer rows.Close()
+	out := []domain.Attachment{}
+	for rows.Next() {
+		attachment, scanErr := scanAttachment(rows)
+		if scanErr != nil {
+			return nil, dbError(scanErr)
+		}
+		out = append(out, *attachment)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, dbError(err)
+	}
+	return out, s.enrichAttachmentRAG(ctx, out)
+}
+
+func (s *PostgresStore) GetContactKnowledgeItem(ctx context.Context, messageID, attachmentID, organizationID string) (string, error) {
+	var id string
+	err := s.pool.QueryRow(ctx, `SELECT COALESCE(
+		(SELECT shared.id::text
+		 FROM knowledge.knowledge_items source
+		 JOIN knowledge.knowledge_items shared ON shared.source_type='shared_private_item' AND shared.source_private_item_id=source.id
+		 WHERE source.source_message_id=NULLIF($1,'')::uuid AND source.source_attachment_id IS NULL
+		   AND shared.organization_id=NULLIF($3,'')::uuid AND shared.lifecycle_status='active'
+		 LIMIT 1),
+		(SELECT source.id::text
+		 FROM knowledge.knowledge_items source
+		 WHERE source.source_message_id=NULLIF($1,'')::uuid AND source.source_attachment_id IS NULL AND source.source_type<>'shared_private_item'
+		 LIMIT 1),
+		(SELECT shared.id::text
+		 FROM knowledge.knowledge_items source
+		 JOIN knowledge.knowledge_items shared ON shared.source_type='shared_private_item' AND shared.source_private_item_id=source.id
+		 WHERE source.source_attachment_id=NULLIF($2,'')::uuid
+		   AND shared.organization_id=NULLIF($3,'')::uuid AND shared.lifecycle_status='active'
+		 LIMIT 1),
+		(SELECT source.id::text
+		 FROM knowledge.knowledge_items source
+		 WHERE source.source_attachment_id=NULLIF($2,'')::uuid AND source.source_type<>'shared_private_item'
+		 LIMIT 1),
+		'')`, messageID, attachmentID, organizationID).Scan(&id)
+	if err != nil {
+		return "", dbError(err)
+	}
+	return id, nil
+}
+
+func scanPrivateShareReference(row rowScanner) (*domain.PrivateShareReference, error) {
+	var reference domain.PrivateShareReference
+	if err := row.Scan(&reference.ID, &reference.OrganizationID, &reference.SourcePrivateResourceID, &reference.SourceResourceType, &reference.SourceContentVersion, &reference.ShareBatchID, &reference.ShareRequestID, &reference.CreatedByUserID, &reference.Status, &reference.Sensitive, &reference.ContentAccessRequired, &reference.CreatedAt); err != nil {
+		return nil, err
+	}
+	return &reference, nil
+}
+
+func (s *PostgresStore) GetPrivateShareReference(ctx context.Context, resourceID, resourceType string) (*domain.PrivateShareReference, error) {
+	reference, err := scanPrivateShareReference(s.pool.QueryRow(ctx, `SELECT id::text,organization_id::text,source_private_resource_id::text,source_resource_type,source_content_version,share_batch_id::text,share_request_id,created_by_user_id::text,status,sensitive,content_access_required,created_at FROM knowledge.private_share_references WHERE source_private_resource_id=$1 AND source_resource_type=$2 AND status='ready' ORDER BY created_at DESC LIMIT 1`, resourceID, resourceType))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, dbError(err)
+	}
+	return reference, nil
+}
+
+func scanPrivateAccessRequest(row rowScanner) (*domain.PrivateAccessRequest, error) {
+	var request domain.PrivateAccessRequest
+	if err := row.Scan(&request.ID, &request.RequesterUserID, &request.ShareReferenceID, &request.ResourceID, &request.ResourceType, &request.RequestedAction, &request.Reason, &request.Status, &request.ReviewedByUserID, &request.ReviewNote, &request.CreatedAt, &request.ReviewedAt); err != nil {
+		return nil, err
+	}
+	return &request, nil
+}
+
+func (s *PostgresStore) ListPrivateAccessRequests(ctx context.Context, userID, scope string) ([]domain.PrivateAccessRequest, error) {
+	query := ""
+	switch scope {
+	case "mine":
+		query = `SELECT r.id::text,r.requester_user_id::text,r.share_reference_id::text,r.resource_id::text,r.resource_type,r.requested_action,COALESCE(r.reason,''),r.status,COALESCE(r.reviewed_by_user_id::text,''),COALESCE(r.review_note,''),r.created_at,r.reviewed_at FROM knowledge.private_access_requests r WHERE r.requester_user_id=NULLIF($1,'')::uuid ORDER BY r.created_at DESC LIMIT 100`
+	case "inbox":
+		query = `SELECT r.id::text,r.requester_user_id::text,r.share_reference_id::text,r.resource_id::text,r.resource_type,r.requested_action,COALESCE(r.reason,''),r.status,COALESCE(r.reviewed_by_user_id::text,''),COALESCE(r.review_note,''),r.created_at,r.reviewed_at FROM knowledge.private_access_requests r JOIN knowledge.knowledge_items source ON source.source_type='private_conversation' AND ((r.resource_type='message' AND source.source_message_id=r.resource_id AND source.source_attachment_id IS NULL) OR (r.resource_type='attachment' AND source.source_attachment_id=r.resource_id)) JOIN knowledge.conversation_ingestions ci ON ci.id=source.conversation_ingestion_id WHERE ci.owner_user_id=NULLIF($1,'')::uuid AND r.status='pending' ORDER BY r.created_at DESC LIMIT 100`
+	default:
+		return nil, apperror.New("invalid_scope", "scope must be mine or inbox", 400, false)
+	}
+	rows, err := s.pool.Query(ctx, query, userID)
+	if err != nil {
+		return nil, dbError(err)
+	}
+	defer rows.Close()
+	out := []domain.PrivateAccessRequest{}
+	for rows.Next() {
+		request, scanErr := scanPrivateAccessRequest(rows)
+		if scanErr != nil {
+			return nil, dbError(scanErr)
+		}
+		out = append(out, *request)
+	}
+	return out, dbError(rows.Err())
+}
+
+func (s *PostgresStore) GetContactProfile(ctx context.Context, ownerUserID, contactKey string) (*domain.ContactProfile, error) {
+	var profile domain.ContactProfile
+	err := s.pool.QueryRow(ctx, `SELECT id::text,owner_user_id::text,contact_key,summary,source_fingerprint,status,COALESCE(last_error,''),generated_at,updated_at FROM knowledge.contact_profiles WHERE owner_user_id=$1 AND contact_key=$2`, ownerUserID, contactKey).Scan(
+		&profile.ID, &profile.OwnerUserID, &profile.ContactKey, &profile.Summary, &profile.SourceFingerprint,
+		&profile.Status, &profile.LastError, &profile.GeneratedAt, &profile.UpdatedAt,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, dbError(err)
+	}
+	return &profile, nil
+}
+
+func (s *PostgresStore) ListContactProfileCandidates(ctx context.Context, limit int) ([]ContactProfileCandidate, error) {
+	if limit <= 0 || limit > 500 {
+		limit = 200
+	}
+	rows, err := s.pool.Query(ctx, `SELECT cr.owner_user_id::text,
+		COALESCE(NULLIF(ei.mapped_user_id::text,''),ei.id::text) AS contact_key,
+		array_agg(ei.id::text ORDER BY ei.id::text)
+		FROM knowledge.contact_relations cr
+		JOIN knowledge.external_identities ei ON ei.id=cr.external_identity_id
+		WHERE cr.status='active'
+		GROUP BY cr.owner_user_id,COALESCE(NULLIF(ei.mapped_user_id::text,''),ei.id::text)
+		ORDER BY MAX(cr.updated_at) DESC
+		LIMIT $1`, limit)
+	if err != nil {
+		return nil, dbError(err)
+	}
+	defer rows.Close()
+	out := []ContactProfileCandidate{}
+	for rows.Next() {
+		var candidate ContactProfileCandidate
+		if err := rows.Scan(&candidate.OwnerUserID, &candidate.ContactKey, &candidate.IdentityIDs); err != nil {
+			return nil, dbError(err)
+		}
+		out = append(out, candidate)
+	}
+	return out, dbError(rows.Err())
+}
+
+func (s *PostgresStore) UpsertContactProfile(ctx context.Context, profile domain.ContactProfile) error {
+	if strings.TrimSpace(profile.OwnerUserID) == "" || strings.TrimSpace(profile.ContactKey) == "" {
+		return apperror.New("invalid_contact_profile", "owner and contact key are required", 400, false)
+	}
+	id := strings.TrimSpace(profile.ID)
+	if id == "" {
+		id = uuid.NewString()
+	}
+	_, err := s.pool.Exec(ctx, `INSERT INTO knowledge.contact_profiles
+		(id,owner_user_id,contact_key,summary,source_fingerprint,status,last_error,generated_at,updated_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+		ON CONFLICT (owner_user_id,contact_key) DO UPDATE SET
+			summary=EXCLUDED.summary,source_fingerprint=EXCLUDED.source_fingerprint,
+			status=EXCLUDED.status,last_error=EXCLUDED.last_error,
+			generated_at=EXCLUDED.generated_at,updated_at=EXCLUDED.updated_at`,
+		id, profile.OwnerUserID, profile.ContactKey, profile.Summary, profile.SourceFingerprint,
+		profile.Status, nilString(profile.LastError), profile.GeneratedAt, profile.UpdatedAt)
+	return dbError(err)
+}
+
 func (s *PostgresStore) CompleteMessageClassification(ctx context.Context, messageID, displayContent string, sensitive bool) error {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -1929,7 +2229,7 @@ func (s *PostgresStore) CompleteMessageClassification(ctx context.Context, messa
 	}
 	defer tx.Rollback(ctx)
 	var conversationID string
-	if err = tx.QueryRow(ctx, `UPDATE knowledge.messages SET normalized_content=$2,sensitive=$3,classification_status='succeeded' WHERE id=$1 AND classification_status='pending' RETURNING conversation_ingestion_id::text`, messageID, displayContent, sensitive).Scan(&conversationID); err != nil {
+	if err = tx.QueryRow(ctx, `UPDATE knowledge.messages SET normalized_content=$2,sensitive=$3,classification_status='succeeded',contact_facts_status='pending' WHERE id=$1 AND classification_status='pending' RETURNING conversation_ingestion_id::text`, messageID, displayContent, sensitive).Scan(&conversationID); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return apperror.New("message_not_found", "message is not pending", 404, false)
 		}
@@ -3066,3 +3366,83 @@ func normalizePrivateWechatSender(conversationType, conversationName, conversati
 }
 
 var _ = fmt.Sprintf
+
+// -- Agent calendar support ------------------------------------------------
+
+func (s *PostgresStore) GetAgentMessageContext(ctx context.Context, messageID string) (*domain.AgentMessageContext, error) {
+	var item domain.AgentMessageContext
+	err := s.pool.QueryRow(ctx, `SELECT m.id::text,m.conversation_ingestion_id::text,m.message_type,COALESCE(m.normalized_content,''),m.sent_at,m.sensitive FROM knowledge.messages m WHERE m.id::text=$1`, messageID).
+		Scan(&item.MessageID, &item.ConversationID, &item.MessageType, &item.Text, &item.SentAt, &item.Sensitive)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, apperror.New("message_not_found", "message was not found", 404, false)
+	}
+	if err != nil {
+		return nil, dbError(err)
+	}
+	return &item, nil
+}
+
+func (s *PostgresStore) ListAgentConversationMembers(ctx context.Context, conversationID string) ([]domain.AgentConversationMember, error) {
+	rows, err := s.pool.Query(ctx, `SELECT ei.external_user_id,COALESCE(ei.display_name,''),COALESCE(cm.member_role,''),cm.status='active',COALESCE(ei.mapped_user_id::text,''),ei.mapping_status FROM knowledge.conversation_memberships cm JOIN knowledge.external_identities ei ON ei.id=cm.external_identity_id WHERE cm.conversation_ingestion_id::text=$1 ORDER BY cm.joined_at NULLS LAST,cm.id`, conversationID)
+	if err != nil {
+		return nil, dbError(err)
+	}
+	defer rows.Close()
+	items := make([]domain.AgentConversationMember, 0)
+	for rows.Next() {
+		var item domain.AgentConversationMember
+		if err := rows.Scan(&item.ExternalUserID, &item.DisplayName, &item.MemberRole, &item.Active, &item.MappedUserID, &item.MappingStatus); err != nil {
+			return nil, dbError(err)
+		}
+		items = append(items, item)
+	}
+	return items, dbError(rows.Err())
+}
+
+func (s *PostgresStore) GetCalendarAuthorization(ctx context.Context, ownerUserID, provider string) (*domain.CalendarAuthorization, error) {
+	var item domain.CalendarAuthorization
+	err := s.pool.QueryRow(ctx, `SELECT id::text,owner_user_id::text,provider,credential_ref,COALESCE(external_account_id,''),status,created_at,updated_at FROM knowledge.calendar_authorizations WHERE owner_user_id::text=$1 AND provider=$2`, ownerUserID, provider).
+		Scan(&item.ID, &item.OwnerUserID, &item.Provider, &item.CredentialRef, &item.ExternalAccountID, &item.Status, &item.CreatedAt, &item.UpdatedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, apperror.New("calendar_not_bound", "the user has no calendar authorization", 404, false)
+	}
+	if err != nil {
+		return nil, dbError(err)
+	}
+	return &item, nil
+}
+
+func (s *PostgresStore) UpsertCalendarAuthorization(ctx context.Context, item domain.CalendarAuthorization, now time.Time) (*domain.CalendarAuthorization, error) {
+	var saved domain.CalendarAuthorization
+	err := s.pool.QueryRow(ctx, `INSERT INTO knowledge.calendar_authorizations (owner_user_id,provider,credential_ref,external_account_id,status,created_at,updated_at) VALUES ($1::uuid,$2,$3,$4,$5,$6,$6) ON CONFLICT (owner_user_id,provider) DO UPDATE SET credential_ref=EXCLUDED.credential_ref,external_account_id=EXCLUDED.external_account_id,status=EXCLUDED.status,updated_at=EXCLUDED.updated_at RETURNING id::text,owner_user_id::text,provider,credential_ref,COALESCE(external_account_id,''),status,created_at,updated_at`, item.OwnerUserID, item.Provider, item.CredentialRef, nilString(item.ExternalAccountID), item.Status, now).
+		Scan(&saved.ID, &saved.OwnerUserID, &saved.Provider, &saved.CredentialRef, &saved.ExternalAccountID, &saved.Status, &saved.CreatedAt, &saved.UpdatedAt)
+	if err != nil {
+		return nil, dbError(err)
+	}
+	return &saved, nil
+}
+
+func (s *PostgresStore) GetCalendarEventRequest(ctx context.Context, requestID string) (*domain.CalendarEventRequest, error) {
+	var item domain.CalendarEventRequest
+	var start, end *time.Time
+	err := s.pool.QueryRow(ctx, `SELECT request_id,owner_user_id::text,provider,status,event_id,COALESCE(event_url,''),COALESCE(title,''),start_time,end_time,created_at FROM knowledge.calendar_event_requests WHERE request_id=$1`, requestID).
+		Scan(&item.RequestID, &item.OwnerUserID, &item.Provider, &item.Status, &item.EventID, &item.EventURL, &item.Title, &start, &end, &item.CreatedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, dbError(err)
+	}
+	if start != nil {
+		item.StartTime = *start
+	}
+	if end != nil {
+		item.EndTime = *end
+	}
+	return &item, nil
+}
+
+func (s *PostgresStore) SaveCalendarEventRequest(ctx context.Context, item domain.CalendarEventRequest) error {
+	_, err := s.pool.Exec(ctx, `INSERT INTO knowledge.calendar_event_requests (request_id,owner_user_id,provider,status,event_id,event_url,title,start_time,end_time,created_at) VALUES ($1,$2::uuid,$3,$4,$5,$6,$7,$8,$9,$10) ON CONFLICT (request_id) DO NOTHING`, item.RequestID, item.OwnerUserID, item.Provider, item.Status, item.EventID, nilString(item.EventURL), nilString(item.Title), item.StartTime, item.EndTime, item.CreatedAt)
+	return dbError(err)
+}

@@ -86,6 +86,9 @@ class PostgresAgentStore:
             source_type=row["source_type"],
             owner_user_id=row["owner_user_id"],
             status=row["status"],
+            input=row["input"] or {},
+            source_ref=row["source_ref"] or {},
+            constraints=row["constraints"] or {},
             objective=row["objective"],
             current_plan_id=row["current_plan_id"],
             current_plan_version=row["current_plan_version"],
@@ -255,8 +258,9 @@ class PostgresAgentStore:
             INSERT INTO {self._tasks} (
                 task_id, source_type, owner_user_id, status, objective, current_plan_id,
                 current_plan_version, idempotency_key, checkpoint, last_error,
-                lease_owner, lease_expires_at, created_at, updated_at
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                lease_owner, lease_expires_at, input, source_ref, constraints,
+                created_at, updated_at
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (task_id) DO UPDATE SET
                 status = EXCLUDED.status,
                 objective = EXCLUDED.objective,
@@ -264,6 +268,9 @@ class PostgresAgentStore:
                 current_plan_version = EXCLUDED.current_plan_version,
                 checkpoint = EXCLUDED.checkpoint,
                 last_error = EXCLUDED.last_error,
+                input = EXCLUDED.input,
+                source_ref = EXCLUDED.source_ref,
+                constraints = EXCLUDED.constraints,
                 updated_at = EXCLUDED.updated_at
             """,
             (
@@ -279,6 +286,9 @@ class PostgresAgentStore:
                 _json(task.last_error),
                 task.lease_owner,
                 task.lease_expires_at,
+                _json(task.input),
+                _json(task.source_ref),
+                _json(task.constraints),
                 task.created_at,
                 task.updated_at,
             ),
@@ -353,6 +363,30 @@ class PostgresAgentStore:
                     "ORDER BY created_at LIMIT %s",
                     (limit,),
                 )
+                return [self._task_model(row) for row in cursor.fetchall()]
+
+    def list_tasks_for_owner(
+        self,
+        owner_user_id: str,
+        *,
+        statuses: list[str] | None = None,
+        limit: int = 50,
+    ) -> list[TaskRecord]:
+        wanted = [status for status in (statuses or []) if status]
+        with self.pool.connection() as connection:
+            with connection.cursor(row_factory=dict_row) as cursor:
+                if wanted:
+                    cursor.execute(
+                        f"SELECT * FROM {self._tasks} WHERE owner_user_id = %s AND status = ANY(%s) "
+                        "ORDER BY created_at DESC LIMIT %s",
+                        (owner_user_id, wanted, max(0, limit)),
+                    )
+                else:
+                    cursor.execute(
+                        f"SELECT * FROM {self._tasks} WHERE owner_user_id = %s "
+                        "ORDER BY created_at DESC LIMIT %s",
+                        (owner_user_id, max(0, limit)),
+                    )
                 return [self._task_model(row) for row in cursor.fetchall()]
 
     def acquire_lease(self, task_id: str, owner: str, seconds: float) -> bool:
@@ -588,6 +622,8 @@ class PostgresAgentStore:
                         attempt, status, arguments, result, error, created_at, finished_at
                     ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT (call_id) DO UPDATE SET
+                        attempt = EXCLUDED.attempt,
+                        arguments = EXCLUDED.arguments,
                         status = EXCLUDED.status,
                         result = EXCLUDED.result,
                         error = EXCLUDED.error,

@@ -1,0 +1,1 @@
+"""Knowledge internal API adapters."""

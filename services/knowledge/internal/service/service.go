@@ -19,12 +19,14 @@ import (
 	"github.com/google/uuid"
 	"info-agent/knowledge/internal/apperror"
 	"info-agent/knowledge/internal/config"
+	"info-agent/knowledge/internal/contactfacts"
 	"info-agent/knowledge/internal/coreclient"
 	"info-agent/knowledge/internal/domain"
 	"info-agent/knowledge/internal/kv"
 	"info-agent/knowledge/internal/objectstore"
 	"info-agent/knowledge/internal/platform"
 	"info-agent/knowledge/internal/privacy"
+	"info-agent/knowledge/internal/ragclient"
 	"info-agent/knowledge/internal/repository"
 	"info-agent/knowledge/internal/trace"
 	"info-agent/knowledge/internal/vault"
@@ -37,7 +39,9 @@ type Service struct {
 	Vault   *vault.Vault
 	Objects objectstore.Store
 	Feishu  platform.OAuthProvider
+	Calendar platform.CalendarProvider
 	Core    *coreclient.Client
+	RAG     *ragclient.Client
 	Config  config.Config
 	Now     func() time.Time
 }
@@ -307,8 +311,12 @@ type oauthCompletion struct {
 	Retryable bool                     `json:"retryable,omitempty"`
 }
 
-func New(repo repository.Repository, store kv.Store, vaultStore *vault.Vault, objects objectstore.Store, feishu platform.OAuthProvider, core *coreclient.Client, cfg config.Config) *Service {
-	return &Service{Repo: repo, KV: store, Vault: vaultStore, Objects: objects, Feishu: feishu, Core: core, Config: cfg, Now: func() time.Time { return time.Now().UTC() }}
+func New(repo repository.Repository, store kv.Store, vaultStore *vault.Vault, objects objectstore.Store, feishu platform.OAuthProvider, calendar platform.CalendarProvider, core *coreclient.Client, cfg config.Config) *Service {
+	var rag *ragclient.Client
+	if strings.TrimSpace(cfg.RAGURL) != "" && strings.TrimSpace(cfg.RAGServiceToken) != "" {
+		rag = ragclient.New(cfg.RAGURL, cfg.RAGServiceToken)
+	}
+	return &Service{Repo: repo, KV: store, Vault: vaultStore, Objects: objects, Feishu: feishu, Calendar: calendar, Core: core, RAG: rag, Config: cfg, Now: func() time.Time { return time.Now().UTC() }}
 }
 
 func (s *Service) ListConnectors(ctx context.Context, userID string) ([]domain.ConnectorView, error) {
@@ -512,6 +520,14 @@ func (s *Service) CompleteFeishuOAuth(ctx context.Context, state, code, provider
 	if err != nil {
 		_ = s.Vault.Delete(ctx, key)
 		return fail(err)
+	}
+	// One Feishu authorization can serve both message collection and calendar
+	// writes; record the calendar authorization only when the scope was asked for.
+	if s.ScopesGrantCalendar() {
+		if err := s.BindCalendarAuthorization(ctx, data.UserID, domain.PlatformFeishu, key, profile.ExternalAccountID); err != nil {
+			slog.Default().WarnContext(ctx, "calendar authorization could not be recorded",
+				"error", err.Error())
+		}
 	}
 	if oldCredentialRef != "" && oldCredentialRef != key {
 		_ = s.Vault.Delete(ctx, oldCredentialRef)
@@ -1599,7 +1615,7 @@ func containsString(values []string, target string) bool {
 	return false
 }
 
-func (s *Service) GetContact(ctx context.Context, userID, relationID string) (*domain.ContactDetail, error) {
+func (s *Service) GetContact(ctx context.Context, userID, relationID string, organizationID ...string) (*domain.ContactDetail, error) {
 	relations, err := s.Repo.ListContactRelations(ctx, userID, "")
 	if err != nil {
 		return nil, err
@@ -1630,36 +1646,127 @@ func (s *Service) GetContact(ctx context.Context, userID, relationID string) (*d
 	if matched == nil {
 		return nil, apperror.New("contact_not_found", "contact relation was not found", 404, false)
 	}
-	detail := &domain.ContactDetail{ContactView: *matched, Messages: []domain.Message{}, Attachments: []domain.Attachment{}}
-	identityIDs := make(map[string]struct{}, len(matched.Identities))
+	organization := ""
+	if len(organizationID) > 0 {
+		organization = strings.TrimSpace(organizationID[0])
+	}
+	identityIDs := make([]string, 0, len(matched.Identities))
 	for _, identity := range matched.Identities {
-		identityIDs[identity.ID] = struct{}{}
-	}
-	for _, conversationID := range matched.ConversationIDs {
-		// Reuse the existing conversation authorization boundary before reading
-		// any messages or attachment references through the contact view.
-		conversation, accessErr := s.GetConversation(ctx, userID, conversationID)
-		if accessErr != nil {
-			return nil, accessErr
-		}
-		messages, messageErr := s.Repo.ListMessages(ctx, conversationID, 200, "")
-		if messageErr != nil {
-			return nil, messageErr
-		}
-		for _, message := range messages {
-			belongsToContact := conversation.ConversationType == "private"
-			if !belongsToContact {
-				_, belongsToContact = identityIDs[message.SenderIdentityID]
-			}
-			if !belongsToContact {
-				continue
-			}
-			detail.Attachments = append(detail.Attachments, message.Attachments...)
-			if repository.IsDisplayableTextMessage(message.MessageType, message.Content) {
-				detail.Messages = append(detail.Messages, message)
-			}
+		if strings.TrimSpace(identity.ID) != "" {
+			identityIDs = append(identityIDs, identity.ID)
 		}
 	}
+	facts, err := s.Repo.ListContactFacts(ctx, identityIDs)
+	if err != nil {
+		return nil, err
+	}
+	messages, err := s.Repo.ListContactMessages(ctx, userID, organization, identityIDs, 200)
+	if err != nil {
+		return nil, err
+	}
+	visibleMessageIDs := make(map[string]struct{}, len(messages))
+	messageIDs := make([]string, 0, len(messages))
+	for _, message := range messages {
+		visibleMessageIDs[message.ID] = struct{}{}
+		messageIDs = append(messageIDs, message.ID)
+	}
+	visibleFacts := facts[:0]
+	for _, fact := range facts {
+		if _, visible := visibleMessageIDs[fact.MessageID]; visible {
+			visibleFacts = append(visibleFacts, fact)
+		}
+	}
+	facts = visibleFacts
+	attachments, err := s.Repo.ListAttachmentsForMessages(ctx, messageIDs)
+	if err != nil {
+		return nil, err
+	}
+	evaluator, err := newContactAccessEvaluator(ctx, s, userID, organization)
+	if err != nil {
+		return nil, err
+	}
+	conversationCache := map[string]*domain.ConversationIngestion{}
+	directConversation := func(conversationID string) bool {
+		conversation, exists := conversationCache[conversationID]
+		if !exists {
+			loaded, loadErr := s.Repo.GetConversation(ctx, conversationID)
+			if loadErr != nil {
+				conversationCache[conversationID] = nil
+				return false
+			}
+			conversation = loaded
+			conversationCache[conversationID] = loaded
+		}
+		return canManageConversation(conversation, userID)
+	}
+	for index := range facts {
+		reference, referenceErr := s.Repo.GetPrivateShareReference(ctx, facts[index].MessageID, "message")
+		if referenceErr != nil {
+			return nil, referenceErr
+		}
+		knowledgeItemID, itemErr := s.Repo.GetContactKnowledgeItem(ctx, facts[index].MessageID, "", organization)
+		if itemErr != nil {
+			return nil, itemErr
+		}
+		evaluator.add(contactAccessTarget{
+			Key: "fact:" + facts[index].ID, Direct: directConversation(facts[index].ConversationID),
+			ResourceType: "knowledge_item", ResourcePart: "display", ResourceID: knowledgeItemID, Action: "view",
+			RequestType: "message", RequestResourceID: facts[index].MessageID, ShareReference: reference,
+		})
+	}
+	for index := range attachments {
+		reference, referenceErr := s.Repo.GetPrivateShareReference(ctx, attachments[index].ID, "attachment")
+		if referenceErr != nil {
+			return nil, referenceErr
+		}
+		direct := directConversation(attachments[index].ConversationID)
+		requiresApproval := attachments[index].Sensitive && attachments[index].ContentAccessRequired
+		if item, itemErr := s.Repo.GetKnowledgeItemByAttachment(ctx, attachments[index].ID); itemErr == nil && item != nil {
+			requiresApproval = item.ContentAccessRequired
+		}
+		common := contactAccessTarget{
+			Direct: direct, ResourceType: "attachment", ResourceID: attachments[index].ID,
+			RequestType: "attachment", RequestResourceID: attachments[index].ID, ShareReference: reference,
+		}
+		metadata := common
+		metadata.Key, metadata.ResourcePart, metadata.Action = "attachment:"+attachments[index].ID+":metadata", "metadata", "view"
+		content := common
+		content.Key, content.ResourcePart, content.Action = "attachment:"+attachments[index].ID+":content", "content", "view"
+		content.Direct = direct && !requiresApproval
+		download := common
+		download.Key, download.ResourcePart, download.Action = "attachment:"+attachments[index].ID+":download", "content", "download"
+		download.Direct = direct && !requiresApproval
+		evaluator.add(metadata)
+		evaluator.add(content)
+		evaluator.add(download)
+	}
+	access, err := evaluator.resolve(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for index := range facts {
+		facts[index].Access = access["fact:"+facts[index].ID]
+		if facts[index].Access.Status != "granted" {
+			facts[index].MessageID = ""
+			facts[index].SenderIdentityID = ""
+			facts[index].RawValue = ""
+			facts[index].ValueHash = ""
+		}
+	}
+	for index := range attachments {
+		attachments[index].Access = access["attachment:"+attachments[index].ID+":metadata"]
+		attachments[index].ContentAccess = access["attachment:"+attachments[index].ID+":content"]
+		attachments[index].DownloadAccess = access["attachment:"+attachments[index].ID+":download"]
+	}
+	contactKey := contactKeyFromView(*matched)
+	profile, err := s.Repo.GetContactProfile(ctx, userID, contactKey)
+	if err != nil {
+		return nil, err
+	}
+	if profile == nil {
+		profile = &domain.ContactProfile{OwnerUserID: userID, ContactKey: contactKey, Status: "pending", UpdatedAt: time.Now().UTC()}
+	}
+	detail := &domain.ContactDetail{ContactView: *matched, Profile: *profile, Facts: facts, Attachments: attachments}
 	return detail, nil
 }
 
@@ -1803,6 +1910,10 @@ func (s *Service) CreatePrivateAccessRequest(ctx context.Context, userID string,
 	input.RequesterUserID = userID
 	input.Now = s.Now()
 	return s.Repo.CreatePrivateAccessRequest(ctx, input)
+}
+
+func (s *Service) ListPrivateAccessRequests(ctx context.Context, userID, scope string) ([]domain.PrivateAccessRequest, error) {
+	return s.Repo.ListPrivateAccessRequests(ctx, userID, strings.TrimSpace(scope))
 }
 
 func (s *Service) ReviewPrivateAccessRequest(ctx context.Context, userID, requestID, status, note string) (*domain.PrivateAccessRequest, error) {
@@ -2250,6 +2361,14 @@ func (s *Service) UploadAttachment(ctx context.Context, collectorID, attachmentI
 }
 
 func (s *Service) OpenAttachment(ctx context.Context, userID, id string, authorization ...string) (*domain.Attachment, io.ReadCloser, error) {
+	return s.OpenAttachmentWithAction(ctx, userID, id, "view", authorization...)
+}
+
+func (s *Service) OpenAttachmentWithAction(ctx context.Context, userID, id, action string, authorization ...string) (*domain.Attachment, io.ReadCloser, error) {
+	action = strings.ToLower(strings.TrimSpace(action))
+	if action != "view" && action != "download" {
+		return nil, nil, apperror.New("invalid_action", "attachment action must be view or download", 400, false)
+	}
 	attachment, err := s.Repo.GetAttachment(ctx, id)
 	if err != nil {
 		return nil, nil, err
@@ -2285,12 +2404,23 @@ func (s *Service) OpenAttachment(ctx context.Context, userID, id string, authori
 		if err != nil {
 			return nil, nil, err
 		}
-		if _, err := s.GetConversation(ctx, userID, conversation.ID); err != nil {
-			return nil, nil, err
+		requiresApproval := attachment.Sensitive && attachment.ContentAccessRequired
+		if item, itemErr := s.Repo.GetKnowledgeItemByAttachment(ctx, attachment.ID); itemErr == nil && item != nil {
+			requiresApproval = item.ContentAccessRequired
 		}
-	}
-	if attachment.Sensitive && attachment.ContentAccessRequired {
-		return nil, nil, apperror.New("attachment_content_restricted", "attachment content requires approval", 403, false)
+		if requiresApproval {
+			allowed, permissionErr := s.attachmentContentAllowed(ctx, userID, attachment.ID, action)
+			if permissionErr != nil {
+				return nil, nil, apperror.New("attachment_content_restricted", "attachment content requires approval", 403, false)
+			}
+			if !allowed {
+				return nil, nil, apperror.New("attachment_content_restricted", "attachment content requires approval", 403, false)
+			}
+		} else if !canManageConversation(conversation, userID) {
+			if _, accessErr := s.GetConversation(ctx, userID, conversation.ID); accessErr != nil {
+				return nil, nil, accessErr
+			}
+		}
 	}
 	if attachment.ContentStatus != "ready" || attachment.ObjectRef == "" {
 		return nil, nil, apperror.New("attachment_not_ready", "attachment content is not ready", 409, true)
@@ -2391,6 +2521,16 @@ func (s *Service) PublishOutbox(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	if len(events) == 0 {
+		return nil
+	}
+	// An empty stream name is not harmless: XADD would write to a key named ""
+	// and the row would still be marked published, silently dropping the event.
+	// Refuse instead and leave the rows pending so a configured deployment can
+	// still deliver them.
+	if strings.TrimSpace(s.Config.RedisOutboundStream) == "" {
+		return apperror.New("outbox_stream_not_configured", "KNOWLEDGE_REDIS_OUTBOUND_STREAM is not configured; refusing to publish and lose outbox events", 503, true)
+	}
 	var firstErr error
 	for _, event := range events {
 		if err := s.KV.Publish(ctx, s.Config.RedisOutboundStream, event.Envelope()); err != nil {
@@ -2480,6 +2620,195 @@ func (s *Service) ProcessPrivacy(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+func (s *Service) ProcessContactFacts(ctx context.Context) error {
+	pending, err := s.Repo.ListPendingContactFactMessages(ctx, 100)
+	if err != nil {
+		return err
+	}
+	var firstErr error
+	for _, message := range pending {
+		inputs := []repository.ContactFactInput{}
+		if repository.IsDisplayableTextMessage(message.MessageType, message.Content) {
+			for _, fact := range contactfacts.Extract(message.Content) {
+				inputs = append(inputs, repository.ContactFactInput{
+					FactType: fact.Type, Label: fact.Label, RawValue: fact.RawValue, ValueHash: fact.ValueHash,
+				})
+			}
+		}
+		if err := s.Repo.CompleteContactFactExtraction(ctx, message.ID, inputs, "succeeded"); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
+}
+
+func (s *Service) ProcessContactProfiles(ctx context.Context) error {
+	candidates, err := s.Repo.ListContactProfileCandidates(ctx, 50)
+	if err != nil {
+		return err
+	}
+	var firstErr error
+	for _, candidate := range candidates {
+		organizationID := ""
+		if s.Core != nil {
+			current, resolveErr := s.Core.CurrentOrganization(ctx, candidate.OwnerUserID)
+			if resolveErr != nil {
+				slog.WarnContext(ctx, "contact profile organization resolution failed", "owner_user_id", candidate.OwnerUserID, "error", resolveErr)
+			} else {
+				organizationID = current
+			}
+		}
+		if _, refreshErr := s.refreshContactProfile(ctx, candidate, organizationID); refreshErr != nil && firstErr == nil {
+			firstErr = refreshErr
+		}
+	}
+	return firstErr
+}
+
+func (s *Service) RefreshContactProfile(ctx context.Context, userID, relationID, organizationID string) (*domain.ContactProfile, error) {
+	relations, err := s.Repo.ListContactRelations(ctx, userID, "")
+	if err != nil {
+		return nil, err
+	}
+	var relation *repository.ContactRelation
+	for index := range relations {
+		if relations[index].ID == relationID {
+			relation = &relations[index]
+			break
+		}
+	}
+	if relation == nil {
+		return nil, apperror.New("contact_not_found", "contact relation was not found", 404, false)
+	}
+	views, err := s.ListContacts(ctx, userID, "")
+	if err != nil {
+		return nil, err
+	}
+	var matched *domain.ContactView
+	for index := range views {
+		if containsIdentity(views[index].Identities, relation.ExternalIdentity.ID) {
+			matched = &views[index]
+			break
+		}
+	}
+	if matched == nil {
+		return nil, apperror.New("contact_not_found", "contact relation was not found", 404, false)
+	}
+	identityIDs := make([]string, 0, len(matched.Identities))
+	for _, identity := range matched.Identities {
+		if strings.TrimSpace(identity.ID) != "" {
+			identityIDs = append(identityIDs, identity.ID)
+		}
+	}
+	return s.refreshContactProfile(ctx, repository.ContactProfileCandidate{
+		OwnerUserID: userID, ContactKey: contactKeyFromView(*matched), IdentityIDs: identityIDs,
+	}, organizationID)
+}
+
+func (s *Service) refreshContactProfile(ctx context.Context, candidate repository.ContactProfileCandidate, organizationID string) (*domain.ContactProfile, error) {
+	messages, err := s.Repo.ListContactMessages(ctx, candidate.OwnerUserID, organizationID, candidate.IdentityIDs, 200)
+	if err != nil {
+		return nil, err
+	}
+	messages, err = s.visibleContactMessagesForProfile(ctx, candidate.OwnerUserID, organizationID, messages)
+	if err != nil {
+		return nil, err
+	}
+	facts, err := s.Repo.ListContactFacts(ctx, candidate.IdentityIDs)
+	if err != nil {
+		return nil, err
+	}
+	messagesWithFacts := make(map[string]struct{}, len(facts))
+	for _, fact := range facts {
+		messagesWithFacts[fact.MessageID] = struct{}{}
+	}
+	type materialMessage struct {
+		id      string
+		hash    string
+		text    string
+		sentAt  time.Time
+	}
+	materials := make([]materialMessage, 0, len(messages))
+	for _, message := range messages {
+		if message.ContactFactsStatus != "succeeded" {
+			continue
+		}
+		if _, excluded := messagesWithFacts[message.ID]; excluded {
+			continue
+		}
+		if !repository.IsDisplayableTextMessage(message.MessageType, message.Content) {
+			continue
+		}
+		text := strings.TrimSpace(message.Content)
+		if text == "" {
+			continue
+		}
+		materials = append(materials, materialMessage{id: message.ID, hash: message.ContentHash, text: text, sentAt: message.SentAt})
+	}
+	sort.Slice(materials, func(i, j int) bool {
+		if materials[i].sentAt.Equal(materials[j].sentAt) {
+			return materials[i].id < materials[j].id
+		}
+		return materials[i].sentAt.Before(materials[j].sentAt)
+	})
+	fingerprintParts := make([]string, 0, len(materials))
+	lines := make([]string, 0, len(materials))
+	for _, material := range materials {
+		fingerprintParts = append(fingerprintParts, material.id+"\x00"+material.hash)
+		lines = append(lines, material.text)
+	}
+	sort.Strings(fingerprintParts)
+	fingerprintSum := sha256.Sum256([]byte(strings.Join(fingerprintParts, "\n")))
+	fingerprint := hex.EncodeToString(fingerprintSum[:])
+	existing, err := s.Repo.GetContactProfile(ctx, candidate.OwnerUserID, candidate.ContactKey)
+	if err != nil {
+		return nil, err
+	}
+	if existing != nil && existing.Status == "ready" && existing.SourceFingerprint == fingerprint {
+		return existing, nil
+	}
+	now := time.Now().UTC()
+	if s.Now != nil {
+		now = s.Now().UTC()
+	}
+	profile := domain.ContactProfile{
+		OwnerUserID: candidate.OwnerUserID, ContactKey: candidate.ContactKey,
+		SourceFingerprint: fingerprint, UpdatedAt: now,
+	}
+	if existing != nil {
+		profile.ID = existing.ID
+		profile.Summary = existing.Summary
+		profile.GeneratedAt = existing.GeneratedAt
+	}
+	if len(lines) == 0 {
+		profile.Summary, profile.Status, profile.LastError, profile.GeneratedAt = "暂无足够信息", "ready", "", &now
+		if err := s.Repo.UpsertContactProfile(ctx, profile); err != nil {
+			return nil, err
+		}
+		return &profile, nil
+	}
+	if s.RAG == nil {
+		profile.Status, profile.LastError = "failed", "profile_provider_unavailable"
+		if err := s.Repo.UpsertContactProfile(ctx, profile); err != nil {
+			return nil, err
+		}
+		return nil, apperror.New("profile_provider_unavailable", "contact profile provider is unavailable", 503, true)
+	}
+	summary, err := s.RAG.SummarizeContactProfile(ctx, candidate.OwnerUserID, candidate.ContactKey, lines)
+	if err != nil {
+		profile.Status, profile.LastError = "failed", "profile_provider_unavailable"
+		if upsertErr := s.Repo.UpsertContactProfile(ctx, profile); upsertErr != nil {
+			return nil, upsertErr
+		}
+		return nil, apperror.Wrap("profile_provider_unavailable", "contact profile provider is unavailable", 503, true, err)
+	}
+	profile.Summary, profile.Status, profile.LastError, profile.GeneratedAt = summary, "ready", "", &now
+	if err := s.Repo.UpsertContactProfile(ctx, profile); err != nil {
+		return nil, err
+	}
+	return &profile, nil
 }
 
 func isMediaMessageEnvelope(messageType, content string) bool {
@@ -2608,7 +2937,7 @@ func (s *Service) GetAttachmentForRAG(ctx context.Context, id string, contentVer
 	if _, err = s.GetKnowledgeForRAG(ctx, item.ID, contentVersion, aclVersion); err != nil {
 		return nil, err
 	}
-	if item.ContentAccessRequired && item.SourceType != "shared_private_item" {
+	if item.ContentAccessRequired && item.SourceType != "shared_private_item" && (!item.PermissionReady || item.ACLSyncStatus != "synced") {
 		return nil, apperror.New("attachment_content_restricted", "attachment content requires approval", 403, false)
 	}
 	attachment, err := s.Repo.GetAttachment(ctx, id)
@@ -2617,6 +2946,9 @@ func (s *Service) GetAttachmentForRAG(ctx context.Context, id string, contentVer
 	}
 	if attachment.ContentStatus != "ready" || attachment.ObjectRef == "" {
 		return nil, apperror.New("attachment_not_ready", "attachment content is not ready", 409, true)
+	}
+	if item.ContentAccessRequired {
+		attachment.ObjectRef = ""
 	}
 	return attachment, nil
 }

@@ -130,7 +130,7 @@ func newServiceForTest(provider platform.OAuthProvider) (*Service, *repository.M
 		panic(err)
 	}
 	cfg := config.Config{OAuthStateTTL: 10 * time.Minute, PairingTTL: 10 * time.Minute, DeviceTTL: time.Hour, MaxAttachmentBytes: 1024 * 1024, JWTRequired: false}
-	return New(repo, store, vault.New(store, keyring), nil, provider, nil, cfg), repo, store
+	return New(repo, store, vault.New(store, keyring), nil, provider, nil, nil, cfg), repo, store
 }
 
 func vaultTestKeyring() (*crypto.Keyring, error) {

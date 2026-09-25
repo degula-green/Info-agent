@@ -100,6 +100,16 @@ class AgentStore(Protocol):
     def find_task_by_idempotency_key(self, idempotency_key: str) -> TaskRecord | None:
         ...
 
+    def list_tasks_for_owner(
+        self,
+        owner_user_id: str,
+        *,
+        statuses: list[str] | None = None,
+        limit: int = 50,
+    ) -> list[TaskRecord]:
+        """Read-only listing for the API; the runtime never calls this."""
+        ...
+
     def commit(
         self,
         task: TaskRecord,

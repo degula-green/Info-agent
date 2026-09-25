@@ -76,8 +76,8 @@ func TestGetContactAggregatesMessagesFromMergedIdentities(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, input := range []repository.IngestMessageInput{
-		{CollectorID: wechatConversation.Collectors[0].ID, ExternalConversationID: "wx-chat", ExternalMessageID: "wx-message", SenderExternalID: "wx-user", SenderDisplayName: "微信名", MessageType: "text", Content: "微信消息", ContentHash: hashForTest("微信消息"), SentAt: now},
-		{CollectorID: feishuConversation.Collectors[0].ID, ExternalConversationID: "fs-chat", ExternalMessageID: "fs-message", SenderExternalID: "fs-user", SenderDisplayName: "飞书名", MessageType: "text", Content: "飞书消息", ContentHash: hashForTest("飞书消息"), SentAt: now.Add(time.Second)},
+		{CollectorID: wechatConversation.Collectors[0].ID, ExternalConversationID: "wx-chat", ExternalMessageID: "wx-message", SenderExternalID: "wx-user", SenderDisplayName: "微信名", MessageType: "text", Content: "微信消息 13800138000", ContentHash: hashForTest("微信消息 13800138000"), SentAt: now},
+		{CollectorID: feishuConversation.Collectors[0].ID, ExternalConversationID: "fs-chat", ExternalMessageID: "fs-message", SenderExternalID: "fs-user", SenderDisplayName: "飞书名", MessageType: "text", Content: "飞书消息 13900139000", ContentHash: hashForTest("飞书消息 13900139000"), SentAt: now.Add(time.Second)},
 	} {
 		input.PayloadHash, err = repository.CalculatePayloadHash(input)
 		if err != nil {
@@ -95,6 +95,9 @@ func TestGetContactAggregatesMessagesFromMergedIdentities(t *testing.T) {
 		t.Fatal(err)
 	}
 	svc := &Service{Repo: repo}
+	if err := svc.ProcessContactFacts(ctx); err != nil {
+		t.Fatal(err)
+	}
 	contacts, err := svc.ListContacts(ctx, "owner", "")
 	if err != nil {
 		t.Fatal(err)
@@ -106,8 +109,8 @@ func TestGetContactAggregatesMessagesFromMergedIdentities(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if detail.Kind != "internal" || len(detail.Identities) != 2 || len(detail.Messages) != 2 {
-		t.Fatalf("merged contact detail did not aggregate identities and messages: %+v", detail)
+	if detail.Kind != "internal" || len(detail.Identities) != 2 || len(detail.Facts) != 2 {
+		t.Fatalf("merged contact detail did not aggregate identities and facts: %+v", detail)
 	}
 }
 

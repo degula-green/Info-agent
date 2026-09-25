@@ -87,6 +87,8 @@
       </section>
     </div>
 
+    <InfoSidebarSchedules :collapsed="collapsed" @request-expand="collapsed = false" />
+
     <div class="info-sidebar__footer">
       <button
         class="sidebar-user"
@@ -115,6 +117,7 @@
 
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import InfoSidebarSchedules from './InfoSidebarSchedules.vue'
 import type { QASession } from '../mock'
 
 const props = defineProps<{

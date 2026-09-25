@@ -107,6 +107,17 @@ class TaskService:
     def get_active_plan(self, task_id: str) -> Plan | None:
         return self.store.get_active_plan(task_id)
 
+    def list_tasks(
+        self,
+        *,
+        owner_user_id: str,
+        statuses: list[str] | None = None,
+        limit: int = 50,
+    ) -> list[TaskRecord]:
+        """Read-only listing used by the API so a client can discover its Tasks."""
+
+        return self.store.list_tasks_for_owner(owner_user_id, statuses=statuses, limit=limit)
+
     def list_observations(self, task_id: str) -> list[Observation]:
         return self.store.list_observations(task_id)
 

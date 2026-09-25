@@ -173,6 +173,21 @@ export interface AttachmentDTO {
   updated_at: string
 }
 
+export interface PrivateAccessRequestDTO {
+  id: string
+  requester_user_id: string
+  share_reference_id: string
+  resource_id: string
+  resource_type: 'message' | 'attachment' | string
+  requested_action: 'view' | 'download' | string
+  reason?: string
+  status: 'pending' | 'approved' | 'rejected' | 'expired' | 'revoked' | string
+  reviewed_by_user_id?: string
+  review_note?: string
+  created_at: string
+  reviewed_at?: string | null
+}
+
 export interface ConversationTimelineItemDTO {
   kind: 'message' | 'attachment'
   collected_at: string
@@ -389,8 +404,41 @@ export async function sharePrivateResources(input: { requestID: string; privateC
   })
 }
 
+export async function listPrivateAccessRequests(scope: 'mine' | 'inbox') {
+  const body = await knowledgeRequest<{ items: PrivateAccessRequestDTO[] }>(`/private-access-requests?scope=${scope}`)
+  return body.items || []
+}
+
+export async function createPrivateAccessRequest(input: { shareReferenceID: string; resourceID: string; resourceType: 'message' | 'attachment'; requestedAction: 'view' | 'download'; reason?: string }) {
+  return knowledgeRequest<PrivateAccessRequestDTO>('/private-access-requests', {
+    method: 'POST',
+    body: JSON.stringify({
+      share_reference_id: input.shareReferenceID,
+      resource_id: input.resourceID,
+      resource_type: input.resourceType,
+      requested_action: input.requestedAction,
+      reason: input.reason || '',
+    }),
+  })
+}
+
+export async function approvePrivateAccessRequest(id: string, note = '') {
+  return knowledgeRequest<PrivateAccessRequestDTO>(`/private-share-requests/${encodeURIComponent(id)}/approve`, {
+    method: 'POST',
+    body: JSON.stringify({ note }),
+  })
+}
+
+export async function rejectPrivateAccessRequest(id: string, note = '') {
+  return knowledgeRequest<PrivateAccessRequestDTO>(`/private-share-requests/${encodeURIComponent(id)}/reject`, {
+    method: 'POST',
+    body: JSON.stringify({ note }),
+  })
+}
+
 export async function getKnowledgeAttachmentContent(id: string, download = false) {
-  const response = await knowledgeFetch(knowledgeContentURL(`/attachments/${encodeURIComponent(id)}/content`), {
+  const action = download ? '?action=download' : ''
+  const response = await knowledgeFetch(knowledgeContentURL(`/attachments/${encodeURIComponent(id)}/content${action}`), {
     headers: knowledgeHeaders(undefined, download ? 'application/octet-stream' : '*/*'),
   })
   if (!response.ok) {

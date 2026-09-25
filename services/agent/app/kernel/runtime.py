@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from typing import Callable
 
 from app.kernel.checkpoint import all_steps_finished, build_checkpoint, next_pending_step
-from app.kernel.errors import AgentContractError, ContractValidationError
+from app.kernel.errors import AgentContractError, ContractValidationError, TaskNotFoundError
 from app.kernel.events import new_outbox_event, new_task_event, utcnow
 from app.kernel.executor import CapabilityExecutor
 from app.kernel.limits import ExecutionLimits
@@ -73,7 +73,7 @@ class AgentRuntime:
     def run_task(self, task_id: str, *, lease_owner: str = "worker") -> TaskRunResult:
         task = self.store.get_task(task_id)
         if task is None:
-            raise AgentContractError(f"unknown task: {task_id}")
+            raise TaskNotFoundError(f"unknown task: {task_id}")
         if task.status in TERMINAL_TASK_STATUSES or task.status in WAITING_TASK_STATUSES:
             return self._result(task, waiting_for=task.status if task.status in WAITING_TASK_STATUSES else None)
         if not self.store.acquire_lease(task_id, lease_owner, self.limits.lease_seconds):
@@ -88,13 +88,16 @@ class AgentRuntime:
     def _drive(self, task_id: str) -> TaskRunResult:
         executed: list[str] = []
         deadline_seconds = self.limits.max_execution_seconds
-        started_at = self.store.get_task(task_id).created_at
+        # The execution budget covers one drive, not the Task's whole lifetime:
+        # a Task may legitimately wait hours for approval or user input, and
+        # that wait must not consume the budget of the resolving drive.
+        started_at = self._clock()
         guard = (self.limits.max_steps * max(self.limits.max_step_attempts, 1)) + self.limits.max_steps + 5
 
         for _ in range(guard):
             task = self.store.get_task(task_id)
             if task is None:
-                raise AgentContractError(f"unknown task: {task_id}")
+                raise TaskNotFoundError(f"unknown task: {task_id}")
             if task.status in TERMINAL_TASK_STATUSES or task.status in WAITING_TASK_STATUSES:
                 return self._result(task, executed=executed, waiting_for=task.status if task.status in WAITING_TASK_STATUSES else None)
 
@@ -117,6 +120,10 @@ class AgentRuntime:
             steps = self.store.list_steps(plan.plan_id)
             step = next_pending_step(steps)
             if step is None:
+                if not steps:
+                    # A zero-step plan means the request carried nothing this
+                    # Agent can act on: that is a completion, not a failure.
+                    return self._complete(task, plan, steps, executed)
                 if all_steps_finished(steps):
                     return self._complete(task, plan, steps, executed)
                 return self._fail(

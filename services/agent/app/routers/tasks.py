@@ -84,6 +84,24 @@ def create_task(
     }
 
 
+@router.get("/tasks")
+def list_tasks(
+    status: str = "",
+    limit: int = 50,
+    x_agent_user_id: str | None = Header(default=None, alias="X-Agent-User-Id"),
+) -> dict[str, Any]:
+    """Lists the caller's Tasks so a client can discover fan-out and completed work."""
+
+    container = get_container()
+    statuses = [item.strip() for item in status.split(",") if item.strip()]
+    items = container.task_service.list_tasks(
+        owner_user_id=_current_user(x_agent_user_id),
+        statuses=statuses or None,
+        limit=min(max(limit, 1), 200),
+    )
+    return {"items": [item.model_dump(mode="json") for item in items]}
+
+
 @router.get("/tasks/{task_id}")
 def get_task(
     task_id: str,

@@ -72,6 +72,20 @@ type publicContact struct {
 	AttachmentCount int                      `json:"attachment_count"`
 }
 
+type publicContactAttachment struct {
+	publicAttachment
+	Access         domain.ContactAccess `json:"access"`
+	ContentAccess  domain.ContactAccess `json:"content_access"`
+	DownloadAccess domain.ContactAccess `json:"download_access"`
+}
+
+type publicContactDetail struct {
+	Contact     publicContact             `json:"contact"`
+	Profile     domain.ContactProfile     `json:"profile"`
+	Facts       []domain.ContactFact      `json:"facts"`
+	Attachments []publicContactAttachment `json:"attachments"`
+}
+
 type publicAvailableContact struct {
 	ExternalUserID string `json:"external_user_id"`
 	DisplayName    string `json:"display_name,omitempty"`
@@ -342,6 +356,33 @@ func publicAttachmentFromDomain(value domain.Attachment) publicAttachment {
 		LastError: value.LastError, RAGStatus: value.RAGStatus, RAGContentVersion: value.RAGContentVersion,
 		RAGACLVersion: value.RAGACLVersion, RAGLastError: value.RAGLastError, RAGFinishedAt: value.RAGFinishedAt,
 		Searchable: value.RAGSearchable, CreatedAt: value.CreatedAt, UpdatedAt: value.UpdatedAt,
+	}
+}
+
+func publicContactFromDomain(value domain.ContactView) publicContact {
+	return publicContact{
+		ID: value.ID, Kind: value.Kind, InternalUserID: value.InternalUserID,
+		DisplayName: value.DisplayName, Identities: value.Identities,
+		ConversationIDs: value.ConversationIDs, MessageCount: value.MessageCount,
+		AttachmentCount: value.AttachmentCount,
+	}
+}
+
+func publicContactDetailFromDomain(value domain.ContactDetail) publicContactDetail {
+	attachments := make([]publicContactAttachment, 0, len(value.Attachments))
+	for _, attachment := range value.Attachments {
+		attachments = append(attachments, publicContactAttachment{
+			publicAttachment: publicAttachmentFromDomain(attachment),
+			Access:           attachment.Access, ContentAccess: attachment.ContentAccess, DownloadAccess: attachment.DownloadAccess,
+		})
+	}
+	facts := value.Facts
+	if facts == nil {
+		facts = []domain.ContactFact{}
+	}
+	return publicContactDetail{
+		Contact: publicContactFromDomain(value.ContactView), Profile: value.Profile,
+		Facts: facts, Attachments: attachments,
 	}
 }
 

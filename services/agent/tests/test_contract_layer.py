@@ -49,11 +49,13 @@ def knowledge_snapshot(**overrides: object) -> dict:
         "conversation_ingestion_id": "ingestion-1",
         "conversation_type": "private",
         "platform": "feishu",
+        "knowledge_item_id": "item-1",
         "source_message_id": "message-1",
         "message_type": "text",
         "text": "今天晚上八点开会",
         "content_version": 1,
         "acl_version": 3,
+        "sent_at": "2026-09-25T06:12:30Z",
         "eligible_owners": [{"owner_user_id": "user-1", "reason_code": None}],
     }
     snapshot.update(overrides)
@@ -69,12 +71,14 @@ def test_knowledge_event_ingress_creates_one_task_for_a_private_chat() -> None:
     assert task.input["text"] == "今天晚上八点开会"
     assert task.source_ref == {
         "event_id": "event-1",
+        "knowledge_item_id": "item-1",
         "source_message_id": "message-1",
         "platform": "feishu",
         "conversation_ingestion_id": "ingestion-1",
         "conversation_type": "private",
         "content_version": 1,
         "acl_version": 3,
+        "sent_at": "2026-09-25T06:12:30Z",
     }
 
 

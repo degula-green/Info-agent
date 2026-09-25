@@ -8,48 +8,20 @@ TaskEnvelope per eligible owner.
 
 from __future__ import annotations
 
-import re
 from collections.abc import Callable, Iterable, Mapping
 from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
 
+from app.ingress.vocabulary import (  # noqa: F401 - re-exported for callers
+    CJK_DIGITS,
+    SCHEDULE_KEYWORDS,
+    TIME_PHRASE_PATTERN,
+    schedule_hint,
+)
 from app.kernel.models import TaskEnvelope
 
 DEFAULT_PLATFORMS: tuple[str, ...] = ("feishu", "wecom", "wechat")
-
-# The v1 pre-filter is intentionally small and deterministic: it only lowers the
-# number of useless Tasks and never replaces task understanding. Refining the
-# vocabulary must not move this check out of the ingress.
-SCHEDULE_KEYWORDS: tuple[str, ...] = (
-    "会议",
-    "开会",
-    "日程",
-    "安排",
-    "预约",
-    "碰一下",
-    "碰头",
-    "评审",
-    "汇报",
-    "讨论",
-    "聚餐",
-    "面试",
-    "培训",
-    "分享",
-    "例会",
-    "面谈",
-)
-
-TIME_EXPRESSION_PATTERN = re.compile(
-    r"(\d{1,2}\s*[:：]\s*\d{2})"  # 8:30
-    r"|(\d{1,2}\s*[点时]\s*(\d{1,2}\s*分?|半)?)"  # 8点 / 8点半 / 8时30分
-    r"|(\d{1,2}\s*月\s*\d{1,2}\s*[日号])"  # 3月5日
-    r"|(今天|明天|后天|大后天|今晚|今早|明晚|本周|下周|下下周|这周|下个月|本月)"
-    r"|(周[一二三四五六日天])"
-    r"|(星期[一二三四五六日天])"
-    r"|(礼拜[一二三四五六日天])"
-    r"|(上午|中午|下午|晚上|早上|傍晚|凌晨)"
-)
 
 
 class KnowledgeEventIngress:
@@ -103,12 +75,14 @@ class KnowledgeEventIngress:
             key: value
             for key, value in {
                 "event_id": event.get("event_id"),
+                "knowledge_item_id": fields.get("knowledge_item_id") or message_id,
                 "source_message_id": message_id,
                 "platform": fields.get("platform"),
                 "conversation_ingestion_id": fields.get("conversation_ingestion_id"),
                 "conversation_type": fields.get("conversation_type"),
                 "content_version": fields.get("content_version"),
                 "acl_version": fields.get("acl_version"),
+                "sent_at": fields.get("sent_at"),
             }.items()
             if value is not None
         }
@@ -143,17 +117,19 @@ class KnowledgeEventIngress:
     def schedule_hint(text: str | None) -> bool:
         """Deterministic hint: a time expression or a schedule keyword."""
 
-        if not text:
-            return False
-        if TIME_EXPRESSION_PATTERN.search(text):
-            return True
-        return any(keyword in text for keyword in SCHEDULE_KEYWORDS)
+        return schedule_hint(text)
 
     @staticmethod
-    def idempotency_key(message_id: str, content_version: Any, owner_user_id: str) -> str:
-        """One Task per (message version, owner); matches the step-2 spec."""
+    def client_message_id(knowledge_item_id: str, content_version: Any) -> str:
+        """The Task idempotency key suffix; the service layer passes it through."""
 
-        return f"knowledge_event:{owner_user_id}:{message_id}:{content_version}"
+        return f"{knowledge_item_id}:{content_version}"
+
+    @staticmethod
+    def idempotency_key(knowledge_item_id: str, content_version: Any, owner_user_id: str) -> str:
+        """One Task per (item version, owner); matches the step-2 spec."""
+
+        return f"knowledge_event:{owner_user_id}:{KnowledgeEventIngress.client_message_id(knowledge_item_id, content_version)}"
 
     @staticmethod
     def resolve_text(

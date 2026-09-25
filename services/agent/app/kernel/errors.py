@@ -44,6 +44,10 @@ class PermanentCapabilityError(AgentContractError):
     classification = "permanent_error"
 
 
+class TaskNotFoundError(AgentContractError):
+    """The Task id has no persisted record; a wake-up for it must be dropped."""
+
+
 class UnknownExternalResultError(AgentContractError):
     """The external call may have succeeded or failed; it must not be retried blindly."""
 

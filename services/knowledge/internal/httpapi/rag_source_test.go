@@ -54,7 +54,7 @@ func readySourceRouter(t *testing.T) (*gin.Engine, string) {
 		t.Fatal(err)
 	}
 	cfg := config.Config{InternalServiceToken: "rag-token", MaxAttachmentBytes: 1024}
-	svc := service.New(repo, kv.NewMemory(), nil, nil, nil, nil, cfg)
+	svc := service.New(repo, kv.NewMemory(), nil, nil, nil, nil, nil, cfg)
 	app := &App{Service: svc, Config: cfg}
 	return NewRouterWithApp(app), item.ID
 }
