@@ -105,8 +105,9 @@ def validate_attachment(path: Path, context: Any) -> PreflightResult:
         for block in iter(lambda: source.read(1024 * 1024), b""):
             digest.update(block)
     sha256 = digest.hexdigest()
-    if context.source_content_hash:
-        expected = context.source_content_hash.removeprefix("sha256:").lower()
+    source_hash = getattr(context, "source_content_hash", None) or getattr(context, "content_hash", None)
+    if source_hash:
+        expected = str(source_hash).removeprefix("sha256:").lower()
         if not re.fullmatch(r"[0-9a-f]{64}", expected):
             raise PreflightError("HASH_INVALID", "source_content_hash must be a SHA-256 hex digest")
         if expected != sha256:
