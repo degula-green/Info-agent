@@ -1969,7 +1969,7 @@ func (s *PostgresStore) ListMessages(ctx context.Context, conversationID string,
 	if metadataErr != nil && !errors.Is(metadataErr, pgx.ErrNoRows) {
 		return nil, dbError(metadataErr)
 	}
-	query := `SELECT m.id::text,m.conversation_ingestion_id::text,m.external_message_id,COALESCE(m.sender_identity_id::text,''),COALESCE(ei.external_user_id,''),COALESCE(NULLIF(ei.display_name,''),NULLIF(m.sender_display_name,''),''),m.message_type,COALESCE(m.normalized_content_ref,''),COALESCE(m.normalized_content,''),m.content_hash,m.content_version,m.sent_at,COALESCE((SELECT MIN(ms.collected_at) FROM knowledge.message_sources ms WHERE ms.message_id=m.id),m.created_at),m.lifecycle_status,CASE WHEN EXISTS (SELECT 1 FROM knowledge.knowledge_items ki WHERE ki.source_message_id=m.id AND ki.source_attachment_id IS NULL AND ki.source_type<>'shared_private_item' AND ki.rag_status='succeeded' AND ki.rag_content_version=ki.content_version AND ki.rag_acl_version=ki.acl_version) THEN 'ready' WHEN EXISTS (SELECT 1 FROM knowledge.knowledge_items ki WHERE ki.source_message_id=m.id AND ki.source_attachment_id IS NULL AND ki.source_type<>'shared_private_item' AND ki.rag_status='failed') THEN 'failed' ELSE m.vector_status END,m.created_at,m.sensitive,m.classification_status FROM knowledge.messages m LEFT JOIN knowledge.external_identities ei ON ei.id=m.sender_identity_id WHERE m.conversation_ingestion_id=$1`
+	query := `SELECT m.id::text,m.conversation_ingestion_id::text,m.external_message_id,COALESCE(m.sender_identity_id::text,''),COALESCE(ei.external_user_id,''),COALESCE(NULLIF(ei.display_name,''),NULLIF(m.sender_display_name,''),''),m.message_type,COALESCE(m.normalized_content_ref,''),COALESCE(m.normalized_content,''),m.content_hash,m.content_version,m.sent_at,COALESCE((SELECT MIN(ms.collected_at) FROM knowledge.message_sources ms WHERE ms.message_id=m.id),m.created_at),m.lifecycle_status,CASE WHEN EXISTS (SELECT 1 FROM knowledge.knowledge_items ki WHERE ki.source_message_id=m.id AND ki.source_attachment_id IS NULL AND ki.source_type<>'shared_private_item' AND ki.rag_status='ready' AND ki.rag_content_version=ki.content_version AND ki.rag_acl_version=ki.acl_version) THEN 'ready' WHEN EXISTS (SELECT 1 FROM knowledge.knowledge_items ki WHERE ki.source_message_id=m.id AND ki.source_attachment_id IS NULL AND ki.source_type<>'shared_private_item' AND ki.rag_status='failed') THEN 'failed' ELSE m.vector_status END,m.created_at,m.sensitive,m.classification_status FROM knowledge.messages m LEFT JOIN knowledge.external_identities ei ON ei.id=m.sender_identity_id WHERE m.conversation_ingestion_id=$1`
 	args := []any{conversationID}
 	if !cutoff.IsZero() {
 		if cutoffID != "" {
@@ -2083,7 +2083,7 @@ func (s *PostgresStore) ListConversationTimeline(ctx context.Context, conversati
 		return nil, dbError(err)
 	}
 	collectedExpr := `COALESCE((SELECT MIN(ms.collected_at) FROM knowledge.message_sources ms WHERE ms.message_id=m.id),m.created_at)`
-	messageQuery := `SELECT m.id::text,m.conversation_ingestion_id::text,m.external_message_id,COALESCE(m.sender_identity_id::text,''),COALESCE(ei.external_user_id,''),COALESCE(NULLIF(ei.display_name,''),NULLIF(m.sender_display_name,''),''),m.message_type,COALESCE(m.normalized_content_ref,''),COALESCE(m.normalized_content,''),m.content_hash,m.content_version,m.sent_at,` + collectedExpr + `,m.lifecycle_status,CASE WHEN EXISTS (SELECT 1 FROM knowledge.knowledge_items ki WHERE ki.source_message_id=m.id AND ki.source_attachment_id IS NULL AND ki.source_type<>'shared_private_item' AND ki.rag_status='succeeded' AND ki.rag_content_version=ki.content_version AND ki.rag_acl_version=ki.acl_version) THEN 'ready' WHEN EXISTS (SELECT 1 FROM knowledge.knowledge_items ki WHERE ki.source_message_id=m.id AND ki.source_attachment_id IS NULL AND ki.source_type<>'shared_private_item' AND ki.rag_status='failed') THEN 'failed' ELSE m.vector_status END,m.created_at,m.sensitive,m.classification_status FROM knowledge.messages m LEFT JOIN knowledge.external_identities ei ON ei.id=m.sender_identity_id WHERE m.conversation_ingestion_id=$1`
+	messageQuery := `SELECT m.id::text,m.conversation_ingestion_id::text,m.external_message_id,COALESCE(m.sender_identity_id::text,''),COALESCE(ei.external_user_id,''),COALESCE(NULLIF(ei.display_name,''),NULLIF(m.sender_display_name,''),''),m.message_type,COALESCE(m.normalized_content_ref,''),COALESCE(m.normalized_content,''),m.content_hash,m.content_version,m.sent_at,` + collectedExpr + `,m.lifecycle_status,CASE WHEN EXISTS (SELECT 1 FROM knowledge.knowledge_items ki WHERE ki.source_message_id=m.id AND ki.source_attachment_id IS NULL AND ki.source_type<>'shared_private_item' AND ki.rag_status='ready' AND ki.rag_content_version=ki.content_version AND ki.rag_acl_version=ki.acl_version) THEN 'ready' WHEN EXISTS (SELECT 1 FROM knowledge.knowledge_items ki WHERE ki.source_message_id=m.id AND ki.source_attachment_id IS NULL AND ki.source_type<>'shared_private_item' AND ki.rag_status='failed') THEN 'failed' ELSE m.vector_status END,m.created_at,m.sensitive,m.classification_status FROM knowledge.messages m LEFT JOIN knowledge.external_identities ei ON ei.id=m.sender_identity_id WHERE m.conversation_ingestion_id=$1`
 	messageArgs := []any{conversationID}
 	if before != nil {
 		messageQuery += ` AND (` + collectedExpr + ` < $2 OR (` + collectedExpr + ` = $2 AND ('message' < $3 OR ('message' = $3 AND m.id::text < $4))))`
@@ -2199,7 +2199,7 @@ func (s *PostgresStore) enrichAttachmentRAG(ctx context.Context, attachments []d
 			COALESCE(rag_last_error,''), rag_finished_at,
 			(content_version = COALESCE(rag_content_version,0)
 			 AND acl_version = COALESCE(rag_acl_version,0)
-			 AND rag_status = 'succeeded')
+			 AND rag_status = 'ready')
 		FROM knowledge.knowledge_items
 		WHERE source_attachment_id = ANY($1::uuid[])
 		ORDER BY source_attachment_id, content_version DESC, updated_at DESC`, ids)
@@ -2268,11 +2268,11 @@ func (s *PostgresStore) ListContactMemberships(ctx context.Context, userID strin
 	return out, dbError(rows.Err())
 }
 
-const knowledgeItemColumns = `ki.id::text,COALESCE(ki.knowledge_base_id::text,''),ki.knowledge_scope,ki.access_scope,COALESCE(ki.owner_user_id::text,''),COALESCE(ki.organization_id::text,''),COALESCE(ki.conversation_ingestion_id::text,''),COALESCE(ci.external_conversation_id,''),ki.source_type,COALESCE(ki.source_message_id::text,''),COALESCE(ki.source_attachment_id::text,''),COALESCE(ki.source_private_item_id::text,''),COALESCE(ki.share_request_id,''),COALESCE(ki.share_batch_id::text,''),COALESCE(ki.shared_by_user_id::text,''),ki.shared_at,ki.content_type,ki.content_ref,COALESCE(ki.original_content_ref,''),ki.content_hash,ki.content_version,ki.content_visibility,ki.original_access_required,ki.security_status,COALESCE(ki.sensitivity,''),ki.content_saved,ki.ownership_ready,ki.security_ready,ki.permission_ready,ki.acl_version,ki.acl_sync_status,ki.processing_status,ki.lifecycle_status,(ki.source_type='shared_private_item' OR ki.original_access_required),COALESCE(ki.last_error,''),COALESCE(ki.rag_status,'pending'),COALESCE(ki.rag_source_event_id::text,''),COALESCE(ki.rag_job_id::text,''),COALESCE(ki.rag_content_version,0),COALESCE(ki.rag_acl_version,0),ki.rag_started_at,ki.rag_finished_at,COALESCE(ki.rag_last_error,''),COALESCE(ki.rag_result,'{}'::jsonb),ki.created_at,ki.updated_at`
+const knowledgeItemColumns = `ki.id::text,COALESCE(ki.knowledge_base_id::text,''),ki.knowledge_scope,ki.access_scope,COALESCE(ki.owner_user_id::text,''),COALESCE(ki.organization_id::text,''),COALESCE(ki.conversation_ingestion_id::text,''),COALESCE(ci.external_conversation_id,''),COALESCE(ci.conversation_type,''),ki.source_type,COALESCE(ki.source_message_id::text,''),COALESCE(ki.source_attachment_id::text,''),COALESCE(ki.source_private_item_id::text,''),COALESCE(ki.share_request_id,''),COALESCE(ki.share_batch_id::text,''),COALESCE(ki.shared_by_user_id::text,''),ki.shared_at,ki.content_type,ki.content_ref,COALESCE(ki.original_content_ref,''),ki.content_hash,ki.content_version,ki.content_visibility,ki.original_access_required,ki.security_status,COALESCE(ki.sensitivity,''),ki.content_saved,ki.ownership_ready,ki.security_ready,ki.permission_ready,ki.acl_version,ki.acl_sync_status,ki.processing_status,ki.lifecycle_status,(ki.source_type='shared_private_item' OR ki.original_access_required),COALESCE(ki.last_error,''),COALESCE(ki.rag_status,'pending'),COALESCE(ki.rag_source_event_id::text,''),COALESCE(ki.rag_job_id::text,''),COALESCE(ki.rag_content_version,0),COALESCE(ki.rag_acl_version,0),ki.rag_started_at,ki.rag_finished_at,COALESCE(ki.rag_last_error,''),COALESCE(ki.rag_result,'{}'::jsonb),ki.created_at,ki.updated_at`
 
 func scanKnowledgeItem(row rowScanner) (*domain.KnowledgeItem, error) {
 	var item domain.KnowledgeItem
-	err := row.Scan(&item.ID, &item.KnowledgeBaseID, &item.KnowledgeScope, &item.AccessScope, &item.OwnerUserID, &item.OrganizationID, &item.ConversationID, &item.ExternalConversationID, &item.SourceType, &item.SourceMessageID, &item.SourceAttachmentID, &item.SourcePrivateItemID, &item.ShareRequestID, &item.ShareBatchID, &item.SharedByUserID, &item.SharedAt, &item.ContentType, &item.ContentRef, &item.OriginalContentRef, &item.ContentHash, &item.ContentVersion, &item.ContentVisibility, &item.OriginalAccessRequired, &item.SecurityStatus, &item.Sensitivity, &item.ContentSaved, &item.OwnershipReady, &item.SecurityReady, &item.PermissionReady, &item.ACLVersion, &item.ACLSyncStatus, &item.ProcessingStatus, &item.LifecycleStatus, &item.ContentAccessRequired, &item.LastError, &item.RAGStatus, &item.RAGSourceEventID, &item.RAGJobID, &item.RAGContentVersion, &item.RAGACLVersion, &item.RAGStartedAt, &item.RAGFinishedAt, &item.RAGLastError, &item.RAGResult, &item.CreatedAt, &item.UpdatedAt)
+	err := row.Scan(&item.ID, &item.KnowledgeBaseID, &item.KnowledgeScope, &item.AccessScope, &item.OwnerUserID, &item.OrganizationID, &item.ConversationID, &item.ExternalConversationID, &item.SourceConversationType, &item.SourceType, &item.SourceMessageID, &item.SourceAttachmentID, &item.SourcePrivateItemID, &item.ShareRequestID, &item.ShareBatchID, &item.SharedByUserID, &item.SharedAt, &item.ContentType, &item.ContentRef, &item.OriginalContentRef, &item.ContentHash, &item.ContentVersion, &item.ContentVisibility, &item.OriginalAccessRequired, &item.SecurityStatus, &item.Sensitivity, &item.ContentSaved, &item.OwnershipReady, &item.SecurityReady, &item.PermissionReady, &item.ACLVersion, &item.ACLSyncStatus, &item.ProcessingStatus, &item.LifecycleStatus, &item.ContentAccessRequired, &item.LastError, &item.RAGStatus, &item.RAGSourceEventID, &item.RAGJobID, &item.RAGContentVersion, &item.RAGACLVersion, &item.RAGStartedAt, &item.RAGFinishedAt, &item.RAGLastError, &item.RAGResult, &item.CreatedAt, &item.UpdatedAt)
 	return &item, err
 }
 
@@ -2303,14 +2303,14 @@ func (s *PostgresStore) ApplyRAGResult(ctx context.Context, id string, input RAG
 	if sourceEventID == input.SourceEventID && jobID == input.RAGJobID && status == input.Status {
 		return &RAGResultApply{Applied: false, Status: status, Reason: "duplicate"}, nil
 	}
-	if status == "succeeded" && ragContentVersion == input.ContentVersion && ragACLVersion == input.ACLVersion {
+	if (status == "ready" || status == "metadata_only") && ragContentVersion == input.ContentVersion && ragACLVersion == input.ACLVersion {
 		return &RAGResultApply{Applied: false, Status: status, Reason: "terminal_state"}, nil
 	}
 	if status == "failed" && input.Status == "processing" && jobID == input.RAGJobID {
 		return &RAGResultApply{Applied: false, Status: status, Reason: "terminal_state"}, nil
 	}
 	resultJSON, _ := json.Marshal(input.Result)
-	_, err = tx.Exec(ctx, `UPDATE knowledge.knowledge_items SET rag_status=$2::text,rag_source_event_id=$3::uuid,rag_job_id=$4::uuid,rag_content_version=$5,rag_acl_version=$6,rag_started_at=CASE WHEN $2::text='processing' THEN COALESCE(rag_started_at,$7) ELSE rag_started_at END,rag_finished_at=CASE WHEN $2::text IN ('succeeded','failed') THEN $7 ELSE NULL END,rag_last_error=CASE WHEN $2::text='failed' THEN NULLIF($8,'') ELSE NULL END,rag_result=CASE WHEN $2::text='succeeded' THEN $9::jsonb ELSE rag_result END,updated_at=now() WHERE id=$1`, id, input.Status, input.SourceEventID, input.RAGJobID, input.ContentVersion, input.ACLVersion, input.OccurredAt, input.ErrorCode, resultJSON)
+	_, err = tx.Exec(ctx, `UPDATE knowledge.knowledge_items SET rag_status=$2::text,rag_source_event_id=$3::uuid,rag_job_id=$4::uuid,rag_content_version=$5,rag_acl_version=$6,rag_started_at=CASE WHEN $2::text='processing' THEN COALESCE(rag_started_at,$7) ELSE rag_started_at END,rag_finished_at=CASE WHEN $2::text IN ('ready','metadata_only','failed') THEN $7 ELSE NULL END,rag_last_error=CASE WHEN $2::text='failed' THEN NULLIF($8,'') ELSE NULL END,rag_result=CASE WHEN $2::text IN ('ready','metadata_only') THEN $9::jsonb ELSE rag_result END,updated_at=now() WHERE id=$1`, id, input.Status, input.SourceEventID, input.RAGJobID, input.ContentVersion, input.ACLVersion, input.OccurredAt, input.ErrorCode, resultJSON)
 	if err != nil {
 		return nil, dbError(err)
 	}
@@ -2441,11 +2441,16 @@ func (s *PostgresStore) TryMarkKnowledgeReady(ctx context.Context, id, traceID s
 	if !item.ContentSaved || !item.OwnershipReady || !item.SecurityReady || !item.PermissionReady || item.ACLSyncStatus != "synced" {
 		return false, nil
 	}
+	resourceType, resourceID := item.ProcessingResource()
 	payload, _ := json.Marshal(map[string]any{
-		"resource_type": "knowledge_item", "resource_id": item.ID, "knowledge_item_id": item.ID,
-		"source_message_id": item.SourceMessageID, "source_attachment_id": item.SourceAttachmentID, "attachment_id": item.SourceAttachmentID,
-		"content_version": item.ContentVersion, "acl_version": item.ACLVersion,
-		"content_variant": "display", "content_access_required": item.ContentAccessRequired,
+		"resource_type": resourceType, "resource_id": resourceID,
+		"knowledge_item_id":        item.ID,
+		"source_conversation_id":   nilString(item.ConversationID),
+		"source_conversation_type": nilString(item.SourceConversationType),
+		"source_audience_policy":   item.SourceAudiencePolicy(),
+		"content_version":          item.ContentVersion, "acl_version": item.ACLVersion,
+		"content_hash":            item.ContentHash,
+		"content_access_required": item.ContentAccessRequired,
 	})
 	if _, err = tx.Exec(ctx, `UPDATE knowledge.knowledge_items SET processing_status='ready',lifecycle_status=CASE WHEN source_type='local_upload' THEN 'ready' ELSE lifecycle_status END,last_error=NULL,updated_at=now() WHERE id=$1`, id); err != nil {
 		return false, dbError(err)
@@ -2774,7 +2779,7 @@ func (s *PostgresStore) ListKnowledgeLibraryItems(ctx context.Context, libraryID
 		}
 		return out, dbError(rows.Err())
 	}
-	selectSQL := `SELECT ki.id::text,ki.knowledge_scope,ki.access_scope,ki.source_type,COALESCE(ki.source_message_id::text,''),COALESCE(ki.source_attachment_id::text,''),COALESCE(ki.conversation_ingestion_id::text,''),COALESCE(ci.platform,''),COALESCE(ci.external_conversation_id,''),COALESCE(ci.conversation_type,''),COALESCE(ci.name,''),COALESCE(ki.content_type,''),COALESCE(ki.content_visibility,''),COALESCE(ki.processing_status,''),COALESCE(ki.original_access_required,FALSE),COALESCE(ki.share_batch_id::text,''),ki.shared_at,ki.created_at,ki.updated_at,COALESCE(m.sender_display_name,''),COALESCE(m.normalized_content,''),m.sent_at,COALESCE(a.file_name,''),COALESCE(a.mime_type,''),COALESCE(a.size_bytes,0),COALESCE(a.content_status,''),COALESCE(ki.rag_status,'pending'),COALESCE(ki.rag_content_version,0),COALESCE(ki.rag_acl_version,0),COALESCE(ki.rag_last_error,''),(COALESCE(ki.rag_status,'pending')='succeeded' AND COALESCE(ki.rag_content_version,0)=ki.content_version AND COALESCE(ki.rag_acl_version,0)=ki.acl_version) FROM knowledge.knowledge_items ki LEFT JOIN knowledge.conversation_ingestions ci ON ci.id=ki.conversation_ingestion_id LEFT JOIN knowledge.messages m ON m.id=ki.source_message_id LEFT JOIN knowledge.attachments a ON a.id=ki.source_attachment_id WHERE ` + strings.Join(conditions, " AND ") + ` ORDER BY ki.updated_at DESC LIMIT ` + strconv.Itoa(limit)
+	selectSQL := `SELECT ki.id::text,ki.knowledge_scope,ki.access_scope,ki.source_type,COALESCE(ki.source_message_id::text,''),COALESCE(ki.source_attachment_id::text,''),COALESCE(ki.conversation_ingestion_id::text,''),COALESCE(ci.platform,''),COALESCE(ci.external_conversation_id,''),COALESCE(ci.conversation_type,''),COALESCE(ci.name,''),COALESCE(ki.content_type,''),COALESCE(ki.content_visibility,''),COALESCE(ki.processing_status,''),COALESCE(ki.original_access_required,FALSE),COALESCE(ki.share_batch_id::text,''),ki.shared_at,ki.created_at,ki.updated_at,COALESCE(m.sender_display_name,''),COALESCE(m.normalized_content,''),m.sent_at,COALESCE(a.file_name,''),COALESCE(a.mime_type,''),COALESCE(a.size_bytes,0),COALESCE(a.content_status,''),COALESCE(ki.rag_status,'pending'),COALESCE(ki.rag_content_version,0),COALESCE(ki.rag_acl_version,0),COALESCE(ki.rag_last_error,''),(COALESCE(ki.rag_status,'pending')='ready' AND COALESCE(ki.rag_content_version,0)=ki.content_version AND COALESCE(ki.rag_acl_version,0)=ki.acl_version) FROM knowledge.knowledge_items ki LEFT JOIN knowledge.conversation_ingestions ci ON ci.id=ki.conversation_ingestion_id LEFT JOIN knowledge.messages m ON m.id=ki.source_message_id LEFT JOIN knowledge.attachments a ON a.id=ki.source_attachment_id WHERE ` + strings.Join(conditions, " AND ") + ` ORDER BY ki.updated_at DESC LIMIT ` + strconv.Itoa(limit)
 	rows, err := s.pool.Query(ctx, selectSQL, args...)
 	if err != nil {
 		return nil, dbError(err)
@@ -2975,7 +2980,18 @@ func (s *PostgresStore) FinalizeLocalUpload(ctx context.Context, requestID, obje
 		}
 		return &a, nil
 	}
-	payload := map[string]any{"resource_type": "knowledge_item", "resource_id": resourceID, "knowledge_item_id": resourceID, "source_message_id": nil, "source_attachment_id": a.ID, "attachment_id": a.ID, "content_version": a.ContentVersion, "acl_version": aclVersion, "content_variant": "display", "content_access_required": false}
+	audiencePolicy := "owner_only"
+	if a.OrganizationID != "" {
+		audiencePolicy = "organization_members"
+	}
+	payload := map[string]any{
+		"resource_type": "attachment", "resource_id": a.ID, "knowledge_item_id": resourceID,
+		"source_conversation_id":   nilString(a.ConversationID),
+		"source_conversation_type": nil,
+		"source_audience_policy":   audiencePolicy,
+		"content_version":          a.ContentVersion, "acl_version": aclVersion,
+		"content_hash": a.ContentHash, "content_access_required": false,
+	}
 	raw, _ := json.Marshal(payload)
 	traceID := trace.TraceID(ctx)
 	if traceID == "" {

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -210,7 +211,16 @@ def _filters(
     if request.conversation_id:
         output.append({"term": {"source_conversation_id": request.conversation_id}})
     if branch_keys:
-        output.append({"terms": {"branch_keys": list(branch_keys)}})
+        should: list[dict[str, Any]] = []
+        exact: list[str] = []
+        for key in branch_keys:
+            if re.search(r":\d{4}-\d{2}$", key):
+                exact.append(key)
+            else:
+                should.append({"prefix": {"branch_keys": key}})
+        if exact:
+            should.append({"terms": {"branch_keys": exact}})
+        output.append({"bool": {"should": should, "minimum_should_match": 1}})
     if protected_object_keys:
         output.append({"terms": {"auth_object_key": list(protected_object_keys)}})
     return output

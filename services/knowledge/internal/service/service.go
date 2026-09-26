@@ -2563,8 +2563,8 @@ func (s *Service) ApplyRAGResult(ctx context.Context, id string, input repositor
 	if _, err := uuid.Parse(strings.TrimSpace(id)); err != nil {
 		return nil, apperror.New("invalid_rag_result", "knowledge_item_id must be a UUID", 400, false)
 	}
-	if input.Status != "processing" && input.Status != "succeeded" && input.Status != "failed" {
-		return nil, apperror.New("invalid_rag_status", "status must be processing, succeeded, or failed", 400, false)
+	if input.Status != "processing" && input.Status != "ready" && input.Status != "metadata_only" && input.Status != "failed" {
+		return nil, apperror.New("invalid_rag_status", "status must be processing, ready, metadata_only, or failed", 400, false)
 	}
 	if strings.TrimSpace(input.SourceEventID) == "" || strings.TrimSpace(input.RAGJobID) == "" {
 		return nil, apperror.New("invalid_rag_result", "source_event_id and rag_job_id are required", 400, false)
@@ -2584,23 +2584,26 @@ func (s *Service) ApplyRAGResult(ctx context.Context, id string, input repositor
 	return s.Repo.ApplyRAGResult(ctx, id, input)
 }
 
-func (s *Service) GetKnowledgeContentForRAG(ctx context.Context, id string, contentVersion int, aclVersion int64, variant string) (*domain.KnowledgeContent, error) {
+func (s *Service) GetKnowledgeContentForRAG(ctx context.Context, id string, contentVersion int, aclVersion int64, variant, purpose string) (*domain.KnowledgeContent, error) {
 	item, err := s.GetKnowledgeForRAG(ctx, id, contentVersion, aclVersion)
 	if err != nil {
 		return nil, err
 	}
-	if variant == "original" && item.OriginalAccessRequired && item.SourceType != "shared_private_item" {
+	if variant == "original" && item.OriginalAccessRequired && item.SourceType != "shared_private_item" && purpose != "index" {
 		return nil, apperror.New("knowledge_content_restricted", "original content requires approval", 403, false)
 	}
 	content, err := s.Repo.GetKnowledgeContent(ctx, id)
 	if err != nil {
 		return nil, err
 	}
-	content.ContentVariant = "display"
+	if variant == "" {
+		variant = "display"
+	}
+	content.ContentVariant = variant
 	return content, nil
 }
 
-func (s *Service) GetAttachmentForRAG(ctx context.Context, id string, contentVersion int, aclVersion int64) (*domain.Attachment, error) {
+func (s *Service) GetAttachmentForRAG(ctx context.Context, id string, contentVersion int, aclVersion int64, purpose string) (*domain.Attachment, error) {
 	item, err := s.Repo.GetKnowledgeItemByAttachment(ctx, id)
 	if err != nil {
 		return nil, err
@@ -2608,7 +2611,7 @@ func (s *Service) GetAttachmentForRAG(ctx context.Context, id string, contentVer
 	if _, err = s.GetKnowledgeForRAG(ctx, item.ID, contentVersion, aclVersion); err != nil {
 		return nil, err
 	}
-	if item.ContentAccessRequired && item.SourceType != "shared_private_item" {
+	if item.ContentAccessRequired && item.SourceType != "shared_private_item" && purpose != "index" {
 		return nil, apperror.New("attachment_content_restricted", "attachment content requires approval", 403, false)
 	}
 	attachment, err := s.Repo.GetAttachment(ctx, id)

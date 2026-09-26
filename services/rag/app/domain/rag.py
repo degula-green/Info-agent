@@ -349,7 +349,7 @@ class Chunk:
             auth_object_key=context.auth_object_key(variant),
             acl_version=context.acl_version,
             sensitivity=context.sensitivity,
-            rag_eligible=variant == "display" and bool(content.strip()),
+            rag_eligible=bool(content.strip()),
             source_kind=context.resource_type,
         )
 
@@ -463,6 +463,9 @@ class SearchResult:
             "highlight": self.highlight,
             "source": source,
         }
+
+    def as_dict(self) -> dict[str, Any]:
+        return self.safe_dict()
 
 
 @dataclass(frozen=True)

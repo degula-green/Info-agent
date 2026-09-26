@@ -123,6 +123,7 @@ func registerRAGSourceRoutes(r *gin.Engine, app *App) {
 		if !ok {
 			return
 		}
+		purpose := strings.TrimSpace(c.Query("purpose"))
 		item, err := app.Service.GetKnowledgeForRAG(c, c.Param("knowledge_item_id"), contentVersion, aclVersion)
 		if err != nil {
 			writeError(c, err)
@@ -137,7 +138,10 @@ func registerRAGSourceRoutes(r *gin.Engine, app *App) {
 			"source_message_id":        item.SourceMessageID, "source_attachment_id": item.SourceAttachmentID,
 			"source_private_item_id": item.SourcePrivateItemID, "share_request_id": item.ShareRequestID,
 			"share_batch_id": item.ShareBatchID, "shared_by_user_id": item.SharedByUserID,
-			"content_type": item.ContentType, "content_hash": item.ContentHash,
+			"source_conversation_id":   item.ConversationID,
+			"source_conversation_type": item.SourceConversationType,
+			"source_audience_policy":   item.SourceAudiencePolicy(),
+			"content_type":             item.ContentType, "content_hash": item.ContentHash,
 			"content_version": item.ContentVersion, "acl_version": item.ACLVersion,
 			"content_variant": "display", "content_access_required": item.ContentAccessRequired,
 			"lifecycle_status": item.LifecycleStatus,
@@ -152,10 +156,13 @@ func registerRAGSourceRoutes(r *gin.Engine, app *App) {
 		}
 		if item.Attachment != nil {
 			attachment := *item.Attachment
-			if item.ContentAccessRequired {
+			if item.ContentAccessRequired && purpose != "index" {
 				attachment.ObjectRef = ""
 			}
 			response["attachments"] = []domain.Attachment{attachment}
+		}
+		if purpose == "index" {
+			response["purpose"] = "index"
 		}
 		c.JSON(http.StatusOK, response)
 	})
@@ -164,7 +171,7 @@ func registerRAGSourceRoutes(r *gin.Engine, app *App) {
 		if !ok {
 			return
 		}
-		content, err := app.Service.GetKnowledgeContentForRAG(c, c.Param("knowledge_item_id"), contentVersion, aclVersion, strings.TrimSpace(c.Query("content_variant")))
+		content, err := app.Service.GetKnowledgeContentForRAG(c, c.Param("knowledge_item_id"), contentVersion, aclVersion, strings.TrimSpace(c.Query("content_variant")), strings.TrimSpace(c.Query("purpose")))
 		if err != nil {
 			writeError(c, err)
 			return
@@ -176,7 +183,7 @@ func registerRAGSourceRoutes(r *gin.Engine, app *App) {
 		if !ok {
 			return
 		}
-		attachment, err := app.Service.GetAttachmentForRAG(c, c.Param("attachment_id"), contentVersion, aclVersion)
+		attachment, err := app.Service.GetAttachmentForRAG(c, c.Param("attachment_id"), contentVersion, aclVersion, strings.TrimSpace(c.Query("purpose")))
 		if err != nil {
 			writeError(c, err)
 			return

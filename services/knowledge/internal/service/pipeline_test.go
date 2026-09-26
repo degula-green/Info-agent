@@ -325,7 +325,7 @@ func TestPrivacyPermissionAndReadyOutboxContract(t *testing.T) {
 	if err != nil || len(events) != 1 || events[0].EventType != "knowledge.ready" || events[0].SchemaVersion != 1 || events[0].Producer != "module-2" {
 		t.Fatalf("unexpected ready event contract: events=%+v err=%v", events, err)
 	}
-	if events[0].Payload["resource_type"] != "knowledge_item" || events[0].Payload["knowledge_item_id"] != item.ID || events[0].Payload["acl_version"] != int64(3) {
+	if events[0].Payload["resource_type"] != "message" || events[0].Payload["knowledge_item_id"] != item.ID || events[0].Payload["acl_version"] != int64(3) {
 		t.Fatalf("unexpected ready payload: %+v", events[0].Payload)
 	}
 	if err := f.service.PublishOutbox(context.Background()); err != nil {

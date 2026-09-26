@@ -2015,15 +2015,19 @@ func (s *MemoryStore) TryMarkKnowledgeReady(ctx context.Context, id, traceID str
 	if traceID == "" {
 		traceID = uuid.NewString()
 	}
+	resourceType, resourceID := item.ProcessingResource()
 	event := domain.OutboxEvent{
 		ID: uuid.NewString(), EventType: "knowledge.ready", SchemaVersion: 1,
 		OccurredAt: time.Now().UTC(), TraceID: traceID, OrganizationID: item.OrganizationID,
 		Producer: "module-2", AvailableAt: time.Now().UTC(),
 		Payload: map[string]any{
-			"resource_type": "knowledge_item", "resource_id": item.ID, "knowledge_item_id": item.ID,
-			"source_message_id": item.SourceMessageID, "source_attachment_id": item.SourceAttachmentID, "attachment_id": item.SourceAttachmentID,
-			"content_version": item.ContentVersion, "acl_version": item.ACLVersion,
-			"content_variant": "display", "content_access_required": item.ContentAccessRequired,
+			"resource_type": resourceType, "resource_id": resourceID,
+			"knowledge_item_id":        item.ID,
+			"source_conversation_id":   nilString(item.ConversationID),
+			"source_conversation_type": nilString(item.SourceConversationType),
+			"source_audience_policy":   item.SourceAudiencePolicy(),
+			"content_version":          item.ContentVersion, "acl_version": item.ACLVersion,
+			"content_hash": item.ContentHash, "content_access_required": item.ContentAccessRequired,
 		},
 	}
 	s.outbox[event.ID] = event
@@ -2075,7 +2079,7 @@ func (s *MemoryStore) ApplyRAGResult(_ context.Context, id string, input RAGResu
 	if item.RAGSourceEventID == input.SourceEventID && item.RAGJobID == input.RAGJobID && status == input.Status {
 		return &RAGResultApply{Applied: false, Status: status, Reason: "duplicate"}, nil
 	}
-	if status == "succeeded" && item.RAGContentVersion == input.ContentVersion && item.RAGACLVersion == input.ACLVersion {
+	if (status == "ready" || status == "metadata_only") && item.RAGContentVersion == input.ContentVersion && item.RAGACLVersion == input.ACLVersion {
 		return &RAGResultApply{Applied: false, Status: status, Reason: "terminal_state"}, nil
 	}
 	if status == "failed" && input.Status == "processing" && item.RAGJobID == input.RAGJobID {
@@ -2090,7 +2094,7 @@ func (s *MemoryStore) ApplyRAGResult(_ context.Context, id string, input RAGResu
 		}
 		item.RAGFinishedAt = nil
 	}
-	if input.Status == "succeeded" || input.Status == "failed" {
+	if input.Status == "ready" || input.Status == "metadata_only" || input.Status == "failed" {
 		at := input.OccurredAt
 		item.RAGFinishedAt = &at
 	}
@@ -2099,7 +2103,7 @@ func (s *MemoryStore) ApplyRAGResult(_ context.Context, id string, input RAGResu
 	} else {
 		item.RAGLastError = ""
 	}
-	if input.Status == "succeeded" {
+	if input.Status == "ready" || input.Status == "metadata_only" {
 		item.RAGResult = input.Result
 	}
 	item.UpdatedAt = time.Now().UTC()

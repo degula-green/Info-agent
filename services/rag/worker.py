@@ -13,9 +13,9 @@ from dotenv import load_dotenv
 
 load_dotenv(Path(__file__).resolve().parent / ".env", override=False)
 
-from app.application.worker import RAGEventHandler
+from app.application.bootstrap import build_runtime
 from app.config import settings
-from app.infrastructure.events.redis_streams import RedisStreamPublisher, RedisStreamWorker
+from app.infrastructure.events.redis_streams import RedisStreamWorker
 
 
 logger = logging.getLogger("rag.worker")
@@ -50,25 +50,11 @@ def main() -> None:
         settings.redis_inbound_stream, settings.redis_consumer_group,
         settings.redis_consumer_name or "(generated)", settings.redis_dlq_stream_name or "(disabled)",
     )
-    publisher = RedisStreamPublisher() if settings.redis_outbound_stream else None
-    handler = RAGEventHandler(publisher=publisher)
-    worker = RedisStreamWorker(handler.handle)
+    runtime = build_runtime()
+    runtime.start()
+    worker = RedisStreamWorker(runtime.handle)
     failure_streak = 0
     while True:
-        # The outbox flush is the only path that reports job outcomes back to
-        # Knowledge, and it does not touch the inbound Redis stream. Running it
-        # inside the same try as `run_once` meant a Redis connect timeout
-        # aborted the flush before it ran, so an unreachable Redis silently
-        # stalled PG -> Knowledge callback delivery as well. Flush first, and
-        # flush in its own scope.
-        try:
-            handler.flush_outbox()
-        except Exception:
-            logger.exception("RAG worker outbox flush failed; retrying next iteration")
-        # `run_once` creates the consumer group itself, at most once per
-        # connection (`RedisStreamWorker._ensure_group_once`). Calling
-        # `ensure_group()` here as well made every iteration pay an extra round
-        # trip that could fail before anything was read.
         try:
             worker.run_once()
             failure_streak = 0

@@ -45,7 +45,7 @@ func (c *Client) Check(ctx context.Context, subjectID, organizationID string, ch
 }
 
 func (c *Client) ListObjects(ctx context.Context, subjectID, organizationID, objectType, relation string) ([]string, error) {
-	if objectType != "knowledge_original" && objectType != "attachment_content" {
+	if objectType != "knowledge_original" && objectType != "attachment_content" && objectType != "conversation_group" && objectType != "organization" {
 		return nil, fmt.Errorf("unsupported protected object type")
 	}
 	body := map[string]any{"user": "user:" + subjectID, "relation": relation, "type": objectType}
@@ -62,6 +62,10 @@ func (c *Client) ListObjects(ctx context.Context, subjectID, organizationID, obj
 	for _, id := range response.Objects {
 		id = strings.TrimSpace(id)
 		if id == "" || id == "*" || strings.Contains(id, ":") {
+			continue
+		}
+		if objectType == "conversation_group" || objectType == "organization" {
+			result = append(result, id)
 			continue
 		}
 		result = append(result, objectType+":"+id)

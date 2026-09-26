@@ -94,6 +94,9 @@ func TestRAGSourceRoutesAuthenticateAndValidateVersions(t *testing.T) {
 	if result := call("/internal/knowledge/"+itemID+"/content?content_version=1&acl_version=2&content_variant=original", "rag-token"); result.Code != http.StatusForbidden {
 		t.Fatalf("protected original returned %d: %s", result.Code, result.Body.String())
 	}
+	if result := call("/internal/knowledge/"+itemID+"/content?content_version=1&acl_version=2&content_variant=original&purpose=index", "rag-token"); result.Code != http.StatusOK {
+		t.Fatalf("index purpose did not receive protected original: %d: %s", result.Code, result.Body.String())
+	}
 }
 
 func postRAGResult(t *testing.T, router http.Handler, itemID, token, caller string, payload map[string]any) *httptest.ResponseRecorder {
@@ -149,9 +152,9 @@ func TestRAGResultCallbackAuthenticatesAndProtectsState(t *testing.T) {
 	if result := postRAGResult(t, router, itemID, "rag-token", "rag", payload); result.Code != http.StatusOK || !strings.Contains(result.Body.String(), `"reason":"duplicate"`) {
 		t.Fatalf("duplicate processing callback returned %d: %s", result.Code, result.Body.String())
 	}
-	succeeded := ragResultPayload(eventID, jobID, "succeeded", 1, 2)
-	if result := postRAGResult(t, router, itemID, "rag-token", "rag", succeeded); result.Code != http.StatusOK || !strings.Contains(result.Body.String(), `"status":"succeeded"`) {
-		t.Fatalf("succeeded callback returned %d: %s", result.Code, result.Body.String())
+	ready := ragResultPayload(eventID, jobID, "ready", 1, 2)
+	if result := postRAGResult(t, router, itemID, "rag-token", "rag", ready); result.Code != http.StatusOK || !strings.Contains(result.Body.String(), `"status":"ready"`) {
+		t.Fatalf("ready callback returned %d: %s", result.Code, result.Body.String())
 	}
 	oldJob := ragResultPayload("30000000-0000-0000-0000-000000000001", "40000000-0000-0000-0000-000000000001", "failed", 1, 2)
 	if result := postRAGResult(t, router, itemID, "rag-token", "rag", oldJob); result.Code != http.StatusOK || !strings.Contains(result.Body.String(), `"reason":"terminal_state"`) {

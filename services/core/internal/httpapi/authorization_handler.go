@@ -37,6 +37,8 @@ type authContext struct {
 	SubjectType     string   `json:"subject_type" binding:"required"`
 	SubjectID       string   `json:"subject_id" binding:"required"`
 	OrganizationID  string   `json:"organization_id"`
+	ScopeType       string   `json:"scope_type"`
+	ScopeID         string   `json:"scope_id"`
 	ResourceParts   []string `json:"resource_parts"`
 	KnowledgeBaseID *string  `json:"knowledge_base_id"`
 }
@@ -45,6 +47,8 @@ type checkRequest struct {
 	SubjectType    string      `json:"subject_type" binding:"required"`
 	SubjectID      string      `json:"subject_id" binding:"required"`
 	OrganizationID string      `json:"organization_id"`
+	ScopeType      string      `json:"scope_type"`
+	ScopeID        string      `json:"scope_id"`
 	SnapshotID     string      `json:"snapshot_id"`
 	Checks         []checkItem `json:"checks" binding:"required,min=1,max=100"`
 }
@@ -79,7 +83,20 @@ func (h *AuthorizationHandler) Scope(c *gin.Context) {
 		writeError(c, http.StatusBadRequest, "AUTHZ_INVALID_REQUEST", "invalid authorization scope request", false)
 		return
 	}
+	scopeType := strings.TrimSpace(req.ScopeType)
+	scopeID := strings.TrimSpace(req.ScopeID)
+	organizationID := strings.TrimSpace(req.OrganizationID)
+	if scopeType == "" {
+		scopeType = "organization"
+	}
+	if scopeID == "" {
+		scopeID = organizationID
+	}
+	if scopeType == "organization" && organizationID == "" {
+		organizationID = scopeID
+	}
 	objects := map[string][]string{}
+	protectedObjects := make([]string, 0)
 	for _, part := range req.ResourceParts {
 		var typ string
 		switch part {
@@ -97,12 +114,28 @@ func (h *AuthorizationHandler) Scope(c *gin.Context) {
 			return
 		}
 		objects[typ] = ids
+		protectedObjects = append(protectedObjects, ids...)
+	}
+	authorizedOrganizations := []string{}
+	authorizedConversations := []string{}
+	if scopeType == "organization" && scopeID != "" {
+		authorizedOrganizations = append(authorizedOrganizations, scopeID)
+		if ids, err := h.provider.ListObjects(c.Request.Context(), req.SubjectID, organizationID, "conversation_group", "participant"); err != nil {
+			writeError(c, http.StatusServiceUnavailable, "AUTHZ_BACKEND_UNAVAILABLE", "authorization backend unavailable", true)
+			return
+		} else {
+			authorizedConversations = ids
+		}
 	}
 	c.JSON(http.StatusOK, gin.H{
-		"available":   true,
-		"snapshot_id": uuid.NewString(),
-		"expires_at":  time.Now().UTC().Add(30 * time.Second).Format(time.RFC3339),
-		"objects":     objects,
+		"available":                         true,
+		"snapshot_id":                       uuid.NewString(),
+		"expires_at":                        time.Now().UTC().Add(5 * time.Second).Format(time.RFC3339),
+		"authorized_organization_ids":       authorizedOrganizations,
+		"authorized_conversation_group_ids": authorizedConversations,
+		"authorized_protected_object_keys":  protectedObjects,
+		"truncated":                         false,
+		"objects":                           objects,
 	})
 }
 
@@ -117,7 +150,11 @@ func (h *AuthorizationHandler) CheckBatch(c *gin.Context) {
 	}
 	decisions := make([]gin.H, 0, len(req.Checks))
 	for _, item := range req.Checks {
-		allowed, err := h.provider.Check(c.Request.Context(), req.SubjectID, req.OrganizationID, application.AuthorizationCheck{ResourceType: item.ResourceType, ResourcePart: item.ResourcePart, ResourceID: item.ResourceID, Action: item.Action})
+		organizationID := strings.TrimSpace(req.OrganizationID)
+		if organizationID == "" && strings.TrimSpace(req.ScopeType) == "organization" {
+			organizationID = strings.TrimSpace(req.ScopeID)
+		}
+		allowed, err := h.provider.Check(c.Request.Context(), req.SubjectID, organizationID, application.AuthorizationCheck{ResourceType: item.ResourceType, ResourcePart: item.ResourcePart, ResourceID: item.ResourceID, Action: item.Action})
 		if err != nil {
 			writeError(c, http.StatusServiceUnavailable, "AUTHZ_BACKEND_UNAVAILABLE", "authorization backend unavailable", true)
 			return

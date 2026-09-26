@@ -56,6 +56,10 @@ def _as_json(value: Any) -> str:
     return json.dumps(value or {}, ensure_ascii=False)
 
 
+def _looks_like_month(value: str) -> bool:
+    return bool(re.search(r":\d{4}-\d{2}$", value or ""))
+
+
 class PostgresRagMVPRepository:
     def __init__(self, *, connection_factory: Any | None = None) -> None:
         self.schema = _safe_schema(settings.database_schema)
@@ -507,8 +511,11 @@ class PostgresRagMVPRepository:
         entity_name: str,
         bucket: str | None,
         registry_version: int,
+        branch_key: str | None = None,
     ) -> str:
-        branch_key = f"entity:{domain}:{entity_id}" + (f":{bucket}" if bucket else "")
+        branch_key = branch_key or (
+            f"entity:{domain}:{entity_id}" + (f":{bucket}" if bucket else "")
+        )
         scope_node_key = f"scope:{scope_type}:{scope_id}"
         domain_node_key = f"domain:{domain}"
         entity_node_key = f"entity:{domain}:{entity_id}"
@@ -540,6 +547,17 @@ class PostgresRagMVPRepository:
         return branch_key
 
     def replace_chunk_branches(self, chunk: Chunk, branches: list[BranchMatch]) -> None:
+        for branch in branches:
+            self.ensure_tree_branch(
+                scope_type=chunk.scope_type,
+                scope_id=chunk.scope_id,
+                domain=branch.domain,
+                entity_id=branch.entity_id,
+                entity_name=branch.entity_id,
+                bucket=branch.branch_key.rsplit(":", 1)[-1] if _looks_like_month(branch.branch_key) else None,
+                registry_version=branch.registry_version,
+                branch_key=branch.branch_key,
+            )
         with self._connection() as connection:
             with connection.cursor() as cursor:
                 keys = [branch.branch_key for branch in branches]
@@ -556,15 +574,6 @@ class PostgresRagMVPRepository:
                         (chunk.chunk_id,),
                     )
                 for branch in branches:
-                    self.ensure_tree_branch(
-                        scope_type=chunk.scope_type,
-                        scope_id=chunk.scope_id,
-                        domain=branch.domain,
-                        entity_id=branch.entity_id,
-                        entity_name=branch.entity_id,
-                        bucket=None if ":" not in branch.branch_key.split("entity:", 1)[-1] else None,
-                        registry_version=branch.registry_version,
-                    )
                     cursor.execute(
                         f"""INSERT INTO {self.schema}.chunk_branches
                         (chunk_id,branch_key,entity_id,scope_type,scope_id,registry_version,
@@ -719,7 +728,8 @@ class PostgresRagMVPRepository:
         with self._connection() as connection:
             with connection.cursor() as cursor:
                 cursor.execute(
-                    f"""SELECT id::text,status,candidate_name,candidate_domain,resolved_entity_id::text
+                    f"""SELECT id::text,status,candidate_name,candidate_domain,resolved_entity_id::text,
+                               normalized_key
                         FROM {self.schema}.entity_candidates
                         WHERE id=%s::uuid AND scope_type=%s AND scope_id=%s::uuid FOR UPDATE""",
                     (candidate_id, scope_type, scope_id),
@@ -743,11 +753,12 @@ class PostgresRagMVPRepository:
                 if expected_status and current_status != expected_status:
                     raise ValueError("candidate status changed")
                 resolved_entity_id = row[4]
+                candidate_normalized_key = row[5]
                 registry_version: int | None = None
                 if action == "promote":
                     name = canonical_name or row[2]
                     entity_domain = domain or row[3]
-                    normalized = stable_id(name, length=64)
+                    normalized = candidate_normalized_key
                     cursor.execute(
                         f"""INSERT INTO {self.schema}.entity_registry
                         (scope_type,scope_id,domain,canonical_name,normalized_key,status,registry_version,created_by)
@@ -1369,6 +1380,19 @@ class InMemoryRagMVPRepository:
             if key[0] == chunk.chunk_id:
                 self.branches.pop(key)
         for branch in branches:
+            self.ensure_tree_branch(
+                scope_type=chunk.scope_type,
+                scope_id=chunk.scope_id,
+                domain=branch.domain,
+                entity_id=branch.entity_id,
+                entity_name=branch.entity_id,
+                bucket=(
+                    branch.branch_key.rsplit(":", 1)[-1]
+                    if re.search(r":\d{4}-\d{2}$", branch.branch_key) else None
+                ),
+                registry_version=branch.registry_version,
+                branch_key=branch.branch_key,
+            )
             self.branches[(chunk.chunk_id, branch.branch_key)] = {
                 **branch.__dict__, "status": "active",
             }
