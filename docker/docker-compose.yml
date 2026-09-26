@@ -88,12 +88,17 @@ services:
       ELASTICSEARCH_URL: ${ELASTICSEARCH_URL:-http://elasticsearch:9200}
       ELASTICSEARCH_USERNAME: ${ELASTICSEARCH_USERNAME:-}
       ELASTICSEARCH_PASSWORD: ${ELASTICSEARCH_PASSWORD:-}
-      ELASTICSEARCH_DISPLAY_INDEX: ${ELASTICSEARCH_DISPLAY_INDEX:-knowledge_display_chunks_read}
-      ELASTICSEARCH_PROTECTED_INDEX: ${ELASTICSEARCH_PROTECTED_INDEX:-knowledge_protected_chunks_read}
+      ELASTICSEARCH_DISPLAY_INDEX: ${ELASTICSEARCH_DISPLAY_INDEX:-rag_chunks_display_write}
+      ELASTICSEARCH_PROTECTED_INDEX: ${ELASTICSEARCH_PROTECTED_INDEX:-rag_chunks_protected_write}
+      ELASTICSEARCH_DISPLAY_READ_INDEX: ${ELASTICSEARCH_DISPLAY_READ_INDEX:-rag_chunks_display_read}
+      ELASTICSEARCH_DISPLAY_WRITE_INDEX: ${ELASTICSEARCH_DISPLAY_WRITE_INDEX:-rag_chunks_display_write}
+      ELASTICSEARCH_PROTECTED_READ_INDEX: ${ELASTICSEARCH_PROTECTED_READ_INDEX:-rag_chunks_protected_read}
+      ELASTICSEARCH_PROTECTED_WRITE_INDEX: ${ELASTICSEARCH_PROTECTED_WRITE_INDEX:-rag_chunks_protected_write}
       EMBEDDING_MODEL: ${EMBEDDING_MODEL:-text-embedding-v4}
       EMBEDDING_DIMS: ${EMBEDDING_DIMS:-1536}
       RAG_DATABASE_URL: ${RAG_DATABASE_URL:-}
-      RAG_DATABASE_SCHEMA: ${RAG_DATABASE_SCHEMA:-rag}
+      RAG_DATABASE_SCHEMA: ${RAG_DATABASE_SCHEMA:-rag_mvp}
+      RAG_TREE_MODE: ${RAG_TREE_MODE:-shadow}
       RAG_REDIS_URL: ${RAG_REDIS_URL:-redis://redis:6379/1}
       RAG_REDIS_DATABASE: ${RAG_REDIS_DATABASE:-1}
       RAG_REDIS_INBOUND_STREAM: ${RAG_REDIS_INBOUND_STREAM:-knowledge:ready}
@@ -121,14 +126,19 @@ services:
       ELASTICSEARCH_URL: ${ELASTICSEARCH_URL:-http://elasticsearch:9200}
       ELASTICSEARCH_USERNAME: ${ELASTICSEARCH_USERNAME:-}
       ELASTICSEARCH_PASSWORD: ${ELASTICSEARCH_PASSWORD:-}
-      ELASTICSEARCH_DISPLAY_INDEX: ${ELASTICSEARCH_DISPLAY_INDEX:-knowledge_display_chunks_read}
-      ELASTICSEARCH_PROTECTED_INDEX: ${ELASTICSEARCH_PROTECTED_INDEX:-knowledge_protected_chunks_read}
+      ELASTICSEARCH_DISPLAY_INDEX: ${ELASTICSEARCH_DISPLAY_INDEX:-rag_chunks_display_write}
+      ELASTICSEARCH_PROTECTED_INDEX: ${ELASTICSEARCH_PROTECTED_INDEX:-rag_chunks_protected_write}
+      ELASTICSEARCH_DISPLAY_READ_INDEX: ${ELASTICSEARCH_DISPLAY_READ_INDEX:-rag_chunks_display_read}
+      ELASTICSEARCH_DISPLAY_WRITE_INDEX: ${ELASTICSEARCH_DISPLAY_WRITE_INDEX:-rag_chunks_display_write}
+      ELASTICSEARCH_PROTECTED_READ_INDEX: ${ELASTICSEARCH_PROTECTED_READ_INDEX:-rag_chunks_protected_read}
+      ELASTICSEARCH_PROTECTED_WRITE_INDEX: ${ELASTICSEARCH_PROTECTED_WRITE_INDEX:-rag_chunks_protected_write}
       EMBEDDING_API_BASE_URL: ${EMBEDDING_API_BASE_URL:-}
       EMBEDDING_API_KEY: ${EMBEDDING_API_KEY:-}
       EMBEDDING_MODEL: ${EMBEDDING_MODEL:-text-embedding-v4}
       EMBEDDING_DIMS: ${EMBEDDING_DIMS:-1536}
       RAG_DATABASE_URL: ${RAG_DATABASE_URL:-postgresql://postgres:postgres@postgres:5432/info_agent}
-      RAG_DATABASE_SCHEMA: ${RAG_DATABASE_SCHEMA:-rag}
+      RAG_DATABASE_SCHEMA: ${RAG_DATABASE_SCHEMA:-rag_mvp}
+      RAG_TREE_MODE: ${RAG_TREE_MODE:-shadow}
       RAG_REDIS_URL: ${RAG_REDIS_URL:-redis://redis:6379/1}
       RAG_REDIS_DATABASE: ${RAG_REDIS_DATABASE:-1}
       RAG_REDIS_INBOUND_STREAM: ${RAG_REDIS_INBOUND_STREAM:-knowledge:ready}
@@ -177,7 +187,10 @@ services:
         psql --dbname="$${KNOWLEDGE_DATABASE_URL}" --set=ON_ERROR_STOP=1 --file=/migrations/20260913_contacts.sql &&
         psql --dbname="$${KNOWLEDGE_DATABASE_URL}" --set=ON_ERROR_STOP=1 --file=/migrations/20260916_knowledge_ready_pipeline.sql &&
         psql --dbname="$${KNOWLEDGE_DATABASE_URL}" --set=ON_ERROR_STOP=1 --file=/migrations/20260916_rag_memory_tree.sql &&
-        psql --dbname="$${KNOWLEDGE_DATABASE_URL}" --set=ON_ERROR_STOP=1 --file=/migrations/20260918_knowledge_rag_status.sql
+        psql --dbname="$${KNOWLEDGE_DATABASE_URL}" --set=ON_ERROR_STOP=1 --file=/migrations/20260918_knowledge_rag_status.sql &&
+        psql --dbname="$${KNOWLEDGE_DATABASE_URL}" --set=ON_ERROR_STOP=1 --file=/migrations/20260926_rag_mvp_schema.sql &&
+        psql --dbname="$${KNOWLEDGE_DATABASE_URL}" --set=ON_ERROR_STOP=1 --file=/migrations/20260927_rag_mvp_entity_review_requests.sql &&
+        psql --dbname="$${KNOWLEDGE_DATABASE_URL}" --set=ON_ERROR_STOP=1 --file=/migrations/20260927_knowledge_rag_mvp_status.sql
     depends_on:
       postgres:
         condition: service_healthy
@@ -190,6 +203,9 @@ services:
       - ../db/migrations/20260916_knowledge_ready_pipeline.sql:/migrations/20260916_knowledge_ready_pipeline.sql:ro
       - ../db/migrations/20260916_rag_memory_tree.sql:/migrations/20260916_rag_memory_tree.sql:ro
       - ../db/migrations/20260918_knowledge_rag_status.sql:/migrations/20260918_knowledge_rag_status.sql:ro
+      - ../db/migrations/20260926_rag_mvp_schema.sql:/migrations/20260926_rag_mvp_schema.sql:ro
+      - ../db/migrations/20260927_rag_mvp_entity_review_requests.sql:/migrations/20260927_rag_mvp_entity_review_requests.sql:ro
+      - ../db/migrations/20260927_knowledge_rag_mvp_status.sql:/migrations/20260927_knowledge_rag_mvp_status.sql:ro
     restart: "no"
 
   redis:

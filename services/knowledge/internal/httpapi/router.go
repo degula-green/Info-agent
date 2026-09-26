@@ -129,8 +129,9 @@ func registerRAGSourceRoutes(r *gin.Engine, app *App) {
 			writeError(c, err)
 			return
 		}
+		resourceType, resourceID := item.ProcessingResource()
 		response := gin.H{
-			"knowledge_item_id": item.ID, "resource_type": "knowledge_item",
+			"knowledge_item_id": item.ID, "resource_type": resourceType, "resource_id": resourceID,
 			"knowledge_base_id": item.KnowledgeBaseID, "knowledge_scope": item.KnowledgeScope,
 			"access_scope": item.AccessScope, "owner_user_id": item.OwnerUserID,
 			"organization_id": item.OrganizationID, "conversation_ingestion_id": item.ConversationID,

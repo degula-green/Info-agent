@@ -49,6 +49,9 @@ class MVPWorkerRuntime:
     def handle(self, envelope: dict[str, Any]) -> None:
         validate_envelope(envelope)
         job = self.repository.create_or_get_job(envelope)
+        detailed = self.repository.get_job(job["id"])
+        if detailed:
+            job = detailed
         if job.get("status") not in {"pending", "processing"}:
             return
         self._callback(

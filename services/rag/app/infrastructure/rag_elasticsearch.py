@@ -70,9 +70,10 @@ class RagChunkIndex:
                 chunk.es_source(),
             ))
         response = self.client.bulk(operations=operations, refresh="wait_for")
-        if isinstance(response, dict) and response.get("errors"):
+        payload = _response_body(response)
+        if payload.get("errors"):
             failures = [
-                item for item in response.get("items", [])
+                item for item in payload.get("items", [])
                 if _bulk_failed(item)
             ]
             raise ElasticsearchUnavailable(f"bulk indexing failed for {len(failures)} chunk(s)")
@@ -119,7 +120,7 @@ class RagChunkIndex:
                 }},
             ))
         response = self.client.bulk(operations=operations, refresh="wait_for")
-        if isinstance(response, dict) and response.get("errors"):
+        if _response_body(response).get("errors"):
             raise ElasticsearchUnavailable("branch projection update failed")
         return len(chunks)
 
@@ -292,6 +293,13 @@ def _dedupe_display_protected(results: list[SearchResult]) -> list[SearchResult]
 def _bulk_failed(item: Any) -> bool:
     operation = next(iter(item.values()), {}) if isinstance(item, dict) else {}
     return int(operation.get("status", 200)) >= 300
+
+
+def _response_body(response: Any) -> dict[str, Any]:
+    if isinstance(response, dict):
+        return response
+    body = getattr(response, "body", None)
+    return body if isinstance(body, dict) else {}
 
 
 def _not_found(exc: Exception) -> bool:

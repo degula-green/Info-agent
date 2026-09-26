@@ -419,8 +419,16 @@ class PostgresRagMVPRepository:
                                chunk_index,chunk_count,title,file_name,heading_path,context_header,content,
                                content_hash,source_locator,source_conversation_id::text,conversation_type,
                                document_id::text,message_id::text,sent_at,auth_partition_key,auth_object_key,
-               acl_version,sensitivity,embedding_model,embedding_dimensions,
-                               embedding_status,rag_eligible,lifecycle_status
+                               acl_version,sensitivity,embedding_model,embedding_dimensions,
+                               embedding_status,rag_eligible,lifecycle_status,
+                               COALESCE((SELECT array_agg(branch_key ORDER BY branch_key)
+                                         FROM {self.schema}.chunk_branches b
+                                         WHERE b.chunk_id={self.schema}.chunks.chunk_id
+                                           AND b.status='active'),ARRAY[]::text[]),
+                               COALESCE((SELECT MAX(registry_version)
+                                         FROM {self.schema}.chunk_branches b
+                                         WHERE b.chunk_id={self.schema}.chunks.chunk_id
+                                           AND b.status='active'),0)
                         FROM {self.schema}.chunks WHERE {where} ORDER BY chunk_index""",
                     tuple(params),
                 )
@@ -573,6 +581,118 @@ class PostgresRagMVPRepository:
                 )
                 version = int(cursor.fetchone()[0] or 1)
         return entities, aliases, version
+
+    def upsert_entity(
+        self,
+        *,
+        entity_id: str | None = None,
+        scope_type: str,
+        scope_id: str,
+        domain: str,
+        canonical_name: str,
+        normalized_key: str,
+        created_by: str | None = None,
+        status: str = "active",
+    ) -> dict[str, Any]:
+        with self._connection() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    f"""SELECT COALESCE(MAX(registry_version),0)+1
+                        FROM {self.schema}.entity_registry
+                        WHERE scope_type=%s AND scope_id=%s::uuid""",
+                    (scope_type, scope_id),
+                )
+                registry_version = int(cursor.fetchone()[0])
+                cursor.execute(
+                    f"""INSERT INTO {self.schema}.entity_registry
+                    (id,scope_type,scope_id,domain,canonical_name,normalized_key,status,registry_version,created_by)
+                    VALUES (COALESCE(%s::uuid,gen_random_uuid()),%s,%s::uuid,%s,%s,%s,%s,%s,%s::uuid)
+                    ON CONFLICT (scope_type,scope_id,domain,normalized_key) DO UPDATE SET
+                      canonical_name=EXCLUDED.canonical_name,status=EXCLUDED.status,
+                      registry_version=EXCLUDED.registry_version,updated_at=CURRENT_TIMESTAMP
+                    RETURNING id::text,registry_version""",
+                    (
+                        entity_id, scope_type, scope_id, domain, canonical_name,
+                        normalized_key, status, registry_version, created_by,
+                    ),
+                )
+                row = cursor.fetchone()
+                return {"id": row[0], "registry_version": int(row[1])}
+
+    def upsert_alias(
+        self,
+        *,
+        entity_id: str,
+        scope_type: str,
+        scope_id: str,
+        domain: str,
+        display_alias: str,
+        normalized_alias: str,
+        source: str = "manual",
+    ) -> str:
+        with self._connection() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    f"""INSERT INTO {self.schema}.entity_aliases
+                    (entity_id,scope_type,scope_id,domain,display_alias,normalized_alias,source,status)
+                    VALUES (%s::uuid,%s,%s::uuid,%s,%s,%s,%s,'active')
+                    ON CONFLICT (scope_type,scope_id,domain,normalized_alias) DO UPDATE SET
+                      entity_id=EXCLUDED.entity_id,display_alias=EXCLUDED.display_alias,
+                      source=EXCLUDED.source,status='active',updated_at=CURRENT_TIMESTAMP
+                    RETURNING id::text""",
+                    (
+                        entity_id, scope_type, scope_id, domain, display_alias,
+                        normalized_alias, source,
+                    ),
+                )
+                return str(cursor.fetchone()[0])
+
+    def list_entities(self, *, scope_type: str, scope_id: str) -> list[dict[str, Any]]:
+        with self._connection() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    f"""SELECT id::text,domain,canonical_name,normalized_key,status,
+                               registry_version,merged_into_entity_id::text,created_at,updated_at
+                        FROM {self.schema}.entity_registry
+                        WHERE scope_type=%s AND scope_id=%s::uuid
+                        ORDER BY domain,canonical_name""",
+                    (scope_type, scope_id),
+                )
+                return [
+                    {
+                        "entity_id": row[0], "domain": row[1], "canonical_name": row[2],
+                        "normalized_key": row[3], "status": row[4],
+                        "registry_version": int(row[5]), "merged_into_entity_id": row[6],
+                        "created_at": row[7].isoformat() if row[7] else None,
+                        "updated_at": row[8].isoformat() if row[8] else None,
+                    }
+                    for row in cursor.fetchall()
+                ]
+
+    def get_entity(self, *, scope_type: str, scope_id: str, entity_id: str) -> dict[str, Any] | None:
+        entities = [
+            item for item in self.list_entities(scope_type=scope_type, scope_id=scope_id)
+            if item["entity_id"] == entity_id
+        ]
+        if not entities:
+            return None
+        value = entities[0]
+        with self._connection() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    f"""SELECT id::text,display_alias,normalized_alias,source,status
+                        FROM {self.schema}.entity_aliases
+                        WHERE entity_id=%s::uuid ORDER BY display_alias""",
+                    (entity_id,),
+                )
+                value["aliases"] = [
+                    {
+                        "id": row[0], "display_alias": row[1], "normalized_alias": row[2],
+                        "source": row[3], "status": row[4],
+                    }
+                    for row in cursor.fetchall()
+                ]
+        return value
 
     def ensure_tree_branch(
         self,
@@ -1219,6 +1339,7 @@ class PostgresRagMVPRepository:
             auth_object_key=row[27], acl_version=int(row[28] or 0), sensitivity=row[29],
             embedding_model=row[30], embedding_dimensions=row[31], embedding_status=row[32],
             rag_eligible=bool(row[33]), lifecycle_status=row[34],
+            branch_keys=tuple(row[35] or ()), registry_version=int(row[36] or 0),
         )
 
     @staticmethod
@@ -1378,7 +1499,18 @@ class InMemoryRagMVPRepository:
             values = [item for item in values if item.scope_type == filters["scope_type"]]
         if filters.get("scope_id"):
             values = [item for item in values if item.scope_id == filters["scope_id"]]
-        return [item for item in sorted(values, key=lambda value: value.chunk_index)]
+        output = [item for item in sorted(values, key=lambda value: value.chunk_index)]
+        for chunk in output:
+            active = [
+                value for (chunk_id, _), value in self.branches.items()
+                if chunk_id == chunk.chunk_id and value.get("status") == "active"
+            ]
+            chunk.branch_keys = tuple(sorted(value["branch_key"] for value in active))
+            chunk.registry_version = max(
+                (int(value.get("registry_version") or 0) for value in active),
+                default=0,
+            )
+        return output
 
     def list_pending_branch_refresh_jobs(self, *, limit: int = 10) -> list[dict[str, Any]]:
         return [
@@ -1459,6 +1591,33 @@ class InMemoryRagMVPRepository:
 
     def upsert_alias(self, **value: Any) -> None:
         self.aliases = [item for item in self.aliases if item["id"] != value["id"]] + [value]
+
+    def list_entities(self, *, scope_type: str, scope_id: str) -> list[dict[str, Any]]:
+        return [
+            {
+                "entity_id": item["id"], "domain": item["domain"],
+                "canonical_name": item["canonical_name"], "normalized_key": item["normalized_key"],
+                "status": item["status"], "registry_version": item["registry_version"],
+                "merged_into_entity_id": item.get("merged_into_entity_id"),
+            }
+            for item in self.entities
+            if item["scope_type"] == scope_type and item["scope_id"] == scope_id
+        ]
+
+    def get_entity(self, *, scope_type: str, scope_id: str, entity_id: str) -> dict[str, Any] | None:
+        value = next(
+            (
+                item for item in self.list_entities(scope_type=scope_type, scope_id=scope_id)
+                if item["entity_id"] == entity_id
+            ),
+            None,
+        )
+        if not value:
+            return None
+        value["aliases"] = [
+            dict(item) for item in self.aliases if item["entity_id"] == entity_id
+        ]
+        return value
 
     def ensure_tree_branch(self, **value: Any) -> str:
         branch_key = str(value["branch_key"])

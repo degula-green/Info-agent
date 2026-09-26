@@ -140,7 +140,10 @@ class ResourceContext:
 
     @classmethod
     def from_event_and_source(cls, event_payload: dict[str, Any], source: dict[str, Any]) -> "ResourceContext":
-        merged = {**event_payload, **source}
+        # Event fields define the processing identity. Knowledge metadata is
+        # authoritative for ownership and content, but it must not be able to
+        # change the resource identity after the task was created.
+        merged = {**source, **event_payload}
         scope_type = str(merged.get("scope_type") or "")
         scope_id = str(merged.get("scope_id") or "")
         if not scope_type or not scope_id:
@@ -333,11 +336,6 @@ class Chunk:
                 "file_name": file_name,
                 "heading_path": list(heading_path),
                 "source_kind": context.resource_type,
-                "source_audience_policy": context.source_audience_policy,
-                "external_conversation_id": context.external_conversation_id,
-                "sender_identity_id": context.sender_identity_id,
-                "sender_platform": context.sender_platform,
-                "sender_display_name": context.sender_display_name,
             },
             source_locator=dict(source_locator or {}),
             source_conversation_id=context.source_conversation_id,

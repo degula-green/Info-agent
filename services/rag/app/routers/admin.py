@@ -7,6 +7,7 @@ from fastapi import APIRouter, Header, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from app.application.bootstrap import build_repository, build_retrieval_service
+from app.domain.rag import DOMAINS, normalized_text
 router = APIRouter(prefix="/api/v1/admin", tags=["rag-admin"])
 
 
@@ -18,6 +19,25 @@ class CandidateReviewBody(BaseModel):
     domain: str | None = None
     note: str | None = None
     expected_status: str | None = None
+
+
+class EntityBody(BaseModel):
+    entity_id: str | None = None
+    canonical_name: str = Field(min_length=1, max_length=512)
+    domain: str
+    aliases: list[str] = Field(default_factory=list, max_length=100)
+    status: str = Field(default="active", pattern="^(active|disabled|merged)$")
+
+
+class EntityPatchBody(BaseModel):
+    canonical_name: str | None = Field(default=None, min_length=1, max_length=512)
+    domain: str | None = None
+    status: str | None = Field(default=None, pattern="^(active|disabled|merged)$")
+
+
+class EntityAliasBody(BaseModel):
+    alias: str = Field(min_length=1, max_length=512)
+    source: str = Field(default="manual", max_length=32)
 
 
 def _admin_scope(
@@ -192,3 +212,145 @@ def get_branch_refresh_job(
     if not value or value.get("scope_id") != scope_id:
         raise HTTPException(status_code=404, detail="branch_refresh_job_not_found")
     return value
+
+
+@router.get("/entities")
+def list_entities(
+    scope_type: str = Query(default="organization", pattern="^(organization|user)$"),
+    x_user_id: str | None = Header(default=None),
+    x_organization_id: str | None = Header(default=None),
+) -> dict[str, Any]:
+    _, scope_type, scope_id = _admin_scope(
+        x_user_id=x_user_id,
+        x_organization_id=x_organization_id,
+        scope_type=scope_type,
+    )
+    return {"items": build_repository().list_entities(scope_type=scope_type, scope_id=scope_id)}
+
+
+@router.get("/entities/{entity_id}")
+def get_entity(
+    entity_id: str,
+    scope_type: str = Query(default="organization", pattern="^(organization|user)$"),
+    x_user_id: str | None = Header(default=None),
+    x_organization_id: str | None = Header(default=None),
+) -> dict[str, Any]:
+    _, scope_type, scope_id = _admin_scope(
+        x_user_id=x_user_id,
+        x_organization_id=x_organization_id,
+        scope_type=scope_type,
+    )
+    value = build_repository().get_entity(
+        scope_type=scope_type,
+        scope_id=scope_id,
+        entity_id=entity_id,
+    )
+    if not value:
+        raise HTTPException(status_code=404, detail="entity_not_found")
+    return value
+
+
+@router.post("/entities")
+def create_entity(
+    body: EntityBody,
+    scope_type: str = Query(default="organization", pattern="^(organization|user)$"),
+    x_user_id: str | None = Header(default=None),
+    x_organization_id: str | None = Header(default=None),
+) -> dict[str, Any]:
+    user_id, scope_type, scope_id = _admin_scope(
+        x_user_id=x_user_id,
+        x_organization_id=x_organization_id,
+        scope_type=scope_type,
+    )
+    if body.domain not in DOMAINS:
+        raise HTTPException(status_code=422, detail="invalid_domain")
+    repository = build_repository()
+    entity = repository.upsert_entity(
+        entity_id=body.entity_id,
+        scope_type=scope_type,
+        scope_id=scope_id,
+        domain=body.domain,
+        canonical_name=body.canonical_name,
+        normalized_key=normalized_text(body.canonical_name),
+        created_by=user_id,
+        status=body.status,
+    )
+    for alias in body.aliases:
+        repository.upsert_alias(
+            entity_id=entity["id"],
+            scope_type=scope_type,
+            scope_id=scope_id,
+            domain=body.domain,
+            display_alias=alias,
+            normalized_alias=normalized_text(alias),
+            source="manual",
+        )
+    return {**entity, "aliases": body.aliases}
+
+
+@router.patch("/entities/{entity_id}")
+def patch_entity(
+    entity_id: str,
+    body: EntityPatchBody,
+    scope_type: str = Query(default="organization", pattern="^(organization|user)$"),
+    x_user_id: str | None = Header(default=None),
+    x_organization_id: str | None = Header(default=None),
+) -> dict[str, Any]:
+    user_id, scope_type, scope_id = _admin_scope(
+        x_user_id=x_user_id,
+        x_organization_id=x_organization_id,
+        scope_type=scope_type,
+    )
+    current = build_repository().get_entity(
+        scope_type=scope_type,
+        scope_id=scope_id,
+        entity_id=entity_id,
+    )
+    if not current:
+        raise HTTPException(status_code=404, detail="entity_not_found")
+    domain = body.domain or current["domain"]
+    if domain not in DOMAINS:
+        raise HTTPException(status_code=422, detail="invalid_domain")
+    value = build_repository().upsert_entity(
+        entity_id=entity_id,
+        scope_type=scope_type,
+        scope_id=scope_id,
+        domain=domain,
+        canonical_name=body.canonical_name or current["canonical_name"],
+        normalized_key=normalized_text(body.canonical_name or current["canonical_name"]),
+        created_by=user_id,
+        status=body.status or current["status"],
+    )
+    return {**current, **value}
+
+
+@router.post("/entities/{entity_id}/aliases")
+def create_entity_alias(
+    entity_id: str,
+    body: EntityAliasBody,
+    scope_type: str = Query(default="organization", pattern="^(organization|user)$"),
+    x_user_id: str | None = Header(default=None),
+    x_organization_id: str | None = Header(default=None),
+) -> dict[str, Any]:
+    _, scope_type, scope_id = _admin_scope(
+        x_user_id=x_user_id,
+        x_organization_id=x_organization_id,
+        scope_type=scope_type,
+    )
+    entity = build_repository().get_entity(
+        scope_type=scope_type,
+        scope_id=scope_id,
+        entity_id=entity_id,
+    )
+    if not entity:
+        raise HTTPException(status_code=404, detail="entity_not_found")
+    alias_id = build_repository().upsert_alias(
+        entity_id=entity_id,
+        scope_type=scope_type,
+        scope_id=scope_id,
+        domain=entity["domain"],
+        display_alias=body.alias,
+        normalized_alias=normalized_text(body.alias),
+        source=body.source,
+    )
+    return {"id": alias_id, "entity_id": entity_id, "alias": body.alias}
