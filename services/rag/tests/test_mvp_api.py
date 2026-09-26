@@ -43,8 +43,8 @@ class ApiTests(unittest.TestCase):
                 x_organization_id="org-1",
             )
         self.assertEqual(response["request_id"], "request-1")
-        self.assertEqual(response["items"][0]["source"]["knowledge_item_id"], "item-1")
-        self.assertNotIn("auth_object_key", response["items"][0]["source"])
+        self.assertEqual(response["items"][0]["knowledge_item_id"], "item-1")
+        self.assertNotIn("auth_object_key", response["items"][0])
 
 
 if __name__ == "__main__":

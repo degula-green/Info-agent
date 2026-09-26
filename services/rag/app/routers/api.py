@@ -172,7 +172,7 @@ def ai_documents_stream(
             response = service.search(request)
             yield _sse("meta", {"request_id": response.request_id})
             for index, result in enumerate(response.results, start=1):
-                yield _sse("citation", {"citation": {"rank": index, **result.safe_dict()["source"]}})
+                yield _sse("citation", {"citation": {"rank": index, **_legacy_item(result)}})
             provider = OpenAICompatibleAnswerProvider()
             tokens: list[str] = []
             for delta in provider.generate_stream(request.query, response.results):
@@ -318,9 +318,20 @@ def _run_search(request: SearchRequest) -> RetrievalResponse:
 def _search_response(response: RetrievalResponse) -> dict[str, Any]:
     return {
         "request_id": response.request_id,
-        "items": [item.safe_dict() for item in response.results],
+        "items": [_legacy_item(item) for item in response.results],
         "citations": [],
         "diagnostics": response.diagnostics,
+    }
+
+
+def _legacy_item(result: Any) -> dict[str, Any]:
+    """Flatten the MVP source projection for the existing Web client."""
+    item = result.safe_dict()
+    source = item.pop("source", {}) or {}
+    return {
+        **source,
+        **item,
+        "source": source.get("platform") or source.get("resource_type") or "knowledge",
     }
 
 
