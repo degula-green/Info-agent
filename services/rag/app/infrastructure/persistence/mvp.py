@@ -203,6 +203,7 @@ class PostgresRagMVPRepository:
                         UPDATE {self.schema}.processing_jobs j
                         SET lease_owner=%s,lease_until=CURRENT_TIMESTAMP + (%s * INTERVAL '1 second'),
                             status=CASE WHEN j.status='pending' THEN 'processing' ELSE j.status END,
+                            current_stage=COALESCE(j.current_stage,%s),
                             started_at=COALESCE(j.started_at,CURRENT_TIMESTAMP),
                             updated_at=CURRENT_TIMESTAMP
                         FROM candidates c WHERE j.id=c.id
@@ -212,7 +213,7 @@ class PostgresRagMVPRepository:
                                   j.knowledge_base_id::text,j.scope_type,j.scope_id::text,
                                   j.source_conversation_id::text,j.source_audience_policy,
                                   j.content_version,j.processing_version,j.acl_version,j.last_error""",
-                    (limit, owner, lease),
+                    (limit, owner, lease, "fetch" if lane == "parse" else lane),
                 )
                 return [self._full_job_row(row) for row in cursor.fetchall()]
 
@@ -1449,6 +1450,9 @@ class InMemoryRagMVPRepository:
                 continue
             if item["status"] == "pending":
                 item["status"] = "processing"
+            item.setdefault("current_stage", None)
+            if not item["current_stage"]:
+                item["current_stage"] = "fetch" if lane == "parse" else lane
             item["lease_owner"] = f"{settings.service_name}:{lane}"
             item["lease_until"] = datetime.now(timezone.utc) + timedelta(seconds=lease_seconds or settings.task_lease_seconds)
             output.append(dict(item))
