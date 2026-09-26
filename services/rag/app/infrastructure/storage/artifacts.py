@@ -10,9 +10,6 @@ from pathlib import Path
 from typing import Any
 
 from app.config import settings
-from app.domain.models import AttachmentContext
-
-
 class StorageError(RuntimeError):
     pass
 
@@ -27,7 +24,7 @@ class ArtifactStore:
     def put_json(self, key: str, value: dict[str, Any]) -> str:
         return self.put_text(key, json.dumps(value, ensure_ascii=False, indent=2), "application/json")
 
-    def download_source(self, context: AttachmentContext, destination: Path) -> int:
+    def download_source(self, context: Any, destination: Path) -> int:
         raise NotImplementedError
 
 
@@ -51,7 +48,7 @@ class LocalArtifactStore(ArtifactStore):
         path.write_bytes(data)
         return f"file://{path}"
 
-    def download_source(self, context: AttachmentContext, destination: Path) -> int:
+    def download_source(self, context: Any, destination: Path) -> int:
         source = context.file_path or context.object_ref
         if not source:
             raise StorageError("attachment has no file_path or object_ref")
@@ -97,7 +94,7 @@ class MinioArtifactStore(ArtifactStore):
         self.client.put_object(bucket, key, BytesIO(data), len(data), content_type=content_type)
         return f"minio://{bucket}/{key}"
 
-    def download_source(self, context: AttachmentContext, destination: Path) -> int:
+    def download_source(self, context: Any, destination: Path) -> int:
         if context.file_path:
             local_path = Path(context.file_path)
             if local_path.exists() and local_path.is_file():
@@ -126,10 +123,11 @@ def build_artifact_store() -> ArtifactStore:
     return MinioArtifactStore() if settings.minio_endpoint else LocalArtifactStore()
 
 
-def derived_key(context: AttachmentContext, run_id: str, suffix: str) -> str:
+def derived_key(context: Any, run_id: str, suffix: str) -> str:
     digest = context.source_content_hash or "unknown"
     safe_hash = re.sub(r"[^0-9A-Fa-f]", "", digest.removeprefix("sha256:"))[:40] or "unknown"
-    safe_attachment = hashlib.sha256(context.attachment_id.encode("utf-8")).hexdigest()[:24]
+    resource_id = str(context.resource_id or context.attachment_id or context.knowledge_item_id)
+    safe_attachment = hashlib.sha256(resource_id.encode("utf-8")).hexdigest()[:24]
     safe_run = hashlib.sha256(str(run_id).encode("utf-8")).hexdigest()[:20]
     return (
         f"{settings.minio_derived_prefix}/{safe_attachment}/"

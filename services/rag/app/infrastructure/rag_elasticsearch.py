@@ -101,6 +101,28 @@ class RagChunkIndex:
                 total += int(response.get("deleted") or 0)
         return total
 
+    def update_chunk_branches(self, chunks: list[Chunk]) -> int:
+        if not chunks:
+            return 0
+        operations: list[dict[str, Any]] = []
+        for chunk in chunks:
+            alias = (
+                settings.elasticsearch_protected_write_index
+                if chunk.protected
+                else settings.elasticsearch_display_write_index
+            )
+            operations.extend((
+                {"update": {"_index": alias, "_id": chunk.chunk_id}},
+                {"doc": {
+                    "branch_keys": list(chunk.branch_keys),
+                    "registry_version": chunk.registry_version,
+                }},
+            ))
+        response = self.client.bulk(operations=operations, refresh="wait_for")
+        if isinstance(response, dict) and response.get("errors"):
+            raise ElasticsearchUnavailable("branch projection update failed")
+        return len(chunks)
+
     def search_bm25(
         self,
         request: SearchRequest,

@@ -10,7 +10,7 @@ from typing import Any
 from app.application.mvp_ports import KnowledgeSource
 from app.application.processing.mvp_chunking import build_variant_chunks, parsed_from_text
 from app.application.processing.preflight import PreflightError, validate_attachment
-from app.application.processing.preprocessor import ParserRouter
+from app.application.processing.parser_router import ParserRouter
 from app.application.processing.quality import QualityChecker
 from app.config import settings
 from app.domain.models import ParsedDocument

@@ -386,6 +386,8 @@ class PostgresRagMVPRepository:
         chunk_ids: list[str] | None = None,
         variant: str | None = None,
         embedding_status: str | None = None,
+        scope_type: str | None = None,
+        scope_id: str | None = None,
     ) -> list[Chunk]:
         filters = []
         params: list[Any] = []
@@ -401,6 +403,12 @@ class PostgresRagMVPRepository:
         if embedding_status:
             filters.append("embedding_status=%s")
             params.append(embedding_status)
+        if scope_type:
+            filters.append("scope_type=%s")
+            params.append(scope_type)
+        if scope_id:
+            filters.append("scope_id=%s::uuid")
+            params.append(scope_id)
         where = " AND ".join(filters) if filters else "TRUE"
         with self._connection() as connection:
             with connection.cursor() as cursor:
@@ -411,12 +419,77 @@ class PostgresRagMVPRepository:
                                chunk_index,chunk_count,title,file_name,heading_path,context_header,content,
                                content_hash,source_locator,source_conversation_id::text,conversation_type,
                                document_id::text,message_id::text,sent_at,auth_partition_key,auth_object_key,
-                               acl_version,sensitivity,embedding_model,embedding_dimensions,
+               acl_version,sensitivity,embedding_model,embedding_dimensions,
                                embedding_status,rag_eligible,lifecycle_status
                         FROM {self.schema}.chunks WHERE {where} ORDER BY chunk_index""",
                     tuple(params),
                 )
                 return [self._chunk_row(row) for row in cursor.fetchall()]
+
+    def list_pending_branch_refresh_jobs(self, *, limit: int = 10) -> list[dict[str, Any]]:
+        with self._connection() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    f"""SELECT id::text,scope_type,scope_id::text,entity_id::text,registry_version,
+                               status,target_count,processed_count
+                        FROM {self.schema}.branch_refresh_jobs
+                        WHERE status IN ('pending','failed') AND next_retry_at<=CURRENT_TIMESTAMP
+                        ORDER BY created_at LIMIT %s""",
+                    (max(1, limit),),
+                )
+                return [
+                    {
+                        "id": row[0], "scope_type": row[1], "scope_id": row[2],
+                        "entity_id": row[3], "registry_version": int(row[4]),
+                        "status": row[5], "target_count": int(row[6] or 0),
+                        "processed_count": int(row[7] or 0),
+                    }
+                    for row in cursor.fetchall()
+                ]
+
+    def get_branch_refresh_job(self, job_id: str) -> dict[str, Any] | None:
+        with self._connection() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    f"""SELECT id::text,scope_type,scope_id::text,entity_id::text,registry_version,
+                               status,target_count,processed_count,retry_count,last_error
+                        FROM {self.schema}.branch_refresh_jobs WHERE id=%s::uuid""",
+                    (job_id,),
+                )
+                row = cursor.fetchone()
+                if not row:
+                    return None
+                return {
+                    "id": row[0], "scope_type": row[1], "scope_id": row[2],
+                    "entity_id": row[3], "registry_version": int(row[4]),
+                    "status": row[5], "target_count": int(row[6] or 0),
+                    "processed_count": int(row[7] or 0), "retry_count": int(row[8] or 0),
+                    "last_error": row[9],
+                }
+
+    def mark_branch_refresh(
+        self,
+        job_id: str,
+        *,
+        status: str,
+        processed_count: int,
+        error: str | None = None,
+    ) -> None:
+        with self._connection() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    f"""UPDATE {self.schema}.branch_refresh_jobs
+                        SET status=%s,processed_count=%s,last_error=%s,
+                            started_at=CASE WHEN %s='processing' THEN COALESCE(started_at,CURRENT_TIMESTAMP) ELSE started_at END,
+                            finished_at=CASE WHEN %s='succeeded' THEN CURRENT_TIMESTAMP ELSE finished_at END,
+                            retry_count=retry_count+CASE WHEN %s='failed' THEN 1 ELSE 0 END,
+                            next_retry_at=CASE WHEN %s='failed' THEN CURRENT_TIMESTAMP + INTERVAL '30 seconds' ELSE next_retry_at END,
+                            updated_at=CURRENT_TIMESTAMP
+                        WHERE id=%s::uuid""",
+                    (
+                        status, processed_count, error, status, status, status, status, job_id,
+                    ),
+                )
 
     def update_embedding_status(
         self,
@@ -1180,6 +1253,7 @@ class InMemoryRagMVPRepository:
         self.candidates: dict[str, dict[str, Any]] = {}
         self.candidate_mentions: list[dict[str, Any]] = []
         self.reviews: list[dict[str, Any]] = []
+        self.branch_refresh_jobs: dict[str, dict[str, Any]] = {}
         self.outbox: list[dict[str, Any]] = []
         self.searches: list[dict[str, Any]] = []
         self.conversations: dict[str, dict[str, Any]] = {}
@@ -1300,7 +1374,34 @@ class InMemoryRagMVPRepository:
             values = [item for item in values if item.content_variant == filters["variant"]]
         if filters.get("embedding_status"):
             values = [item for item in values if item.embedding_status == filters["embedding_status"]]
+        if filters.get("scope_type"):
+            values = [item for item in values if item.scope_type == filters["scope_type"]]
+        if filters.get("scope_id"):
+            values = [item for item in values if item.scope_id == filters["scope_id"]]
         return [item for item in sorted(values, key=lambda value: value.chunk_index)]
+
+    def list_pending_branch_refresh_jobs(self, *, limit: int = 10) -> list[dict[str, Any]]:
+        return [
+            dict(value) for value in self.branch_refresh_jobs.values()
+            if value["status"] in {"pending", "failed"}
+        ][:limit]
+
+    def get_branch_refresh_job(self, job_id: str) -> dict[str, Any] | None:
+        value = self.branch_refresh_jobs.get(job_id)
+        return dict(value) if value else None
+
+    def mark_branch_refresh(
+        self,
+        job_id: str,
+        *,
+        status: str,
+        processed_count: int,
+        error: str | None = None,
+    ) -> None:
+        value = self.branch_refresh_jobs[job_id]
+        value["status"] = status
+        value["processed_count"] = processed_count
+        value["last_error"] = error
 
     def update_embedding_status(
         self,
@@ -1488,10 +1589,18 @@ class InMemoryRagMVPRepository:
         status = {"promote": "promoted", "merge": "merged", "ignore": "ignored", "defer": "deferred"}[value["action"]]
         candidate["status"] = status
         candidate["resolved_entity_id"] = resolved
+        refresh_job_id = new_uuid() if resolved else None
+        if refresh_job_id:
+            self.branch_refresh_jobs[refresh_job_id] = {
+                "id": refresh_job_id, "scope_type": candidate["scope_type"],
+                "scope_id": candidate["scope_id"], "entity_id": resolved,
+                "registry_version": version or 1, "status": "pending",
+                "target_count": 0, "processed_count": 0,
+            }
         review = {
             "candidate_id": value["candidate_id"], "status": status,
             "resolved_entity_id": resolved, "registry_version": version,
-            "branch_refresh_job_id": new_uuid() if resolved else None,
+            "branch_refresh_job_id": refresh_job_id,
         }
         self.reviews.append({**value, **review})
         return review

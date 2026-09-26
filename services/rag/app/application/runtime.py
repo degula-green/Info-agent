@@ -29,6 +29,7 @@ class MVPWorkerRuntime:
         index_service: MVPIndexService,
         memory_service: MemoryCandidateService,
         callback_lane: CallbackLane,
+        branch_refresh_service: Any | None = None,
     ) -> None:
         self.repository = repository or (
             PostgresRagMVPRepository() if settings.database_url else InMemoryRagMVPRepository()
@@ -37,6 +38,7 @@ class MVPWorkerRuntime:
         self.index_service = index_service
         self.memory_service = memory_service
         self.callback_lane = callback_lane
+        self.branch_refresh_service = branch_refresh_service
         self.queues = {
             lane: queue.Queue(maxsize=max(1, settings.lane_queue_size))
             for lane in ("parse", "index", "memory")
@@ -291,6 +293,11 @@ class MVPWorkerRuntime:
                 self.callback_lane.flush()
             except Exception:
                 logger.exception("callback lane flush failed")
+            if self.branch_refresh_service is not None:
+                try:
+                    self.branch_refresh_service.run_pending()
+                except Exception:
+                    logger.exception("branch refresh lane failed")
             self.stop_event.wait(settings.lane_poll_interval_seconds)
 
 

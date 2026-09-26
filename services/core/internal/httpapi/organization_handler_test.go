@@ -24,6 +24,9 @@ func (s *organizationCheckStub) CurrentOrganization(context.Context, string) (do
 func (s *organizationCheckStub) CheckOrganizationMember(context.Context, string, string) (bool, error) {
 	return s.allowed, nil
 }
+func (s *organizationCheckStub) CheckOrganizationCapability(context.Context, string, string, string) (bool, error) {
+	return s.allowed, nil
+}
 func (s *organizationCheckStub) CreateInvitation(context.Context, string, string) (domain.Invitation, string, error) {
 	return domain.Invitation{}, "", nil
 }
@@ -51,7 +54,7 @@ func TestInternalOrganizationMemberCheckRestrictsCaller(t *testing.T) {
 
 	forbidden := httptest.NewRequest(http.MethodGet, "/internal/organizations/org-1/members/user-1/check", nil)
 	forbidden.Header.Set("Authorization", "Bearer knowledge-token")
-	forbidden.Header.Set("X-Caller-Service", "rag")
+	forbidden.Header.Set("X-Caller-Service", "worker")
 	forbiddenResult := httptest.NewRecorder()
 	router.ServeHTTP(forbiddenResult, forbidden)
 	if forbiddenResult.Code != http.StatusForbidden {

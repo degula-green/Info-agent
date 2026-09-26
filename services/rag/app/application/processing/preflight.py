@@ -9,7 +9,6 @@ from pathlib import Path
 from typing import Any
 
 from app.config import settings
-from app.domain.models import AttachmentContext
 
 
 class PreflightError(ValueError):

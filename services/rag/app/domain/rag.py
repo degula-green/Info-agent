@@ -440,6 +440,19 @@ class SearchResult:
         return str(value) if value else None
 
     @property
+    def attachment_id(self) -> str | None:
+        value = self.source.get("attachment_id")
+        if value:
+            return str(value)
+        if self.source.get("resource_type") == "attachment":
+            return self.resource_id
+        return None
+
+    @property
+    def auth_acl_version(self) -> int:
+        return int(self.source.get("acl_version") or 0)
+
+    @property
     def resource_id(self) -> str | None:
         value = self.source.get("resource_id")
         return str(value) if value else None

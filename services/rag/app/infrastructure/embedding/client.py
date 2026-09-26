@@ -7,12 +7,11 @@ import time
 from collections import OrderedDict
 from typing import Any
 
-from app.application.ports import EmbeddingProvider
 from app.config import settings
 from app.infrastructure.http import HttpClient, IntegrationError, join_url
 
 
-class EmbeddingClient(EmbeddingProvider):
+class EmbeddingClient:
     def __init__(
         self,
         *,
@@ -102,7 +101,7 @@ class EmbeddingClient(EmbeddingProvider):
                 self._cache.popitem(last=False)
 
 
-class HashEmbeddingProvider(EmbeddingProvider):
+class HashEmbeddingProvider:
     """Deterministic test double; never used by the production bootstrap."""
 
     def __init__(self, dimensions: int = 1536, model: str = "hash-test") -> None:

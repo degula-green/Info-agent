@@ -7,9 +7,6 @@ from fastapi import APIRouter, Header, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from app.application.bootstrap import build_repository, build_retrieval_service
-from app.domain.rag import AccessCheck
-
-
 router = APIRouter(prefix="/api/v1/admin", tags=["rag-admin"])
 
 
@@ -39,13 +36,19 @@ def _admin_scope(
     else:
         scope_id = user_id
     service = build_retrieval_service()
-    decisions = service.authorization.check_batch(
-        user_id=user_id,
-        scope_type=scope_type,
-        scope_id=scope_id,
-        checks=[AccessCheck("organization", "admin", scope_id, "manage")],
-    )
-    if decisions != [True]:
+    checker = getattr(service.authorization, "check_organization_capability", None)
+    if scope_type == "user":
+        allowed = user_id == scope_id
+    elif callable(checker):
+        allowed = checker(
+            user_id=user_id,
+            scope_type=scope_type,
+            scope_id=scope_id,
+            capability="entity:review",
+        )
+    else:
+        allowed = False
+    if not allowed:
         raise HTTPException(status_code=403, detail="forbidden")
     return user_id, scope_type, scope_id
 
@@ -171,3 +174,21 @@ def review_candidate(
         raise HTTPException(status_code=404, detail="candidate_not_found") from exc
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.get("/branch-refresh-jobs/{job_id}")
+def get_branch_refresh_job(
+    job_id: str,
+    scope_type: str = Query(default="organization", pattern="^(organization|user)$"),
+    x_user_id: str | None = Header(default=None),
+    x_organization_id: str | None = Header(default=None),
+) -> dict[str, Any]:
+    _, _, scope_id = _admin_scope(
+        x_user_id=x_user_id,
+        x_organization_id=x_organization_id,
+        scope_type=scope_type,
+    )
+    value = build_repository().get_branch_refresh_job(job_id)
+    if not value or value.get("scope_id") != scope_id:
+        raise HTTPException(status_code=404, detail="branch_refresh_job_not_found")
+    return value

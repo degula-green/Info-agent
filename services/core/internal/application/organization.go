@@ -139,6 +139,24 @@ func (s *OrganizationService) CheckOrganizationMember(ctx context.Context, userI
 	return membership.IsActive(), nil
 }
 
+func (s *OrganizationService) CheckOrganizationCapability(ctx context.Context, userID, organizationID, capability string) (bool, error) {
+	membership, roles, err := s.repo.GetMembership(ctx, userID, organizationID)
+	if errors.Is(err, repository.ErrMembershipNotFound) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	switch capability {
+	case "entity:read":
+		return domain.HasPermission(membership, roles, domain.PermissionOrganizationMemberRead), nil
+	case "entity:review", "entity:merge", "entity:admin":
+		return domain.HasPermission(membership, roles, domain.PermissionOrganizationInformationManage), nil
+	default:
+		return false, nil
+	}
+}
+
 func (s *OrganizationService) GrantRole(ctx context.Context, actorID, organizationID, userID, role string) error {
 	if !domain.IsValidRole(role) {
 		return ErrInvalidRole

@@ -3,6 +3,7 @@ from __future__ import annotations
 from functools import lru_cache
 
 from app.application.callback_service import CallbackLane
+from app.application.branch_refresh_service import BranchRefreshService
 from app.application.index_service import MVPIndexService
 from app.application.memory_service import MemoryCandidateService
 from app.application.parse_service import MVPParseService
@@ -47,6 +48,7 @@ def build_runtime() -> MVPWorkerRuntime:
         ),
         memory_service=MemoryCandidateService(repository=repository),
         callback_lane=callback,
+        branch_refresh_service=BranchRefreshService(repository=repository, indexer=index),
     )
 
 

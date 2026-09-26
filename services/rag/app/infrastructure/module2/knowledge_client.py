@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from typing import Any
 
-from app.application.ports import KnowledgeSource
 from app.config import settings
 from app.infrastructure.http import HttpClient, IntegrationError, join_url, with_query
 
@@ -11,7 +10,7 @@ class KnowledgeSourceUnavailable(RuntimeError):
     pass
 
 
-class Module2KnowledgeClient(KnowledgeSource):
+class Module2KnowledgeClient:
     """Versioned HTTP back-source; it never reads module 2's database."""
 
     def __init__(

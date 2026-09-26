@@ -9,7 +9,7 @@ from typing import Any
 from app.application.mvp_ports import AuthorizationGateway
 from app.config import settings
 from app.domain.rag import AccessCheck, AuthorizationScope
-from app.infrastructure.http import HttpClient, IntegrationError, join_url
+from app.infrastructure.http import HttpClient, IntegrationError, join_url, with_query
 
 
 @dataclass(frozen=True)
@@ -137,6 +137,39 @@ class RagAuthorizationClient(AuthorizationGateway):
                 decisions.extend([False] * len(batch))
         return decisions if len(decisions) == len(checks) else [False] * len(checks)
 
+    def check_organization_capability(
+        self,
+        *,
+        user_id: str,
+        scope_type: str,
+        scope_id: str,
+        capability: str,
+    ) -> bool:
+        if scope_type != "organization" or not self.base_url:
+            return False
+        request_id = uuid.uuid4().hex
+        try:
+            response = self.http.request(
+                "GET",
+                with_query(
+                    join_url(
+                        self.base_url,
+                        f"/internal/organizations/{scope_id}/members/{user_id}/check",
+                    ),
+                    capability=capability,
+                ),
+                token=self.token,
+                headers={
+                    "X-Caller-Service": "rag",
+                    "X-Request-ID": request_id,
+                    "X-Trace-ID": request_id,
+                },
+                timeout=settings.authz_timeout_seconds,
+            ).json()
+            return bool(response.get("allowed")) if isinstance(response, dict) else False
+        except IntegrationError:
+            return False
+
 
 class AllowAllAuthorizationGateway(AuthorizationGateway):
     """Development-only display gateway; protected scope remains unavailable."""
@@ -146,6 +179,9 @@ class AllowAllAuthorizationGateway(AuthorizationGateway):
 
     def check_batch(self, *, checks: list[AccessCheck], **_: Any) -> list[bool]:
         return [True] * len(checks)
+
+    def check_organization_capability(self, **_: Any) -> bool:
+        return True
 
 
 def _scope_from_response(

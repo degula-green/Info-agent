@@ -5,9 +5,8 @@ import urllib.error
 import urllib.request
 from typing import Any, Iterable
 
-from app.application.ports import AnswerProvider
 from app.config import settings
-from app.domain.models import SearchResult
+from app.domain.rag import SearchResult
 from app.infrastructure.http import HttpClient, IntegrationError, join_url
 
 
@@ -15,7 +14,7 @@ class QAUnavailable(RuntimeError):
     pass
 
 
-class OpenAICompatibleAnswerProvider(AnswerProvider):
+class OpenAICompatibleAnswerProvider:
     """Small adapter for OpenAI-compatible chat completion endpoints."""
 
     def __init__(self, *, http: HttpClient | None = None) -> None:
