@@ -6,6 +6,7 @@ import re
 import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 from app.config import settings
 from app.domain.models import AttachmentContext
@@ -53,7 +54,7 @@ _MIME_BY_EXTENSION = {
 }
 
 
-def validate_attachment(path: Path, context: AttachmentContext) -> PreflightResult:
+def validate_attachment(path: Path, context: Any) -> PreflightResult:
     """Validate a downloaded source before any parser or cloud upload sees it."""
     path = path.resolve()
     if not path.exists() or not path.is_file():
@@ -61,12 +62,25 @@ def validate_attachment(path: Path, context: AttachmentContext) -> PreflightResu
     size = path.stat().st_size
     if size <= 0:
         raise PreflightError("EMPTY_FILE", "attachment source is empty")
-    if size > settings.preprocess_max_file_bytes:
-        raise PreflightError("FILE_TOO_LARGE", "attachment exceeds configured size limit")
-
     extension = Path(context.file_name).suffix.lower().lstrip(".")
     if not extension:
         extension = path.suffix.lower().lstrip(".")
+    type_limit = settings.preprocess_max_file_bytes
+    if extension in {"txt", "md"}:
+        type_limit = min(type_limit, settings.preprocess_max_text_bytes)
+    elif extension == "json":
+        type_limit = min(type_limit, settings.preprocess_max_text_bytes)
+    elif extension in {"csv", "tsv"}:
+        type_limit = min(type_limit, settings.preprocess_max_table_bytes)
+    elif extension in {"docx", "pptx", "xlsx"}:
+        type_limit = min(type_limit, settings.preprocess_max_office_bytes)
+    elif extension == "pdf":
+        type_limit = min(type_limit, settings.preprocess_max_pdf_bytes)
+    elif extension in {"png", "jpg", "jpeg"}:
+        type_limit = min(type_limit, settings.preprocess_max_image_bytes)
+    if size > type_limit:
+        raise PreflightError("FILE_TOO_LARGE", "attachment exceeds configured size limit")
+
     if extension in UNSUPPORTED_EXTENSIONS or extension not in LOCAL_EXTENSIONS | MINERU_EXTENSIONS:
         raise PreflightError("UNSUPPORTED_FORMAT", f"unsupported attachment format: {extension or 'unknown'}")
 
