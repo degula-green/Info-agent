@@ -682,7 +682,7 @@ commit 5: test(rag): cover contracts, fail-fast settings and owned writes
 - 生产漏配授权时启动失败。
 - 生产不再使用 AllowAll。
 - 应用容器启动和关闭正常。
-- 被触碰接口不再直接依赖 Repository。
+- 被触碰接口已经通过 ApplicationContainer 获取依赖，不再每请求重建基础设施。
 - QA、merge、幂等和权威 Scope 的目标契约已写入文档。
 - Phase 2、Phase 3 的测试矩阵已建立。
 

@@ -3,10 +3,12 @@ from __future__ import annotations
 import uuid
 from typing import Any
 
-from fastapi import APIRouter, Header, HTTPException, Query
+from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from pydantic import BaseModel, Field
 
-from app.application.bootstrap import build_repository, build_retrieval_service
+from app.application.bootstrap import ApplicationContainer
+from app.application.rag_service import RAGRetrievalService
+from app.dependencies import get_container
 from app.domain.rag import DOMAINS, normalized_text
 router = APIRouter(prefix="/api/v1/admin", tags=["rag-admin"])
 
@@ -45,6 +47,7 @@ def _admin_scope(
     x_user_id: str | None,
     x_organization_id: str | None,
     scope_type: str,
+    service: RAGRetrievalService,
 ) -> tuple[str, str, str]:
     user_id = str(x_user_id or "").strip()
     if not user_id:
@@ -55,7 +58,6 @@ def _admin_scope(
             raise HTTPException(status_code=422, detail="invalid_scope")
     else:
         scope_id = user_id
-    service = build_retrieval_service()
     checker = getattr(service.authorization, "check_organization_capability", None)
     if scope_type == "user":
         allowed = user_id == scope_id
@@ -78,13 +80,15 @@ def get_entity_tree(
     scope_type: str = Query(default="organization", pattern="^(organization|user)$"),
     x_user_id: str | None = Header(default=None),
     x_organization_id: str | None = Header(default=None),
+    container: ApplicationContainer = Depends(get_container),
 ) -> dict[str, Any]:
     _, scope_type, scope_id = _admin_scope(
         x_user_id=x_user_id,
         x_organization_id=x_organization_id,
         scope_type=scope_type,
+        service=container.retrieval_service,
     )
-    return build_repository().get_tree(scope_type=scope_type, scope_id=scope_id)
+    return container.repository.get_tree(scope_type=scope_type, scope_id=scope_id)
 
 
 @router.get("/entity-tree/nodes/{node_id}")
@@ -93,13 +97,15 @@ def get_entity_tree_node(
     scope_type: str = Query(default="organization", pattern="^(organization|user)$"),
     x_user_id: str | None = Header(default=None),
     x_organization_id: str | None = Header(default=None),
+    container: ApplicationContainer = Depends(get_container),
 ) -> dict[str, Any]:
     _, scope_type, scope_id = _admin_scope(
         x_user_id=x_user_id,
         x_organization_id=x_organization_id,
         scope_type=scope_type,
+        service=container.retrieval_service,
     )
-    tree = build_repository().get_tree(scope_type=scope_type, scope_id=scope_id)
+    tree = container.repository.get_tree(scope_type=scope_type, scope_id=scope_id)
     node = next((item for item in tree["nodes"] if item["node_id"] == node_id), None)
     if not node:
         raise HTTPException(status_code=404, detail="node_not_found")
@@ -120,13 +126,15 @@ def list_candidates(
     scope_type: str = Query(default="organization", pattern="^(organization|user)$"),
     x_user_id: str | None = Header(default=None),
     x_organization_id: str | None = Header(default=None),
+    container: ApplicationContainer = Depends(get_container),
 ) -> dict[str, Any]:
     _, scope_type, scope_id = _admin_scope(
         x_user_id=x_user_id,
         x_organization_id=x_organization_id,
         scope_type=scope_type,
+        service=container.retrieval_service,
     )
-    items, total = build_repository().list_candidates(
+    items, total = container.repository.list_candidates(
         scope_type=scope_type,
         scope_id=scope_id,
         status=status,
@@ -145,13 +153,15 @@ def get_candidate(
     scope_type: str = Query(default="organization", pattern="^(organization|user)$"),
     x_user_id: str | None = Header(default=None),
     x_organization_id: str | None = Header(default=None),
+    container: ApplicationContainer = Depends(get_container),
 ) -> dict[str, Any]:
     _, scope_type, scope_id = _admin_scope(
         x_user_id=x_user_id,
         x_organization_id=x_organization_id,
         scope_type=scope_type,
+        service=container.retrieval_service,
     )
-    value = build_repository().get_candidate(
+    value = container.repository.get_candidate(
         scope_type=scope_type,
         scope_id=scope_id,
         candidate_id=candidate_id,
@@ -169,15 +179,17 @@ def review_candidate(
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
     x_user_id: str | None = Header(default=None),
     x_organization_id: str | None = Header(default=None),
+    container: ApplicationContainer = Depends(get_container),
 ) -> dict[str, Any]:
     user_id, scope_type, scope_id = _admin_scope(
         x_user_id=x_user_id,
         x_organization_id=x_organization_id,
         scope_type=scope_type,
+        service=container.retrieval_service,
     )
     request_id = body.review_request_id or idempotency_key or str(uuid.uuid4())
     try:
-        return build_repository().review_candidate(
+        return container.repository.review_candidate(
             scope_type=scope_type,
             scope_id=scope_id,
             candidate_id=candidate_id,
@@ -202,13 +214,15 @@ def get_branch_refresh_job(
     scope_type: str = Query(default="organization", pattern="^(organization|user)$"),
     x_user_id: str | None = Header(default=None),
     x_organization_id: str | None = Header(default=None),
+    container: ApplicationContainer = Depends(get_container),
 ) -> dict[str, Any]:
     _, _, scope_id = _admin_scope(
         x_user_id=x_user_id,
         x_organization_id=x_organization_id,
         scope_type=scope_type,
+        service=container.retrieval_service,
     )
-    value = build_repository().get_branch_refresh_job(job_id)
+    value = container.repository.get_branch_refresh_job(job_id)
     if not value or value.get("scope_id") != scope_id:
         raise HTTPException(status_code=404, detail="branch_refresh_job_not_found")
     return value
@@ -219,13 +233,20 @@ def list_entities(
     scope_type: str = Query(default="organization", pattern="^(organization|user)$"),
     x_user_id: str | None = Header(default=None),
     x_organization_id: str | None = Header(default=None),
+    container: ApplicationContainer = Depends(get_container),
 ) -> dict[str, Any]:
     _, scope_type, scope_id = _admin_scope(
         x_user_id=x_user_id,
         x_organization_id=x_organization_id,
         scope_type=scope_type,
+        service=container.retrieval_service,
     )
-    return {"items": build_repository().list_entities(scope_type=scope_type, scope_id=scope_id)}
+    return {
+        "items": container.repository.list_entities(
+            scope_type=scope_type,
+            scope_id=scope_id,
+        )
+    }
 
 
 @router.get("/entities/{entity_id}")
@@ -234,13 +255,15 @@ def get_entity(
     scope_type: str = Query(default="organization", pattern="^(organization|user)$"),
     x_user_id: str | None = Header(default=None),
     x_organization_id: str | None = Header(default=None),
+    container: ApplicationContainer = Depends(get_container),
 ) -> dict[str, Any]:
     _, scope_type, scope_id = _admin_scope(
         x_user_id=x_user_id,
         x_organization_id=x_organization_id,
         scope_type=scope_type,
+        service=container.retrieval_service,
     )
-    value = build_repository().get_entity(
+    value = container.repository.get_entity(
         scope_type=scope_type,
         scope_id=scope_id,
         entity_id=entity_id,
@@ -256,15 +279,17 @@ def create_entity(
     scope_type: str = Query(default="organization", pattern="^(organization|user)$"),
     x_user_id: str | None = Header(default=None),
     x_organization_id: str | None = Header(default=None),
+    container: ApplicationContainer = Depends(get_container),
 ) -> dict[str, Any]:
     user_id, scope_type, scope_id = _admin_scope(
         x_user_id=x_user_id,
         x_organization_id=x_organization_id,
         scope_type=scope_type,
+        service=container.retrieval_service,
     )
     if body.domain not in DOMAINS:
         raise HTTPException(status_code=422, detail="invalid_domain")
-    repository = build_repository()
+    repository = container.repository
     entity = repository.upsert_entity(
         entity_id=body.entity_id,
         scope_type=scope_type,
@@ -295,13 +320,15 @@ def patch_entity(
     scope_type: str = Query(default="organization", pattern="^(organization|user)$"),
     x_user_id: str | None = Header(default=None),
     x_organization_id: str | None = Header(default=None),
+    container: ApplicationContainer = Depends(get_container),
 ) -> dict[str, Any]:
     user_id, scope_type, scope_id = _admin_scope(
         x_user_id=x_user_id,
         x_organization_id=x_organization_id,
         scope_type=scope_type,
+        service=container.retrieval_service,
     )
-    current = build_repository().get_entity(
+    current = container.repository.get_entity(
         scope_type=scope_type,
         scope_id=scope_id,
         entity_id=entity_id,
@@ -311,7 +338,7 @@ def patch_entity(
     domain = body.domain or current["domain"]
     if domain not in DOMAINS:
         raise HTTPException(status_code=422, detail="invalid_domain")
-    value = build_repository().upsert_entity(
+    value = container.repository.upsert_entity(
         entity_id=entity_id,
         scope_type=scope_type,
         scope_id=scope_id,
@@ -331,20 +358,22 @@ def create_entity_alias(
     scope_type: str = Query(default="organization", pattern="^(organization|user)$"),
     x_user_id: str | None = Header(default=None),
     x_organization_id: str | None = Header(default=None),
+    container: ApplicationContainer = Depends(get_container),
 ) -> dict[str, Any]:
     _, scope_type, scope_id = _admin_scope(
         x_user_id=x_user_id,
         x_organization_id=x_organization_id,
         scope_type=scope_type,
+        service=container.retrieval_service,
     )
-    entity = build_repository().get_entity(
+    entity = container.repository.get_entity(
         scope_type=scope_type,
         scope_id=scope_id,
         entity_id=entity_id,
     )
     if not entity:
         raise HTTPException(status_code=404, detail="entity_not_found")
-    alias_id = build_repository().upsert_alias(
+    alias_id = container.repository.upsert_alias(
         entity_id=entity_id,
         scope_type=scope_type,
         scope_id=scope_id,

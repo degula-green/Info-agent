@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from functools import lru_cache
+from dataclasses import dataclass
+from typing import Any
 
 from app.application.callback_service import CallbackLane
 from app.application.branch_refresh_service import BranchRefreshService
@@ -13,7 +14,10 @@ from app.config import settings
 from app.infrastructure.embedding.client import EmbeddingClient
 from app.infrastructure.module2.knowledge_client import Module2KnowledgeClient
 from app.infrastructure.module2.rag_callback import KnowledgeRAGCallbackClient
-from app.infrastructure.persistence.mvp import InMemoryRagMVPRepository, PostgresRagMVPRepository
+from app.infrastructure.persistence.mvp import (
+    InMemoryRagMVPRepository,
+    PostgresRagMVPRepository,
+)
 from app.infrastructure.rag_elasticsearch import RagChunkIndex
 from app.infrastructure.service1.rag_authorization import (
     AllowAllAuthorizationGateway,
@@ -22,47 +26,84 @@ from app.infrastructure.service1.rag_authorization import (
 from app.infrastructure.storage.artifacts import build_artifact_store
 
 
+@dataclass
+class ApplicationContainer:
+    repository: PostgresRagMVPRepository | InMemoryRagMVPRepository
+    indexer: RagChunkIndex
+    embedding: EmbeddingClient
+    authorization: Any
+    retrieval_service: RAGRetrievalService
+
+    def close(self) -> None:
+        close = getattr(self.repository, "close", None)
+        if callable(close):
+            close()
+
+
 def build_repository() -> PostgresRagMVPRepository | InMemoryRagMVPRepository:
-    return PostgresRagMVPRepository() if settings.database_url else InMemoryRagMVPRepository()
+    return (
+        PostgresRagMVPRepository()
+        if settings.database_url
+        else InMemoryRagMVPRepository()
+    )
+
+
+def _build_authorization() -> Any:
+    if settings.authz_base_url:
+        return RagAuthorizationClient()
+    if settings.development_like:
+        return AllowAllAuthorizationGateway()
+    raise RuntimeError("authorization configuration is required outside development/test")
+
+
+def build_container() -> ApplicationContainer:
+    settings.validate_mvp()
+    repository = build_repository()
+    indexer = RagChunkIndex()
+    embedding = EmbeddingClient()
+    authorization = _build_authorization()
+    retrieval = RAGRetrievalService(
+        repository=repository,
+        indexer=indexer,
+        embedding=embedding,
+        authorization=authorization,
+    )
+    return ApplicationContainer(
+        repository=repository,
+        indexer=indexer,
+        embedding=embedding,
+        authorization=authorization,
+        retrieval_service=retrieval,
+    )
 
 
 def build_runtime() -> MVPWorkerRuntime:
-    settings.validate_mvp()
-    repository = build_repository()
-    index = RagChunkIndex()
-    embedding = EmbeddingClient()
+    container = build_container()
     callback = CallbackLane(
-        repository=repository,
+        repository=container.repository,
         publisher=KnowledgeRAGCallbackClient(),
     )
-    return MVPWorkerRuntime(
-        repository=repository,
+    runtime = MVPWorkerRuntime(
+        repository=container.repository,
         parse_service=MVPParseService(
             knowledge=Module2KnowledgeClient(),
             artifact_store=build_artifact_store(),
         ),
         index_service=MVPIndexService(
-            repository=repository,
-            indexer=index,
-            embedding=embedding,
+            repository=container.repository,
+            indexer=container.indexer,
+            embedding=container.embedding,
         ),
-        memory_service=MemoryCandidateService(repository=repository),
+        memory_service=MemoryCandidateService(repository=container.repository),
         callback_lane=callback,
-        branch_refresh_service=BranchRefreshService(repository=repository, indexer=index),
+        branch_refresh_service=BranchRefreshService(
+            repository=container.repository,
+            indexer=container.indexer,
+        ),
     )
+    runtime.container = container
+    return runtime
 
 
 def build_retrieval_service() -> RAGRetrievalService:
-    settings.validate_mvp()
-    repository = build_repository()
-    authorization = (
-        RagAuthorizationClient()
-        if settings.authz_base_url
-        else AllowAllAuthorizationGateway()
-    )
-    return RAGRetrievalService(
-        repository=repository,
-        indexer=RagChunkIndex(),
-        embedding=EmbeddingClient(),
-        authorization=authorization,
-    )
+    return build_container().retrieval_service

@@ -149,6 +149,11 @@ class MVPWorkerRuntime:
                 scope_id=result.context.scope_id,
                 source_conversation_id=result.context.source_conversation_id,
                 source_audience_policy=result.context.source_audience_policy,
+                parse_status=(
+                    "metadata_only"
+                    if result.status == "metadata_only"
+                    else "parsed"
+                ),
                 current_stage="index",
                 status="processing",
                 last_error=None,
@@ -231,28 +236,32 @@ class MVPWorkerRuntime:
             error_message=str(exc),
         )
         if terminal:
-            self.repository.update_job(
-                job["id"],
-                status="failed",
-                current_stage="callback",
-                retry_count=retry_count,
-                finished_at=utc_now(),
-                last_error=str(exc)[:2000],
-            )
+            fields: dict[str, Any] = {
+                "status": "failed",
+                "current_stage": "callback",
+                "retry_count": retry_count,
+                "finished_at": utc_now(),
+                "last_error": str(exc)[:2000],
+            }
+            if lane == "parse":
+                fields["parse_status"] = "failed"
+            self.repository.update_job(job["id"], **fields)
             self._callback(
                 job,
                 "failed",
                 {"error_code": code, "retryable": False},
             )
             return
-        self.repository.update_job(
-            job["id"],
-            status="pending" if lane == "parse" else "processing",
-            current_stage="fetch" if lane == "parse" else "index",
-            retry_count=retry_count,
-            next_retry_at=datetime.now(timezone.utc) + timedelta(seconds=5),
-            last_error=str(exc)[:2000],
-        )
+        fields = {
+            "status": "retry_wait",
+            "current_stage": "fetch" if lane == "parse" else "index",
+            "retry_count": retry_count,
+            "next_retry_at": datetime.now(timezone.utc) + timedelta(seconds=5),
+            "last_error": str(exc)[:2000],
+        }
+        if lane == "parse":
+            fields["parse_status"] = "failed"
+        self.repository.update_job(job["id"], **fields)
 
     def _callback(self, job: dict[str, Any], status: str, result: dict[str, Any]) -> None:
         self.repository.add_outbox_event({

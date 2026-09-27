@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Header, HTTPException, Query
+from fastapi import APIRouter, Depends, Header, HTTPException, Query
 
-from app.application.bootstrap import build_retrieval_service
-from app.application.rag_service import SearchUnavailable
+from app.application.rag_service import RAGRetrievalService, SearchUnavailable
+from app.dependencies import get_retrieval_service
 from app.domain.rag import SearchRequest
 
 
@@ -16,6 +16,7 @@ def search(
     top_k: int = Query(default=8, ge=1, le=50),
     x_user_id: str | None = Header(default=None),
     x_organization_id: str | None = Header(default=None),
+    service: RAGRetrievalService = Depends(get_retrieval_service),
 ) -> dict[str, object]:
     user_id = str(x_user_id or "").strip()
     if not user_id:
@@ -25,7 +26,7 @@ def search(
     else:
         scope_type, scope_id = "user", user_id
     try:
-        response = build_retrieval_service().search(SearchRequest(
+        response = service.search(SearchRequest(
             query=q,
             user_id=user_id,
             scope_type=scope_type,

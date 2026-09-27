@@ -19,8 +19,39 @@ class TaskRepository(Protocol):
     def create_or_get_job(self, envelope: dict[str, Any], *, processing_version: str | None = None) -> dict[str, Any]: ...
     def get_job(self, job_id: str | None = None, *, source_event_id: str | None = None) -> dict[str, Any] | None: ...
     def claim_jobs(self, lane: str, *, limit: int = 1, lease_seconds: int | None = None) -> list[dict[str, Any]]: ...
-    def heartbeat(self, job_id: str, *, lease_seconds: int | None = None) -> None: ...
+    def heartbeat(
+        self,
+        job_id: str,
+        *,
+        owner: str,
+        epoch: int,
+        lease_seconds: int | None = None,
+    ) -> bool: ...
     def update_job(self, job_id: str, **fields: Any) -> None: ...
+    def update_job_if_owned(
+        self,
+        job_id: str,
+        *,
+        owner: str,
+        epoch: int,
+        fields: dict[str, Any],
+    ) -> bool: ...
+    def complete_if_owned(
+        self,
+        job_id: str,
+        *,
+        owner: str,
+        epoch: int,
+        fields: dict[str, Any],
+    ) -> bool: ...
+    def fail_if_owned(
+        self,
+        job_id: str,
+        *,
+        owner: str,
+        epoch: int,
+        fields: dict[str, Any],
+    ) -> bool: ...
     def add_attempt(self, job_id: str, **fields: Any) -> str: ...
 
 
@@ -109,11 +140,26 @@ class EmbeddingProvider(Protocol):
 
 
 class SearchIndexer(Protocol):
-    def create_indices(self) -> list[str]: ...
+    def create_indices(self, *, recreate: bool = False) -> list[str]: ...
     def index_chunks(self, chunks: list[Chunk]) -> int: ...
     def delete_older_versions(self, *, resource_id: str, content_version: int) -> int: ...
-    def search_bm25(self, request: SearchRequest, *, branch_keys: tuple[str, ...] = ()) -> list[SearchResult]: ...
-    def search_knn(self, request: SearchRequest, query_vector: list[float], *, branch_keys: tuple[str, ...] = ()) -> list[SearchResult]: ...
+    def search_bm25(
+        self,
+        request: SearchRequest,
+        *,
+        branch_keys: tuple[str, ...] = (),
+        protected_object_keys: tuple[str, ...] = (),
+        size: int | None = None,
+    ) -> list[SearchResult]: ...
+    def search_knn(
+        self,
+        request: SearchRequest,
+        query_vector: list[float],
+        *,
+        branch_keys: tuple[str, ...] = (),
+        protected_object_keys: tuple[str, ...] = (),
+        size: int | None = None,
+    ) -> list[SearchResult]: ...
 
 
 class AuthorizationGateway(Protocol):

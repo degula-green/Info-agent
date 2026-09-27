@@ -323,6 +323,10 @@ class Settings:
     def elasticsearch_index(self) -> str:
         return self.elasticsearch_display_read_index
 
+    @property
+    def development_like(self) -> bool:
+        return self.environment.lower() in {"development", "test"}
+
     def validate_mvp(self) -> None:
         """Fail fast on configuration that would write outside the MVP contract."""
         if not self.database_schema.startswith("rag"):
@@ -337,6 +341,15 @@ class Settings:
                 raise RuntimeError(f"Elasticsearch alias must use rag_chunks_*: {name}")
         if self.tree_mode not in {"off", "shadow", "boost"}:
             raise RuntimeError("RAG_TREE_MODE must be off, shadow, or boost")
+        if not self.development_like:
+            if not self.authz_base_url:
+                raise RuntimeError(
+                    "RAG_AUTHZ_BASE_URL is required outside development/test"
+                )
+            if not self.authz_api_token:
+                raise RuntimeError(
+                    "RAG_AUTHZ_API_TOKEN is required outside development/test"
+                )
 
 
 settings = Settings()

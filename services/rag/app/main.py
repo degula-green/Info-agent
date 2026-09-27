@@ -1,3 +1,4 @@
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -9,11 +10,24 @@ load_dotenv(Path(__file__).resolve().parents[1] / ".env", override=False)
 
 from fastapi import FastAPI
 
+from app.application.bootstrap import build_container
 from app.config import settings
 from app.routers import admin, api, health, search
 
 settings.validate_mvp()
-app = FastAPI(title="info-agent-rag", version="0.1.0")
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    container = build_container()
+    app.state.container = container
+    try:
+        yield
+    finally:
+        container.close()
+
+
+app = FastAPI(title="info-agent-rag", version="0.1.0", lifespan=lifespan)
 app.include_router(health.router)
 app.include_router(search.router)
 app.include_router(api.router)

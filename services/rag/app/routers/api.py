@@ -4,16 +4,17 @@ import json
 import uuid
 from typing import Any, Iterator
 
-from fastapi import APIRouter, Header, HTTPException, Query
+from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from fastapi.responses import StreamingResponse
 
-from app.application.bootstrap import build_retrieval_service
 from app.application.rag_service import (
     AuthorizationUnavailable,
+    RAGRetrievalService,
     RetrievalResponse,
     SearchUnavailable,
 )
 from app.config import settings
+from app.dependencies import get_retrieval_service
 from app.domain.rag import SearchRequest
 from app.infrastructure.qa import OpenAICompatibleAnswerProvider, QAUnavailable
 from app.schemas.search import (
@@ -82,6 +83,7 @@ def global_search(
     body: SearchBody,
     x_user_id: str | None = Header(default=None),
     x_organization_id: str | None = Header(default=None),
+    service: RAGRetrievalService = Depends(get_retrieval_service),
 ) -> dict[str, object]:
     request = _request(
         body,
@@ -89,7 +91,7 @@ def global_search(
         header_user_id=x_user_id,
         header_organization_id=x_organization_id,
     )
-    return _search_response(_run_search(request))
+    return _search_response(_run_search(request, service))
 
 
 @router.post("/search/knowledge")
@@ -97,6 +99,7 @@ def knowledge_search(
     body: SearchBody,
     x_user_id: str | None = Header(default=None),
     x_organization_id: str | None = Header(default=None),
+    service: RAGRetrievalService = Depends(get_retrieval_service),
 ) -> dict[str, object]:
     request = _request(
         body,
@@ -104,7 +107,7 @@ def knowledge_search(
         header_user_id=x_user_id,
         header_organization_id=x_organization_id,
     )
-    return _search_response(_run_search(request))
+    return _search_response(_run_search(request, service))
 
 
 @router.post("/search/tree")
@@ -112,6 +115,7 @@ def tree_search(
     body: TreeSearchBody,
     x_user_id: str | None = Header(default=None),
     x_organization_id: str | None = Header(default=None),
+    service: RAGRetrievalService = Depends(get_retrieval_service),
 ) -> dict[str, object]:
     request = _request(
         body,
@@ -119,7 +123,7 @@ def tree_search(
         header_user_id=x_user_id,
         header_organization_id=x_organization_id,
     )
-    return _search_response(_run_search(request))
+    return _search_response(_run_search(request, service))
 
 
 @router.post("/ai/documents")
@@ -127,6 +131,7 @@ def ai_documents(
     body: AIDocumentBody,
     x_user_id: str | None = Header(default=None),
     x_organization_id: str | None = Header(default=None),
+    service: RAGRetrievalService = Depends(get_retrieval_service),
 ) -> dict[str, object]:
     request = _request(
         body,
@@ -135,7 +140,6 @@ def ai_documents(
         header_organization_id=x_organization_id,
     )
     try:
-        service = build_retrieval_service()
         response = service.search(request)
         provider = OpenAICompatibleAnswerProvider()
         answer = provider.generate(request.query, response.results)
@@ -158,6 +162,7 @@ def ai_documents_stream(
     body: AIDocumentBody,
     x_user_id: str | None = Header(default=None),
     x_organization_id: str | None = Header(default=None),
+    service: RAGRetrievalService = Depends(get_retrieval_service),
 ) -> StreamingResponse:
     request = _request(
         body,
@@ -168,7 +173,6 @@ def ai_documents_stream(
 
     def events() -> Iterator[str]:
         try:
-            service = build_retrieval_service()
             response = service.search(request)
             yield _sse("meta", {"request_id": response.request_id})
             for index, result in enumerate(response.results, start=1):
@@ -200,10 +204,11 @@ def list_qa_conversations(
     x_user_id: str | None = Header(default=None),
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=20, ge=1, le=100),
+    service: RAGRetrievalService = Depends(get_retrieval_service),
 ) -> dict[str, Any]:
     user_id = _header_user(x_user_id)
     try:
-        items, total = build_retrieval_service().repository.list_qa_conversations(
+        items, total = service.repository.list_qa_conversations(
             user_id=user_id,
             page=page,
             page_size=page_size,
@@ -218,6 +223,7 @@ def create_qa_conversation(
     body: QAConversationBody | None = None,
     x_user_id: str | None = Header(default=None),
     x_organization_id: str | None = Header(default=None),
+    service: RAGRetrievalService = Depends(get_retrieval_service),
 ) -> dict[str, Any]:
     user_id = _header_user(x_user_id)
     value = body or QAConversationBody()
@@ -232,7 +238,7 @@ def create_qa_conversation(
     if not scope_id:
         raise HTTPException(status_code=422, detail="invalid_scope")
     try:
-        conversation_id = build_retrieval_service().repository.create_qa_conversation(
+        conversation_id = service.repository.create_qa_conversation(
             user_id=user_id,
             scope_type=scope_type,
             scope_id=scope_id,
@@ -255,9 +261,10 @@ def create_qa_conversation(
 def get_qa_conversation(
     conversation_id: str,
     x_user_id: str | None = Header(default=None),
+    service: RAGRetrievalService = Depends(get_retrieval_service),
 ) -> dict[str, Any]:
     try:
-        value = build_retrieval_service().repository.get_qa_conversation(
+        value = service.repository.get_qa_conversation(
             user_id=_header_user(x_user_id),
             conversation_id=conversation_id,
         )
@@ -273,9 +280,10 @@ def rename_qa_conversation(
     conversation_id: str,
     body: QATitleBody,
     x_user_id: str | None = Header(default=None),
+    service: RAGRetrievalService = Depends(get_retrieval_service),
 ) -> dict[str, Any]:
     try:
-        renamed = build_retrieval_service().repository.rename_qa_conversation(
+        renamed = service.repository.rename_qa_conversation(
             user_id=_header_user(x_user_id),
             conversation_id=conversation_id,
             title=body.title,
@@ -291,9 +299,10 @@ def rename_qa_conversation(
 def delete_qa_conversation(
     conversation_id: str,
     x_user_id: str | None = Header(default=None),
+    service: RAGRetrievalService = Depends(get_retrieval_service),
 ) -> dict[str, str]:
     try:
-        deleted = build_retrieval_service().repository.delete_qa_conversation(
+        deleted = service.repository.delete_qa_conversation(
             user_id=_header_user(x_user_id),
             conversation_id=conversation_id,
         )
@@ -304,9 +313,12 @@ def delete_qa_conversation(
     return {"status": "deleted"}
 
 
-def _run_search(request: SearchRequest) -> RetrievalResponse:
+def _run_search(
+    request: SearchRequest,
+    service: RAGRetrievalService,
+) -> RetrievalResponse:
     try:
-        return build_retrieval_service().search(request)
+        return service.search(request)
     except SearchUnavailable as exc:
         raise HTTPException(status_code=503, detail="search_unavailable") from exc
     except AuthorizationUnavailable as exc:

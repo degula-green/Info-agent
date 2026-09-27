@@ -19,6 +19,7 @@ from app.domain.rag import (
     ResourceContext,
     stable_id,
 )
+from app.domain.state import validate_job_transition
 
 
 ZERO_UUID = "00000000-0000-0000-0000-000000000000"
@@ -155,7 +156,7 @@ class PostgresRagMVPRepository:
                     raise ValueError("source_event_id payload changed")
                 job_id = str(row[0])
                 cursor.execute(
-                    f"""SELECT id::text,status,current_stage,lease_owner,lease_until,retry_count,next_retry_at
+                    f"""SELECT id::text,status,current_stage,lease_owner,lease_until,lease_epoch,retry_count,next_retry_at,parse_status
                         FROM {self.schema}.processing_jobs WHERE id=%s::uuid""",
                     (job_id,),
                 )
@@ -168,7 +169,7 @@ class PostgresRagMVPRepository:
         with self._connection() as connection:
             with connection.cursor() as cursor:
                 cursor.execute(
-                    f"""SELECT id::text,status,current_stage,lease_owner,lease_until,retry_count,next_retry_at,
+                    f"""SELECT id::text,status,current_stage,lease_owner,lease_until,lease_epoch,retry_count,next_retry_at,parse_status,
                                source_event_id::text,knowledge_item_id::text,resource_type,resource_id::text,
                                knowledge_base_id::text,scope_type,scope_id::text,source_conversation_id::text,
                                source_audience_policy,content_version,processing_version,acl_version,last_error
@@ -183,8 +184,8 @@ class PostgresRagMVPRepository:
             raise ValueError("lane must be parse, index, or memory")
         lease = int(lease_seconds or settings.task_lease_seconds)
         stage_clause = {
-            "parse": "(status='pending' OR current_stage IN ('fetch','parse','chunk'))",
-            "index": "(status='processing' AND current_stage='index')",
+            "parse": "((status='pending' OR status='retry_wait' OR status='processing') AND (current_stage IS NULL OR current_stage IN ('fetch','parse','chunk')))",
+            "index": "(status IN ('processing','retry_wait') AND current_stage='index')",
             "memory": "(status='ready' AND current_stage='memory')",
         }[lane]
         owner = f"{settings.service_name}:{lane}:{uuid.uuid4().hex[:12]}"
@@ -201,14 +202,15 @@ class PostgresRagMVPRepository:
                           LIMIT %s
                         )
                         UPDATE {self.schema}.processing_jobs j
-                        SET lease_owner=%s,lease_until=CURRENT_TIMESTAMP + (%s * INTERVAL '1 second'),
-                            status=CASE WHEN j.status='pending' THEN 'processing' ELSE j.status END,
+                        SET lease_owner=%s,lease_epoch=j.lease_epoch+1,
+                            lease_until=CURRENT_TIMESTAMP + (%s * INTERVAL '1 second'),
+                            status='processing',
                             current_stage=COALESCE(j.current_stage,%s),
                             started_at=COALESCE(j.started_at,CURRENT_TIMESTAMP),
                             updated_at=CURRENT_TIMESTAMP
                         FROM candidates c WHERE j.id=c.id
                         RETURNING j.id::text,j.status,j.current_stage,j.lease_owner,j.lease_until,
-                                  j.retry_count,j.next_retry_at,j.source_event_id::text,
+                                  j.lease_epoch,j.retry_count,j.next_retry_at,j.parse_status,j.source_event_id::text,
                                   j.knowledge_item_id::text,j.resource_type,j.resource_id::text,
                                   j.knowledge_base_id::text,j.scope_type,j.scope_id::text,
                                   j.source_conversation_id::text,j.source_audience_policy,
@@ -217,21 +219,35 @@ class PostgresRagMVPRepository:
                 )
                 return [self._full_job_row(row) for row in cursor.fetchall()]
 
-    def heartbeat(self, job_id: str, *, lease_seconds: int | None = None) -> None:
+    def heartbeat(
+        self,
+        job_id: str,
+        *,
+        owner: str,
+        epoch: int,
+        lease_seconds: int | None = None,
+    ) -> bool:
         with self._connection() as connection:
             with connection.cursor() as cursor:
                 cursor.execute(
                     f"""UPDATE {self.schema}.processing_jobs
                         SET lease_until=CURRENT_TIMESTAMP + (%s * INTERVAL '1 second'),updated_at=CURRENT_TIMESTAMP
-                        WHERE id=%s::uuid""",
-                    (int(lease_seconds or settings.task_lease_seconds), job_id),
+                        WHERE id=%s::uuid AND lease_owner=%s AND lease_epoch=%s""",
+                    (
+                        int(lease_seconds or settings.task_lease_seconds),
+                        job_id,
+                        owner,
+                        int(epoch),
+                    ),
                 )
+                return cursor.rowcount == 1
 
     def update_job(self, job_id: str, **fields: Any) -> None:
         allowed = {
             "knowledge_base_id", "scope_type", "scope_id", "source_conversation_id",
             "source_audience_policy", "status", "current_stage", "lease_owner", "lease_until",
-            "retry_count", "next_retry_at", "last_error", "started_at", "finished_at",
+            "lease_epoch", "retry_count", "next_retry_at", "parse_status", "last_error",
+            "started_at", "finished_at",
         }
         values = [(key, value) for key, value in fields.items() if key in allowed]
         if not values:
@@ -249,10 +265,110 @@ class PostgresRagMVPRepository:
         assignments.append("updated_at=CURRENT_TIMESTAMP")
         with self._connection() as connection:
             with connection.cursor() as cursor:
+                if "status" in fields:
+                    cursor.execute(
+                        f"""SELECT status FROM {self.schema}.processing_jobs
+                            WHERE id=%s::uuid FOR UPDATE""",
+                        (job_id,),
+                    )
+                    row = cursor.fetchone()
+                    if row:
+                        validate_job_transition(str(row[0]), str(fields["status"]))
                 cursor.execute(
                     f"UPDATE {self.schema}.processing_jobs SET {', '.join(assignments)} WHERE id=%s::uuid",
                     (*params, job_id),
                 )
+
+    def update_job_if_owned(
+        self,
+        job_id: str,
+        *,
+        owner: str,
+        epoch: int,
+        fields: dict[str, Any],
+    ) -> bool:
+        return self._update_job_if_owned(
+            job_id,
+            owner=owner,
+            epoch=epoch,
+            fields=fields,
+        )
+
+    def complete_if_owned(
+        self,
+        job_id: str,
+        *,
+        owner: str,
+        epoch: int,
+        fields: dict[str, Any],
+    ) -> bool:
+        return self._update_job_if_owned(
+            job_id,
+            owner=owner,
+            epoch=epoch,
+            fields={**fields, "status": fields.get("status", "ready")},
+        )
+
+    def fail_if_owned(
+        self,
+        job_id: str,
+        *,
+        owner: str,
+        epoch: int,
+        fields: dict[str, Any],
+    ) -> bool:
+        return self._update_job_if_owned(
+            job_id,
+            owner=owner,
+            epoch=epoch,
+            fields={**fields, "status": "failed"},
+        )
+
+    def _update_job_if_owned(
+        self,
+        job_id: str,
+        *,
+        owner: str,
+        epoch: int,
+        fields: dict[str, Any],
+    ) -> bool:
+        allowed = {
+            "knowledge_base_id", "scope_type", "scope_id", "source_conversation_id",
+            "source_audience_policy", "status", "current_stage", "retry_count",
+            "next_retry_at", "parse_status", "last_error", "started_at", "finished_at",
+        }
+        values = [(key, value) for key, value in fields.items() if key in allowed]
+        assignments = []
+        params: list[Any] = []
+        for key, value in values:
+            if key in {"knowledge_base_id", "scope_id", "source_conversation_id"}:
+                assignments.append(f"{key}=%s::uuid")
+            elif key in {"lease_until", "next_retry_at", "started_at", "finished_at"}:
+                assignments.append(f"{key}=%s::timestamptz")
+            else:
+                assignments.append(f"{key}=%s")
+            params.append(value)
+        assignments.append("updated_at=CURRENT_TIMESTAMP")
+        with self._connection() as connection:
+            with connection.cursor() as cursor:
+                if "status" in fields:
+                    cursor.execute(
+                        f"""SELECT status FROM {self.schema}.processing_jobs
+                            WHERE id=%s::uuid AND lease_owner=%s AND lease_epoch=%s
+                            FOR UPDATE""",
+                        (job_id, owner, int(epoch)),
+                    )
+                    row = cursor.fetchone()
+                    if not row:
+                        return False
+                    validate_job_transition(str(row[0]), str(fields["status"]))
+                cursor.execute(
+                    f"""UPDATE {self.schema}.processing_jobs
+                        SET {', '.join(assignments)}
+                        WHERE id=%s::uuid AND lease_owner=%s AND lease_epoch=%s""",
+                    (*params, job_id, owner, int(epoch)),
+                )
+                return cursor.rowcount == 1
 
     def add_attempt(
         self,
@@ -545,7 +661,7 @@ class PostgresRagMVPRepository:
                      es_document_id,mapping_version,embedding_model,status,indexed_at)
                     VALUES (%s,%s,%s,%s::uuid,%s::uuid,%s,%s,%s,%s,%s,
                             CASE WHEN %s='ready' THEN CURRENT_TIMESTAMP ELSE NULL END)
-                    ON CONFLICT (chunk_id,chunk_variant,mapping_version) DO UPDATE SET
+                    ON CONFLICT (chunk_id,es_index_alias,mapping_version) DO UPDATE SET
                       es_index_alias=EXCLUDED.es_index_alias,embedding_model=EXCLUDED.embedding_model,
                       status=EXCLUDED.status,indexed_at=EXCLUDED.indexed_at,last_error=NULL,
                       updated_at=CURRENT_TIMESTAMP""",
@@ -1307,21 +1423,25 @@ class PostgresRagMVPRepository:
     def _job_row(row: Any) -> dict[str, Any]:
         return {
             "id": str(row[0]), "status": row[1], "current_stage": row[2],
-            "lease_owner": row[3], "lease_until": row[4], "retry_count": int(row[5] or 0),
-            "next_retry_at": row[6],
+            "lease_owner": row[3], "lease_until": row[4], "lease_epoch": int(row[5] or 0),
+            "retry_count": int(row[6] or 0), "next_retry_at": row[7],
+            "parse_status": row[8],
         }
 
     @staticmethod
     def _full_job_row(row: Any) -> dict[str, Any]:
         return {
             "id": str(row[0]), "status": row[1], "current_stage": row[2],
-            "lease_owner": row[3], "lease_until": row[4], "retry_count": int(row[5] or 0),
-            "next_retry_at": row[6], "source_event_id": str(row[7]),
-            "knowledge_item_id": str(row[8]), "resource_type": row[9], "resource_id": str(row[10]),
-            "knowledge_base_id": str(row[11]), "scope_type": row[12], "scope_id": str(row[13]),
-            "source_conversation_id": str(row[14]) if row[14] else None,
-            "source_audience_policy": row[15], "content_version": int(row[16]),
-            "processing_version": row[17], "acl_version": int(row[18] or 0), "last_error": row[19],
+            "lease_owner": row[3], "lease_until": row[4], "lease_epoch": int(row[5] or 0),
+            "retry_count": int(row[6] or 0), "next_retry_at": row[7], "parse_status": row[8],
+            "source_event_id": str(row[9]),
+            "knowledge_item_id": str(row[10]), "resource_type": row[11],
+            "resource_id": str(row[12]), "knowledge_base_id": str(row[13]),
+            "scope_type": row[14], "scope_id": str(row[15]),
+            "source_conversation_id": str(row[16]) if row[16] else None,
+            "source_audience_policy": row[17], "content_version": int(row[18]),
+            "processing_version": row[19], "acl_version": int(row[20] or 0),
+            "last_error": row[21],
         }
 
     @staticmethod
@@ -1398,7 +1518,8 @@ class InMemoryRagMVPRepository:
                 (item["knowledge_item_id"], item["resource_type"], item["resource_id"], item["content_version"])
                 == resource_key
                 and item["job_type"] == "full_process"
-                and item["status"] in {"pending", "processing", "ready", "metadata_only"}
+                and item["status"]
+                in {"pending", "processing", "retry_wait", "ready", "metadata_only"}
             ):
                 self.events[event_id] = digest
                 return dict(item)
@@ -1415,7 +1536,8 @@ class InMemoryRagMVPRepository:
             "source_audience_policy": audience or None, "content_version": resource_key[3],
             "processing_version": processing_version or settings.processing_version,
             "acl_version": int(payload.get("acl_version") or 0), "status": "pending",
-            "current_stage": None, "lease_owner": None, "lease_until": None,
+            "current_stage": None, "lease_owner": None, "lease_until": None, "lease_epoch": 0,
+            "parse_status": "pending",
             "retry_count": 0, "next_retry_at": datetime.now(timezone.utc), "last_error": None,
         }
         self.jobs[job_id] = value
@@ -1432,9 +1554,12 @@ class InMemoryRagMVPRepository:
 
     def claim_jobs(self, lane: str, *, limit: int = 1, lease_seconds: int | None = None) -> list[dict[str, Any]]:
         def eligible(item: dict[str, Any]) -> bool:
-            if item["status"] == "pending" or item.get("current_stage") in {"fetch", "parse", "chunk"}:
+            if (
+                item["status"] in {"pending", "retry_wait", "processing"}
+                and item.get("current_stage") in {None, "fetch", "parse", "chunk"}
+            ):
                 return lane == "parse"
-            if item["status"] == "processing" and item.get("current_stage") == "index":
+            if item["status"] in {"processing", "retry_wait"} and item.get("current_stage") == "index":
                 return lane == "index"
             if item["status"] == "ready" and item.get("current_stage") == "memory":
                 return lane == "memory"
@@ -1450,21 +1575,92 @@ class InMemoryRagMVPRepository:
                 continue
             if item["status"] == "pending":
                 item["status"] = "processing"
+            elif item["status"] == "retry_wait":
+                item["status"] = "processing"
             item.setdefault("current_stage", None)
             if not item["current_stage"]:
                 item["current_stage"] = "fetch" if lane == "parse" else lane
             item["lease_owner"] = f"{settings.service_name}:{lane}"
+            item["lease_epoch"] = int(item.get("lease_epoch") or 0) + 1
             item["lease_until"] = datetime.now(timezone.utc) + timedelta(seconds=lease_seconds or settings.task_lease_seconds)
             output.append(dict(item))
         return output
 
-    def heartbeat(self, job_id: str, *, lease_seconds: int | None = None) -> None:
-        self.jobs[job_id]["lease_until"] = datetime.now(timezone.utc) + timedelta(
+    def heartbeat(
+        self,
+        job_id: str,
+        *,
+        owner: str,
+        epoch: int,
+        lease_seconds: int | None = None,
+    ) -> bool:
+        item = self.jobs.get(job_id)
+        if (
+            not item
+            or item.get("lease_owner") != owner
+            or int(item.get("lease_epoch") or 0) != int(epoch)
+        ):
+            return False
+        item["lease_until"] = datetime.now(timezone.utc) + timedelta(
             seconds=lease_seconds or settings.task_lease_seconds
         )
+        return True
 
     def update_job(self, job_id: str, **fields: Any) -> None:
-        self.jobs[job_id].update(fields)
+        current = self.jobs[job_id]
+        if "status" in fields:
+            validate_job_transition(str(current["status"]), str(fields["status"]))
+        current.update(fields)
+
+    def update_job_if_owned(
+        self,
+        job_id: str,
+        *,
+        owner: str,
+        epoch: int,
+        fields: dict[str, Any],
+    ) -> bool:
+        item = self.jobs.get(job_id)
+        if (
+            not item
+            or item.get("lease_owner") != owner
+            or int(item.get("lease_epoch") or 0) != int(epoch)
+        ):
+            return False
+        if "status" in fields:
+            validate_job_transition(str(item["status"]), str(fields["status"]))
+        item.update(fields)
+        return True
+
+    def complete_if_owned(
+        self,
+        job_id: str,
+        *,
+        owner: str,
+        epoch: int,
+        fields: dict[str, Any],
+    ) -> bool:
+        return self.update_job_if_owned(
+            job_id,
+            owner=owner,
+            epoch=epoch,
+            fields={**fields, "status": fields.get("status", "ready")},
+        )
+
+    def fail_if_owned(
+        self,
+        job_id: str,
+        *,
+        owner: str,
+        epoch: int,
+        fields: dict[str, Any],
+    ) -> bool:
+        return self.update_job_if_owned(
+            job_id,
+            owner=owner,
+            epoch=epoch,
+            fields={**fields, "status": "failed"},
+        )
 
     def add_attempt(self, job_id: str, **fields: Any) -> str:
         value = {"id": new_uuid(), "job_id": job_id, **fields}
