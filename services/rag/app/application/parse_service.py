@@ -88,16 +88,28 @@ class MVPParseService:
         if context.resource_type != job["resource_type"] or context.resource_id != job["resource_id"]:
             raise ParseStageError("SOURCE_RESOURCE_MISMATCH", "Knowledge returned a different resource")
         if context.resource_type == "message":
-            return self._parse_message(context)
+            return self._parse_message(
+                context,
+                rag_job_id=str(job.get("id") or ""),
+                trace_id=str(job.get("source_event_id") or ""),
+            )
         return self._parse_attachment(context)
 
-    def _parse_message(self, context: ResourceContext) -> ParseResult:
+    def _parse_message(
+        self,
+        context: ResourceContext,
+        *,
+        rag_job_id: str,
+        trace_id: str,
+    ) -> ParseResult:
         display = self.knowledge.get_content(
             context.knowledge_item_id,
             content_version=context.content_version,
             acl_version=context.acl_version,
             content_variant="display",
             purpose="index",
+            rag_job_id=rag_job_id,
+            trace_id=trace_id,
         )
         display_text = _content_text(display)
         if not display_text.strip():
@@ -118,6 +130,8 @@ class MVPParseService:
                 acl_version=context.acl_version,
                 content_variant="original",
                 purpose="index",
+                rag_job_id=rag_job_id,
+                trace_id=trace_id,
             )
             original_text = _content_text(original)
             if original_text.strip():

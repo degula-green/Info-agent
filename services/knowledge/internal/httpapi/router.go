@@ -172,7 +172,16 @@ func registerRAGSourceRoutes(r *gin.Engine, app *App) {
 		if !ok {
 			return
 		}
-		content, err := app.Service.GetKnowledgeContentForRAG(c, c.Param("knowledge_item_id"), contentVersion, aclVersion, strings.TrimSpace(c.Query("content_variant")), strings.TrimSpace(c.Query("purpose")))
+		content, err := app.Service.GetKnowledgeContentForRAG(
+			c,
+			c.Param("knowledge_item_id"),
+			contentVersion,
+			aclVersion,
+			strings.TrimSpace(c.Query("content_variant")),
+			strings.TrimSpace(c.Query("purpose")),
+			strings.TrimSpace(c.GetHeader("X-RAG-Job-ID")),
+			strings.TrimSpace(c.GetHeader("X-Trace-ID")),
+		)
 		if err != nil {
 			writeError(c, err)
 			return

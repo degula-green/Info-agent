@@ -32,6 +32,8 @@ class Module2KnowledgeClient:
         acl_version: int | None = None,
         content_variant: str | None = None,
         purpose: str | None = None,
+        rag_job_id: str | None = None,
+        trace_id: str | None = None,
     ) -> dict[str, Any]:
         if not self.base_url:
             raise KnowledgeSourceUnavailable("RAG_KNOWLEDGE_BASE_URL is not configured")
@@ -46,7 +48,11 @@ class Module2KnowledgeClient:
                     purpose=purpose,
                 ),
                 token=self.token,
-                headers={"X-Caller-Service": "rag"},
+                headers={
+                    "X-Caller-Service": "rag",
+                    "X-RAG-Job-ID": rag_job_id,
+                    "X-Trace-ID": trace_id,
+                },
                 timeout=settings.knowledge_timeout_seconds,
             ).json()
         except IntegrationError as exc:
@@ -78,6 +84,8 @@ class Module2KnowledgeClient:
         acl_version: int | None = None,
         content_variant: str | None = None,
         purpose: str | None = None,
+        rag_job_id: str | None = None,
+        trace_id: str | None = None,
     ) -> dict[str, Any]:
         return self._get(
             f"/internal/knowledge/{knowledge_item_id}/content",
@@ -85,6 +93,8 @@ class Module2KnowledgeClient:
             acl_version=acl_version,
             content_variant=content_variant,
             purpose=purpose,
+            rag_job_id=rag_job_id,
+            trace_id=trace_id,
         )
 
     def get_attachment(

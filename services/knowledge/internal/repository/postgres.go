@@ -2517,13 +2517,62 @@ func (s *PostgresStore) GetKnowledgeItemByAttachment(ctx context.Context, attach
 	return s.GetKnowledgeItem(ctx, id)
 }
 
-func (s *PostgresStore) GetKnowledgeContent(ctx context.Context, id string) (*domain.KnowledgeContent, error) {
+func (s *PostgresStore) GetKnowledgeContent(ctx context.Context, id, variant string) (*domain.KnowledgeContent, error) {
 	var content domain.KnowledgeContent
-	err := s.pool.QueryRow(ctx, `SELECT ki.id::text,ki.content_version,'display',ki.content_hash,COALESCE(m.normalized_content,'') FROM knowledge.knowledge_items ki JOIN knowledge.messages m ON m.id=ki.source_message_id WHERE ki.id=$1 AND ki.source_attachment_id IS NULL`, id).Scan(&content.KnowledgeItemID, &content.ContentVersion, &content.ContentVariant, &content.ContentHash, &content.Text)
+	if variant == "" {
+		variant = "display"
+	}
+	if variant != "display" && variant != "original" {
+		return nil, apperror.New("knowledge_invalid_variant", "content variant must be display or original", 400, false)
+	}
+	var displayContent, originalContent string
+	err := s.pool.QueryRow(ctx, `SELECT ki.id::text,ki.content_version,ki.content_hash,
+		COALESCE(m.normalized_content,''),COALESCE(p.content,'')
+		FROM knowledge.knowledge_items ki
+		JOIN knowledge.messages m ON m.id=ki.source_message_id
+		LEFT JOIN knowledge.message_private_content p ON p.message_id=m.id
+		WHERE ki.id=$1 AND ki.source_attachment_id IS NULL`, id).Scan(
+		&content.KnowledgeItemID,
+		&content.ContentVersion,
+		&content.ContentHash,
+		&displayContent,
+		&originalContent,
+	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, apperror.New("knowledge_content_not_found", "knowledge content not found", 404, false)
 	}
-	return &content, dbError(err)
+	if err != nil {
+		return nil, dbError(err)
+	}
+	content.ContentVariant = variant
+	if variant == "original" {
+		if strings.TrimSpace(originalContent) == "" {
+			return nil, apperror.New("knowledge_original_unavailable", "original content is unavailable", 409, false)
+		}
+		content.Text = originalContent
+		return &content, nil
+	}
+	content.Text = displayContent
+	return &content, nil
+}
+
+func (s *PostgresStore) RecordRAGSourceAudit(ctx context.Context, input RAGSourceAuditInput) error {
+	_, err := s.pool.Exec(ctx, `INSERT INTO knowledge.rag_source_access_audit
+		(caller_service,purpose,knowledge_item_id,resource_id,content_version,acl_version,
+		 content_variant,rag_job_id,trace_id,result)
+		VALUES ($1,$2,$3::uuid,$4::uuid,$5,$6,$7,$8::uuid,$9,$10)`,
+		input.CallerService,
+		input.Purpose,
+		input.KnowledgeItemID,
+		nullableUUID(input.ResourceID),
+		input.ContentVersion,
+		input.ACLVersion,
+		input.ContentVariant,
+		nullableUUID(input.RAGJobID),
+		input.TraceID,
+		input.Result,
+	)
+	return dbError(err)
 }
 
 // ListKnowledgeLibraries returns the stable directory nodes used by the web
@@ -3037,6 +3086,13 @@ func dbError(err error) error {
 }
 func isUnique(err error) bool { return err != nil && strings.Contains(err.Error(), "SQLSTATE 23505") }
 func nilString(value string) any {
+	if strings.TrimSpace(value) == "" {
+		return nil
+	}
+	return value
+}
+
+func nullableUUID(value string) any {
 	if strings.TrimSpace(value) == "" {
 		return nil
 	}

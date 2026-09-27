@@ -78,6 +78,8 @@ class AuthorizationScope:
     authorized_protected_object_keys: tuple[str, ...] = ()
     available: bool = True
     truncated: bool = False
+    denied: bool = False
+    failed: bool = False
 
     @property
     def scope_key(self) -> str:

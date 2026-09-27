@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from fastapi.responses import StreamingResponse
 
 from app.application.rag_service import (
+    AuthorizationDenied,
     AuthorizationUnavailable,
     RAGRetrievalService,
     RetrievalResponse,
@@ -148,6 +149,8 @@ def ai_documents(
         return service.answer(request)
     except SearchUnavailable as exc:
         raise HTTPException(status_code=503, detail="search_unavailable") from exc
+    except AuthorizationDenied as exc:
+        raise HTTPException(status_code=403, detail="forbidden") from exc
     except (QAUnavailable, ConversationNotFound, ConversationScopeMismatch) as exc:
         if isinstance(exc, ConversationNotFound):
             raise HTTPException(status_code=404, detail="conversation_not_found") from exc
@@ -309,6 +312,8 @@ def _run_search(
         return service.search(request)
     except SearchUnavailable as exc:
         raise HTTPException(status_code=503, detail="search_unavailable") from exc
+    except AuthorizationDenied as exc:
+        raise HTTPException(status_code=403, detail="forbidden") from exc
     except AuthorizationUnavailable as exc:
         raise HTTPException(status_code=503, detail="authz_unavailable") from exc
     except RuntimeError as exc:

@@ -27,6 +27,10 @@ class AuthorizationUnavailable(RuntimeError):
     pass
 
 
+class AuthorizationDenied(RuntimeError):
+    pass
+
+
 @dataclass
 class RetrievalResponse:
     request_id: str
@@ -61,7 +65,11 @@ class RAGRetrievalService:
             resource_parts=("original", "content"),
         )
         protected_keys = scope.authorized_protected_object_keys if scope.available else ()
-        if not scope.available or scope.truncated:
+        if scope.denied:
+            raise AuthorizationDenied("authorization denied")
+        if scope.failed or scope.truncated:
+            raise AuthorizationUnavailable("authorization scope is incomplete")
+        if not scope.available:
             request = replace(request, include_protected=False)
             protected_keys = ()
         branch_keys, entity_matches = self._resolve_branches(request)

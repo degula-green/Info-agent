@@ -12,8 +12,9 @@ import (
 )
 
 type AuthorizationHandler struct {
-	provider application.AuthorizationProvider
-	token    string
+	provider     application.AuthorizationProvider
+	organization OrganizationApplication
+	token        string
 }
 
 type PermissionSyncApplication interface {
@@ -29,8 +30,12 @@ func NewPermissionSyncHandler(service PermissionSyncApplication, token string) *
 	return &PermissionSyncHandler{service: service, token: token}
 }
 
-func NewAuthorizationHandler(provider application.AuthorizationProvider, token string) *AuthorizationHandler {
-	return &AuthorizationHandler{provider: provider, token: token}
+func NewAuthorizationHandler(provider application.AuthorizationProvider, token string, organization ...OrganizationApplication) *AuthorizationHandler {
+	var org OrganizationApplication
+	if len(organization) > 0 {
+		org = organization[0]
+	}
+	return &AuthorizationHandler{provider: provider, organization: org, token: token}
 }
 
 type authContext struct {
@@ -95,8 +100,27 @@ func (h *AuthorizationHandler) Scope(c *gin.Context) {
 	if scopeType == "organization" && organizationID == "" {
 		organizationID = scopeID
 	}
+	if scopeType != "organization" && scopeType != "user" {
+		writeError(c, http.StatusBadRequest, "AUTHZ_INVALID_SCOPE", "unsupported scope type", false)
+		return
+	}
+	if scopeType == "organization" {
+		if organizationID == "" || scopeID == "" || organizationID != scopeID {
+			writeError(c, http.StatusForbidden, "AUTHZ_SCOPE_FORBIDDEN", "organization scope is not verified", false)
+			return
+		}
+		isMember, err := h.verifyOrganizationMembership(c, req.SubjectID, organizationID)
+		if err != nil {
+			return
+		}
+		if !isMember {
+			writeError(c, http.StatusForbidden, "AUTHZ_SCOPE_FORBIDDEN", "subject is not an organization member", false)
+			return
+		}
+	}
 	objects := map[string][]string{}
 	protectedObjects := make([]string, 0)
+	truncated := false
 	for _, part := range req.ResourceParts {
 		var typ string
 		switch part {
@@ -108,23 +132,25 @@ func (h *AuthorizationHandler) Scope(c *gin.Context) {
 			writeError(c, http.StatusBadRequest, "AUTHZ_INVALID_RESOURCE_PART", "unsupported resource part", false)
 			return
 		}
-		ids, err := h.provider.ListObjects(c.Request.Context(), req.SubjectID, req.OrganizationID, typ, "view")
+		result, err := h.listObjects(c, req.SubjectID, organizationID, typ, "view")
 		if err != nil {
 			writeError(c, http.StatusServiceUnavailable, "AUTHZ_BACKEND_UNAVAILABLE", "authorization backend unavailable", true)
 			return
 		}
-		objects[typ] = ids
-		protectedObjects = append(protectedObjects, ids...)
+		objects[typ] = result.Objects
+		protectedObjects = append(protectedObjects, result.Objects...)
+		truncated = truncated || result.Truncated
 	}
 	authorizedOrganizations := []string{}
 	authorizedConversations := []string{}
 	if scopeType == "organization" && scopeID != "" {
 		authorizedOrganizations = append(authorizedOrganizations, scopeID)
-		if ids, err := h.provider.ListObjects(c.Request.Context(), req.SubjectID, organizationID, "conversation_group", "participant"); err != nil {
+		if result, err := h.listObjects(c, req.SubjectID, organizationID, "conversation_group", "participant"); err != nil {
 			writeError(c, http.StatusServiceUnavailable, "AUTHZ_BACKEND_UNAVAILABLE", "authorization backend unavailable", true)
 			return
 		} else {
-			authorizedConversations = ids
+			authorizedConversations = result.Objects
+			truncated = truncated || result.Truncated
 		}
 	}
 	c.JSON(http.StatusOK, gin.H{
@@ -134,7 +160,7 @@ func (h *AuthorizationHandler) Scope(c *gin.Context) {
 		"authorized_organization_ids":       authorizedOrganizations,
 		"authorized_conversation_group_ids": authorizedConversations,
 		"authorized_protected_object_keys":  protectedObjects,
-		"truncated":                         false,
+		"truncated":                         truncated,
 		"objects":                           objects,
 	})
 }
@@ -148,12 +174,28 @@ func (h *AuthorizationHandler) CheckBatch(c *gin.Context) {
 		writeError(c, http.StatusBadRequest, "AUTHZ_INVALID_REQUEST", "invalid authorization check request", false)
 		return
 	}
+	organizationID := strings.TrimSpace(req.OrganizationID)
+	scopeType := strings.TrimSpace(req.ScopeType)
+	scopeID := strings.TrimSpace(req.ScopeID)
+	if organizationID == "" && scopeType == "organization" {
+		organizationID = scopeID
+	}
+	if scopeType == "organization" {
+		if organizationID == "" || scopeID == "" || organizationID != scopeID {
+			writeError(c, http.StatusForbidden, "AUTHZ_SCOPE_FORBIDDEN", "organization scope is not verified", false)
+			return
+		}
+		isMember, err := h.verifyOrganizationMembership(c, req.SubjectID, organizationID)
+		if err != nil {
+			return
+		}
+		if !isMember {
+			writeError(c, http.StatusForbidden, "AUTHZ_SCOPE_FORBIDDEN", "subject is not an organization member", false)
+			return
+		}
+	}
 	decisions := make([]gin.H, 0, len(req.Checks))
 	for _, item := range req.Checks {
-		organizationID := strings.TrimSpace(req.OrganizationID)
-		if organizationID == "" && strings.TrimSpace(req.ScopeType) == "organization" {
-			organizationID = strings.TrimSpace(req.ScopeID)
-		}
 		allowed, err := h.provider.Check(c.Request.Context(), req.SubjectID, organizationID, application.AuthorizationCheck{ResourceType: item.ResourceType, ResourcePart: item.ResourcePart, ResourceID: item.ResourceID, Action: item.Action})
 		if err != nil {
 			writeError(c, http.StatusServiceUnavailable, "AUTHZ_BACKEND_UNAVAILABLE", "authorization backend unavailable", true)
@@ -162,6 +204,27 @@ func (h *AuthorizationHandler) CheckBatch(c *gin.Context) {
 		decisions = append(decisions, gin.H{"check_id": item.CheckID, "allowed": allowed})
 	}
 	c.JSON(http.StatusOK, gin.H{"snapshot_id": req.SnapshotID, "decisions": decisions})
+}
+
+func (h *AuthorizationHandler) verifyOrganizationMembership(c *gin.Context, userID, organizationID string) (bool, error) {
+	if h.organization == nil {
+		writeError(c, http.StatusServiceUnavailable, "AUTHZ_ORGANIZATION_UNAVAILABLE", "organization membership service unavailable", true)
+		return false, application.ErrMembershipRequired
+	}
+	allowed, err := h.organization.CheckOrganizationMember(c.Request.Context(), userID, organizationID)
+	if err != nil {
+		writeError(c, http.StatusServiceUnavailable, "AUTHZ_ORGANIZATION_UNAVAILABLE", "organization membership service unavailable", true)
+		return false, err
+	}
+	return allowed, nil
+}
+
+func (h *AuthorizationHandler) listObjects(c *gin.Context, subjectID, organizationID, objectType, relation string) (application.ListObjectsResult, error) {
+	if provider, ok := h.provider.(application.AuthorizationListProvider); ok {
+		return provider.ListObjectsWithMetadata(c.Request.Context(), subjectID, organizationID, objectType, relation)
+	}
+	objects, err := h.provider.ListObjects(c.Request.Context(), subjectID, organizationID, objectType, relation)
+	return application.ListObjectsResult{Objects: objects}, err
 }
 
 type permissionSyncRequest struct {

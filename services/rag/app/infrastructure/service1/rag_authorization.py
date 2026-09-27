@@ -47,7 +47,12 @@ class RagAuthorizationClient(AuthorizationGateway):
             if cached and cached.expires_at > now:
                 return cached.value
         if not self.base_url:
-            return AuthorizationScope(scope_type, scope_id, available=False)
+            return AuthorizationScope(
+                scope_type,
+                scope_id,
+                available=False,
+                failed=True,
+            )
         request_id = uuid.uuid4().hex
         try:
             response = self.http.request(
@@ -69,8 +74,14 @@ class RagAuthorizationClient(AuthorizationGateway):
                 timeout=settings.authz_timeout_seconds,
             ).json()
             value = _scope_from_response(response, scope_type=scope_type, scope_id=scope_id)
-        except IntegrationError:
-            value = AuthorizationScope(scope_type, scope_id, available=False)
+        except IntegrationError as exc:
+            value = AuthorizationScope(
+                scope_type,
+                scope_id,
+                available=False,
+                denied=exc.status == 403,
+                failed=exc.status != 403,
+            )
         ttl = min(5, max(0, settings.authz_scope_cache_ttl_seconds))
         with self._lock:
             self._cache[key] = _CacheEntry(now + ttl, value)

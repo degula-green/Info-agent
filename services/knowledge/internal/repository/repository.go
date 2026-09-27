@@ -536,6 +536,19 @@ type AgentPairingResult struct {
 	Device    domain.AgentDevice
 }
 
+type RAGSourceAuditInput struct {
+	CallerService   string
+	Purpose         string
+	KnowledgeItemID string
+	ResourceID      string
+	ContentVersion  int
+	ACLVersion      int64
+	ContentVariant  string
+	RAGJobID        string
+	TraceID         string
+	Result          string
+}
+
 type Repository interface {
 	Close() error
 
@@ -611,7 +624,8 @@ type Repository interface {
 	GetKnowledgeItem(ctx context.Context, knowledgeItemID string) (*domain.KnowledgeItem, error)
 	GetKnowledgeItemByMessage(ctx context.Context, messageID string) (*domain.KnowledgeItem, error)
 	GetKnowledgeItemByAttachment(ctx context.Context, attachmentID string) (*domain.KnowledgeItem, error)
-	GetKnowledgeContent(ctx context.Context, knowledgeItemID string) (*domain.KnowledgeContent, error)
+	GetKnowledgeContent(ctx context.Context, knowledgeItemID, variant string) (*domain.KnowledgeContent, error)
+	RecordRAGSourceAudit(ctx context.Context, input RAGSourceAuditInput) error
 	ListKnowledgeLibraries(ctx context.Context, userID, organizationID string) ([]domain.KnowledgeLibrary, error)
 	ListKnowledgeLibraryItems(ctx context.Context, libraryID, userID, organizationID, kind, platform, query string, limit int) ([]domain.KnowledgeLibraryItem, error)
 	ApplyRAGResult(ctx context.Context, knowledgeItemID string, input RAGResultInput) (*RAGResultApply, error)

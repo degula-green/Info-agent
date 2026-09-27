@@ -19,7 +19,7 @@ import (
 	"info-agent/knowledge/internal/service"
 )
 
-func readySourceRouter(t *testing.T) (*gin.Engine, string) {
+func readySourceRouter(t *testing.T) (*gin.Engine, string, *repository.MemoryStore) {
 	t.Helper()
 	repo := repository.NewMemoryStore()
 	ctx := context.Background()
@@ -56,16 +56,18 @@ func readySourceRouter(t *testing.T) (*gin.Engine, string) {
 	cfg := config.Config{InternalServiceToken: "rag-token", MaxAttachmentBytes: 1024}
 	svc := service.New(repo, kv.NewMemory(), nil, nil, nil, nil, cfg)
 	app := &App{Service: svc, Config: cfg}
-	return NewRouterWithApp(app), item.ID
+	return NewRouterWithApp(app), item.ID, repo
 }
 
 func TestRAGSourceRoutesAuthenticateAndValidateVersions(t *testing.T) {
-	router, itemID := readySourceRouter(t)
+	router, itemID, repo := readySourceRouter(t)
 	call := func(path, token string) *httptest.ResponseRecorder {
 		request := httptest.NewRequest(http.MethodGet, path, nil)
 		if token != "" {
 			request.Header.Set("Authorization", "Bearer "+token)
 		}
+		request.Header.Set("X-RAG-Job-ID", "90000000-0000-0000-0000-000000000001")
+		request.Header.Set("X-Trace-ID", "trace-source")
 		result := httptest.NewRecorder()
 		router.ServeHTTP(result, request)
 		return result
@@ -96,6 +98,16 @@ func TestRAGSourceRoutesAuthenticateAndValidateVersions(t *testing.T) {
 	}
 	if result := call("/internal/knowledge/"+itemID+"/content?content_version=1&acl_version=2&content_variant=original&purpose=index", "rag-token"); result.Code != http.StatusOK {
 		t.Fatalf("index purpose did not receive protected original: %d: %s", result.Code, result.Body.String())
+	} else if !strings.Contains(result.Body.String(), `"text":"password=private"`) || !strings.Contains(result.Body.String(), `"content_variant":"original"`) {
+		t.Fatalf("index purpose did not receive the original text: %s", result.Body.String())
+	}
+	audits := repo.RAGSourceAudits()
+	if len(audits) == 0 {
+		t.Fatal("rag source access audit was not recorded")
+	}
+	last := audits[len(audits)-1]
+	if last.Purpose != "index" || last.ContentVariant != "original" || last.RAGJobID != "90000000-0000-0000-0000-000000000001" || last.TraceID != "trace-source" || last.Result != "success" {
+		t.Fatalf("unexpected rag source audit: %+v", last)
 	}
 }
 
@@ -132,7 +144,7 @@ func ragResultPayload(eventID, jobID, status string, contentVersion int, aclVers
 }
 
 func TestRAGResultCallbackAuthenticatesAndProtectsState(t *testing.T) {
-	router, itemID := readySourceRouter(t)
+	router, itemID, _ := readySourceRouter(t)
 	eventID := "10000000-0000-0000-0000-000000000001"
 	jobID := "20000000-0000-0000-0000-000000000001"
 	payload := ragResultPayload(eventID, jobID, "processing", 1, 2)
@@ -167,7 +179,7 @@ func TestRAGResultCallbackAuthenticatesAndProtectsState(t *testing.T) {
 }
 
 func TestRAGResultCallbackValidatesIDsAndFailedState(t *testing.T) {
-	router, itemID := readySourceRouter(t)
+	router, itemID, _ := readySourceRouter(t)
 	valid := ragResultPayload("70000000-0000-0000-0000-000000000001", "80000000-0000-0000-0000-000000000001", "failed", 1, 2)
 	valid["error_code"] = "fact_model_timeout"
 	if result := postRAGResult(t, router, "not-a-uuid", "rag-token", "rag", valid); result.Code != http.StatusBadRequest {

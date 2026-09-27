@@ -24,9 +24,18 @@ type AuthorizationScope struct {
 	Objects map[string][]string
 }
 
+type ListObjectsResult struct {
+	Objects   []string
+	Truncated bool
+}
+
 type AuthorizationProvider interface {
 	Check(ctx context.Context, subjectID, organizationID string, check AuthorizationCheck) (bool, error)
 	ListObjects(ctx context.Context, subjectID, organizationID, objectType, relation string) ([]string, error)
+}
+
+type AuthorizationListProvider interface {
+	ListObjectsWithMetadata(ctx context.Context, subjectID, organizationID, objectType, relation string) (ListObjectsResult, error)
 }
 
 type RelationTuple struct {

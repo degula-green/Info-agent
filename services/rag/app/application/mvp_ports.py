@@ -122,6 +122,8 @@ class KnowledgeSource(Protocol):
         acl_version: int | None = None,
         content_variant: str | None = None,
         purpose: str | None = None,
+        rag_job_id: str | None = None,
+        trace_id: str | None = None,
     ) -> dict[str, Any]: ...
     def get_attachment(
         self,

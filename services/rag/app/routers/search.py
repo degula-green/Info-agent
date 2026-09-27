@@ -2,7 +2,11 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
 
-from app.application.rag_service import RAGRetrievalService, SearchUnavailable
+from app.application.rag_service import (
+    AuthorizationDenied,
+    RAGRetrievalService,
+    SearchUnavailable,
+)
 from app.dependencies import get_retrieval_service
 from app.domain.rag import SearchRequest
 
@@ -36,6 +40,8 @@ def search(
         ))
     except SearchUnavailable as exc:
         raise HTTPException(status_code=503, detail="search_unavailable") from exc
+    except AuthorizationDenied as exc:
+        raise HTTPException(status_code=403, detail="forbidden") from exc
     return {
         "request_id": response.request_id,
         "query": q,

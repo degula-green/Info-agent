@@ -43,6 +43,7 @@ type MemoryStore struct {
 	accessRequests     map[string]domain.PrivateAccessRequest
 	wechatConfigs      map[string]domain.WechatCollectionConfig
 	wechatRuntime      map[string]domain.WechatCollectorRuntime
+	ragSourceAudits    []RAGSourceAuditInput
 }
 
 type attachmentCursorReceipt struct {
@@ -64,6 +65,7 @@ func NewMemoryStore() *MemoryStore {
 		outbox:        map[string]domain.OutboxEvent{},
 		shareRequests: map[string]domain.PrivateShareRequest{}, shareRefs: map[string]domain.PrivateShareReference{}, accessRequests: map[string]domain.PrivateAccessRequest{},
 		wechatConfigs: map[string]domain.WechatCollectionConfig{}, wechatRuntime: map[string]domain.WechatCollectorRuntime{},
+		ragSourceAudits: []RAGSourceAuditInput{},
 	}
 }
 
@@ -2151,7 +2153,7 @@ func (s *MemoryStore) GetKnowledgeItemByAttachment(ctx context.Context, attachme
 	return s.GetKnowledgeItem(ctx, id)
 }
 
-func (s *MemoryStore) GetKnowledgeContent(_ context.Context, id string) (*domain.KnowledgeContent, error) {
+func (s *MemoryStore) GetKnowledgeContent(_ context.Context, id, variant string) (*domain.KnowledgeContent, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	item, ok := s.knowledgeItems[id]
@@ -2161,12 +2163,38 @@ func (s *MemoryStore) GetKnowledgeContent(_ context.Context, id string) (*domain
 	if item.SourceAttachmentID != "" {
 		return nil, apperror.New("knowledge_content_is_attachment", "knowledge content is an attachment", 409, false)
 	}
+	if variant == "" {
+		variant = "display"
+	}
+	if variant != "display" && variant != "original" {
+		return nil, apperror.New("knowledge_invalid_variant", "content variant must be display or original", 400, false)
+	}
 	for _, message := range s.messages {
 		if message.ID == item.SourceMessageID {
-			return &domain.KnowledgeContent{KnowledgeItemID: id, ContentVersion: item.ContentVersion, ContentVariant: "display", ContentHash: item.ContentHash, Text: message.Content}, nil
+			text := message.Content
+			if variant == "original" {
+				text = s.privateContent[message.ID]
+				if strings.TrimSpace(text) == "" {
+					return nil, apperror.New("knowledge_original_unavailable", "original content is unavailable", 409, false)
+				}
+			}
+			return &domain.KnowledgeContent{KnowledgeItemID: id, ContentVersion: item.ContentVersion, ContentVariant: variant, ContentHash: item.ContentHash, Text: text}, nil
 		}
 	}
 	return nil, apperror.New("knowledge_content_not_found", "knowledge content not found", 404, false)
+}
+
+func (s *MemoryStore) RecordRAGSourceAudit(_ context.Context, input RAGSourceAuditInput) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.ragSourceAudits = append(s.ragSourceAudits, input)
+	return nil
+}
+
+func (s *MemoryStore) RAGSourceAudits() []RAGSourceAuditInput {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return append([]RAGSourceAuditInput(nil), s.ragSourceAudits...)
 }
 
 const (

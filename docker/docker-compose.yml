@@ -191,6 +191,7 @@ services:
         psql --dbname="$${KNOWLEDGE_DATABASE_URL}" --set=ON_ERROR_STOP=1 --file=/migrations/20260926_rag_mvp_schema.sql &&
         psql --dbname="$${KNOWLEDGE_DATABASE_URL}" --set=ON_ERROR_STOP=1 --file=/migrations/20260927_rag_mvp_entity_review_requests.sql &&
         psql --dbname="$${KNOWLEDGE_DATABASE_URL}" --set=ON_ERROR_STOP=1 --file=/migrations/20260927_rag_mvp_phase1_hardening.up.sql &&
+        psql --dbname="$${KNOWLEDGE_DATABASE_URL}" --set=ON_ERROR_STOP=1 --file=/migrations/20260927_knowledge_rag_source_audit.sql &&
         psql --dbname="$${KNOWLEDGE_DATABASE_URL}" --set=ON_ERROR_STOP=1 --file=/migrations/20260927_knowledge_rag_mvp_status.sql
     depends_on:
       postgres:
@@ -208,6 +209,8 @@ services:
       - ../db/migrations/20260927_rag_mvp_entity_review_requests.sql:/migrations/20260927_rag_mvp_entity_review_requests.sql:ro
       - ../db/migrations/20260927_rag_mvp_phase1_hardening.up.sql:/migrations/20260927_rag_mvp_phase1_hardening.up.sql:ro
       - ../db/migrations/20260927_rag_mvp_phase1_hardening.down.sql:/migrations/20260927_rag_mvp_phase1_hardening.down.sql:ro
+      - ../db/migrations/20260927_knowledge_rag_source_audit.sql:/migrations/20260927_knowledge_rag_source_audit.sql:ro
+      - ../db/migrations/20260927_knowledge_rag_source_audit.down.sql:/migrations/20260927_knowledge_rag_source_audit.down.sql:ro
       - ../db/migrations/20260927_knowledge_rag_mvp_status.sql:/migrations/20260927_knowledge_rag_mvp_status.sql:ro
     restart: "no"
 

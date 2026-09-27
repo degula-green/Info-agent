@@ -2584,22 +2584,39 @@ func (s *Service) ApplyRAGResult(ctx context.Context, id string, input repositor
 	return s.Repo.ApplyRAGResult(ctx, id, input)
 }
 
-func (s *Service) GetKnowledgeContentForRAG(ctx context.Context, id string, contentVersion int, aclVersion int64, variant, purpose string) (*domain.KnowledgeContent, error) {
+func (s *Service) GetKnowledgeContentForRAG(ctx context.Context, id string, contentVersion int, aclVersion int64, variant, purpose, ragJobID, traceID string) (*domain.KnowledgeContent, error) {
 	item, err := s.GetKnowledgeForRAG(ctx, id, contentVersion, aclVersion)
-	if err != nil {
-		return nil, err
-	}
-	if variant == "original" && item.OriginalAccessRequired && item.SourceType != "shared_private_item" && purpose != "index" {
-		return nil, apperror.New("knowledge_content_restricted", "original content requires approval", 403, false)
-	}
-	content, err := s.Repo.GetKnowledgeContent(ctx, id)
 	if err != nil {
 		return nil, err
 	}
 	if variant == "" {
 		variant = "display"
 	}
-	content.ContentVariant = variant
+	if variant != "display" && variant != "original" {
+		return nil, apperror.New("knowledge_invalid_variant", "content variant must be display or original", 400, false)
+	}
+	_, resourceID := item.ProcessingResource()
+	if variant == "original" && item.OriginalAccessRequired && item.SourceType != "shared_private_item" && purpose != "index" {
+		if auditErr := s.Repo.RecordRAGSourceAudit(ctx, repository.RAGSourceAuditInput{
+			CallerService: "rag", Purpose: purpose, KnowledgeItemID: id,
+			ResourceID: resourceID, ContentVersion: contentVersion, ACLVersion: aclVersion,
+			ContentVariant: variant, RAGJobID: ragJobID, TraceID: traceID, Result: "denied",
+		}); auditErr != nil {
+			return nil, apperror.New("knowledge_audit_unavailable", "content access audit unavailable", 503, true)
+		}
+		return nil, apperror.New("knowledge_content_restricted", "original content requires approval", 403, false)
+	}
+	content, err := s.Repo.GetKnowledgeContent(ctx, id, variant)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.Repo.RecordRAGSourceAudit(ctx, repository.RAGSourceAuditInput{
+		CallerService: "rag", Purpose: purpose, KnowledgeItemID: id,
+		ResourceID: resourceID, ContentVersion: contentVersion, ACLVersion: aclVersion,
+		ContentVariant: variant, RAGJobID: ragJobID, TraceID: traceID, Result: "success",
+	}); err != nil {
+		return nil, apperror.New("knowledge_audit_unavailable", "content access audit unavailable", 503, true)
+	}
 	return content, nil
 }
 
