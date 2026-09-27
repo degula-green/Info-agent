@@ -68,6 +68,28 @@ class ChunkRepository(Protocol):
 
 class ProjectionRepository(Protocol):
     def upsert_projection(self, chunk: Chunk, **values: Any) -> None: ...
+    def ensure_projection_records(
+        self,
+        chunks: list[Chunk],
+        *,
+        mapping_version: str,
+    ) -> dict[str, dict[str, Any]]: ...
+    def list_projection_records(
+        self,
+        *,
+        knowledge_item_id: str,
+        content_version: int,
+    ) -> list[dict[str, Any]]: ...
+    def update_projection_status(
+        self,
+        chunk_ids: list[str],
+        *,
+        status: str,
+        failure_stage: str | None = None,
+        error: str | None = None,
+        increment_retry: bool = False,
+        next_retry_at: Any | None = None,
+    ) -> int: ...
 
 
 class OutboxRepository(Protocol):

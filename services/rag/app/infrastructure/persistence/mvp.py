@@ -19,7 +19,11 @@ from app.domain.rag import (
     ResourceContext,
     stable_id,
 )
-from app.domain.state import validate_job_transition
+from app.domain.state import (
+    ProjectionStatus,
+    validate_job_transition,
+    validate_projection_transition,
+)
 
 
 ZERO_UUID = "00000000-0000-0000-0000-000000000000"
@@ -671,6 +675,134 @@ class PostgresRagMVPRepository:
                         chunk.embedding_model, status, status,
                     ),
                 )
+
+    def ensure_projection_records(
+        self,
+        chunks: list[Chunk],
+        *,
+        mapping_version: str,
+    ) -> dict[str, dict[str, Any]]:
+        if not chunks:
+            return {}
+        with self._connection() as connection:
+            with connection.cursor() as cursor:
+                for chunk in chunks:
+                    alias = (
+                        settings.elasticsearch_protected_write_index
+                        if chunk.protected
+                        else settings.elasticsearch_display_write_index
+                    )
+                    cursor.execute(
+                        f"""INSERT INTO {self.schema}.projection_records
+                        (chunk_id,chunk_variant,scope_type,scope_id,knowledge_base_id,
+                         es_index_alias,es_document_id,mapping_version,embedding_model,
+                         status,retry_count,next_retry_at)
+                        VALUES (%s,%s,%s,%s::uuid,%s::uuid,%s,%s,%s,%s,'pending',0,CURRENT_TIMESTAMP)
+                        ON CONFLICT (chunk_id,es_index_alias,mapping_version) DO NOTHING""",
+                        (
+                            chunk.chunk_id,
+                            chunk.content_variant,
+                            chunk.scope_type,
+                            chunk.scope_id,
+                            chunk.knowledge_base_id,
+                            alias,
+                            chunk.chunk_id,
+                            mapping_version,
+                            chunk.embedding_model,
+                        ),
+                    )
+        return {
+            item["chunk_id"]: item
+            for item in self.list_projection_records(
+                knowledge_item_id=chunks[0].knowledge_item_id,
+                content_version=chunks[0].content_version,
+            )
+        }
+
+    def list_projection_records(
+        self,
+        *,
+        knowledge_item_id: str,
+        content_version: int,
+    ) -> list[dict[str, Any]]:
+        with self._connection() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    f"""SELECT p.chunk_id,p.chunk_variant,p.es_index_alias,p.mapping_version,
+                               p.status,p.retry_count,p.next_retry_at,p.last_error,p.failure_stage
+                        FROM {self.schema}.projection_records p
+                        JOIN {self.schema}.chunks c ON c.chunk_id=p.chunk_id
+                        WHERE c.knowledge_item_id=%s::uuid
+                          AND c.content_version=%s
+                          AND c.lifecycle_status='active'
+                        ORDER BY p.chunk_id""",
+                    (knowledge_item_id, int(content_version)),
+                )
+                return [
+                    {
+                        "chunk_id": row[0],
+                        "chunk_variant": row[1],
+                        "es_index_alias": row[2],
+                        "mapping_version": row[3],
+                        "status": row[4],
+                        "retry_count": int(row[5] or 0),
+                        "next_retry_at": row[6],
+                        "last_error": row[7],
+                        "failure_stage": row[8],
+                    }
+                    for row in cursor.fetchall()
+                ]
+
+    def update_projection_status(
+        self,
+        chunk_ids: list[str],
+        *,
+        status: str,
+        failure_stage: str | None = None,
+        error: str | None = None,
+        increment_retry: bool = False,
+        next_retry_at: datetime | None = None,
+    ) -> int:
+        if not chunk_ids:
+            return 0
+        ProjectionStatus(status)
+        updated = 0
+        with self._connection() as connection:
+            with connection.cursor() as cursor:
+                for chunk_id in chunk_ids:
+                    cursor.execute(
+                        f"""SELECT status FROM {self.schema}.projection_records
+                            WHERE chunk_id=%s FOR UPDATE""",
+                        (chunk_id,),
+                    )
+                    rows = cursor.fetchall()
+                    if not rows:
+                        continue
+                    for row in rows:
+                        validate_projection_transition(str(row[0]), status)
+                    cursor.execute(
+                        f"""UPDATE {self.schema}.projection_records
+                            SET status=%s,
+                                failure_stage=%s,
+                                last_error=%s,
+                                retry_count=retry_count + CASE WHEN %s THEN 1 ELSE 0 END,
+                                next_retry_at=%s,
+                                indexed_at=CASE WHEN %s='ready' THEN CURRENT_TIMESTAMP
+                                                ELSE indexed_at END,
+                                updated_at=CURRENT_TIMESTAMP
+                            WHERE chunk_id=%s""",
+                        (
+                            status,
+                            failure_stage,
+                            (error or "")[:2000] or None,
+                            increment_retry,
+                            next_retry_at,
+                            status,
+                            chunk_id,
+                        ),
+                    )
+                    updated += cursor.rowcount
+        return updated
 
     def load_entity_registry(self, *, scope_type: str, scope_id: str) -> tuple[list[Entity], list[EntityAlias], int]:
         with self._connection() as connection:
@@ -1817,7 +1949,109 @@ class InMemoryRagMVPRepository:
                 chunk.lifecycle_status = "inactive"
 
     def upsert_projection(self, chunk: Chunk, **value: Any) -> None:
-        self.projections.append({"chunk_id": chunk.chunk_id, **value})
+        existing = next(
+            (
+                item
+                for item in self.projections
+                if item["chunk_id"] == chunk.chunk_id
+                and item["es_index_alias"] == value.get("alias")
+                and item["mapping_version"] == value.get("mapping_version")
+            ),
+            None,
+        )
+        record = {"chunk_id": chunk.chunk_id, "retry_count": 0, **value}
+        if existing:
+            existing.update(record)
+        else:
+            self.projections.append(record)
+
+    def ensure_projection_records(
+        self,
+        chunks: list[Chunk],
+        *,
+        mapping_version: str,
+    ) -> dict[str, dict[str, Any]]:
+        for chunk in chunks:
+            alias = (
+                settings.elasticsearch_protected_write_index
+                if chunk.protected
+                else settings.elasticsearch_display_write_index
+            )
+            existing = next(
+                (
+                    item
+                    for item in self.projections
+                    if item["chunk_id"] == chunk.chunk_id
+                    and item["es_index_alias"] == alias
+                    and item["mapping_version"] == mapping_version
+                ),
+                None,
+            )
+            if not existing:
+                self.projections.append(
+                    {
+                        "chunk_id": chunk.chunk_id,
+                        "chunk_variant": chunk.content_variant,
+                        "es_index_alias": alias,
+                        "es_document_id": chunk.chunk_id,
+                        "mapping_version": mapping_version,
+                        "status": "pending",
+                        "retry_count": 0,
+                        "next_retry_at": datetime.now(timezone.utc),
+                        "last_error": None,
+                        "failure_stage": None,
+                    }
+                )
+        return {
+            item["chunk_id"]: dict(item)
+            for item in self.projections
+            if item["chunk_id"] in {chunk.chunk_id for chunk in chunks}
+        }
+
+    def list_projection_records(
+        self,
+        *,
+        knowledge_item_id: str,
+        content_version: int,
+    ) -> list[dict[str, Any]]:
+        chunk_ids = {
+            chunk.chunk_id
+            for chunk in self.chunks.values()
+            if chunk.knowledge_item_id == knowledge_item_id
+            and chunk.content_version == int(content_version)
+            and chunk.lifecycle_status == "active"
+        }
+        return [
+            dict(item)
+            for item in self.projections
+            if item["chunk_id"] in chunk_ids
+        ]
+
+    def update_projection_status(
+        self,
+        chunk_ids: list[str],
+        *,
+        status: str,
+        failure_stage: str | None = None,
+        error: str | None = None,
+        increment_retry: bool = False,
+        next_retry_at: datetime | None = None,
+    ) -> int:
+        updated = 0
+        for item in self.projections:
+            if item["chunk_id"] not in chunk_ids:
+                continue
+            validate_projection_transition(str(item["status"]), status)
+            item["status"] = status
+            item["failure_stage"] = failure_stage
+            item["last_error"] = error
+            if increment_retry:
+                item["retry_count"] = int(item.get("retry_count") or 0) + 1
+            item["next_retry_at"] = next_retry_at
+            if status == "ready":
+                item["indexed_at"] = datetime.now(timezone.utc)
+            updated += 1
+        return updated
 
     def load_entity_registry(self, *, scope_type: str, scope_id: str) -> tuple[list[Entity], list[EntityAlias], int]:
         entities = [
