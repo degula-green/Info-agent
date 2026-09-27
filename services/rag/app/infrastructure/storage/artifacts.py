@@ -49,7 +49,7 @@ class LocalArtifactStore(ArtifactStore):
         return f"file://{path}"
 
     def download_source(self, context: Any, destination: Path) -> int:
-        source = context.file_path or context.object_ref
+        source = getattr(context, "file_path", None) or context.object_ref
         if not source:
             raise StorageError("attachment has no file_path or object_ref")
         if source.startswith("file://"):
@@ -95,8 +95,9 @@ class MinioArtifactStore(ArtifactStore):
         return f"minio://{bucket}/{key}"
 
     def download_source(self, context: Any, destination: Path) -> int:
-        if context.file_path:
-            local_path = Path(context.file_path)
+        file_path = getattr(context, "file_path", None)
+        if file_path:
+            local_path = Path(file_path)
             if local_path.exists() and local_path.is_file():
                 return _copy_limited(local_path, destination, settings.preprocess_max_file_bytes)
         source = context.object_ref

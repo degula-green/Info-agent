@@ -2090,7 +2090,7 @@ func (s *MemoryStore) ApplyRAGResult(_ context.Context, id string, input RAGResu
 	if item.RAGSourceEventID == input.SourceEventID && item.RAGJobID == input.RAGJobID && status == input.Status {
 		return &RAGResultApply{Applied: false, Status: status, Reason: "duplicate"}, nil
 	}
-	if (status == "ready" || status == "metadata_only") && item.RAGContentVersion == input.ContentVersion && item.RAGACLVersion == input.ACLVersion {
+	if (status == "ready" || status == "metadata_only") && item.RAGContentVersion == input.ContentVersion && item.RAGACLVersion == input.ACLVersion && !(status == "metadata_only" && input.Status == "ready") {
 		return &RAGResultApply{Applied: false, Status: status, Reason: "terminal_state"}, nil
 	}
 	if status == "failed" && input.Status == "processing" && item.RAGJobID == input.RAGJobID {

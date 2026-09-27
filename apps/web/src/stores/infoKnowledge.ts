@@ -164,7 +164,9 @@ function mapMessage(value: MessageDTO, attachments: AttachmentDTO[], senderNames
 }
 
 function timelinePageRecords(page: ConversationTimelinePageDTO) {
-  const messages = page.items.flatMap((item) => item.kind === 'message' && item.message ? [item.message] : [])
+  const messages = page.items.flatMap((item) => item.kind === 'message' && item.message
+    ? [{ ...item.message, collected_at: item.collected_at || item.message.collected_at }]
+    : [])
   const attachments = page.items.flatMap((item) => item.kind === 'attachment' && item.attachment ? [item.attachment] : [])
   return { messages, attachments }
 }

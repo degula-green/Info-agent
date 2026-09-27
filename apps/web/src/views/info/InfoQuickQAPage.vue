@@ -26,7 +26,7 @@
               <div v-if="isCitationsExpanded(index)" class="qa-citations__list">
                 <button v-for="citation in message.citations" :key="citation.citation_id" type="button" class="qa-citation" @click="openCitation(citation)">
                   <t-icon :name="citation.type === 'document' ? 'file' : 'chat-bubble-1'" />
-                  <span>{{ citation.file_name || citation.message_summary || citation.conversation_name || citation.platform || '来源' }}</span>
+                  <span>{{ citationLabel(citation) }}</span>
                 </button>
               </div>
             </div>
@@ -105,12 +105,22 @@ type QaMessage = { role: 'user' | 'assistant'; text: string; citations?: QaCitat
 
 function mapCitation(item: any): QaCitation {
   const path = Array.isArray(item?.tree_path) ? item.tree_path.map((node: any) => node?.summary || node?.topic_key || node?.phase_key).filter(Boolean).join(' / ') : ''
-  const sourceKind = item?.source_kind === 'document' || item?.file_name ? 'document' : 'message'
-  const attachmentId = sourceKind === 'document' ? item?.attachment_id ?? null : null
+  const sourceKind = item?.source_kind === 'document' || item?.resource_type === 'attachment' || item?.file_name ? 'document' : 'message'
+  const attachmentId = sourceKind === 'document' ? item?.attachment_id ?? item?.resource_id ?? item?.document_id ?? null : null
   const knowledgeItemId = item?.knowledge_item_id ?? null
-  const messageId = item?.message_id ?? item?.source_resource_id ?? null
+  const messageId = item?.message_id ?? item?.source_message_id ?? item?.source_resource_id ?? null
+  const conversationId = item?.conversation_id ?? item?.source_conversation_id ?? null
   const identity = item?.source_id || (attachmentId ? `attachment:${attachmentId}` : messageId ? `message:${messageId}` : knowledgeItemId ? `knowledge:${knowledgeItemId}` : String(item?.es_chunk_id || item?.chunk_id || item?.fact_id || `${Date.now()}-${Math.random()}`))
-  return { citation_id: identity, type: sourceKind, source_kind: sourceKind, platform: item?.platform, file_name: item?.file_name, message_summary: item?.message_summary || item?.display_name, conversation_name: path || item?.title, conversation_id: item?.conversation_id, message_id: messageId, attachment_id: attachmentId, knowledge_item_id: knowledgeItemId, snippet: item?.quote_text || item?.content || item?.fact_text || path }
+  return { citation_id: identity, type: sourceKind, source_kind: sourceKind, platform: item?.platform || item?.source_platform, file_name: item?.file_name, message_summary: item?.message_summary || item?.display_name, conversation_name: path || item?.conversation_name || item?.title, conversation_id: conversationId, message_id: messageId, attachment_id: attachmentId, knowledge_item_id: knowledgeItemId, snippet: item?.quote_text || item?.content || item?.fact_text || path }
+}
+
+function citationLabel(citation: QaCitation): string {
+  if (citation.file_name) return citation.file_name
+  if (citation.message_summary) return citation.message_summary
+  if (citation.conversation_name) return citation.conversation_name
+  const snippet = String(citation.snippet || '').replace(/\s+/g, ' ').trim()
+  if (snippet) return snippet.length > 46 ? `消息：${snippet.slice(0, 45)}…` : `消息：${snippet}`
+  return citation.platform ? `${citation.platform} 消息` : '知识库消息'
 }
 
 function mergeCitations(values: any[]): QaCitation[] {

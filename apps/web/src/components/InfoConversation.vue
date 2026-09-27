@@ -378,13 +378,11 @@ function attachmentStatus(file: InfoFile) {
 }
 
 function attachmentDisplayStatus(file: InfoFile): KnowledgeDisplayStatus {
-  return mapKnowledgeDisplayStatus({ contentStatus: file.documentStatus || file.parseStatus, ragStatus: file.vectorStatus, searchable: file.searchable })
+  return mapKnowledgeDisplayStatus({ contentStatus: file.parseStatus || file.documentStatus, ragStatus: file.vectorStatus, searchable: file.searchable })
 }
 
 function messageDisplayStatus(message: InfoMessage): KnowledgeDisplayStatus {
-  if (message.vectorStatus === 'ready' || message.vectorStatus === 'succeeded') return 'searchable'
-  if (message.vectorStatus === 'failed') return 'failed'
-  return 'collected'
+  return mapKnowledgeDisplayStatus({ ragStatus: message.vectorStatus })
 }
 
 function messageDisplayLabel(message: InfoMessage) {

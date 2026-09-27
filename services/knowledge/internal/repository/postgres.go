@@ -2096,12 +2096,13 @@ func (s *PostgresStore) ListConversationTimeline(ctx context.Context, conversati
 		var message domain.Message
 		var senderExternalID string
 		var item domain.ConversationTimelineItem
-		if err := messageRows.Scan(&message.ID, &message.ConversationID, &message.ExternalMessageID, &message.SenderIdentityID, &senderExternalID, &message.SenderDisplayName, &message.MessageType, &message.NormalizedContentRef, &message.Content, &message.ContentHash, &message.ContentVersion, &message.SentAt, &item.CollectedAt, &message.LifecycleStatus, &message.VectorStatus, &message.CreatedAt, &message.Sensitive, &message.ClassificationStatus); err != nil {
+		if err := messageRows.Scan(&message.ID, &message.ConversationID, &message.ExternalMessageID, &message.SenderIdentityID, &senderExternalID, &message.SenderDisplayName, &message.MessageType, &message.NormalizedContentRef, &message.Content, &message.ContentHash, &message.ContentVersion, &message.SentAt, &message.CollectedAt, &message.LifecycleStatus, &message.VectorStatus, &message.CreatedAt, &message.Sensitive, &message.ClassificationStatus); err != nil {
 			messageRows.Close()
 			return nil, dbError(err)
 		}
 		message.SenderDisplayName = normalizePrivateWechatSender(conversationType, conversationName, externalConversationID, senderExternalID, accountExternalID, message.SenderDisplayName)
 		item.Kind = "message"
+		item.CollectedAt = message.CollectedAt
 		item.Message = &message
 		items = append(items, item)
 	}
@@ -2299,7 +2300,7 @@ func (s *PostgresStore) ApplyRAGResult(ctx context.Context, id string, input RAG
 	if sourceEventID == input.SourceEventID && jobID == input.RAGJobID && status == input.Status {
 		return &RAGResultApply{Applied: false, Status: status, Reason: "duplicate"}, nil
 	}
-	if (status == "ready" || status == "metadata_only") && ragContentVersion == input.ContentVersion && ragACLVersion == input.ACLVersion {
+	if (status == "ready" || status == "metadata_only") && ragContentVersion == input.ContentVersion && ragACLVersion == input.ACLVersion && !(status == "metadata_only" && input.Status == "ready") {
 		return &RAGResultApply{Applied: false, Status: status, Reason: "terminal_state"}, nil
 	}
 	if status == "failed" && input.Status == "processing" && jobID == input.RAGJobID {

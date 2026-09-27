@@ -171,7 +171,18 @@ class ResourceContext:
         content_hash = str(merged.get("content_hash") or "").removeprefix("sha256:").lower()
         if not re.fullmatch(r"[0-9a-f]{64}", content_hash):
             raise ValueError("source did not resolve a valid content_hash")
-        display_required = bool(merged.get("content_access_required", False))
+        attachment = (
+            _attachment_source(
+                source,
+                resource_id=resource_id,
+                source_attachment_id=_text_or_none(merged.get("source_attachment_id")),
+            )
+            if resource_type == "attachment"
+            else {}
+        )
+        display_required = bool(
+            _source_value(merged, attachment, "content_access_required", default=False)
+        )
         return cls(
             knowledge_item_id=knowledge_item_id,
             resource_type=resource_type,
@@ -194,10 +205,10 @@ class ResourceContext:
             sender_external_user_id=_text_or_none(merged.get("sender_external_user_id")),
             sender_mapped_user_id=_text_or_none(merged.get("sender_mapped_user_id")),
             sender_display_name=_text_or_none(merged.get("sender_display_name")),
-            file_name=_text_or_none(merged.get("file_name")),
-            mime_type=_text_or_none(merged.get("mime_type")),
-            size_bytes=int(merged.get("size_bytes") or 0),
-            object_ref=_text_or_none(merged.get("object_ref")),
+            file_name=_text_or_none(_source_value(merged, attachment, "file_name")),
+            mime_type=_text_or_none(_source_value(merged, attachment, "mime_type")),
+            size_bytes=_int_or_zero(_source_value(merged, attachment, "size_bytes")),
+            object_ref=_text_or_none(_source_value(merged, attachment, "object_ref")),
             content_type=_text_or_none(merged.get("content_type")),
             access_scope=_text_or_none(merged.get("access_scope")),
             sensitivity=_text_or_none(merged.get("sensitivity")),
@@ -539,6 +550,60 @@ def _text_or_none(value: Any) -> str | None:
     if value is None or not str(value).strip():
         return None
     return str(value).strip()
+
+
+def _attachment_source(
+    source: dict[str, Any],
+    *,
+    resource_id: str,
+    source_attachment_id: str | None,
+) -> dict[str, Any]:
+    raw = source.get("attachments")
+    candidates: list[dict[str, Any]]
+    if isinstance(raw, list):
+        candidates = [item for item in raw if isinstance(item, dict)]
+    elif isinstance(raw, dict):
+        if any(key in raw for key in ("id", "attachment_id", "resource_id")):
+            candidates = [raw]
+        else:
+            candidates = [item for item in raw.values() if isinstance(item, dict)]
+    else:
+        return {}
+
+    identifiers = {
+        value
+        for value in (resource_id, source_attachment_id)
+        if value is not None and str(value).strip()
+    }
+    for candidate in candidates:
+        for key in ("id", "attachment_id", "resource_id"):
+            candidate_id = _text_or_none(candidate.get(key))
+            if candidate_id and candidate_id in identifiers:
+                return candidate
+    return candidates[0] if len(candidates) == 1 else {}
+
+
+def _source_value(
+    merged: dict[str, Any],
+    attachment: dict[str, Any],
+    key: str,
+    *,
+    default: Any = None,
+) -> Any:
+    value = merged.get(key)
+    if value is not None and str(value).strip():
+        return value
+    attachment_value = attachment.get(key)
+    if attachment_value is not None and str(attachment_value).strip():
+        return attachment_value
+    return value if value is not None else default
+
+
+def _int_or_zero(value: Any) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
 
 
 def utc_now() -> str:

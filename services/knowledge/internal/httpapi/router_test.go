@@ -699,6 +699,9 @@ func TestFixtureReplayHTTPRoundTripPersistsAndDeduplicates(t *testing.T) {
 	allTimeline := append([]publicConversationTimelineItem{}, timelinePage.Items...)
 	for _, item := range timelinePage.Items {
 		if item.Message != nil {
+			if item.Message.CollectedAt.IsZero() || !item.Message.CollectedAt.Equal(item.CollectedAt) {
+				t.Fatalf("timeline message lost its collected_at: item=%+v message=%+v", item, item.Message)
+			}
 			seenTimelineIDs["message:"+item.Message.ID] = true
 		}
 		if item.Attachment != nil {

@@ -41,6 +41,16 @@ const resumeDialogVisible = ref(false)
 const resumeLoading = ref(false)
 const pendingResumeChat = ref<InfoChat | null>(null)
 const conversationLoads = new Map<string, Promise<void>>()
+const activeKnowledgeStatuses = new Set(['not_enqueued', 'pending', 'processing'])
+const conversationHasActiveWork = computed(() => {
+  const current = chat.value
+  if (!current) return false
+  const statuses = [
+    ...current.messages.map((message) => message.vectorStatus),
+    ...current.files.flatMap((file) => [file.documentStatus, file.parseStatus, file.vectorStatus]),
+  ]
+  return statuses.some((status) => activeKnowledgeStatuses.has(String(status || '').toLowerCase()))
+})
 
 async function toggleChat(current: any) {
   if (current.collectionStatus === 'detached') return
@@ -118,19 +128,38 @@ async function loadOlder() {
     MessagePlugin.error(error?.message || '加载更早内容失败，请稍后重试')
   }
 }
+function scheduleConversationPoll() {
+  if (pollTimer.value != null) window.clearTimeout(pollTimer.value)
+  const delay = conversationHasActiveWork.value ? 5000 : 30000
+  pollTimer.value = window.setTimeout(async () => {
+    if (document.visibilityState === 'visible') {
+      await loadCurrentConversation(sourceKey.value, conversationId.value, true)
+    }
+    scheduleConversationPoll()
+  }, delay)
+}
+async function refreshConversationOnReturn() {
+  if (document.visibilityState !== 'visible') return
+  await loadCurrentConversation(sourceKey.value, conversationId.value, true)
+  scheduleConversationPoll()
+}
 onMounted(() => {
-  pollTimer.value = window.setInterval(() => {
-    void loadCurrentConversation(sourceKey.value, conversationId.value, true)
-  }, 30000)
+  document.addEventListener('visibilitychange', refreshConversationOnReturn)
+  window.addEventListener('focus', refreshConversationOnReturn)
+  scheduleConversationPoll()
 })
 const errorCode = computed(() => String(loadError.value?.code || loadError.value?.error?.code || ''))
 const errorTitle = computed(() => errorCode.value === 'forbidden' ? '你没有权限查看这个群聊' : errorCode.value === 'conversation_not_found' ? '找不到这个会话' : '会话加载失败')
 const errorDescription = computed(() => errorCode.value === 'forbidden' ? '请联系组织管理员确认你的组织成员状态。' : errorCode.value === 'conversation_not_found' ? '' : loadError.value ? '请稍后重试。' : '')
 watch([sourceKey, conversationId], async ([platform, id]) => {
   await loadCurrentConversation(platform, id, true)
+  scheduleConversationPoll()
 }, { immediate: true })
+watch(conversationHasActiveWork, scheduleConversationPoll)
 onBeforeUnmount(() => {
-  if (pollTimer.value != null) window.clearInterval(pollTimer.value)
+  if (pollTimer.value != null) window.clearTimeout(pollTimer.value)
+  document.removeEventListener('visibilitychange', refreshConversationOnReturn)
+  window.removeEventListener('focus', refreshConversationOnReturn)
 })
 </script>
 <style scoped lang="less">.conversation-missing { display: grid; place-items: center; min-height: 360px; gap: 10px; color: var(--td-text-color-secondary); text-align: center; }.conversation-missing h3 { margin: 0; color: var(--td-text-color-primary); }.conversation-missing p { margin: 0; font-size: 12px; }.resume-dialog p { margin: 0 0 14px; color: var(--td-text-color-secondary); font-size: 13px; line-height: 1.65; }.resume-dialog__warning { padding: 10px 12px; border-radius: 6px; color: var(--td-error-color) !important; background: var(--td-error-color-1); }.resume-dialog__note { display: flex; align-items: center; gap: 6px; margin-top: 14px; color: var(--td-text-color-placeholder); font-size: 11px; }</style>

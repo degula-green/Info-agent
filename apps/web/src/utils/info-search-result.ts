@@ -67,7 +67,8 @@ export function mapRagSearchItem(item: RagSearchItem): SearchResult {
   const conversation = text(item.conversation_name || item.conversation_group_id || item.conversation_id || item.conversation_key)
   const time = formatTime(item.sent_at || item.observed_at || item.collected_at)
   const chatId = text(item.conversation_group_id || item.conversation_id || item.conversation_key) || undefined
-  const recordId = text(kind === 'file' ? item.attachment_id : item.message_id || item.attachment_id) || undefined
+  const attachmentId = text(item.attachment_id || item.document_id || (item.resource_type === 'attachment' ? item.resource_id : '')) || undefined
+  const recordId = text(kind === 'file' ? attachmentId : item.message_id || item.source_message_id || attachmentId) || undefined
   const title = kind === 'file'
     ? (fileName || truncate(highlight || content) || '附件')
     : (truncate(highlight || content) || fileName || '消息')
@@ -93,7 +94,16 @@ export function mapRagSearchItem(item: RagSearchItem): SearchResult {
 }
 
 export function mapRagSearchItems(items: RagSearchItem[] | undefined | null): SearchResult[] {
-  return (items || []).map(mapRagSearchItem)
+  const deduped = new Map<string, SearchResult>()
+  for (const result of (items || []).map(mapRagSearchItem)) {
+    const identity = result.recordId || result.chatId || result.title
+    const key = `${result.kind}:${result.platform || 'all'}:${identity}`
+    const current = deduped.get(key)
+    if (!current || (result.score || 0) > (current.score || 0)) {
+      deduped.set(key, result)
+    }
+  }
+  return [...deduped.values()]
 }
 
 export function isAbortError(error: unknown): boolean {

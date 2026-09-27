@@ -193,3 +193,27 @@ func TestRAGResultCallbackValidatesIDsAndFailedState(t *testing.T) {
 		t.Fatalf("failed callback returned %d: %s", result.Code, result.Body.String())
 	}
 }
+
+func TestRAGResultCallbackAllowsReadyToReplaceMetadataOnly(t *testing.T) {
+	router, itemID, _ := readySourceRouter(t)
+	metadataOnly := ragResultPayload(
+		"90000000-0000-0000-0000-000000000001",
+		"91000000-0000-0000-0000-000000000001",
+		"metadata_only",
+		1,
+		2,
+	)
+	if result := postRAGResult(t, router, itemID, "rag-token", "rag", metadataOnly); result.Code != http.StatusOK || !strings.Contains(result.Body.String(), `"status":"metadata_only"`) {
+		t.Fatalf("metadata-only callback returned %d: %s", result.Code, result.Body.String())
+	}
+	ready := ragResultPayload(
+		"92000000-0000-0000-0000-000000000001",
+		"93000000-0000-0000-0000-000000000001",
+		"ready",
+		1,
+		2,
+	)
+	if result := postRAGResult(t, router, itemID, "rag-token", "rag", ready); result.Code != http.StatusOK || !strings.Contains(result.Body.String(), `"status":"ready"`) || strings.Contains(result.Body.String(), `"reason":"terminal_state"`) {
+		t.Fatalf("ready callback did not replace metadata-only state: %d %s", result.Code, result.Body.String())
+	}
+}

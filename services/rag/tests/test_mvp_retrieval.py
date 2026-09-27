@@ -24,6 +24,9 @@ class _Embedding:
 
 
 class _Authorization:
+    def __init__(self):
+        self.batch_sizes = []
+
     def search_scope(self, *, scope_type, scope_id, **kwargs):
         return AuthorizationScope(
             scope_type,
@@ -34,6 +37,7 @@ class _Authorization:
         )
 
     def check_batch(self, *, checks: list[AccessCheck], **kwargs):
+        self.batch_sizes.append(len(checks))
         return [True] * len(checks)
 
 
@@ -96,6 +100,8 @@ class RetrievalTests(unittest.TestCase):
         self.assertTrue(any(call[1].get("branch_keys") for call in indexer.calls))
         self.assertTrue(any(not call[1].get("branch_keys") for call in indexer.calls))
         self.assertEqual(response.diagnostics["effective_execution_path"], "tree_boost")
+        self.assertEqual(response.diagnostics["authorization_candidate_count"], 1)
+        self.assertEqual(service.authorization.batch_sizes, [1])
 
     def test_logical_dedupe_prefers_protected(self) -> None:
         display = SearchResult("d", "display", score=1.0, source={"logical_position_key": "x", "content_variant": "display"})

@@ -6,6 +6,8 @@ import hashlib
 from pathlib import Path
 
 from app.application.parse_service import MVPParseService
+from app.domain.rag import ResourceContext
+from app.infrastructure.storage.artifacts import LocalArtifactStore
 
 
 ITEM = "00000000-0000-0000-0000-000000000002"
@@ -47,6 +49,28 @@ class _Artifacts:
 
 
 class ParseTests(unittest.TestCase):
+    def test_artifact_store_uses_object_ref_without_file_path(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.txt"
+            destination = root / "downloads" / "source.txt"
+            source.write_text("stored object", encoding="utf-8")
+            context = ResourceContext(
+                knowledge_item_id=ITEM,
+                resource_type="attachment",
+                resource_id=MESSAGE,
+                knowledge_base_id=KB,
+                scope_type="organization",
+                scope_id=SCOPE,
+                content_version=1,
+                content_hash="a" * 64,
+                object_ref=str(source),
+            )
+            store = LocalArtifactStore(root / "artifacts")
+            size = store.download_source(context, destination)
+            self.assertEqual(size, source.stat().st_size)
+            self.assertEqual(destination.read_text(encoding="utf-8"), "stored object")
+
     def test_protected_message_creates_display_and_protected_chunks(self) -> None:
         service = MVPParseService(
             knowledge=_Knowledge(content_access_required=True),
@@ -159,6 +183,59 @@ class ParseTests(unittest.TestCase):
             self.assertEqual(result.status, "succeeded")
             self.assertEqual(len(result.chunks), 1)
             self.assertIn("attachment marker", result.chunks[0].content)
+
+    def test_attachment_object_ref_is_resolved_from_nested_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "faq.txt"
+            source.write_text("nested attachment metadata", encoding="utf-8")
+            digest = hashlib.sha256(source.read_bytes()).hexdigest()
+            attachment_id = "00000000-0000-0000-0000-000000000005"
+            knowledge = _Knowledge()
+            knowledge.get_knowledge = lambda *args, **kwargs: {
+                "knowledge_item_id": ITEM,
+                "resource_type": "attachment",
+                "resource_id": MESSAGE,
+                "knowledge_base_id": KB,
+                "scope_type": "organization",
+                "scope_id": SCOPE,
+                "content_version": 1,
+                "acl_version": 1,
+                "content_hash": digest,
+                "content_access_required": False,
+                "attachments": [
+                    {
+                        "attachment_id": attachment_id,
+                        "object_ref": str(source),
+                        "file_name": "faq.txt",
+                        "mime_type": "text/plain",
+                        "size_bytes": source.stat().st_size,
+                    }
+                ],
+            }
+            service = MVPParseService(knowledge=knowledge, artifact_store=_Artifacts())
+            result = service.run(
+                {
+                    "knowledge_item_id": ITEM,
+                    "resource_type": "attachment",
+                    "resource_id": MESSAGE,
+                    "content_version": 1,
+                    "acl_version": 1,
+                    "content_hash": digest,
+                    "source_attachment_id": attachment_id,
+                    "source_conversation_id": None,
+                },
+                {
+                    "resource_type": "attachment",
+                    "resource_id": MESSAGE,
+                    "knowledge_item_id": ITEM,
+                    "content_version": 1,
+                    "acl_version": 1,
+                },
+            )
+            self.assertEqual(result.status, "succeeded")
+            self.assertEqual(result.context.object_ref, str(source))
+            self.assertEqual(len(result.chunks), 1)
+            self.assertIn("nested attachment metadata", result.chunks[0].content)
 
 
 if __name__ == "__main__":

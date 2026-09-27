@@ -116,7 +116,6 @@ class RAGRetrievalService:
         effective = dict(global_branches)
         if settings.tree_mode == "boost":
             effective.update(branch_branches)
-        effective = self._authorize_branches(request, effective, scope)
         fused = rrf_fuse(
             effective,
             k=settings.rrf_k,
@@ -128,10 +127,21 @@ class RAGRetrievalService:
             },
         )
         fused = dedupe_logical_positions(fused)
-        results = dedupe_by_resource(fused, limit=request.top_k)
-        # Final authorization is repeated immediately before the result leaves
-        # the service; no candidate can enter a prompt on a stale decision.
-        results = self._authorize_results(request, results, scope)
+        max_chunks = settings.max_chunks_per_item if request.entry == "ai" else 1
+        # Different passages from one item share the same authorization
+        # decision. Keep a bounded candidate pool per resource before calling
+        # Core, then authorize every resource that can reach the final result.
+        authorization_candidates = dedupe_by_resource(
+            fused,
+            limit=max(request.top_k, min(len(fused), request.top_k * 3)),
+            max_per_resource=max_chunks,
+        )
+        authorized = self._authorize_results(request, authorization_candidates, scope)
+        results = dedupe_by_resource(
+            authorized,
+            limit=request.top_k,
+            max_per_resource=max_chunks,
+        )
         diagnostics = {
             "tree_mode": settings.tree_mode,
             "authorization_snapshot_id": scope.snapshot_id,
@@ -141,6 +151,7 @@ class RAGRetrievalService:
             "resolved_branch_count": len(branch_keys),
             "branch_candidate_count": sum(len(value) for value in branch_branches.values()),
             "global_candidate_count": sum(len(value) for value in global_branches.values()),
+            "authorization_candidate_count": len(authorization_candidates),
             "fused_result_count": len(results),
             "effective_execution_path": (
                 "tree_boost" if settings.tree_mode == "boost" and branch_branches
@@ -308,12 +319,18 @@ def dedupe_logical_positions(results: list[SearchResult]) -> list[SearchResult]:
     return [selected[key] for key in order]
 
 
-def dedupe_by_resource(results: list[SearchResult], *, limit: int) -> list[SearchResult]:
+def dedupe_by_resource(
+    results: list[SearchResult],
+    *,
+    limit: int,
+    max_per_resource: int | None = None,
+) -> list[SearchResult]:
     counts: dict[str, int] = {}
     output: list[SearchResult] = []
+    limit_per_resource = max(1, max_per_resource or settings.max_chunks_per_item)
     for result in results:
         key = str(result.source.get("resource_id") or result.source.get("knowledge_item_id") or result.chunk_id)
-        if counts.get(key, 0) >= settings.max_chunks_per_item:
+        if counts.get(key, 0) >= limit_per_resource:
             continue
         counts[key] = counts.get(key, 0) + 1
         result.rank = len(output) + 1
