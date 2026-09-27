@@ -2018,6 +2018,10 @@ func (s *MemoryStore) TryMarkKnowledgeReady(ctx context.Context, id, traceID str
 		traceID = uuid.NewString()
 	}
 	resourceType, resourceID := item.ProcessingResource()
+	scopeType, scopeID := "user", item.OwnerUserID
+	if item.KnowledgeScope == "organization" || item.OrganizationID != "" {
+		scopeType, scopeID = "organization", item.OrganizationID
+	}
 	event := domain.OutboxEvent{
 		ID: uuid.NewString(), EventType: "knowledge.ready", SchemaVersion: 1,
 		OccurredAt: time.Now().UTC(), TraceID: traceID, OrganizationID: item.OrganizationID,
@@ -2025,6 +2029,11 @@ func (s *MemoryStore) TryMarkKnowledgeReady(ctx context.Context, id, traceID str
 		Payload: map[string]any{
 			"resource_type": resourceType, "resource_id": resourceID,
 			"knowledge_item_id":        item.ID,
+			"scope_type":               scopeType,
+			"scope_id":                 scopeID,
+			"owner_user_id":            nilString(item.OwnerUserID),
+			"organization_id":          nilString(item.OrganizationID),
+			"knowledge_scope":          item.KnowledgeScope,
 			"source_conversation_id":   nilString(item.ConversationID),
 			"source_conversation_type": nilString(item.SourceConversationType),
 			"source_audience_policy":   item.SourceAudiencePolicy(),

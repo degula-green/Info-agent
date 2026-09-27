@@ -18,7 +18,20 @@ from app.domain.rag import (
 class TaskRepository(Protocol):
     def create_or_get_job(self, envelope: dict[str, Any], *, processing_version: str | None = None) -> dict[str, Any]: ...
     def get_job(self, job_id: str | None = None, *, source_event_id: str | None = None) -> dict[str, Any] | None: ...
-    def claim_jobs(self, lane: str, *, limit: int = 1, lease_seconds: int | None = None) -> list[dict[str, Any]]: ...
+    def claim_jobs(
+        self,
+        lane: str,
+        *,
+        limit: int = 1,
+        lease_seconds: int | None = None,
+        job_id: str | None = None,
+    ) -> list[dict[str, Any]]: ...
+    def list_recoverable_jobs(
+        self,
+        lane: str,
+        *,
+        limit: int = 1,
+    ) -> list[dict[str, Any]]: ...
     def heartbeat(
         self,
         job_id: str,
@@ -52,7 +65,14 @@ class TaskRepository(Protocol):
         epoch: int,
         fields: dict[str, Any],
     ) -> bool: ...
-    def add_attempt(self, job_id: str, **fields: Any) -> str: ...
+    def add_attempt(
+        self,
+        job_id: str,
+        *,
+        lease_owner: str | None = None,
+        lease_epoch: int | None = None,
+        **fields: Any,
+    ) -> str: ...
 
 
 class SourceSnapshotRepository(Protocol):

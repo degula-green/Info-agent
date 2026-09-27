@@ -110,12 +110,15 @@ class RuntimeTests(unittest.TestCase):
         })
         job = repository.get_job(source_event_id="00000000-0000-0000-0000-000000000010")
         self.assertIsNotNone(job)
-        runtime._run_parse(job)
+        claimed = repository.claim_jobs("parse", limit=1, job_id=job["id"])[0]
+        runtime._run_parse(claimed)
         job = repository.get_job(job["id"])
-        runtime._run_index(job)
+        claimed = repository.claim_jobs("index", limit=1, job_id=job["id"])[0]
+        runtime._run_index(claimed)
         job = repository.get_job(job["id"])
         self.assertEqual(job["status"], "ready")
-        runtime._run_memory(job)
+        claimed = repository.claim_jobs("memory", limit=1, job_id=job["id"])[0]
+        runtime._run_memory(claimed)
         self.assertGreaterEqual(len(repository.candidates), 1)
         self.assertTrue(indexer.chunks)
         self.assertTrue(all(chunk.embedding_status == "ready" for chunk in indexer.chunks))

@@ -2442,9 +2442,18 @@ func (s *PostgresStore) TryMarkKnowledgeReady(ctx context.Context, id, traceID s
 		return false, nil
 	}
 	resourceType, resourceID := item.ProcessingResource()
+	scopeType, scopeID := "user", item.OwnerUserID
+	if item.KnowledgeScope == "organization" || item.OrganizationID != "" {
+		scopeType, scopeID = "organization", item.OrganizationID
+	}
 	payload, _ := json.Marshal(map[string]any{
 		"resource_type": resourceType, "resource_id": resourceID,
 		"knowledge_item_id":        item.ID,
+		"scope_type":               scopeType,
+		"scope_id":                 scopeID,
+		"owner_user_id":            nilString(item.OwnerUserID),
+		"organization_id":          nilString(item.OrganizationID),
+		"knowledge_scope":          item.KnowledgeScope,
 		"source_conversation_id":   nilString(item.ConversationID),
 		"source_conversation_type": nilString(item.SourceConversationType),
 		"source_audience_policy":   item.SourceAudiencePolicy(),
@@ -3035,6 +3044,11 @@ func (s *PostgresStore) FinalizeLocalUpload(ctx context.Context, requestID, obje
 	}
 	payload := map[string]any{
 		"resource_type": "attachment", "resource_id": a.ID, "knowledge_item_id": resourceID,
+		"scope_type":               map[bool]string{true: "organization", false: "user"}[a.OrganizationID != ""],
+		"scope_id":                 map[bool]string{true: a.OrganizationID, false: a.UploadedByUserID}[a.OrganizationID != ""],
+		"owner_user_id":            nilString(a.UploadedByUserID),
+		"organization_id":          nilString(a.OrganizationID),
+		"knowledge_scope":          map[bool]string{true: "organization", false: "private"}[a.OrganizationID != ""],
 		"source_conversation_id":   nilString(a.ConversationID),
 		"source_conversation_type": nil,
 		"source_audience_policy":   audiencePolicy,

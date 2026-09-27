@@ -5,14 +5,16 @@ import unittest
 import uuid
 
 from app.application.index_service import MVPIndexService
+from app.application.entity_review_service import EntityReviewService
 from app.application.parse_service import MVPParseService
-from app.application.rag_service import RAGRetrievalService
+from app.application.qa_service import QAService
+from app.application.rag_service import RAGRetrievalService, RetrievalResponse
 from app.application.runtime import MVPWorkerRuntime
+from app.domain.rag import Chunk, ResourceContext, SearchRequest, SearchResult
 from app.infrastructure.embedding.client import HashEmbeddingProvider
 from app.infrastructure.persistence.mvp import PostgresRagMVPRepository
 from app.infrastructure.rag_elasticsearch import RagChunkIndex
 from app.infrastructure.service1.rag_authorization import AllowAllAuthorizationGateway
-from app.domain.rag import SearchRequest
 
 
 @unittest.skipUnless(os.getenv("RAG_MVP_INTEGRATION") == "1", "external integration disabled")
@@ -68,9 +70,19 @@ class MVPEndToEndIntegrationTests(unittest.TestCase):
             )
             runtime.handle(event)
             job = repository.get_job(source_event_id=identifiers["event"])
-            runtime._run_parse(job)
+            claimed = repository.claim_jobs(
+                "parse",
+                limit=1,
+                job_id=job["id"],
+            )[0]
+            runtime._run_parse(claimed)
             job = repository.get_job(job["id"])
-            runtime._run_index(job)
+            claimed = repository.claim_jobs(
+                "index",
+                limit=1,
+                job_id=job["id"],
+            )[0]
+            runtime._run_index(claimed)
             chunks = repository.list_chunks(scope_type="organization", scope_id=identifiers["scope"])
             self.assertEqual(len(chunks), 1)
             self.assertEqual(chunks[0].embedding_status, "ready")
@@ -109,6 +121,125 @@ class MVPEndToEndIntegrationTests(unittest.TestCase):
                     cursor.execute(
                         "DELETE FROM rag_mvp.entity_registry WHERE scope_type='organization' AND scope_id=%s::uuid",
                         (identifiers["scope"],),
+                    )
+
+    def test_postgres_qa_history_and_entity_merge(self) -> None:
+        repository = PostgresRagMVPRepository()
+        user_id = str(uuid.uuid4())
+        scope_id = str(uuid.uuid4())
+        candidate_id = None
+        try:
+            qa = QAService(
+                repository=repository,
+                retrieval_service=_FixedRetrieval(),
+                answer_provider=_FixedAnswerProvider(),
+            )
+            answer = qa.answer(
+                SearchRequest(
+                    query="integration question",
+                    user_id=user_id,
+                    scope_type="organization",
+                    scope_id=scope_id,
+                )
+            )
+            conversation = repository.get_qa_conversation(
+                user_id=user_id,
+                conversation_id=answer["conversation_id"],
+            )
+            self.assertIsNotNone(conversation)
+            self.assertEqual(
+                [item["role"] for item in conversation["messages"]],
+                ["user", "assistant"],
+            )
+
+            context = ResourceContext.from_event_and_source(
+                {
+                    "resource_type": "message",
+                    "resource_id": str(uuid.uuid4()),
+                    "knowledge_item_id": str(uuid.uuid4()),
+                    "source_audience_policy": "organization_members",
+                    "content_version": 1,
+                    "acl_version": 1,
+                    "content_hash": "b" * 64,
+                    "content_access_required": False,
+                },
+                {
+                    "scope_type": "organization",
+                    "scope_id": scope_id,
+                    "knowledge_base_id": str(uuid.uuid4()),
+                    "content_hash": "b" * 64,
+                },
+            )
+            snapshot_id = repository.upsert_snapshot(context)
+            chunk = Chunk.create(
+                context=context,
+                snapshot_id=snapshot_id,
+                chunk_index=0,
+                chunk_count=1,
+                content="integration candidate",
+                variant="display",
+                processing_version="v1",
+                chunking_version="v1",
+            )
+            repository.upsert_chunks([chunk])
+            candidate_id = repository.upsert_candidate_mention(
+                scope_type="organization",
+                scope_id=scope_id,
+                candidate_name="Integration Candidate",
+                normalized_key="integration candidate",
+                domain="project",
+                chunk=chunk,
+                context_excerpt=chunk.content,
+            )
+            entity = repository.upsert_entity(
+                scope_type="organization",
+                scope_id=scope_id,
+                domain="project",
+                canonical_name="Integration Target",
+                normalized_key="integration target",
+            )
+            result = EntityReviewService(repository=repository).review(
+                scope_type="organization",
+                scope_id=scope_id,
+                candidate_id=candidate_id,
+                reviewer_id=str(uuid.uuid4()),
+                review_request_id=str(uuid.uuid4()),
+                idempotency_key=None,
+                action="merge",
+                expected_status="new",
+                canonical_name=None,
+                domain=None,
+                target_entity_id=entity["id"],
+                note=None,
+            )
+            self.assertEqual(result["status"], "merged")
+            with repository._connection() as connection:
+                with connection.cursor() as cursor:
+                    cursor.execute(
+                        """SELECT COUNT(*) FROM rag_mvp.entity_aliases
+                           WHERE entity_id=%s::uuid AND normalized_alias='integration candidate'""",
+                        (entity["id"],),
+                    )
+                    self.assertEqual(int(cursor.fetchone()[0]), 1)
+        finally:
+            with repository._connection() as connection:
+                with connection.cursor() as cursor:
+                    cursor.execute(
+                        "DELETE FROM rag_mvp.qa_conversations WHERE user_id=%s::uuid",
+                        (user_id,),
+                    )
+                    if candidate_id:
+                        cursor.execute(
+                            "DELETE FROM rag_mvp.entity_candidates WHERE id=%s::uuid",
+                            (candidate_id,),
+                        )
+                    cursor.execute(
+                        "DELETE FROM rag_mvp.entity_registry WHERE scope_type='organization' AND scope_id=%s::uuid",
+                        (scope_id,),
+                    )
+                    cursor.execute(
+                        "DELETE FROM rag_mvp.resource_snapshots WHERE scope_id=%s::uuid",
+                        (scope_id,),
                     )
 
 
@@ -157,6 +288,37 @@ class _Callback:
 
     def flush(self, *, limit=50):
         return 0
+
+
+class _FixedRetrieval:
+    def search(self, request):
+        return RetrievalResponse(
+            request_id="integration-qa",
+            results=[
+                SearchResult(
+                    chunk_id="integration-chunk",
+                    content="integration answer",
+                    score=1.0,
+                    rank=1,
+                    source={
+                        "knowledge_item_id": str(uuid.uuid4()),
+                        "resource_type": "message",
+                        "resource_id": str(uuid.uuid4()),
+                        "content_variant": "display",
+                    },
+                )
+            ],
+            diagnostics={"effective_execution_path": "traditional"},
+        )
+
+
+class _FixedAnswerProvider:
+    def generate(self, question, results):
+        return "integration answer"
+
+    def generate_stream(self, question, results):
+        yield "integration "
+        yield "answer"
 
 
 if __name__ == "__main__":

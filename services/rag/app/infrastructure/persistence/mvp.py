@@ -58,7 +58,54 @@ def _uuid_or_none(value: Any) -> str | None:
 
 
 def _as_json(value: Any) -> str:
-    return json.dumps(value or {}, ensure_ascii=False)
+    return json.dumps({} if value is None else value, ensure_ascii=False)
+
+
+def _resolve_job_scope(
+    payload: dict[str, Any],
+    envelope: dict[str, Any],
+) -> tuple[str, str]:
+    audience = str(payload.get("source_audience_policy") or "")
+    scope_type = str(payload.get("scope_type") or "").strip()
+    scope_id = str(payload.get("scope_id") or "").strip()
+    owner_user_id = str(payload.get("owner_user_id") or "").strip()
+    organization_id = str(payload.get("organization_id") or "").strip()
+
+    if scope_type or scope_id:
+        if scope_type not in {"user", "organization"}:
+            raise ValueError("knowledge.ready scope_type must be user or organization")
+        if not scope_id or scope_id == ZERO_UUID:
+            raise ValueError("knowledge.ready scope_id is required")
+        try:
+            uuid.UUID(scope_id)
+        except ValueError as exc:
+            raise ValueError("knowledge.ready scope_id must be a UUID") from exc
+        if scope_type == "user":
+            if owner_user_id and owner_user_id != scope_id:
+                raise ValueError("knowledge.ready owner_user_id mismatches scope_id")
+            if audience == "owner_only" and not owner_user_id:
+                raise ValueError("owner_only event is missing owner_user_id")
+        if scope_type == "organization":
+            if organization_id and organization_id != scope_id:
+                raise ValueError(
+                    "knowledge.ready organization_id mismatches scope_id"
+                )
+            if not organization_id:
+                raise ValueError(
+                    "organization event is missing organization_id"
+                )
+        return scope_type, scope_id
+
+    if audience in {"organization_members", "source_conversation_members"}:
+        legacy_scope_id = str(envelope.get("organization_id") or "").strip()
+        if not legacy_scope_id or legacy_scope_id == ZERO_UUID:
+            raise ValueError("organization event is missing organization_id")
+        return "organization", legacy_scope_id
+    if audience == "owner_only":
+        if not owner_user_id or owner_user_id == ZERO_UUID:
+            raise ValueError("owner_only event is missing owner_user_id")
+        return "user", owner_user_id
+    raise ValueError("knowledge.ready scope is not authoritative")
 
 
 def _looks_like_month(value: str) -> bool:
@@ -132,8 +179,7 @@ class PostgresRagMVPRepository:
             raise ValueError("knowledge.ready payload is missing resource identity")
         hash_value = payload_hash(payload)
         audience = str(payload.get("source_audience_policy") or "")
-        scope_type = "organization" if audience in {"organization_members", "source_conversation_members"} else "user"
-        scope_id = str(envelope.get("organization_id") or ZERO_UUID)
+        scope_type, scope_id = _resolve_job_scope(payload, envelope)
         knowledge_base_id = str(payload.get("knowledge_base_id") or ZERO_UUID)
         version = processing_version or settings.processing_version
         with self._connection() as connection:
@@ -183,22 +229,36 @@ class PostgresRagMVPRepository:
                 row = cursor.fetchone()
                 return self._full_job_row(row) if row else None
 
-    def claim_jobs(self, lane: str, *, limit: int = 1, lease_seconds: int | None = None) -> list[dict[str, Any]]:
-        if lane not in {"parse", "index", "memory"}:
-            raise ValueError("lane must be parse, index, or memory")
+    def _lane_stage_clause(self, lane: str) -> str:
+        try:
+            return {
+                "parse": "((status='pending' OR status='retry_wait' OR status='processing') AND (current_stage IS NULL OR current_stage IN ('fetch','parse','chunk')))",
+                "index": "(status IN ('processing','retry_wait') AND current_stage='index')",
+                "memory": "(status='ready' AND current_stage='memory')",
+            }[lane]
+        except KeyError as exc:
+            raise ValueError("lane must be parse, index, or memory") from exc
+
+    def claim_jobs(
+        self,
+        lane: str,
+        *,
+        limit: int = 1,
+        lease_seconds: int | None = None,
+        job_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        stage_clause = self._lane_stage_clause(lane)
         lease = int(lease_seconds or settings.task_lease_seconds)
-        stage_clause = {
-            "parse": "((status='pending' OR status='retry_wait' OR status='processing') AND (current_stage IS NULL OR current_stage IN ('fetch','parse','chunk')))",
-            "index": "(status IN ('processing','retry_wait') AND current_stage='index')",
-            "memory": "(status='ready' AND current_stage='memory')",
-        }[lane]
         owner = f"{settings.service_name}:{lane}:{uuid.uuid4().hex[:12]}"
+        job_clause = "AND id=%s::uuid" if job_id else ""
+        job_params: tuple[Any, ...] = (job_id,) if job_id else ()
         with self._connection() as connection:
             with connection.cursor() as cursor:
                 cursor.execute(
                     f"""WITH candidates AS (
                           SELECT id FROM {self.schema}.processing_jobs
                           WHERE {stage_clause}
+                            {job_clause}
                             AND next_retry_at<=CURRENT_TIMESTAMP
                             AND (lease_until IS NULL OR lease_until<CURRENT_TIMESTAMP)
                           ORDER BY created_at
@@ -219,7 +279,39 @@ class PostgresRagMVPRepository:
                                   j.knowledge_base_id::text,j.scope_type,j.scope_id::text,
                                   j.source_conversation_id::text,j.source_audience_policy,
                                   j.content_version,j.processing_version,j.acl_version,j.last_error""",
-                    (limit, owner, lease, "fetch" if lane == "parse" else lane),
+                    (
+                        *job_params,
+                        limit,
+                        owner,
+                        lease,
+                        "fetch" if lane == "parse" else lane,
+                    ),
+                )
+                return [self._full_job_row(row) for row in cursor.fetchall()]
+
+    def list_recoverable_jobs(
+        self,
+        lane: str,
+        *,
+        limit: int = 1,
+    ) -> list[dict[str, Any]]:
+        stage_clause = self._lane_stage_clause(lane)
+        with self._connection() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    f"""SELECT id::text,status,current_stage,lease_owner,lease_until,lease_epoch,
+                               retry_count,next_retry_at,parse_status,source_event_id::text,
+                               knowledge_item_id::text,resource_type,resource_id::text,
+                               knowledge_base_id::text,scope_type,scope_id::text,
+                               source_conversation_id::text,source_audience_policy,
+                               content_version,processing_version,acl_version,last_error
+                        FROM {self.schema}.processing_jobs
+                        WHERE {stage_clause}
+                          AND next_retry_at<=CURRENT_TIMESTAMP
+                          AND (lease_until IS NULL OR lease_until<CURRENT_TIMESTAMP)
+                        ORDER BY created_at
+                        LIMIT %s""",
+                    (max(1, limit),),
                 )
                 return [self._full_job_row(row) for row in cursor.fetchall()]
 
@@ -338,8 +430,9 @@ class PostgresRagMVPRepository:
     ) -> bool:
         allowed = {
             "knowledge_base_id", "scope_type", "scope_id", "source_conversation_id",
-            "source_audience_policy", "status", "current_stage", "retry_count",
-            "next_retry_at", "parse_status", "last_error", "started_at", "finished_at",
+            "source_audience_policy", "status", "current_stage", "lease_owner",
+            "lease_until", "retry_count", "next_retry_at", "parse_status",
+            "last_error", "started_at", "finished_at",
         }
         values = [(key, value) for key, value in fields.items() if key in allowed]
         assignments = []
@@ -378,6 +471,8 @@ class PostgresRagMVPRepository:
         self,
         job_id: str,
         *,
+        lease_owner: str | None = None,
+        lease_epoch: int | None = None,
         lane: str,
         stage: str,
         status: str,
@@ -388,6 +483,14 @@ class PostgresRagMVPRepository:
     ) -> str:
         with self._connection() as connection:
             with connection.cursor() as cursor:
+                if lease_owner is not None and lease_epoch is not None:
+                    cursor.execute(
+                        f"""SELECT 1 FROM {self.schema}.processing_jobs
+                            WHERE id=%s::uuid AND lease_owner=%s AND lease_epoch=%s""",
+                        (job_id, lease_owner, int(lease_epoch)),
+                    )
+                    if not cursor.fetchone():
+                        raise RuntimeError("lease lost")
                 cursor.execute(
                     f"""SELECT COALESCE(MAX(attempt),0)+1 FROM {self.schema}.processing_job_attempts
                         WHERE job_id=%s::uuid AND stage=%s""",
@@ -396,13 +499,16 @@ class PostgresRagMVPRepository:
                 attempt = int(cursor.fetchone()[0])
                 cursor.execute(
                     f"""INSERT INTO {self.schema}.processing_job_attempts
-                    (job_id,lane,stage,attempt,status,retryable,error_code,error_message,metrics,finished_at)
+                    (job_id,lane,stage,attempt,status,retryable,error_code,error_message,metrics,
+                     lease_owner,lease_epoch,finished_at)
                     VALUES (%s::uuid,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,
+                            %s,%s,
                             CASE WHEN %s='running' THEN NULL ELSE CURRENT_TIMESTAMP END)
                     RETURNING id::text""",
                     (
                         job_id, lane, stage, attempt, status, retryable, error_code,
-                        (error_message or "")[:2000] or None, _as_json(metrics), status,
+                        (error_message or "")[:2000] or None, _as_json(metrics),
+                        lease_owner, lease_epoch, status,
                     ),
                 )
                 return str(cursor.fetchone()[0])
@@ -1718,14 +1824,14 @@ class InMemoryRagMVPRepository:
                 self.events[event_id] = digest
                 return dict(item)
         audience = str(payload.get("source_audience_policy") or "")
-        scope_type = "organization" if audience in {"organization_members", "source_conversation_members"} else "user"
+        scope_type, scope_id = _resolve_job_scope(payload, envelope)
         job_id = new_uuid()
         value = {
             "id": job_id, "source_event_id": event_id, "payload_hash": digest,
             "job_type": "full_process", "knowledge_item_id": resource_key[0],
             "resource_type": resource_key[1], "resource_id": resource_key[2],
             "knowledge_base_id": str(payload.get("knowledge_base_id") or ZERO_UUID),
-            "scope_type": scope_type, "scope_id": str(envelope.get("organization_id") or ZERO_UUID),
+            "scope_type": scope_type, "scope_id": scope_id,
             "source_conversation_id": payload.get("source_conversation_id"),
             "source_audience_policy": audience or None, "content_version": resource_key[3],
             "processing_version": processing_version or settings.processing_version,
@@ -1746,7 +1852,14 @@ class InMemoryRagMVPRepository:
             return dict(value) if value else None
         return None
 
-    def claim_jobs(self, lane: str, *, limit: int = 1, lease_seconds: int | None = None) -> list[dict[str, Any]]:
+    def claim_jobs(
+        self,
+        lane: str,
+        *,
+        limit: int = 1,
+        lease_seconds: int | None = None,
+        job_id: str | None = None,
+    ) -> list[dict[str, Any]]:
         def eligible(item: dict[str, Any]) -> bool:
             if (
                 item["status"] in {"pending", "retry_wait", "processing"}
@@ -1763,6 +1876,8 @@ class InMemoryRagMVPRepository:
         for item in self.jobs.values():
             if len(output) >= limit:
                 break
+            if job_id and item["id"] != job_id:
+                continue
             if not eligible(item):
                 continue
             if item.get("lease_until") and item["lease_until"] > datetime.now(timezone.utc):
@@ -1777,6 +1892,41 @@ class InMemoryRagMVPRepository:
             item["lease_owner"] = f"{settings.service_name}:{lane}"
             item["lease_epoch"] = int(item.get("lease_epoch") or 0) + 1
             item["lease_until"] = datetime.now(timezone.utc) + timedelta(seconds=lease_seconds or settings.task_lease_seconds)
+            output.append(dict(item))
+        return output
+
+    def list_recoverable_jobs(
+        self,
+        lane: str,
+        *,
+        limit: int = 1,
+    ) -> list[dict[str, Any]]:
+        now = datetime.now(timezone.utc)
+        output = []
+        for item in self.jobs.values():
+            if len(output) >= limit:
+                break
+            if lane == "parse":
+                eligible = (
+                    item["status"] in {"pending", "retry_wait", "processing"}
+                    and item.get("current_stage") in {None, "fetch", "parse", "chunk"}
+                )
+            elif lane == "index":
+                eligible = (
+                    item["status"] in {"processing", "retry_wait"}
+                    and item.get("current_stage") == "index"
+                )
+            else:
+                eligible = (
+                    item["status"] == "ready"
+                    and item.get("current_stage") == "memory"
+                )
+            if not eligible:
+                continue
+            if item.get("lease_until") and item["lease_until"] > now:
+                continue
+            if item.get("next_retry_at") and item["next_retry_at"] > now:
+                continue
             output.append(dict(item))
         return output
 
@@ -1856,8 +2006,30 @@ class InMemoryRagMVPRepository:
             fields={**fields, "status": "failed"},
         )
 
-    def add_attempt(self, job_id: str, **fields: Any) -> str:
+    def add_attempt(
+        self,
+        job_id: str,
+        *,
+        lease_owner: str | None = None,
+        lease_epoch: int | None = None,
+        **fields: Any,
+    ) -> str:
+        job = self.jobs.get(job_id)
+        if (
+            lease_owner is not None
+            and lease_epoch is not None
+            and (
+                not job
+                or job.get("lease_owner") != lease_owner
+                or int(job.get("lease_epoch") or 0) != int(lease_epoch)
+            )
+        ):
+            raise RuntimeError("lease lost")
         value = {"id": new_uuid(), "job_id": job_id, **fields}
+        if lease_owner is not None:
+            value["lease_owner"] = lease_owner
+        if lease_epoch is not None:
+            value["lease_epoch"] = int(lease_epoch)
         self.attempts.append(value)
         return value["id"]
 
