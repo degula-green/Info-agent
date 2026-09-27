@@ -183,6 +183,65 @@ class RagChunkIndex:
             output.extend(_results(response))
         return _dedupe_display_protected(output)
 
+    def search_neighbors(
+        self,
+        request: SearchRequest,
+        anchors: list[SearchResult],
+        *,
+        protected_object_keys: tuple[str, ...] = (),
+        radius: int = 1,
+    ) -> list[SearchResult]:
+        if radius < 1:
+            return []
+        output: list[SearchResult] = []
+        seen: set[str] = set()
+        for anchor in anchors:
+            source = anchor.source
+            if source.get("resource_type") != "attachment":
+                continue
+            chunk_index = _int_or_none(source.get("chunk_index"))
+            knowledge_item_id = _text_or_none(source.get("knowledge_item_id"))
+            content_version = _int_or_none(source.get("content_version"))
+            content_variant = _text_or_none(source.get("content_variant")) or "display"
+            if chunk_index is None or knowledge_item_id is None or content_version is None:
+                continue
+            neighbor_indexes = list(range(max(0, chunk_index - radius), chunk_index + radius + 1))
+            neighbor_indexes = [value for value in neighbor_indexes if value != chunk_index]
+            if not neighbor_indexes:
+                continue
+            protected = content_variant == "protected"
+            if protected and (not request.include_protected or not protected_object_keys):
+                continue
+            index = (
+                settings.elasticsearch_protected_read_index
+                if protected
+                else settings.elasticsearch_display_read_index
+            )
+            filters = _filters(
+                request,
+                protected_object_keys=protected_object_keys if protected else (),
+            )
+            filters.extend([
+                {"term": {"knowledge_item_id": knowledge_item_id}},
+                {"term": {"content_version": content_version}},
+                {"term": {"content_variant": content_variant}},
+                {"terms": {"chunk_index": neighbor_indexes}},
+            ])
+            query_key = f"{index}:{knowledge_item_id}:{content_version}:{content_variant}:{chunk_index}"
+            if query_key in seen:
+                continue
+            seen.add(query_key)
+            response = self._search(
+                index=index,
+                query={"bool": {"filter": filters}},
+                size=len(neighbor_indexes),
+            )
+            output.extend(_results(response))
+        unique: dict[str, SearchResult] = {}
+        for result in output:
+            unique[result.chunk_id] = result
+        return list(unique.values())
+
     def _search(self, **kwargs: Any) -> Any:
         try:
             return self.client.search(
@@ -305,6 +364,19 @@ def _response_body(response: Any) -> dict[str, Any]:
 def _not_found(exc: Exception) -> bool:
     text = str(exc).lower()
     return "not_found" in text or "index_not_found" in text
+
+
+def _int_or_none(value: Any) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _text_or_none(value: Any) -> str | None:
+    if value is None or not str(value).strip():
+        return None
+    return str(value).strip()
 
 
 def build_client() -> Any:

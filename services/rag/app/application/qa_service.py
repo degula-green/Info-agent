@@ -21,6 +21,9 @@ class UnsupportedConversationOperation(RuntimeError):
     pass
 
 
+INSUFFICIENT_CONTEXT_ANSWER = "未找到足够相关的资料，暂时无法回答。"
+
+
 class QAService:
     def __init__(
         self,
@@ -112,7 +115,11 @@ class QAService:
         started = time.perf_counter()
         try:
             response = self.retrieval_service.search(request)
-            answer = self.answer_provider.generate(request.query, response.results)
+            answer = (
+                self.answer_provider.generate(request.query, response.results)
+                if response.results
+                else INSUFFICIENT_CONTEXT_ANSWER
+            )
             citations = _citations(response.results)
             self.repository.update_qa_message(
                 assistant_message_id,
@@ -171,13 +178,17 @@ class QAService:
             citations = _citations(response.results)
             for citation in citations:
                 yield ("citation", {"citation": citation})
-            for delta in self.answer_provider.generate_stream(
-                request.query,
-                response.results,
-            ):
-                if delta:
-                    tokens.append(delta)
-                    yield ("token", {"delta": delta})
+            if response.results:
+                for delta in self.answer_provider.generate_stream(
+                    request.query,
+                    response.results,
+                ):
+                    if delta:
+                        tokens.append(delta)
+                        yield ("token", {"delta": delta})
+            else:
+                tokens.append(INSUFFICIENT_CONTEXT_ANSWER)
+                yield ("token", {"delta": INSUFFICIENT_CONTEXT_ANSWER})
             answer = "".join(tokens)
             self.repository.update_qa_message(
                 assistant_message_id,
@@ -272,9 +283,56 @@ class QAService:
 
 def _citations(results: list[SearchResult]) -> list[dict[str, Any]]:
     return [
-        {"rank": index, **_legacy_item(result)}
+        _citation(result, index)
         for index, result in enumerate(results, start=1)
     ]
+
+
+def _citation(result: SearchResult, rank: int) -> dict[str, Any]:
+    item = _legacy_item(result)
+    resource_type = str(item.get("resource_type") or "message")
+    is_document = resource_type == "attachment"
+    message_id = (
+        item.get("message_id")
+        or item.get("source_message_id")
+        or (item.get("resource_id") if not is_document else None)
+    )
+    attachment_id = (
+        item.get("attachment_id")
+        or item.get("document_id")
+        or item.get("resource_id")
+        if is_document
+        else None
+    )
+    knowledge_item_id = item.get("knowledge_item_id")
+    conversation_id = item.get("conversation_id") or item.get("source_conversation_id")
+    citation_id = (
+        f"attachment:{attachment_id}"
+        if attachment_id
+        else f"message:{message_id}"
+        if message_id
+        else f"knowledge:{knowledge_item_id}"
+        if knowledge_item_id
+        else f"chunk:{result.chunk_id}"
+    )
+    return {
+        "rank": rank,
+        "citation_id": citation_id,
+        "type": "document" if is_document else "message",
+        "source_kind": "document" if is_document else "message",
+        "resource_type": resource_type,
+        "resource_id": item.get("resource_id"),
+        "knowledge_item_id": knowledge_item_id,
+        "conversation_id": conversation_id,
+        "message_id": message_id,
+        "attachment_id": attachment_id,
+        "document_id": attachment_id,
+        "platform": item.get("platform") or item.get("source_platform"),
+        "file_name": item.get("file_name"),
+        "title": item.get("title"),
+        "snippet": result.content,
+        "content_variant": item.get("content_variant"),
+    }
 
 
 def _legacy_item(result: SearchResult) -> dict[str, Any]:

@@ -260,11 +260,15 @@ class Settings:
     bm25_top_k: int = _int("RAG_BM25_TOP_K", 24)
     knn_top_k: int = _int("RAG_KNN_TOP_K", 24)
     knn_num_candidates: int = _int("RAG_KNN_NUM_CANDIDATES", 96)
+    anchors_per_item: int = _int("RAG_ANCHORS_PER_ITEM", 2)
+    neighbor_radius: int = _int("RAG_NEIGHBOR_RADIUS", 1)
+    qa_vector_min_score: float = _float("RAG_QA_VECTOR_MIN_SCORE", 0.72)
+    qa_bm25_min_score: float = _float("RAG_QA_BM25_MIN_SCORE", 0.0)
     rrf_k: int = _int("RAG_RRF_K", 60)
     rrf_keyword_weight: float = _float("RAG_RRF_KEYWORD_WEIGHT", 0.5)
     rrf_vector_weight: float = _float("RAG_RRF_VECTOR_WEIGHT", 0.5)
     final_top_k: int = _int("RAG_FINAL_TOP_K", 8)
-    max_chunks_per_item: int = _int("RAG_MAX_CHUNKS_PER_ITEM", 2)
+    max_chunks_per_item: int = _int("RAG_MAX_CHUNKS_PER_ITEM", 4)
     # The tree defines a candidate set (branch T) and the unscoped Chunk search
     # always runs alongside it (branch G). These weights are the RRF votes that
     # express "prefer the navigated branch" without ever excluding branch G, so

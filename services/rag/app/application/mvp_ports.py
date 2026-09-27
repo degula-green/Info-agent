@@ -205,6 +205,14 @@ class SearchIndexer(Protocol):
         protected_object_keys: tuple[str, ...] = (),
         size: int | None = None,
     ) -> list[SearchResult]: ...
+    def search_neighbors(
+        self,
+        request: SearchRequest,
+        anchors: list[SearchResult],
+        *,
+        protected_object_keys: tuple[str, ...] = (),
+        radius: int = 1,
+    ) -> list[SearchResult]: ...
 
 
 class AuthorizationGateway(Protocol):

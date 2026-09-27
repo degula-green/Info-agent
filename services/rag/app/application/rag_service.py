@@ -83,32 +83,44 @@ class RAGRetrievalService:
                 degraded.append("embedding_failed")
         global_branches: dict[str, list[SearchResult]] = {}
         try:
-            global_branches["bm25"] = self.indexer.search_bm25(
-                request,
-                protected_object_keys=protected_keys,
+            global_branches["bm25"] = _annotate_branch(
+                "bm25",
+                self.indexer.search_bm25(
+                    request,
+                    protected_object_keys=protected_keys,
+                ),
             )
             if query_vector is not None:
-                global_branches["knn"] = self.indexer.search_knn(
-                    request,
-                    query_vector,
-                    protected_object_keys=protected_keys,
+                global_branches["knn"] = _annotate_branch(
+                    "knn",
+                    self.indexer.search_knn(
+                        request,
+                        query_vector,
+                        protected_object_keys=protected_keys,
+                    ),
                 )
         except Exception as exc:
             raise SearchUnavailable("Elasticsearch retrieval failed") from exc
         branch_branches: dict[str, list[SearchResult]] = {}
         if settings.tree_mode != "off" and branch_keys:
             try:
-                branch_branches["branch_bm25"] = self.indexer.search_bm25(
-                    request,
-                    branch_keys=branch_keys,
-                    protected_object_keys=protected_keys,
-                )
-                if query_vector is not None:
-                    branch_branches["branch_knn"] = self.indexer.search_knn(
+                branch_branches["branch_bm25"] = _annotate_branch(
+                    "bm25",
+                    self.indexer.search_bm25(
                         request,
-                        query_vector,
                         branch_keys=branch_keys,
                         protected_object_keys=protected_keys,
+                    ),
+                )
+                if query_vector is not None:
+                    branch_branches["branch_knn"] = _annotate_branch(
+                        "knn",
+                        self.indexer.search_knn(
+                            request,
+                            query_vector,
+                            branch_keys=branch_keys,
+                            protected_object_keys=protected_keys,
+                        ),
                     )
             except Exception:
                 degraded.append("branch_failed")
@@ -116,6 +128,15 @@ class RAGRetrievalService:
         effective = dict(global_branches)
         if settings.tree_mode == "boost":
             effective.update(branch_branches)
+        raw_global_candidate_count = sum(len(value) for value in global_branches.values())
+        raw_branch_candidate_count = sum(len(value) for value in branch_branches.values())
+        gate_dropped = 0
+        if request.entry == "ai":
+            effective, gate_dropped = filter_qa_anchor_candidates(
+                effective,
+                vector_min_score=settings.qa_vector_min_score,
+                bm25_min_score=settings.qa_bm25_min_score,
+            )
         fused = rrf_fuse(
             effective,
             k=settings.rrf_k,
@@ -127,20 +148,33 @@ class RAGRetrievalService:
             },
         )
         fused = dedupe_logical_positions(fused)
-        max_chunks = settings.max_chunks_per_item if request.entry == "ai" else 1
-        # Different passages from one item share the same authorization
-        # decision. Keep a bounded candidate pool per resource before calling
-        # Core, then authorize every resource that can reach the final result.
-        authorization_candidates = dedupe_by_resource(
+        anchor_candidates = select_anchors(
             fused,
-            limit=max(request.top_k, min(len(fused), request.top_k * 3)),
-            max_per_resource=max_chunks,
+            max_per_resource=max(1, settings.anchors_per_item),
+            limit=max(request.top_k * 3, settings.anchors_per_item),
         )
-        authorized = self._authorize_results(request, authorization_candidates, scope)
-        results = dedupe_by_resource(
-            authorized,
+        authorized_anchors = self._authorize_results(request, anchor_candidates, scope)
+        neighbors: list[SearchResult] = []
+        expandable_anchors = [
+            item for item in authorized_anchors
+            if item.source.get("resource_type") == "attachment"
+        ]
+        if settings.neighbor_radius > 0 and expandable_anchors:
+            try:
+                neighbors = self.indexer.search_neighbors(
+                    request,
+                    expandable_anchors,
+                    protected_object_keys=protected_keys,
+                    radius=settings.neighbor_radius,
+                )
+            except Exception:
+                degraded.append("neighbor_expansion_failed")
+        authorized_neighbors = self._authorize_results(request, neighbors, scope)
+        results = finalize_resource_chunks(
+            authorized_anchors,
+            authorized_neighbors,
             limit=request.top_k,
-            max_per_resource=max_chunks,
+            max_per_resource=max(1, settings.max_chunks_per_item),
         )
         diagnostics = {
             "tree_mode": settings.tree_mode,
@@ -149,10 +183,22 @@ class RAGRetrievalService:
             "scope_truncated": scope.truncated,
             "resolved_entity_count": len(entity_matches),
             "resolved_branch_count": len(branch_keys),
-            "branch_candidate_count": sum(len(value) for value in branch_branches.values()),
-            "global_candidate_count": sum(len(value) for value in global_branches.values()),
-            "authorization_candidate_count": len(authorization_candidates),
+            "branch_candidate_count": raw_branch_candidate_count,
+            "global_candidate_count": raw_global_candidate_count,
+            "score_gate_dropped_count": gate_dropped,
+            "anchor_candidate_count": len(anchor_candidates),
+            "authorization_candidate_count": len(anchor_candidates),
+            "neighbor_candidate_count": len(neighbors),
             "fused_result_count": len(results),
+            "retrieval_settings": {
+                "anchors_per_item": settings.anchors_per_item,
+                "max_chunks_per_item": settings.max_chunks_per_item,
+                "neighbor_radius": settings.neighbor_radius,
+                "qa_vector_min_score": settings.qa_vector_min_score,
+                "qa_bm25_min_score": settings.qa_bm25_min_score,
+                "bm25_top_k": settings.bm25_top_k,
+                "knn_top_k": settings.knn_top_k,
+            },
             "effective_execution_path": (
                 "tree_boost" if settings.tree_mode == "boost" and branch_branches
                 else "tree_shadow" if settings.tree_mode == "shadow"
@@ -270,6 +316,178 @@ def _access_check(result: SearchResult) -> AccessCheck:
     return AccessCheck("knowledge_item", "display", str(source.get("knowledge_item_id") or ""), "view")
 
 
+def _annotate_branch(branch: str, results: list[SearchResult]) -> list[SearchResult]:
+    for rank, result in enumerate(results, start=1):
+        result.rank = rank
+        if branch == "bm25":
+            result.source["bm25_score"] = result.score
+            result.source["bm25_rank"] = rank
+        elif branch == "knn":
+            result.source["vector_score"] = result.score
+            result.source["vector_rank"] = rank
+        matched = {
+            str(value)
+            for value in result.source.get("matched_by", ())
+            if str(value)
+        }
+        matched.add(branch)
+        result.source["matched_by"] = sorted(matched)
+    return results
+
+
+def filter_qa_anchor_candidates(
+    branches: dict[str, list[SearchResult]],
+    *,
+    vector_min_score: float,
+    bm25_min_score: float,
+) -> tuple[dict[str, list[SearchResult]], int]:
+    output: dict[str, list[SearchResult]] = {}
+    dropped = 0
+    for name, results in branches.items():
+        kept: list[SearchResult] = []
+        for result in results:
+            source = result.source
+            bm25_score = _float_or_none(source.get("bm25_score"))
+            vector_score = _float_or_none(source.get("vector_score"))
+            bm25_ok = bm25_score is not None and (
+                bm25_score >= bm25_min_score
+                if bm25_min_score > 0
+                else bm25_score > 0
+            )
+            vector_ok = vector_score is not None and vector_score >= vector_min_score
+            if bm25_ok or vector_ok:
+                kept.append(result)
+            else:
+                dropped += 1
+        if kept:
+            output[name] = kept
+    return output, dropped
+
+
+def select_anchors(
+    results: list[SearchResult],
+    *,
+    max_per_resource: int,
+    limit: int,
+) -> list[SearchResult]:
+    counts: dict[str, int] = {}
+    output: list[SearchResult] = []
+    for result in results:
+        key = _resource_key(result)
+        if counts.get(key, 0) >= max(1, max_per_resource):
+            continue
+        counts[key] = counts.get(key, 0) + 1
+        result.source["retrieval_role"] = "anchor"
+        result.rank = len(output) + 1
+        output.append(result)
+        if len(output) >= max(1, limit):
+            break
+    return output
+
+
+def finalize_resource_chunks(
+    anchors: list[SearchResult],
+    neighbors: list[SearchResult],
+    *,
+    limit: int,
+    max_per_resource: int,
+) -> list[SearchResult]:
+    anchor_order: list[str] = []
+    groups: dict[str, dict[str, list[SearchResult]]] = {}
+    for anchor in anchors:
+        key = _resource_key(anchor)
+        if key not in groups:
+            groups[key] = {"anchors": [], "neighbors": []}
+            anchor_order.append(key)
+        groups[key]["anchors"].append(anchor)
+    for neighbor in neighbors:
+        key = _resource_key(neighbor)
+        if key in groups:
+            groups[key]["neighbors"].append(neighbor)
+
+    output: list[SearchResult] = []
+    for key in anchor_order:
+        group = groups[key]
+        anchor_values = sorted(group["anchors"], key=lambda item: item.rank)
+        anchor_ids = {item.chunk_id for item in anchor_values}
+        selected = {item.chunk_id: item for item in anchor_values}
+        anchor_positions = {
+            _chunk_index(item)
+            for item in anchor_values
+            if _chunk_index(item) is not None
+        }
+        candidates = [
+            item for item in group["neighbors"]
+            if item.chunk_id not in anchor_ids
+        ]
+        candidates.sort(
+            key=lambda item: (
+                min(
+                    (
+                        abs((_chunk_index(item) or 0) - anchor_index)
+                        for anchor_index in anchor_positions
+                    ),
+                    default=10**6,
+                ),
+                _chunk_index(item) if _chunk_index(item) is not None else 10**6,
+                item.chunk_id,
+            )
+        )
+        for neighbor in candidates:
+            if len(selected) >= max(1, max_per_resource):
+                break
+            nearest = min(
+                anchor_values,
+                key=lambda item: abs(
+                    (_chunk_index(item) or 0) - (_chunk_index(neighbor) or 0)
+                ),
+            )
+            neighbor.source["retrieval_role"] = "neighbor"
+            neighbor.source["neighbor_of_chunk_id"] = nearest.chunk_id
+            neighbor.score = nearest.score * 0.1
+            selected[neighbor.chunk_id] = neighbor
+        ordered = sorted(
+            selected.values(),
+            key=lambda item: (
+                _chunk_index(item) if _chunk_index(item) is not None else 10**6,
+                item.chunk_id,
+            ),
+        )
+        output.extend(ordered[: max(1, max_per_resource)])
+        if len(output) >= max(1, limit):
+            break
+    output = output[: max(1, limit)]
+    for rank, result in enumerate(output, start=1):
+        result.rank = rank
+    return output
+
+
+def _resource_key(result: SearchResult) -> str:
+    return str(
+        result.source.get("resource_id")
+        or result.source.get("knowledge_item_id")
+        or result.chunk_id
+    )
+
+
+def _chunk_index(result: SearchResult) -> int | None:
+    return _int_or_none(result.source.get("chunk_index"))
+
+
+def _float_or_none(value: Any) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _int_or_none(value: Any) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def rrf_fuse(
     branches: dict[str, list[SearchResult]],
     *,
@@ -284,6 +502,8 @@ def rrf_fuse(
         for rank, result in enumerate(results, start=1):
             key = result.source.get("logical_position_key") or result.chunk_id
             scores[key] = scores.get(key, 0.0) + weight / (k + rank)
+            if key in values:
+                _merge_provenance(values[key], result)
             if key not in values or (
                 result.source.get("content_variant") == "protected"
                 and key not in protected
@@ -295,9 +515,34 @@ def rrf_fuse(
     output: list[SearchResult] = []
     for rank, (key, result) in enumerate(ordered, start=1):
         result.score = scores[key]
+        result.source["rrf_score"] = result.score
+        result.source["retrieval_role"] = "anchor"
         result.rank = rank
         output.append(result)
     return output
+
+
+def _merge_provenance(target: SearchResult, incoming: SearchResult) -> None:
+    for key in (
+        "bm25_score",
+        "bm25_rank",
+        "vector_score",
+        "vector_rank",
+    ):
+        if key not in target.source and key in incoming.source:
+            target.source[key] = incoming.source[key]
+    matched = {
+        str(value)
+        for value in target.source.get("matched_by", ())
+        if str(value)
+    }
+    matched.update(
+        str(value)
+        for value in incoming.source.get("matched_by", ())
+        if str(value)
+    )
+    if matched:
+        target.source["matched_by"] = sorted(matched)
 
 
 def dedupe_logical_positions(results: list[SearchResult]) -> list[SearchResult]:

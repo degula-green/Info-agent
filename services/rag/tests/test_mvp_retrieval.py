@@ -42,11 +42,16 @@ class _Authorization:
 
 
 class _Indexer:
-    def __init__(self):
+    def __init__(self, *, bm25_results=None, knn_results=None, neighbors=None):
         self.calls = []
+        self.bm25_results = bm25_results
+        self.knn_results = knn_results or []
+        self.neighbors = neighbors or []
 
     def search_bm25(self, request, **kwargs):
         self.calls.append(("bm25", kwargs))
+        if self.bm25_results is not None:
+            return list(self.bm25_results)
         return [SearchResult(
             chunk_id="c1",
             content="项目状态",
@@ -62,7 +67,11 @@ class _Indexer:
 
     def search_knn(self, request, vector, **kwargs):
         self.calls.append(("knn", kwargs))
-        return []
+        return list(self.knn_results)
+
+    def search_neighbors(self, request, anchors, **kwargs):
+        self.calls.append(("neighbors", kwargs))
+        return list(self.neighbors)
 
 
 class RetrievalTests(unittest.TestCase):
@@ -108,6 +117,92 @@ class RetrievalTests(unittest.TestCase):
         protected = SearchResult("p", "protected", score=0.1, source={"logical_position_key": "x", "content_variant": "protected"})
         values = dedupe_logical_positions([display, protected])
         self.assertEqual([item.chunk_id for item in values], ["p"])
+
+    def test_qa_gate_drops_weak_vector_only_candidate(self) -> None:
+        weak = SearchResult(
+            chunk_id="weak",
+            content="weak match",
+            score=0.64,
+            source={
+                "logical_position_key": "weak",
+                "resource_id": "message-1",
+                "knowledge_item_id": "item-weak",
+                "resource_type": "message",
+                "content_variant": "display",
+                "rag_eligible": True,
+            },
+        )
+        service = RAGRetrievalService(
+            repository=InMemoryRagMVPRepository(),
+            indexer=_Indexer(bm25_results=[], knn_results=[weak]),
+            embedding=_Embedding(),
+            authorization=_Authorization(),
+        )
+        response = service.search(SearchRequest(
+            query="weak query",
+            user_id="user-1",
+            scope_type="organization",
+            scope_id="org-1",
+            entry="ai",
+        ))
+        self.assertEqual(response.results, [])
+        self.assertEqual(response.diagnostics["score_gate_dropped_count"], 1)
+
+    def test_qa_expands_neighbor_chunk_from_anchor(self) -> None:
+        anchor = SearchResult(
+            chunk_id="anchor-question",
+            content="作息时间如何安排？",
+            score=0.89,
+            source={
+                "logical_position_key": "anchor",
+                "resource_id": "attachment-1",
+                "knowledge_item_id": "item-attachment",
+                "resource_type": "attachment",
+                "content_variant": "display",
+                "content_version": 1,
+                "chunk_index": 15,
+                "chunk_count": 19,
+                "file_name": "faq.docx",
+                "rag_eligible": True,
+            },
+        )
+        neighbor = SearchResult(
+            chunk_id="neighbor-answer",
+            content="作息安排如下……",
+            score=0,
+            source={
+                "logical_position_key": "neighbor",
+                "resource_id": "attachment-1",
+                "knowledge_item_id": "item-attachment",
+                "resource_type": "attachment",
+                "content_variant": "display",
+                "content_version": 1,
+                "chunk_index": 16,
+                "chunk_count": 19,
+                "file_name": "faq.docx",
+                "rag_eligible": True,
+            },
+        )
+        service = RAGRetrievalService(
+            repository=InMemoryRagMVPRepository(),
+            indexer=_Indexer(bm25_results=[], knn_results=[anchor], neighbors=[neighbor]),
+            embedding=_Embedding(),
+            authorization=_Authorization(),
+        )
+        response = service.search(SearchRequest(
+            query="作息是什么",
+            user_id="user-1",
+            scope_type="organization",
+            scope_id="org-1",
+            entry="ai",
+        ))
+        self.assertEqual([item.chunk_id for item in response.results], [
+            "anchor-question",
+            "neighbor-answer",
+        ])
+        self.assertEqual(response.results[0].source["retrieval_role"], "anchor")
+        self.assertEqual(response.results[1].source["retrieval_role"], "neighbor")
+        self.assertEqual(response.diagnostics["neighbor_candidate_count"], 1)
 
 
 if __name__ == "__main__":

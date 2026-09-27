@@ -26,6 +26,7 @@ class _Retrieval:
                         "knowledge_item_id": "item-1",
                         "resource_type": "message",
                         "resource_id": "message-1",
+                        "source_conversation_id": "conversation-1",
                         "content_variant": "display",
                     },
                 )
@@ -41,6 +42,15 @@ class _Provider:
     def generate_stream(self, question, results):
         yield "a"
         yield "b"
+
+
+class _EmptyRetrieval:
+    def search(self, request: SearchRequest) -> RetrievalResponse:
+        return RetrievalResponse(
+            request_id="request-empty",
+            results=[],
+            diagnostics={"effective_execution_path": "traditional"},
+        )
 
 
 class _FailingProvider(_Provider):
@@ -119,6 +129,26 @@ class QAServiceTests(unittest.TestCase):
         self.assertEqual(events[-1][0], "done")
         self.assertEqual(assistant["content"], "ab")
         self.assertEqual(assistant["status"], "completed")
+        citation = next(payload["citation"] for event, payload in events if event == "citation")
+        self.assertEqual(citation["citation_id"], "message:message-1")
+        self.assertEqual(citation["type"], "message")
+        self.assertEqual(citation["message_id"], "message-1")
+        self.assertEqual(citation["conversation_id"], "conversation-1")
+        self.assertEqual(citation["snippet"], "source")
+
+    def test_empty_retrieval_does_not_call_provider(self) -> None:
+        repository = InMemoryRagMVPRepository()
+        service = QAService(
+            repository=repository,
+            retrieval_service=_EmptyRetrieval(),
+            answer_provider=_FailingProvider(),
+        )
+
+        result = service.answer(_request())
+
+        self.assertEqual(result["answer"], "未找到足够相关的资料，暂时无法回答。")
+        self.assertEqual(result["citations"], [])
+        self.assertEqual(result["items"], [])
 
 
 class EntityReviewServiceTests(unittest.TestCase):
