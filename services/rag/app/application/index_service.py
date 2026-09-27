@@ -73,27 +73,39 @@ class MVPIndexService:
                     [chunk.content for chunk in embedding_chunks]
                 )
             except Exception as exc:
-                self._mark_retryable_failure(
+                retryable = self._mark_retryable_failure(
                     embedding_chunks,
                     failure_stage="embedding",
                     error=str(exc),
                 )
-                raise IndexStageError("EMBEDDING_FAILED", "embedding provider failed", retryable=True) from exc
+                raise IndexStageError(
+                    "EMBEDDING_FAILED",
+                    "embedding provider failed",
+                    retryable=retryable,
+                ) from exc
             if len(vectors) != len(embedding_chunks):
-                self._mark_retryable_failure(
+                retryable = self._mark_retryable_failure(
                     embedding_chunks,
                     failure_stage="embedding",
                     error="embedding provider returned wrong count",
                 )
-                raise IndexStageError("EMBEDDING_COUNT_MISMATCH", "embedding provider returned wrong count")
+                raise IndexStageError(
+                    "EMBEDDING_COUNT_MISMATCH",
+                    "embedding provider returned wrong count",
+                    retryable=retryable,
+                )
             for chunk, vector in zip(embedding_chunks, vectors):
                 if len(vector) != settings.embedding_dims:
-                    self._mark_retryable_failure(
+                    retryable = self._mark_retryable_failure(
                         [chunk],
                         failure_stage="embedding",
                         error="embedding dimension mismatch",
                     )
-                    raise IndexStageError("EMBEDDING_DIMENSION_MISMATCH", "embedding dimension mismatch")
+                    raise IndexStageError(
+                        "EMBEDDING_DIMENSION_MISMATCH",
+                        "embedding dimension mismatch",
+                        retryable=retryable,
+                    )
                 chunk.embedding = vector
                 chunk.embedding_model = self.embedding.model
                 chunk.embedding_dimensions = self.embedding.dimensions
@@ -130,12 +142,16 @@ class MVPIndexService:
         try:
             self.indexer.index_chunks(indexable)
         except Exception as exc:
-            self._mark_retryable_failure(
+            retryable = self._mark_retryable_failure(
                 indexable,
                 failure_stage="indexing",
                 error=str(exc),
             )
-            raise IndexStageError("ES_INDEX_FAILED", "Elasticsearch indexing failed") from exc
+            raise IndexStageError(
+                "ES_INDEX_FAILED",
+                "Elasticsearch indexing failed",
+                retryable=retryable,
+            ) from exc
         self.repository.update_projection_status(
             [chunk.chunk_id for chunk in indexable],
             status="ready",
@@ -201,7 +217,7 @@ class MVPIndexService:
         *,
         failure_stage: str,
         error: str,
-    ) -> None:
+    ) -> bool:
         max_retries = max(1, settings.index_max_retries)
         retryable_ids: list[str] = []
         terminal_ids: list[str] = []
@@ -236,3 +252,4 @@ class MVPIndexService:
                 error=error,
                 increment_retry=True,
             )
+        return bool(retryable_ids)

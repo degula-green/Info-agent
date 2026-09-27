@@ -145,6 +145,33 @@ class ProjectionRetryTests(unittest.TestCase):
         self.assertEqual(projection["status"], "retry_wait")
         self.assertEqual(projection["failure_stage"], "embedding")
 
+    def test_es_retry_exhaustion_fails_projection_and_job_stage(self) -> None:
+        indexer = _Indexer(failures=settings.index_max_retries)
+        service = MVPIndexService(
+            repository=self.repository,
+            indexer=indexer,
+            embedding=_Embedding(),
+        )
+        last_error: IndexStageError | None = None
+        for _ in range(settings.index_max_retries):
+            try:
+                service.process(_job(self.context))
+            except IndexStageError as exc:
+                last_error = exc
+            else:
+                self.fail("projection retry exhaustion unexpectedly succeeded")
+            if self.repository.projections:
+                self.repository.projections[0]["next_retry_at"] = datetime.now(
+                    timezone.utc
+                )
+        projection = self.repository.list_projection_records(
+            knowledge_item_id=self.context.knowledge_item_id,
+            content_version=self.context.content_version,
+        )[0]
+        self.assertIsNotNone(last_error)
+        self.assertFalse(last_error.retryable)
+        self.assertEqual(projection["status"], "failed")
+
     def test_metadata_only_requires_explicit_parse_status(self) -> None:
         repository = InMemoryRagMVPRepository()
         job = _job(self.context)
