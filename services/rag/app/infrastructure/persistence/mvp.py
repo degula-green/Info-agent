@@ -2395,12 +2395,12 @@ class InMemoryRagMVPRepository:
 
     def review_candidate(self, **value: Any) -> dict[str, Any]:
         candidate = self.candidates[value["candidate_id"]]
-        if value.get("expected_status") and candidate["status"] != value["expected_status"]:
-            raise ValueError("candidate status changed")
         key = (value["candidate_id"], value["review_request_id"])
         existing = next((item for item in self.reviews if (item["candidate_id"], item["review_request_id"]) == key), None)
         if existing:
             return {**existing, "idempotent": True}
+        if value.get("expected_status") and candidate["status"] != value["expected_status"]:
+            raise ValueError("candidate status changed")
         resolved = None
         version = None
         if value["action"] == "promote":

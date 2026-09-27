@@ -3,7 +3,8 @@ from __future__ import annotations
 from typing import Any
 
 from app.config import settings
-from app.infrastructure.http import HttpClient, IntegrationError, join_url, with_query
+from app.infrastructure.http import HttpClient, IntegrationError, with_query
+from app.infrastructure.module2.urls import knowledge_api_url
 
 
 class KnowledgeSourceUnavailable(RuntimeError):
@@ -41,7 +42,7 @@ class Module2KnowledgeClient:
             value = self.http.request(
                 "GET",
                 with_query(
-                    join_url(self.base_url, path),
+                    knowledge_api_url(self.base_url, path),
                     content_version=content_version,
                     acl_version=acl_version,
                     content_variant=content_variant,

@@ -76,7 +76,7 @@ class CrossServiceIntegrationTests(unittest.TestCase):
                         "sender_external_id": f"owner-{ids['owner']}",
                         "sender_name": "Integration Owner",
                         "message_type": "text",
-                        "content": "pipeline marker for rag mvp",
+                        "content": "password=private pipeline marker for rag mvp",
                         "sent_at": "2026-09-27T00:00:00Z",
                         "cursor": "1",
                     }],
@@ -85,7 +85,7 @@ class CrossServiceIntegrationTests(unittest.TestCase):
                         "sender_external_id": f"owner-{ids['owner']}",
                         "sender_name": "Integration Owner",
                         "message_type": "text",
-                        "content": "pipeline marker for rag mvp",
+                        "content": "password=private pipeline marker for rag mvp",
                         "sent_at": "2026-09-27T00:00:00Z",
                         "cursor": "1",
                     }]}],
@@ -134,6 +134,27 @@ class CrossServiceIntegrationTests(unittest.TestCase):
                             )
                             diagnostic["attempts"] = cursor.fetchall()
                 self.fail(f"rag status was {status}: {diagnostic}")
+            with psycopg.connect(settings.database_url) as connection:
+                with connection.cursor() as cursor:
+                    cursor.execute(
+                        """SELECT content_variant,content
+                           FROM rag_mvp.chunks
+                           WHERE knowledge_item_id=%s::uuid
+                           ORDER BY content_variant""",
+                        (item_ids[0],),
+                    )
+                    chunks = dict(cursor.fetchall())
+                    cursor.execute(
+                        """SELECT COUNT(*) FROM knowledge.rag_source_access_audit
+                           WHERE knowledge_item_id=%s::uuid
+                             AND content_variant='original'
+                             AND result='success'""",
+                        (item_ids[0],),
+                    )
+                    audit_count = int(cursor.fetchone()[0])
+            self.assertIn("password=private", chunks.get("protected", ""))
+            self.assertNotIn("password=private", chunks.get("display", ""))
+            self.assertGreaterEqual(audit_count, 1)
             response = _post_json(
                 "http://127.0.0.1:8000/api/v1/search/global",
                 {
@@ -146,6 +167,20 @@ class CrossServiceIntegrationTests(unittest.TestCase):
                 headers={"X-User-ID": ids["owner"]},
             )
             self.assertTrue(any("pipeline marker" in str(item.get("content", "")) for item in response.get("items", [])))
+            try:
+                _post_json(
+                    "http://127.0.0.1:8000/api/v1/search/global",
+                    {
+                        "query": "pipeline marker",
+                        "scope_type": "organization",
+                        "organization_id": str(uuid.uuid4()),
+                    },
+                    token=None,
+                    headers={"X-User-ID": ids["owner"]},
+                )
+                self.fail("non-member organization search unexpectedly succeeded")
+            except AssertionError as exc:
+                self.assertIn("403", str(exc))
         finally:
             if item_ids:
                 index.client.delete_by_query(

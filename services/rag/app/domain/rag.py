@@ -145,7 +145,10 @@ class ResourceContext:
         # Event fields define the processing identity. Knowledge metadata is
         # authoritative for ownership and content, but it must not be able to
         # change the resource identity after the task was created.
-        merged = {**source, **event_payload}
+        # Knowledge metadata is authoritative for content/security fields. The
+        # event remains authoritative for resource identity, and ParseService
+        # verifies that the source identity did not change after task creation.
+        merged = {**event_payload, **source}
         scope_type = str(merged.get("scope_type") or "")
         scope_id = str(merged.get("scope_id") or "")
         if not scope_type or not scope_id:

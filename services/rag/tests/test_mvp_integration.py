@@ -151,6 +151,30 @@ class MVPEndToEndIntegrationTests(unittest.TestCase):
                 [item["role"] for item in conversation["messages"]],
                 ["user", "assistant"],
             )
+            stream_events = list(
+                qa.answer_stream(
+                    SearchRequest(
+                        query="stream integration question",
+                        user_id=user_id,
+                        scope_type="organization",
+                        scope_id=scope_id,
+                    )
+                )
+            )
+            stream_conversation_id = stream_events[0][1]["conversation_id"]
+            stream_conversation = repository.get_qa_conversation(
+                user_id=user_id,
+                conversation_id=stream_conversation_id,
+            )
+            self.assertEqual(stream_events[-1][0], "done")
+            self.assertEqual(
+                [item["role"] for item in stream_conversation["messages"]],
+                ["user", "assistant"],
+            )
+            self.assertEqual(
+                stream_conversation["messages"][-1]["status"],
+                "completed",
+            )
 
             context = ResourceContext.from_event_and_source(
                 {
@@ -240,6 +264,71 @@ class MVPEndToEndIntegrationTests(unittest.TestCase):
                     cursor.execute(
                         "DELETE FROM rag_mvp.resource_snapshots WHERE scope_id=%s::uuid",
                         (scope_id,),
+                    )
+
+    def test_postgres_lease_epoch_blocks_stale_worker(self) -> None:
+        repository = PostgresRagMVPRepository()
+        event_id = str(uuid.uuid4())
+        item_id = str(uuid.uuid4())
+        organization_id = str(uuid.uuid4())
+        try:
+            job = repository.create_or_get_job(
+                {
+                    "event_id": event_id,
+                    "event_type": "knowledge.ready",
+                    "schema_version": 1,
+                    "occurred_at": "2026-09-27T00:00:00Z",
+                    "trace_id": "lease-integration",
+                    "organization_id": organization_id,
+                    "producer": "module-2",
+                    "payload": {
+                        "resource_type": "message",
+                        "resource_id": str(uuid.uuid4()),
+                        "knowledge_item_id": item_id,
+                        "scope_type": "organization",
+                        "scope_id": organization_id,
+                        "organization_id": organization_id,
+                        "source_audience_policy": "organization_members",
+                        "content_version": 1,
+                        "acl_version": 1,
+                        "content_hash": "f" * 64,
+                        "content_access_required": False,
+                    },
+                }
+            )
+            first = repository.claim_jobs(
+                "parse",
+                limit=1,
+                job_id=job["id"],
+            )[0]
+            with repository._connection() as connection:
+                with connection.cursor() as cursor:
+                    cursor.execute(
+                        """UPDATE rag_mvp.processing_jobs
+                           SET lease_until=CURRENT_TIMESTAMP - INTERVAL '1 second'
+                           WHERE id=%s::uuid""",
+                        (job["id"],),
+                    )
+            second = repository.claim_jobs(
+                "parse",
+                limit=1,
+                job_id=job["id"],
+            )[0]
+            self.assertGreater(second["lease_epoch"], first["lease_epoch"])
+            self.assertFalse(
+                repository.update_job_if_owned(
+                    job["id"],
+                    owner=first["lease_owner"],
+                    epoch=first["lease_epoch"],
+                    fields={"status": "failed"},
+                )
+            )
+        finally:
+            with repository._connection() as connection:
+                with connection.cursor() as cursor:
+                    cursor.execute(
+                        "DELETE FROM rag_mvp.processing_jobs WHERE knowledge_item_id=%s::uuid",
+                        (item_id,),
                     )
 
 

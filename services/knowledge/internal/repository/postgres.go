@@ -1192,10 +1192,6 @@ func (s *PostgresStore) IngestMessage(ctx context.Context, input IngestMessageIn
 	}
 	normalizedContent := any(nil)
 	classificationStatus := "pending"
-	if scope == "private" {
-		normalizedContent = nilString(input.Content)
-		classificationStatus = "succeeded"
-	}
 	messageID := uuid.NewString()
 	tag, err := tx.Exec(ctx, `INSERT INTO knowledge.messages (id,conversation_ingestion_id,external_message_id,sender_identity_id,sender_display_name,message_type,normalized_content,content_hash,sent_at,sensitive,classification_status) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,FALSE,$10) ON CONFLICT (conversation_ingestion_id,external_message_id) DO NOTHING`, messageID, conversationID, input.ExternalMessageID, identity, nilString(senderDisplayName), input.MessageType, normalizedContent, input.ContentHash, input.SentAt, classificationStatus)
 	if err != nil {

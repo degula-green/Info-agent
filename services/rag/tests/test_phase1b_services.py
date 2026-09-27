@@ -191,12 +191,13 @@ class EntityReviewServiceTests(unittest.TestCase):
             )
 
     def test_merge_creates_alias_for_target_entity(self) -> None:
+        request_id = "00000000-0000-0000-0000-000000000098"
         result = self.service.review(
             scope_type="organization",
             scope_id=self.scope_id,
             candidate_id=self.candidate_id,
             reviewer_id="00000000-0000-0000-0000-000000000099",
-            review_request_id="00000000-0000-0000-0000-000000000098",
+            review_request_id=request_id,
             idempotency_key=None,
             action="merge",
             expected_status="new",
@@ -214,6 +215,32 @@ class EntityReviewServiceTests(unittest.TestCase):
         self.assertEqual(result["status"], "merged")
         self.assertEqual(len(aliases), 1)
         self.assertEqual(aliases[0]["display_alias"], "青云项目")
+
+        replay = self.service.review(
+            scope_type="organization",
+            scope_id=self.scope_id,
+            candidate_id=self.candidate_id,
+            reviewer_id="00000000-0000-0000-0000-000000000099",
+            review_request_id=request_id,
+            idempotency_key=None,
+            action="merge",
+            expected_status="new",
+            canonical_name=None,
+            domain=None,
+            target_entity_id=self.entity["id"],
+            note=None,
+        )
+        self.assertTrue(replay["idempotent"])
+        self.assertEqual(
+            len(
+                [
+                    alias
+                    for alias in self.repository.aliases
+                    if alias["entity_id"] == self.entity["id"]
+                ]
+            ),
+            1,
+        )
 
 
 if __name__ == "__main__":
