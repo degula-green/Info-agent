@@ -1089,10 +1089,30 @@ class PostgresRagMVPRepository:
                         raise ValueError("merge requires target_entity_id")
                     resolved_entity_id = target_entity_id
                     cursor.execute(
-                        f"SELECT registry_version FROM {self.schema}.entity_registry WHERE id=%s::uuid",
-                        (target_entity_id,),
+                        f"""SELECT registry_version FROM {self.schema}.entity_registry
+                            WHERE id=%s::uuid AND scope_type=%s AND scope_id=%s::uuid""",
+                        (target_entity_id, scope_type, scope_id),
                     )
-                    registry_version = int((cursor.fetchone() or [1])[0])
+                    target = cursor.fetchone()
+                    if not target:
+                        raise LookupError("target entity not found")
+                    registry_version = int(target[0])
+                    cursor.execute(
+                        f"""INSERT INTO {self.schema}.entity_aliases
+                        (entity_id,scope_type,scope_id,domain,display_alias,normalized_alias,source,status)
+                        VALUES (%s::uuid,%s,%s::uuid,%s,%s,%s,'candidate_merge','active')
+                        ON CONFLICT (scope_type,scope_id,domain,normalized_alias) DO UPDATE SET
+                          entity_id=EXCLUDED.entity_id,display_alias=EXCLUDED.display_alias,
+                          source=EXCLUDED.source,status='active',updated_at=CURRENT_TIMESTAMP""",
+                        (
+                            resolved_entity_id,
+                            scope_type,
+                            scope_id,
+                            str(row[3]),
+                            str(row[2]),
+                            candidate_normalized_key,
+                        ),
+                    )
                 result_status = {"promote": "promoted", "merge": "merged", "ignore": "ignored", "defer": "deferred"}[action]
                 cursor.execute(
                     f"""UPDATE {self.schema}.entity_candidates
@@ -1304,7 +1324,8 @@ class PostgresRagMVPRepository:
         with self._connection() as connection:
             with connection.cursor() as cursor:
                 cursor.execute(
-                    f"""SELECT id::text,title,retrieval_mode,knowledge_base_ids,created_at,updated_at
+                    f"""SELECT id::text,title,retrieval_mode,knowledge_base_ids,created_at,updated_at,
+                               scope_type,scope_id::text
                         FROM {self.schema}.qa_conversations
                         WHERE id=%s::uuid AND user_id=%s::uuid AND status='active' AND deleted_at IS NULL""",
                     (conversation_id, user_id),
@@ -1332,6 +1353,8 @@ class PostgresRagMVPRepository:
                     "knowledge_base_ids": row[3] or [],
                     "created_at": row[4].isoformat() if row[4] else None,
                     "updated_at": row[5].isoformat() if row[5] else None,
+                    "scope_type": row[6],
+                    "scope_id": row[7],
                     "messages": messages,
                 }
 
@@ -1389,6 +1412,45 @@ class PostgresRagMVPRepository:
                     (conversation_id,),
                 )
                 return message_id
+
+    def update_qa_message(self, message_id: str, **values: Any) -> bool:
+        allowed = {
+            "content",
+            "citations",
+            "model_name",
+            "prompt_version",
+            "status",
+            "token_usage",
+            "duration_ms",
+            "error_code",
+            "error_stage",
+            "error_class",
+            "error_message",
+            "retryable",
+            "diagnostic_ref",
+        }
+        updates = [(key, value) for key, value in values.items() if key in allowed]
+        if not updates:
+            return False
+        assignments = []
+        params: list[Any] = []
+        for key, value in updates:
+            column = "error_message_safe" if key == "error_message" else key
+            if key in {"citations", "token_usage"}:
+                assignments.append(f"{column}=%s::jsonb")
+                params.append(_as_json(value))
+            else:
+                assignments.append(f"{column}=%s")
+                params.append(value)
+        with self._connection() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    f"""UPDATE {self.schema}.qa_messages
+                        SET {', '.join(assignments)}
+                        WHERE id=%s::uuid""",
+                    (*params, message_id),
+                )
+                return cursor.rowcount == 1
 
     def _ensure_tree_node(
         self,
@@ -1774,20 +1836,22 @@ class InMemoryRagMVPRepository:
     def upsert_entity(
         self,
         *,
-        entity_id: str,
+        entity_id: str | None = None,
         scope_type: str,
         scope_id: str,
         domain: str,
         canonical_name: str,
         normalized_key: str,
         registry_version: int = 1,
-    ) -> None:
+    ) -> dict[str, Any]:
+        entity_id = entity_id or new_uuid()
         value = {
             "id": entity_id, "scope_type": scope_type, "scope_id": scope_id, "domain": domain,
             "canonical_name": canonical_name, "normalized_key": normalized_key, "status": "active",
             "registry_version": registry_version,
         }
         self.entities = [item for item in self.entities if item["id"] != entity_id] + [value]
+        return dict(value)
 
     def upsert_alias(self, **value: Any) -> None:
         self.aliases = [item for item in self.aliases if item["id"] != value["id"]] + [value]
@@ -1944,7 +2008,53 @@ class InMemoryRagMVPRepository:
             )
         elif value["action"] == "merge":
             resolved = value["target_entity_id"]
-            version = next((item["registry_version"] for item in self.entities if item["id"] == resolved), 1)
+            target = next(
+                (
+                    item
+                    for item in self.entities
+                    if item["id"] == resolved
+                    and item["scope_type"] == candidate["scope_type"]
+                    and item["scope_id"] == candidate["scope_id"]
+                ),
+                None,
+            )
+            if not target:
+                raise LookupError("target entity not found")
+            version = target["registry_version"]
+            existing_alias = next(
+                (
+                    item
+                    for item in self.aliases
+                    if item["scope_type"] == candidate["scope_type"]
+                    and item["scope_id"] == candidate["scope_id"]
+                    and item["domain"] == candidate["candidate_domain"]
+                    and item["normalized_alias"] == candidate["normalized_key"]
+                ),
+                None,
+            )
+            if existing_alias:
+                existing_alias.update(
+                    {
+                        "entity_id": resolved,
+                        "display_alias": candidate["candidate_name"],
+                        "source": "candidate_merge",
+                        "status": "active",
+                    }
+                )
+            else:
+                self.aliases.append(
+                    {
+                        "id": new_uuid(),
+                        "entity_id": resolved,
+                        "scope_type": candidate["scope_type"],
+                        "scope_id": candidate["scope_id"],
+                        "domain": candidate["candidate_domain"],
+                        "display_alias": candidate["candidate_name"],
+                        "normalized_alias": candidate["normalized_key"],
+                        "source": "candidate_merge",
+                        "status": "active",
+                    }
+                )
         status = {"promote": "promoted", "merge": "merged", "ignore": "ignored", "defer": "deferred"}[value["action"]]
         candidate["status"] = status
         candidate["resolved_entity_id"] = resolved
@@ -2019,6 +2129,19 @@ class InMemoryRagMVPRepository:
         if conversation:
             conversation["updated_at"] = datetime.now(timezone.utc)
         return message_id
+
+    def update_qa_message(self, message_id: str, **values: Any) -> bool:
+        message = next(
+            (item for item in self.messages if item["id"] == message_id),
+            None,
+        )
+        if not message:
+            return False
+        message.update(values)
+        conversation = self.conversations.get(message["conversation_id"])
+        if conversation:
+            conversation["updated_at"] = datetime.now(timezone.utc)
+        return True
 
     def list_qa_conversations(self, *, user_id: str, page: int, page_size: int) -> tuple[list[dict[str, Any]], int]:
         values = [

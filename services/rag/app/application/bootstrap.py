@@ -5,9 +5,11 @@ from typing import Any
 
 from app.application.callback_service import CallbackLane
 from app.application.branch_refresh_service import BranchRefreshService
+from app.application.entity_review_service import EntityReviewService
 from app.application.index_service import MVPIndexService
 from app.application.memory_service import MemoryCandidateService
 from app.application.parse_service import MVPParseService
+from app.application.qa_service import QAService
 from app.application.runtime import MVPWorkerRuntime
 from app.application.rag_service import RAGRetrievalService
 from app.config import settings
@@ -19,6 +21,7 @@ from app.infrastructure.persistence.mvp import (
     PostgresRagMVPRepository,
 )
 from app.infrastructure.rag_elasticsearch import RagChunkIndex
+from app.infrastructure.qa import OpenAICompatibleAnswerProvider
 from app.infrastructure.service1.rag_authorization import (
     AllowAllAuthorizationGateway,
     RagAuthorizationClient,
@@ -33,6 +36,8 @@ class ApplicationContainer:
     embedding: EmbeddingClient
     authorization: Any
     retrieval_service: RAGRetrievalService
+    qa_service: QAService
+    entity_review_service: EntityReviewService
 
     def close(self) -> None:
         close = getattr(self.repository, "close", None)
@@ -68,12 +73,20 @@ def build_container() -> ApplicationContainer:
         embedding=embedding,
         authorization=authorization,
     )
+    qa_service = QAService(
+        repository=repository,
+        retrieval_service=retrieval,
+        answer_provider=OpenAICompatibleAnswerProvider(),
+    )
+    entity_review_service = EntityReviewService(repository=repository)
     return ApplicationContainer(
         repository=repository,
         indexer=indexer,
         embedding=embedding,
         authorization=authorization,
         retrieval_service=retrieval,
+        qa_service=qa_service,
+        entity_review_service=entity_review_service,
     )
 
 

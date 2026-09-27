@@ -13,10 +13,15 @@ from app.application.rag_service import (
     RetrievalResponse,
     SearchUnavailable,
 )
+from app.application.qa_service import (
+    ConversationNotFound,
+    ConversationScopeMismatch,
+    QAService,
+)
 from app.config import settings
-from app.dependencies import get_retrieval_service
+from app.dependencies import get_qa_service, get_retrieval_service
 from app.domain.rag import SearchRequest
-from app.infrastructure.qa import OpenAICompatibleAnswerProvider, QAUnavailable
+from app.infrastructure.qa import QAUnavailable
 from app.schemas.search import (
     AIDocumentBody,
     QAConversationBody,
@@ -131,7 +136,7 @@ def ai_documents(
     body: AIDocumentBody,
     x_user_id: str | None = Header(default=None),
     x_organization_id: str | None = Header(default=None),
-    service: RAGRetrievalService = Depends(get_retrieval_service),
+    service: QAService = Depends(get_qa_service),
 ) -> dict[str, object]:
     request = _request(
         body,
@@ -140,18 +145,14 @@ def ai_documents(
         header_organization_id=x_organization_id,
     )
     try:
-        response = service.search(request)
-        provider = OpenAICompatibleAnswerProvider()
-        answer = provider.generate(request.query, response.results)
-        return {
-            **_search_response(response),
-            "answer": answer,
-            "retrieval_mode": request.qa_mode,
-            "execution_path": response.diagnostics["effective_execution_path"],
-        }
+        return service.answer(request)
     except SearchUnavailable as exc:
         raise HTTPException(status_code=503, detail="search_unavailable") from exc
-    except QAUnavailable as exc:
+    except (QAUnavailable, ConversationNotFound, ConversationScopeMismatch) as exc:
+        if isinstance(exc, ConversationNotFound):
+            raise HTTPException(status_code=404, detail="conversation_not_found") from exc
+        if isinstance(exc, ConversationScopeMismatch):
+            raise HTTPException(status_code=403, detail="forbidden") from exc
         raise HTTPException(status_code=503, detail="qa_unavailable") from exc
     except AuthorizationUnavailable as exc:
         raise HTTPException(status_code=503, detail="authz_unavailable") from exc
@@ -162,7 +163,7 @@ def ai_documents_stream(
     body: AIDocumentBody,
     x_user_id: str | None = Header(default=None),
     x_organization_id: str | None = Header(default=None),
-    service: RAGRetrievalService = Depends(get_retrieval_service),
+    service: QAService = Depends(get_qa_service),
 ) -> StreamingResponse:
     request = _request(
         body,
@@ -173,21 +174,8 @@ def ai_documents_stream(
 
     def events() -> Iterator[str]:
         try:
-            response = service.search(request)
-            yield _sse("meta", {"request_id": response.request_id})
-            for index, result in enumerate(response.results, start=1):
-                yield _sse("citation", {"citation": {"rank": index, **_legacy_item(result)}})
-            provider = OpenAICompatibleAnswerProvider()
-            tokens: list[str] = []
-            for delta in provider.generate_stream(request.query, response.results):
-                if delta:
-                    tokens.append(delta)
-                    yield _sse("token", {"delta": delta})
-            yield _sse("done", {
-                "answer": "".join(tokens),
-                "diagnostics": response.diagnostics,
-                "execution_path": response.diagnostics["effective_execution_path"],
-            })
+            for event, payload in service.answer_stream(request):
+                yield _sse(event, payload)
         except Exception as exc:
             yield _sse("error", {"code": "qa_unavailable", "message": str(exc)})
             yield _sse("done", {"answer": None, "diagnostics": {}})
@@ -204,11 +192,11 @@ def list_qa_conversations(
     x_user_id: str | None = Header(default=None),
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=20, ge=1, le=100),
-    service: RAGRetrievalService = Depends(get_retrieval_service),
+    service: QAService = Depends(get_qa_service),
 ) -> dict[str, Any]:
     user_id = _header_user(x_user_id)
     try:
-        items, total = service.repository.list_qa_conversations(
+        items, total = service.list_conversations(
             user_id=user_id,
             page=page,
             page_size=page_size,
@@ -223,7 +211,7 @@ def create_qa_conversation(
     body: QAConversationBody | None = None,
     x_user_id: str | None = Header(default=None),
     x_organization_id: str | None = Header(default=None),
-    service: RAGRetrievalService = Depends(get_retrieval_service),
+    service: QAService = Depends(get_qa_service),
 ) -> dict[str, Any]:
     user_id = _header_user(x_user_id)
     value = body or QAConversationBody()
@@ -238,7 +226,7 @@ def create_qa_conversation(
     if not scope_id:
         raise HTTPException(status_code=422, detail="invalid_scope")
     try:
-        conversation_id = service.repository.create_qa_conversation(
+        conversation_id = service.create_conversation(
             user_id=user_id,
             scope_type=scope_type,
             scope_id=scope_id,
@@ -261,10 +249,10 @@ def create_qa_conversation(
 def get_qa_conversation(
     conversation_id: str,
     x_user_id: str | None = Header(default=None),
-    service: RAGRetrievalService = Depends(get_retrieval_service),
+    service: QAService = Depends(get_qa_service),
 ) -> dict[str, Any]:
     try:
-        value = service.repository.get_qa_conversation(
+        value = service.get_conversation(
             user_id=_header_user(x_user_id),
             conversation_id=conversation_id,
         )
@@ -280,10 +268,10 @@ def rename_qa_conversation(
     conversation_id: str,
     body: QATitleBody,
     x_user_id: str | None = Header(default=None),
-    service: RAGRetrievalService = Depends(get_retrieval_service),
+    service: QAService = Depends(get_qa_service),
 ) -> dict[str, Any]:
     try:
-        renamed = service.repository.rename_qa_conversation(
+        renamed = service.rename_conversation(
             user_id=_header_user(x_user_id),
             conversation_id=conversation_id,
             title=body.title,
@@ -299,10 +287,10 @@ def rename_qa_conversation(
 def delete_qa_conversation(
     conversation_id: str,
     x_user_id: str | None = Header(default=None),
-    service: RAGRetrievalService = Depends(get_retrieval_service),
+    service: QAService = Depends(get_qa_service),
 ) -> dict[str, str]:
     try:
-        deleted = service.repository.delete_qa_conversation(
+        deleted = service.delete_conversation(
             user_id=_header_user(x_user_id),
             conversation_id=conversation_id,
         )

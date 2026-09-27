@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-import uuid
 from typing import Any
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from app.application.bootstrap import ApplicationContainer
+from app.application.entity_review_service import InvalidReviewIdempotency
 from app.application.rag_service import RAGRetrievalService
 from app.dependencies import get_container
 from app.domain.rag import DOMAINS, normalized_text
@@ -187,14 +187,14 @@ def review_candidate(
         scope_type=scope_type,
         service=container.retrieval_service,
     )
-    request_id = body.review_request_id or idempotency_key or str(uuid.uuid4())
     try:
-        return container.repository.review_candidate(
+        return container.entity_review_service.review(
             scope_type=scope_type,
             scope_id=scope_id,
             candidate_id=candidate_id,
             reviewer_id=user_id,
-            review_request_id=request_id,
+            review_request_id=body.review_request_id,
+            idempotency_key=idempotency_key,
             action=body.action,
             expected_status=body.expected_status,
             canonical_name=body.canonical_name,
@@ -204,6 +204,8 @@ def review_candidate(
         )
     except LookupError as exc:
         raise HTTPException(status_code=404, detail="candidate_not_found") from exc
+    except InvalidReviewIdempotency as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
