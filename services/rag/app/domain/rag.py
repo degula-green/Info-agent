@@ -432,6 +432,7 @@ class SearchRequest:
     occurred_before: str | None = None
     qa_mode: str = "quick"
     conversation_id: str | None = None
+    source_conversation_id: str | None = None
     branch_keys: tuple[str, ...] = ()
 
     @property

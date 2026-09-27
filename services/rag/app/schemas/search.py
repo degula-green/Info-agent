@@ -14,6 +14,7 @@ class SearchBody(BaseModel):
     occurred_after: str | None = None
     occurred_before: str | None = None
     conversation_id: str | None = None
+    source_conversation_id: str | None = None
     # Controller-only legacy fields. They are normalized before domain/storage.
     organization_id: str | None = None
     user_id: str | None = None

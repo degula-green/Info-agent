@@ -81,6 +81,7 @@ def _request(
         occurred_before=body.occurred_before,
         qa_mode=getattr(body, "mode", "quick"),
         conversation_id=getattr(body, "conversation_id", None),
+        source_conversation_id=body.source_conversation_id,
     )
 
 

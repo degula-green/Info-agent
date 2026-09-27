@@ -290,8 +290,8 @@ def _filters(
         output.append({"range": {"sent_at": {"gte": request.occurred_after}}})
     if request.occurred_before:
         output.append({"range": {"sent_at": {"lte": request.occurred_before}}})
-    if request.conversation_id:
-        output.append({"term": {"source_conversation_id": request.conversation_id}})
+    if request.source_conversation_id:
+        output.append({"term": {"source_conversation_id": request.source_conversation_id}})
     if branch_keys:
         should: list[dict[str, Any]] = []
         exact: list[str] = []

@@ -12,6 +12,7 @@ from app.domain.rag import (
     SearchRequest,
     SearchResult,
 )
+from app.infrastructure.rag_elasticsearch import _filters
 from app.infrastructure.persistence.mvp import InMemoryRagMVPRepository
 
 
@@ -117,6 +118,24 @@ class RetrievalTests(unittest.TestCase):
         protected = SearchResult("p", "protected", score=0.1, source={"logical_position_key": "x", "content_variant": "protected"})
         values = dedupe_logical_positions([display, protected])
         self.assertEqual([item.chunk_id for item in values], ["p"])
+
+    def test_qa_conversation_id_does_not_filter_source_conversation(self) -> None:
+        qa_request = SearchRequest(
+            query="follow-up",
+            user_id="user-1",
+            scope_type="organization",
+            scope_id="org-1",
+            conversation_id="qa-conversation-1",
+        )
+        self.assertNotIn(
+            {"term": {"source_conversation_id": "qa-conversation-1"}},
+            _filters(qa_request),
+        )
+        source_request = replace(qa_request, source_conversation_id="source-chat-1")
+        self.assertIn(
+            {"term": {"source_conversation_id": "source-chat-1"}},
+            _filters(source_request),
+        )
 
     def test_qa_gate_drops_weak_vector_only_candidate(self) -> None:
         weak = SearchResult(
