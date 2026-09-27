@@ -1,3 +1,5 @@
+import { emitAuthSessionExpired } from '../auth/events.ts'
+
 export interface CoreUser { id: string; email: string; nickname: string; status: string; avatar_url?: string }
 export interface CoreTokenResponse { access_token: string; token_type: string; expires_at: string }
 export class CoreAuthError extends Error {
@@ -5,7 +7,7 @@ export class CoreAuthError extends Error {
   status: number
   retryable: boolean
   constructor(message: string, code = 'request_failed', status = 500, retryable = false) {
-    super(message)
+    super(code === 'AUTH_UNAUTHENTICATED' ? '登录已过期，请重新登录' : message)
     this.name = 'CoreAuthError'
     this.code = code
     this.status = status
@@ -83,8 +85,22 @@ function parseFreshRefreshResult(raw: string): RefreshEnvelope | null {
 }
 
 function requestID() { return globalThis.crypto?.randomUUID?.() || `web-${Date.now()}-${Math.random().toString(16).slice(2)}` }
-export function getAccessToken() { try { return localStorage.getItem('access_token') || sessionStorage.getItem('access_token') || '' } catch { return '' } }
-export function saveAccessToken(token: string) { try { sessionStorage.setItem('access_token', token); localStorage.setItem('access_token', token) } catch { /* ignore unavailable storage */ } }
+export function getAccessToken() {
+  let local = ''
+  let session = ''
+  try { local = localStorage.getItem('access_token') || '' } catch { /* unavailable */ }
+  try { session = sessionStorage.getItem('access_token') || '' } catch { /* unavailable */ }
+  return local || session
+}
+export function saveAccessToken(token: string, expiresAt?: string) {
+  try { sessionStorage.setItem('access_token', token) } catch { /* unavailable */ }
+  try { localStorage.setItem('access_token', token) } catch { /* unavailable */ }
+  if (expiresAt) {
+    try { sessionStorage.setItem('access_token_expires_at', expiresAt) } catch { /* unavailable */ }
+    try { localStorage.setItem('access_token_expires_at', expiresAt) } catch { /* unavailable */ }
+  }
+}
+export function clearAccessToken() { try { sessionStorage.removeItem('access_token') } catch { /* unavailable */ } try { localStorage.removeItem('access_token') } catch { /* unavailable */ } }
 async function request<T>(path: string, init: RequestInit = {}, retried = false): Promise<T> {
   const headers = new Headers(init.headers); headers.set('Accept', 'application/json'); headers.set('Content-Type', 'application/json'); headers.set('X-Request-ID', requestID()); headers.set('X-Trace-ID', requestID())
   // Core's authenticated endpoints use the access token persisted after login.
@@ -99,7 +115,11 @@ async function request<T>(path: string, init: RequestInit = {}, retried = false)
   const response = await fetch(`${baseURL}${path}`, { ...init, credentials: 'include', headers })
   const raw = await response.text(); let body: any = null; if (raw) { try { body = JSON.parse(raw) } catch { body = raw } }
   if (response.status === 401 && !retried && path !== '/auth/refresh' && path !== '/auth/login' && path !== '/auth/register') { try { const token = await refresh(); if (token?.access_token) return request<T>(path, init, true) } catch { /* fall through with the original auth error */ } }
-  if (!response.ok) { const e = body && typeof body === 'object' ? body : {}; throw new CoreAuthError(e.message || `Core request failed (${response.status})`, e.code || 'request_failed', response.status, Boolean(e.retryable)) }
+  if (!response.ok) {
+    if (response.status === 401 && path !== '/auth/login' && path !== '/auth/register' && path !== '/auth/refresh') emitAuthSessionExpired('invalid')
+    const e = body && typeof body === 'object' ? body : {}
+    throw new CoreAuthError(e.message || `Core request failed (${response.status})`, e.code || 'request_failed', response.status, Boolean(e.retryable))
+  }
   return body as T
 }
 export const login = (email: string, password: string) => request<CoreTokenResponse>('/auth/login', { method: 'POST', body: JSON.stringify({ email, password }) })
@@ -108,7 +128,7 @@ async function waitForPeerRefresh(owner: string): Promise<CoreTokenResponse> {
   const startedAt = Date.now()
   while (Date.now() - startedAt < refreshWaitTTL) {
     const raw = readStorage(refreshResultKey)
-    if (raw) { try { const message = parseFreshRefreshResult(raw); if (!message || message.owner === owner) { continue } const result = sharedRefreshResult(message); if (result) { saveAccessToken(result.access_token); return result } } catch (error) { if (error instanceof CoreAuthError) throw error } }
+    if (raw) { try { const message = parseFreshRefreshResult(raw); if (!message || message.owner === owner) { continue } const result = sharedRefreshResult(message); if (result) { saveAccessToken(result.access_token, result.expires_at); return result } } catch (error) { if (error instanceof CoreAuthError) throw error } }
     await new Promise<void>((resolve) => setTimeout(resolve, 50))
   }
   throw refreshError('authentication required', 'AUTH_UNAUTHENTICATED', 401)
@@ -116,7 +136,7 @@ async function waitForPeerRefresh(owner: string): Promise<CoreTokenResponse> {
 async function performOwnedRefresh(owner: string): Promise<CoreTokenResponse> {
   try {
     const result = await request<CoreTokenResponse>('/auth/refresh', { method: 'POST' })
-    saveAccessToken(result.access_token)
+    saveAccessToken(result.access_token, result.expires_at)
     publishRefresh({ type: 'success', owner, result })
     return result
   } catch (error) {
@@ -131,7 +151,7 @@ async function refreshWithCrossTabCoordination(): Promise<CoreTokenResponse> {
   // the process-local promise still protects those callers.
   if (typeof window === 'undefined' || typeof localStorage === 'undefined' || typeof navigator === 'undefined') {
     const result = await request<CoreTokenResponse>('/auth/refresh', { method: 'POST' })
-    saveAccessToken(result.access_token)
+    saveAccessToken(result.access_token, result.expires_at)
     return result
   }
   const owner = lockOwner()
@@ -166,11 +186,11 @@ async function refreshWithCrossTabCoordination(): Promise<CoreTokenResponse> {
             const message = parseFreshRefreshResult(lastSeenResult)
             if (message && message.owner !== owner) {
               const result = sharedRefreshResult(message)
-              if (result) { saveAccessToken(result.access_token); return result }
+              if (result) { saveAccessToken(result.access_token, result.expires_at); return result }
             }
           }
           const result = await request<CoreTokenResponse>('/auth/refresh', { method: 'POST' })
-          saveAccessToken(result.access_token)
+          saveAccessToken(result.access_token, result.expires_at)
           publishRefresh({ type: 'success', owner, result })
           return result
         } catch (error) {
@@ -184,7 +204,7 @@ async function refreshWithCrossTabCoordination(): Promise<CoreTokenResponse> {
         if (!message) { lastSeenResult = '' }
         else {
           const result = sharedRefreshResult(message)
-          if (result) { saveAccessToken(result.access_token); return result }
+          if (result) { saveAccessToken(result.access_token, result.expires_at); return result }
         }
       }
       await new Promise<void>((resolve) => setTimeout(resolve, 50))

@@ -9,6 +9,7 @@ test('keeps one display result per source resource while retaining message hits'
       resource_type: 'message',
       resource_id: 'message-record-1',
       message_id: 'message-record-1',
+      source_conversation_id: 'conversation-1',
       content: '青云小组马上招新了',
       score: 0.9,
     },
@@ -17,6 +18,8 @@ test('keeps one display result per source resource while retaining message hits'
       resource_type: 'attachment',
       resource_id: 'attachment-1',
       document_id: 'attachment-1',
+      message_id: 'attachment-message-1',
+      source_conversation_id: 'conversation-1',
       file_name: '常见问题.docx',
       content: '第一段',
       score: 0.8,
@@ -26,6 +29,8 @@ test('keeps one display result per source resource while retaining message hits'
       resource_type: 'attachment',
       resource_id: 'attachment-1',
       document_id: 'attachment-1',
+      message_id: 'attachment-message-1',
+      source_conversation_id: 'conversation-1',
       file_name: '常见问题.docx',
       content: '第二段',
       score: 0.7,
@@ -34,5 +39,9 @@ test('keeps one display result per source resource while retaining message hits'
 
   assert.equal(results.length, 2)
   assert.deepEqual(results.map((item) => item.kind), ['message', 'file'])
+  assert.equal(results[0]?.chatId, 'conversation-1')
+  assert.equal(results[0]?.messageId, 'message-record-1')
+  assert.equal(results[1]?.conversationId, 'conversation-1')
+  assert.equal(results[1]?.messageId, 'attachment-message-1')
   assert.equal(results[1]?.recordId, 'attachment-1')
 })

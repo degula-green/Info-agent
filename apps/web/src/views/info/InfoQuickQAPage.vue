@@ -40,8 +40,23 @@
       </div>
     </div>
 
-    <t-dialog v-model:visible="citationPreviewVisible" attach="body" width="min(920px, 94vw)" :footer="false" destroy-on-close header="文档预览">
-      <InfoAttachmentPreview v-if="activeCitationFile" :file="activeCitationFile" :active="citationPreviewVisible" />
+    <t-dialog
+      v-model:visible="citationPreviewVisible"
+      attach="body"
+      width="min(92vw, 1720px)"
+      :footer="false"
+      destroy-on-close
+      header="文档预览"
+      dialog-class-name="qa-citation-preview-dialog"
+      placement="center"
+    >
+      <article v-if="activeCitationFile" class="qa-citation-preview">
+        <main><InfoAttachmentPreview :file="activeCitationFile" :active="citationPreviewVisible" /></main>
+        <footer v-if="activeCitation?.conversation_id">
+          <span>来自回答引用</span>
+          <t-button variant="outline" @click="openCitationSource"><template #icon><t-icon name="chat" /></template>查看来源会话</t-button>
+        </footer>
+      </article>
     </t-dialog>
 
     <div class="qa-composer-area">
@@ -97,6 +112,7 @@ import { getCurrentOrganization } from '@/api/core-organization'
 import { listKnowledgeConversationAttachments } from '@/api/info-knowledge'
 import InfoAttachmentPreview from '@/components/InfoAttachmentPreview.vue'
 import type { InfoFile } from '@/mock'
+import { navigateToKnowledgeSource } from '@/utils/knowledge-source-navigation'
 
 type Scope = SourceKey | 'all'
 type Mode = 'quick' | 'deep'
@@ -167,6 +183,7 @@ const loading = ref(false)
 const expandedCitations = ref<Record<number, boolean>>({})
 const citationPreviewVisible = ref(false)
 const activeCitationFile = ref<InfoFile | null>(null)
+const activeCitation = ref<QaCitation | null>(null)
 type ConversationId = string | number
 function parseConversationId(value: unknown): ConversationId | null {
   const raw = Array.isArray(value) ? value[0] : value
@@ -272,15 +289,40 @@ async function openCitation(citation: QaCitation) {
     }
     const name = String(metadata?.file_name || metadata?.name || fallbackName)
     const mimeType = String(metadata?.mime_type || metadata?.mimeType || '') || undefined
+    activeCitation.value = citation
     activeCitationFile.value = { id: String(citation.attachment_id), name, type: name.includes('.') ? name.split('.').pop() || 'file' : 'file', mimeType, size: metadata?.size_bytes ? `${metadata.size_bytes} bytes` : '-', time: '', uploadedAt: '', uploader: '', content: '', contentAccessRequired: Boolean(metadata?.content_access_required), documentStatus: 'completed', parseStatus: 'completed' }
     citationPreviewVisible.value = true
     return
   }
-  if (citation.platform && citation.conversation_id) {
-    router.push({ path: '/knowledge/' + encodeURIComponent(citation.platform) + '/conversations/' + encodeURIComponent(String(citation.conversation_id)), query: citation.message_id ? { message: citation.message_id } : undefined })
+  if (citation.type === 'message' && citation.conversation_id) {
+    try {
+      await navigateToKnowledgeSource(router, route, {
+        platform: citation.platform,
+        conversationId: citation.conversation_id,
+        messageId: citation.message_id,
+      })
+    } catch {
+      MessagePlugin.error('无法定位来源会话，请稍后重试')
+    }
     return
   }
   MessagePlugin.info('该引用暂无可打开的详情')
+}
+
+async function openCitationSource() {
+  const citation = activeCitation.value
+  if (!citation?.conversation_id) return
+  try {
+    await navigateToKnowledgeSource(router, route, {
+      platform: citation.platform,
+      conversationId: citation.conversation_id,
+      attachmentId: citation.type === 'document' ? citation.attachment_id : null,
+      messageId: citation.type === 'message' ? citation.message_id : null,
+    })
+    citationPreviewVisible.value = false
+  } catch {
+    MessagePlugin.error('无法定位来源会话，请稍后重试')
+  }
 }
 
 // TDesign textarea emits (value, context) rather than a native KeyboardEvent.
@@ -378,4 +420,10 @@ onBeforeUnmount(() => {
 .qa-citation:hover { border-color: var(--td-brand-color); background: var(--td-bg-color-secondarycontainer); }
 .qa-citation > svg { flex: 0 0 auto; color: var(--td-brand-color); }
 .qa-citation span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
+.qa-citation-preview { display: flex; height: min(76vh, 820px); min-height: 480px; flex-direction: column; overflow: hidden; }.qa-citation-preview main { display: flex; min-height: 0; flex: 1; padding: 0 0 14px; overflow: hidden; }.qa-citation-preview footer { display: flex; flex: 0 0 auto; align-items: center; justify-content: space-between; gap: 16px; padding-top: 12px; border-top: 1px solid var(--td-component-stroke); color: var(--td-text-color-secondary); font-size: 12px; }
+</style>
+
+<style lang="less">
+.qa-citation-preview-dialog .t-dialog__body { padding: 0; }
+.t-dialog__wrap:has(.qa-citation-preview-dialog) .t-dialog__position { display: flex; min-height: 100%; height: 100%; align-items: center; justify-content: center; box-sizing: border-box; }
 </style>

@@ -1,4 +1,5 @@
-import { refresh as refreshCoreToken } from './core-auth.ts'
+import { authenticatedFetch } from '../auth/request.ts'
+import { getAuthSession } from '../auth/session.ts'
 
 export class ApiError extends Error {
   code: string
@@ -6,7 +7,7 @@ export class ApiError extends Error {
   retryable: boolean
 
   constructor(message: string, code = 'request_failed', status = 500, retryable = false) {
-    super(message)
+    super(code === 'AUTH_UNAUTHENTICATED' || status === 401 ? '登录已过期，请重新登录' : message)
     this.name = 'ApiError'
     this.code = code
     this.status = status
@@ -54,24 +55,12 @@ function enqueueRequest<T>(run: () => Promise<T>): Promise<T> {
   })
 }
 
-function accessToken() {
-  try {
-    const session = typeof sessionStorage === 'undefined' ? '' : sessionStorage.getItem('access_token') || ''
-    const local = typeof localStorage === 'undefined' ? '' : localStorage.getItem('access_token') || ''
-    return session || local
-  } catch {
-    return ''
-  }
-}
-
 export function knowledgeHeaders(initial?: HeadersInit, accept = 'application/json') {
   const headers = new Headers(initial)
   headers.set('Accept', accept)
   if (!headers.has('X-Request-ID')) headers.set('X-Request-ID', requestIdentifier())
   if (!headers.has('X-Trace-ID')) headers.set('X-Trace-ID', requestIdentifier())
-  const token = accessToken()
-  if (token) headers.set('Authorization', `Bearer ${token}`)
-  else {
+  if (!getAuthSession().accessToken) {
     headers.set('X-User-ID', appEnv.VITE_KNOWLEDGE_DEV_USER_ID || 'dev-user')
     headers.set('X-Organization-ID', appEnv.VITE_KNOWLEDGE_DEV_ORGANIZATION_ID || 'dev-org')
   }
@@ -87,24 +76,16 @@ function requestIdentifier() {
   return `web-${Date.now()}-${Math.random().toString(16).slice(2)}`
 }
 
-async function performKnowledgeRequest<T>(path: string, init: RequestInit, retried: boolean): Promise<T> {
+async function performKnowledgeRequest<T>(path: string, init: RequestInit): Promise<T> {
   const headers = knowledgeHeaders(init.headers)
   if (init.body && !(init.body instanceof FormData) && !headers.has('Content-Type')) headers.set('Content-Type', 'application/json')
-  const response = await enqueueRequest(() => fetch(`${baseURL}${path.startsWith('/') ? path : `/${path}`}`, { ...init, headers }))
+  const response = await enqueueRequest(() => authenticatedFetch(`${baseURL}${path.startsWith('/') ? path : `/${path}`}`, { ...init, headers }))
   const raw = await response.text()
   let body: any = null
   if (raw) {
     try { body = JSON.parse(raw) } catch { body = raw }
   }
   if (!response.ok) {
-    if (response.status === 401 && !retried) {
-      try {
-        await refreshCoreToken()
-        return performKnowledgeRequest<T>(path, init, true)
-      } catch {
-        // Preserve the original Knowledge error when the Core session expired.
-      }
-    }
     const error = body && typeof body === 'object' ? body : {}
     throw new ApiError(error.message || `Knowledge request failed (${response.status})`, error.code || 'request_failed', response.status, Boolean(error.retryable))
   }
@@ -115,11 +96,11 @@ const inflightGets = new Map<string, Promise<unknown>>()
 
 export function knowledgeRequest<T>(path: string, init: RequestInit = {}): Promise<T> {
   const method = String(init.method || 'GET').toUpperCase()
-  if (method !== 'GET' || init.body) return performKnowledgeRequest<T>(path, init, false)
+  if (method !== 'GET' || init.body) return performKnowledgeRequest<T>(path, init)
   const key = `${method} ${path}`
   const existing = inflightGets.get(key)
   if (existing) return existing as Promise<T>
-  const request = performKnowledgeRequest<T>(path, init, false)
+  const request = performKnowledgeRequest<T>(path, init)
   inflightGets.set(key, request)
   const clear = () => {
     if (inflightGets.get(key) === request) inflightGets.delete(key)
@@ -133,5 +114,5 @@ export function knowledgeContentURL(path: string) {
 }
 
 export function knowledgeFetch(url: string, init: RequestInit = {}) {
-  return enqueueRequest(() => fetch(url, init))
+  return enqueueRequest(() => authenticatedFetch(url, init))
 }

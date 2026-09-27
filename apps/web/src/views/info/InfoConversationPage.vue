@@ -1,5 +1,5 @@
 <template>
-  <InfoConversation v-if="chat && !loadError" :chat="chat" @back="router.push(backPath)" @toggle="toggleChat" @toast="toast" @share="shareSelected" @load-more="loadOlder" />
+  <InfoConversation v-if="chat && !loadError" :chat="chat" :target-message-id="targetMessageId" :target-attachment-id="targetAttachmentId" @back="router.push(backPath)" @toggle="toggleChat" @toast="toast" @share="shareSelected" @load-more="loadOlder" />
   <div v-else-if="loading" class="conversation-missing"><t-icon name="loading" size="28px" /><h3>正在加载会话</h3><p>正在从 Knowledge 加载消息和附件。</p></div>
   <div v-else class="conversation-missing"><t-icon name="error-circle" size="28px" /><h3>{{ errorTitle }}</h3><p v-if="errorDescription">{{ errorDescription }}</p><t-button theme="primary" @click="router.push('/knowledge')">返回知识库</t-button></div>
 
@@ -28,10 +28,12 @@ import { normalizeSourceKey, useInfoKnowledgeStore } from '@/stores/infoKnowledg
 const route = useRoute(); const router = useRouter(); const store = useInfoKnowledgeStore()
 const sourceKey = computed(() => normalizeSourceKey(String(route.params.platform)) || 'wechat')
 const conversationId = computed(() => String(route.params.conversationId))
+const targetMessageId = computed(() => String(route.query.message || '').trim() || null)
+const targetAttachmentId = computed(() => String(route.query.attachment || '').trim() || null)
 const chat = computed(() => store.findConversation(sourceKey.value, conversationId.value))
 const backPath = computed(() => {
   const requested = String(route.query.return || '')
-  if (requested.startsWith('/knowledge/')) return requested
+  if (requested.startsWith('/') && !requested.startsWith('//')) return requested
   return chat.value?.isDirect ? '/knowledge/personal/private' : `/knowledge/${chat.value?.source || sourceKey.value}`
 })
 const loading = ref(true)

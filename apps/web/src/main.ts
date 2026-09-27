@@ -7,9 +7,13 @@ import './assets/fonts.css'
 import 'tdesign-vue-next/dist/tdesign.css'
 import './assets/theme/theme.css'
 import './style.css'
+import { installAuthExpiryHandler } from './auth/expiry'
+import { initializeAuthSession } from './auth/session'
 
 const app = createApp(App)
 app.use(TDesign)
 app.use(createPinia())
+initializeAuthSession()
+installAuthExpiryHandler(router)
 app.use(router)
 router.isReady().then(() => app.mount('#app'))

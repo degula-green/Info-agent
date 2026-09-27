@@ -21,7 +21,34 @@
       <div class="info-shell__content"><RouterView /></div>
     </main>
     <InfoCommandPalette :visible="paletteVisible" :query="paletteQuery" :results="paletteResults" :loading="paletteLoading" :empty-hint="paletteEmptyHint" :recent-searches="store.recentSearches" @update:visible="paletteVisible = $event" @search="runPaletteSearch" @select="selectPaletteResult" />
-    <InfoResultDrawer v-model:visible="drawerVisible" :result="drawerResult" @toast="toast" />
+    <t-dialog
+      v-model:visible="resultPreviewVisible"
+      :header="false"
+      :footer="false"
+      :close-btn="false"
+      width="min(92vw, 1720px)"
+      dialog-class-name="info-search-preview-dialog"
+      placement="center"
+      destroy-on-close
+    >
+      <article v-if="previewFile" class="search-preview" aria-labelledby="search-preview-title">
+        <header class="search-preview__header">
+          <div>
+            <h2 id="search-preview-title">{{ previewFile.name }}</h2>
+            <p>{{ previewFile.uploader || '未知发送人' }} · {{ previewFile.time || '发送时间未知' }}</p>
+          </div>
+          <button type="button" class="search-preview__close" aria-label="关闭预览" @click="resultPreviewVisible = false"><t-icon name="close" /></button>
+        </header>
+        <main class="search-preview__body"><InfoAttachmentPreview :file="previewFile" :active="resultPreviewVisible" /></main>
+        <footer class="search-preview__footer">
+          <span>{{ previewFile.contentAccessRequired ? '受保护文件仅提供元数据' : '来自知识库检索结果' }}</span>
+          <div>
+            <t-button v-if="previewResult?.conversationId" variant="outline" @click="openPreviewSource"><template #icon><t-icon name="chat" /></template>查看来源会话</t-button>
+            <t-button variant="outline" :loading="previewDownloading" :disabled="previewFile.contentAccessRequired" @click="downloadPreviewFile"><template #icon><t-icon :name="previewFile.contentAccessRequired ? 'lock-on' : 'download'" /></template>下载</t-button>
+          </div>
+        </footer>
+      </article>
+    </t-dialog>
     <t-dialog v-model:visible="toastDialogVisible" header="提示" :footer="false" width="360px"><p class="info-toast-dialog">{{ toastText }}</p></t-dialog>
     <t-dialog
       v-model:visible="renameDialogVisible"
@@ -67,21 +94,23 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { MessagePlugin } from 'tdesign-vue-next'
 import InfoSidebar from '@/components/InfoSidebar.vue'
 import InfoCommandPalette from '@/components/InfoCommandPalette.vue'
-import InfoResultDrawer from '@/components/InfoResultDrawer.vue'
-import { type SearchResult } from '@/mock'
+import InfoAttachmentPreview from '@/components/InfoAttachmentPreview.vue'
+import { type InfoFile, type SearchResult } from '@/mock'
 import { useInfoMockStore } from '@/stores/infoMock'
 import { useAuthStore } from '@/stores/auth'
 import { normalizeSourceKey, useInfoKnowledgeStore } from '@/stores/infoKnowledge'
 import { getProfile } from '@/mock-api/info-profile'
 import { downloadAvatar, getCurrentUser } from '@/api/core-auth'
 import { searchGlobal } from '@/api/rag'
+import { getKnowledgeAttachmentContent } from '@/api/info-knowledge'
 import { resolveGlobalSearchScope, searchEmptyHint } from '@/utils/info-search-scope'
 import { isAbortError, mapRagSearchItems } from '@/utils/info-search-result'
+import { navigateToKnowledgeSource } from '@/utils/knowledge-source-navigation'
 import { listQaConversations, type QaConversation } from '@/mock-api/qa-history'
 import { renameQaConversation, deleteQaConversation } from '@/mock-api/qa-history'
 
@@ -149,7 +178,7 @@ onBeforeUnmount(() => {
   if (paletteSearchTimer) clearTimeout(paletteSearchTimer)
   paletteAbort?.abort()
 })
-const sidebarCollapsed = ref(false); const paletteVisible = ref(false); const paletteQuery = ref(''); const paletteResults = ref<SearchResult[]>([]); const paletteLoading = ref(false); const paletteEmptyHint = ref(''); const drawerVisible = ref(false); const drawerResult = ref<SearchResult | null>(null); const toastText = ref(''); const toastDialogVisible = ref(false); const protocolDialogVisible = ref(false); const protocolType = ref<'terms' | 'privacy'>('terms'); let paletteSearchTimer: ReturnType<typeof setTimeout> | undefined; let paletteSearchSeq = 0
+const sidebarCollapsed = ref(false); const paletteVisible = ref(false); const paletteQuery = ref(''); const paletteResults = ref<SearchResult[]>([]); const paletteLoading = ref(false); const paletteEmptyHint = ref(''); const resultPreviewVisible = ref(false); const previewResult = ref<SearchResult | null>(null); const previewFile = ref<InfoFile | null>(null); const previewDownloading = ref(false); const toastText = ref(''); const toastDialogVisible = ref(false); const protocolDialogVisible = ref(false); const protocolType = ref<'terms' | 'privacy'>('terms'); let paletteSearchTimer: ReturnType<typeof setTimeout> | undefined; let paletteSearchSeq = 0
 const activeKey = computed(() => {
   if (paletteVisible.value) return 'search'
   if (route.name === 'chat') return 'new-chat'; if (route.name === 'search') return 'search'; if (String(route.name || '').startsWith('knowledge') || route.name === 'conversation' || route.path.startsWith('/knowledge')) return 'knowledge'; if (route.name === 'organization') return 'organization'; if (route.name === 'contacts') return 'contacts'; if (route.name === 'profile') return 'profile'; return 'new-chat'
@@ -263,10 +292,83 @@ function runPaletteSearch(query: string, committed = false) {
     }
   }, 180)
 }
-function selectPaletteResult(result: SearchResult) {
+function previewFileFromResult(result: SearchResult): InfoFile {
+  const extension = result.title.includes('.') ? result.title.split('.').pop() || 'file' : 'file'
+  return {
+    id: String(result.recordId || ''),
+    name: result.title,
+    type: extension,
+    size: '-',
+    time: result.time || '发送时间未知',
+    uploadedAt: '',
+    uploader: result.uploader || '',
+    content: result.content || '',
+    contentAccessRequired: result.contentAccessRequired,
+    documentStatus: 'completed',
+    parseStatus: 'completed',
+  }
+}
+async function openMessageResult(result: SearchResult) {
+  const conversationID = result.conversationId || result.chatId
+  if (!conversationID) {
+    MessagePlugin.warning('该消息缺少来源会话信息')
+    return
+  }
+  try {
+    await navigateToKnowledgeSource(router, route, {
+      platform: result.platform,
+      conversationId: conversationID,
+      messageId: result.messageId || (result.kind === 'message' ? result.recordId : ''),
+    })
+  } catch {
+    MessagePlugin.error('无法定位来源会话，请稍后重试')
+  }
+}
+async function openPreviewSource() {
+  if (!previewResult.value) return
+  try {
+    await navigateToKnowledgeSource(router, route, {
+      platform: previewResult.value.platform,
+      conversationId: previewResult.value.conversationId || previewResult.value.chatId,
+      attachmentId: previewFile.value?.id,
+    })
+    resultPreviewVisible.value = false
+  } catch {
+    MessagePlugin.error('无法定位来源会话，请稍后重试')
+  }
+}
+async function downloadPreviewFile() {
+  if (!previewFile.value || previewFile.value.contentAccessRequired || previewDownloading.value) return
+  previewDownloading.value = true
+  try {
+    const blob = await getKnowledgeAttachmentContent(previewFile.value.id, true)
+    const url = URL.createObjectURL(blob)
+    const anchor = document.createElement('a')
+    anchor.href = url
+    anchor.download = previewFile.value.name || 'attachment'
+    anchor.click()
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000)
+  } catch (error: any) {
+    MessagePlugin.error(error?.message || '附件下载失败')
+  } finally {
+    previewDownloading.value = false
+  }
+}
+async function selectPaletteResult(result: SearchResult) {
   paletteVisible.value = false
   if (result.kind === 'chat' && result.chatId) { router.push(`/knowledge/${result.platform}/conversations/${result.chatId}`); return }
-  drawerResult.value = result; drawerVisible.value = true
+  if (result.kind === 'message') {
+    await openMessageResult(result)
+    return
+  }
+  if (result.kind === 'file' && result.recordId) {
+    await nextTick()
+    previewResult.value = result
+    previewFile.value = previewFileFromResult(result)
+    resultPreviewVisible.value = true
+    return
+  }
+  MessagePlugin.info('该结果暂无可打开的详情')
 }
 function toast(text: string) { MessagePlugin.success(text) }
 </script>
@@ -280,5 +382,12 @@ function toast(text: string) { MessagePlugin.success(text) }
 .info-shell__crumb { display: flex; align-items: center; gap: 9px; min-width: 0; font-size: 14px; }.info-shell__product { color: var(--td-brand-color); font-weight: 700; }.info-shell__slash { color: var(--td-text-color-placeholder); }.info-shell__crumb strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
 .info-shell__search { display: flex; align-items: center; gap: 9px; width: min(360px, 42vw); padding: 8px 10px; border: 1px solid var(--td-component-stroke); border-radius: 6px; color: var(--td-text-color-placeholder); background: var(--td-bg-color-page); text-align: left; font-size: 12px; cursor: pointer; }.info-shell__search:hover { border-color: var(--td-brand-color); color: var(--td-text-color-secondary); }.info-shell__search span { flex: 1; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }.info-shell__search kbd { padding: 2px 5px; border: 1px solid var(--td-component-stroke); border-radius: 3px; font-size: 10px; }
 .info-shell__content { flex: 1; min-height: 0; overflow: auto; }.info-toast-dialog { margin: 0; color: var(--td-text-color-secondary); }.qa-dialog p { margin: 0 0 16px; color: var(--td-text-color-secondary); font-size: 13px; line-height: 1.65; }.qa-dialog--danger p { margin-bottom: 0; color: var(--td-text-color-primary); }.protocol-dialog { color: var(--td-text-color-secondary); font-size: 13px; line-height: 1.8; }.protocol-dialog p { margin: 0; }.protocol-dialog__updated { margin-top: 14px !important; color: var(--td-text-color-placeholder); font-size: 12px; }
+.search-preview { display: flex; height: min(84vh, 900px); min-height: 520px; flex-direction: column; overflow: hidden; background: var(--td-bg-color-container); }.search-preview__header { display: flex; flex: 0 0 auto; align-items: flex-start; justify-content: space-between; gap: 20px; padding: 20px 24px 16px; border-bottom: 1px solid var(--td-component-stroke); }.search-preview__header h2 { margin: 0; overflow: hidden; color: var(--td-text-color-primary); font-size: 18px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }.search-preview__header p { margin: 6px 0 0; color: var(--td-text-color-secondary); font-size: 12px; }.search-preview__close { display: inline-grid; width: 34px; height: 34px; flex: 0 0 34px; place-items: center; padding: 0; border: 0; border-radius: 6px; color: var(--td-text-color-secondary); background: transparent; cursor: pointer; }.search-preview__close:hover { color: var(--td-text-color-primary); background: var(--td-bg-color-secondarycontainer); }.search-preview__body { display: flex; min-height: 0; flex: 1; padding: 14px; overflow: hidden; }.search-preview__footer { display: flex; flex: 0 0 auto; align-items: center; justify-content: space-between; gap: 16px; padding: 12px 18px; border-top: 1px solid var(--td-component-stroke); color: var(--td-text-color-secondary); font-size: 12px; }.search-preview__footer > div { display: flex; gap: 8px; }
 @media (max-width: 760px) { .info-shell { min-width: 0; }.info-shell__header { padding: 0 16px; }.info-shell__search { width: 40px; padding: 8px; }.info-shell__search span, .info-shell__search kbd { display: none; }.info-shell__search svg { margin: auto; } }
+</style>
+
+<style lang="less">
+.info-search-preview-dialog .t-dialog { overflow: hidden; padding: 0; border-radius: 12px; }
+.info-search-preview-dialog .t-dialog__body { padding: 0; }
+.t-dialog__wrap:has(.info-search-preview-dialog) .t-dialog__position { display: flex; min-height: 100%; height: 100%; align-items: center; justify-content: center; box-sizing: border-box; }
 </style>
