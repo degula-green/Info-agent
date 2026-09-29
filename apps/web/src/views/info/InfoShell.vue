@@ -189,9 +189,9 @@ onBeforeUnmount(() => {
 const sidebarCollapsed = ref(false); const paletteVisible = ref(false); const paletteQuery = ref(''); const paletteResults = ref<SearchResult[]>([]); const paletteLoading = ref(false); const paletteEmptyHint = ref(''); const resultPreviewVisible = ref(false); const previewResult = ref<SearchResult | null>(null); const previewFile = ref<InfoFile | null>(null); const previewDownloading = ref(false); const toastText = ref(''); const toastDialogVisible = ref(false); const protocolDialogVisible = ref(false); const protocolType = ref<'terms' | 'privacy'>('terms'); let paletteSearchTimer: ReturnType<typeof setTimeout> | undefined; let paletteSearchSeq = 0
 const activeKey = computed(() => {
   if (paletteVisible.value) return 'search'
-  if (route.name === 'chat') return 'new-chat'; if (route.name === 'search') return 'search'; if (String(route.name || '').startsWith('knowledge') || route.name === 'conversation' || route.path.startsWith('/knowledge')) return 'knowledge'; if (route.name === 'organization' || route.name === 'organizationKnowledge') return 'organization'; if (route.name === 'contacts') return 'contacts'; if (route.name === 'profile') return 'profile'; return 'new-chat'
+  if (route.name === 'chat' || route.name === 'ragChat') return 'new-chat'; if (route.name === 'search') return 'search'; if (String(route.name || '').startsWith('knowledge') || route.name === 'conversation' || route.path.startsWith('/knowledge')) return 'knowledge'; if (route.name === 'organization' || route.name === 'organizationKnowledge') return 'organization'; if (route.name === 'contacts') return 'contacts'; if (route.name === 'profile') return 'profile'; return 'new-chat'
 })
-const pageTitle = computed(() => ({ dashboard: '概览', search: '搜索', knowledge: '知识库', knowledgeOrganizationFiles: '组织文件库', knowledgeOrganizationGroups: '组织群聊', knowledgeOrganizationPrivateShared: '组织共享私聊', knowledgePersonalPrivate: '私人私聊', knowledgePersonalFiles: '私人本地知识库', knowledgePlatform: '知识库', conversation: '会话详情', organization: '我的组织', organizationKnowledge: '知识结构', contacts: '联系人列表', chat: '新对话', profile: '个人中心' } as Record<string, string>)[String(route.name)] || (route.params.platform ? knowledgeStore.findSource(normalizeSourceKey(String(route.params.platform)) || undefined)?.kbName || store.findSource(normalizeSourceKey(String(route.params.platform)) || undefined)?.kbName || '知识库' : '概览'))
+const pageTitle = computed(() => ({ dashboard: '概览', search: '搜索', knowledge: '知识库', knowledgeOrganizationFiles: '组织文件库', knowledgeOrganizationGroups: '组织群聊', knowledgeOrganizationPrivateShared: '组织共享私聊', knowledgePersonalPrivate: '私人私聊', knowledgePersonalFiles: '私人本地知识库', knowledgePlatform: '知识库', conversation: '会话详情', organization: '我的组织', organizationKnowledge: '知识结构', contacts: '联系人列表', chat: 'Agent 对话', ragChat: '知识问答', profile: '个人中心' } as Record<string, string>)[String(route.name)] || (route.params.platform ? knowledgeStore.findSource(normalizeSourceKey(String(route.params.platform)) || undefined)?.kbName || store.findSource(normalizeSourceKey(String(route.params.platform)) || undefined)?.kbName || '知识库' : '概览'))
 
 async function navigate(view: string) {
   if (view === 'search') { openSearch(); return }
@@ -212,7 +212,7 @@ function handleUserMenuAction(action: 'profile' | 'terms' | 'privacy' | 'logout'
   if (action === 'terms' || action === 'privacy') { protocolType.value = action; protocolDialogVisible.value = true; return }
   void auth.logout(); store.logout(); router.push('/login')
 }
-function openQaSession(id: string) { router.push({ path: '/chat', query: { session: id } }) }
+function openQaSession(id: string) { router.push({ path: '/rag-chat', query: { session: id } }) }
 function renameQaSession(id: string) {
   const current = qaConversations.value.find((item) => String(item.id) === id)
   if (!current) { MessagePlugin.error('未找到该历史会话'); return }

@@ -28,6 +28,8 @@ type Config struct {
 	CoreURL              string
 	CoreServiceToken     string
 	InternalServiceToken string
+	RAGURL               string
+	RAGServiceToken      string
 	JWTSecret            string
 	JWTPublicKey         string
 	JWTIssuer            string
@@ -76,6 +78,8 @@ func Load() Config {
 		CoreURL:              env("KNOWLEDGE_CORE_URL", "http://127.0.0.1:8080"),
 		CoreServiceToken:     env("KNOWLEDGE_CORE_SERVICE_TOKEN", ""),
 		InternalServiceToken: env("KNOWLEDGE_INTERNAL_SERVICE_TOKEN", ""),
+		RAGURL:               env("KNOWLEDGE_RAG_URL", "http://127.0.0.1:8000"),
+		RAGServiceToken:      env("KNOWLEDGE_RAG_TOKEN", env("KNOWLEDGE_INTERNAL_SERVICE_TOKEN", "")),
 		JWTSecret:            env("KNOWLEDGE_JWT_SECRET", ""),
 		JWTPublicKey:         env("KNOWLEDGE_JWT_PUBLIC_KEY", ""),
 		JWTIssuer:            env("KNOWLEDGE_JWT_ISSUER", ""),
@@ -93,7 +97,10 @@ func Load() Config {
 		// Private conversations are read with the OAuth user's identity. Feishu
 		// requires the dedicated p2p scope in addition to the base message scope;
 		// without it the API only exposes messages sent by the app itself.
-		FeishuScopes:           env("KNOWLEDGE_FEISHU_SCOPES", "contact:user.id:readonly im:message im:message.p2p_msg:get_as_user im:chat drive:drive search:message"),
+		// offline_access is what makes Feishu return a refresh_token at all; the
+		// user access token itself only lives two hours, so without this scope
+		// every collection stops two hours after each reauthorization.
+		FeishuScopes:           env("KNOWLEDGE_FEISHU_SCOPES", "contact:user.id:readonly im:message im:message.p2p_msg:get_as_user im:chat drive:drive search:message offline_access"),
 		WorkerInterval:         envDuration("KNOWLEDGE_WORKER_INTERVAL", 30*time.Second),
 		OAuthStateTTL:          envDuration("KNOWLEDGE_OAUTH_STATE_TTL", 10*time.Minute),
 		PairingTTL:             envDuration("KNOWLEDGE_PAIRING_TTL", 10*time.Minute),

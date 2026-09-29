@@ -1,0 +1,226 @@
+"""Agent HTTP API tests (in-memory store, no PostgreSQL or Redis required)."""
+
+from __future__ import annotations
+
+from fastapi.testclient import TestClient
+
+from app.kernel.models import CapabilityDescriptor
+from tests.support import build_test_container, make_app
+
+USER = {"X-Agent-User-Id": "user-1"}
+
+
+def test_create_task_returns_accepted_with_events_url() -> None:
+    container, _store, _publisher, _registry = build_test_container()
+    client = TestClient(make_app(container))
+
+    response = client.post(
+        "/api/agent/v1/tasks",
+        json={"text": "read something", "steps": [{"capability": "fake.read", "arguments": {"value": "a"}}]},
+        headers=USER,
+    )
+
+    assert response.status_code == 202
+    body = response.json()
+    assert body["status"] == "received"
+    assert body["events_url"] == f"/api/agent/v1/tasks/{body['task_id']}/events"
+
+
+def test_create_task_is_idempotent_on_client_message_id() -> None:
+    container, store, _publisher, _registry = build_test_container()
+    client = TestClient(make_app(container))
+
+    first = client.post(
+        "/api/agent/v1/tasks",
+        json={"text": "hello", "client_message_id": "msg-1"},
+        headers=USER,
+    ).json()
+    second = client.post(
+        "/api/agent/v1/tasks",
+        json={"text": "hello", "client_message_id": "msg-1"},
+        headers=USER,
+    ).json()
+
+    assert first["task_id"] == second["task_id"]
+    assert len(store.list_unfinished_tasks()) == 1
+
+
+def test_list_tasks_returns_only_the_callers_tasks() -> None:
+    container, _store, _publisher, _registry = build_test_container()
+    client = TestClient(make_app(container))
+
+    mine = client.post("/api/agent/v1/tasks", json={"text": "mine"}, headers=USER).json()["task_id"]
+    client.post("/api/agent/v1/tasks", json={"text": "theirs"}, headers={"X-Agent-User-Id": "user-2"})
+    client.post(f"/api/agent/v1/tasks/{mine}/run", headers=USER)
+
+    listed = client.get("/api/agent/v1/tasks", headers=USER).json()["items"]
+    assert [item["task_id"] for item in listed] == [mine]
+    assert listed[0]["status"] == "succeeded"
+
+    # The status filter is what a client uses to show only what still needs it.
+    assert client.get("/api/agent/v1/tasks?status=waiting_approval", headers=USER).json()["items"] == []
+    waiting = client.get("/api/agent/v1/tasks?status=succeeded,waiting_input", headers=USER).json()["items"]
+    assert [item["task_id"] for item in waiting] == [mine]
+
+    others = client.get("/api/agent/v1/tasks", headers={"X-Agent-User-Id": "user-2"}).json()["items"]
+    assert [item["owner_user_id"] for item in others] == ["user-2"]
+
+
+def test_task_is_scoped_to_owner() -> None:
+    container, _store, _publisher, _registry = build_test_container()
+    client = TestClient(make_app(container))
+    task_id = client.post("/api/agent/v1/tasks", json={"text": "hi"}, headers=USER).json()["task_id"]
+
+    assert client.get(f"/api/agent/v1/tasks/{task_id}", headers=USER).status_code == 200
+    assert client.get(f"/api/agent/v1/tasks/{task_id}", headers={"X-Agent-User-Id": "other"}).status_code == 403
+    assert client.get("/api/agent/v1/tasks/missing", headers=USER).status_code == 404
+
+
+def test_read_task_flow_exposes_plan_and_observations() -> None:
+    container, _store, _publisher, _registry = build_test_container()
+    client = TestClient(make_app(container))
+    task_id = client.post(
+        "/api/agent/v1/tasks",
+        json={"text": "read", "steps": [{"capability": "fake.read", "arguments": {"value": "a"}}]},
+        headers=USER,
+    ).json()["task_id"]
+
+    run = client.post(f"/api/agent/v1/tasks/{task_id}/run", headers=USER)
+    assert run.status_code == 200
+    assert run.json()["status"] == "succeeded"
+
+    plan = client.get(f"/api/agent/v1/tasks/{task_id}/plan", headers=USER).json()["plan"]
+    assert plan["status"] == "completed"
+    observations = client.get(
+        f"/api/agent/v1/tasks/{task_id}/observations", headers=USER
+    ).json()["items"]
+    assert [item["output"]["value"] for item in observations] == ["a"]
+
+
+def test_write_task_requires_approval_via_api() -> None:
+    container, _store, _publisher, _registry = build_test_container()
+    client = TestClient(make_app(container))
+    task_id = client.post(
+        "/api/agent/v1/tasks",
+        json={"text": "write", "steps": [{"capability": "fake.write", "arguments": {"value": "x"}}]},
+        headers=USER,
+    ).json()["task_id"]
+
+    assert client.post(f"/api/agent/v1/tasks/{task_id}/run", headers=USER).json()["status"] == "waiting_approval"
+    approvals = client.get("/api/agent/v1/approvals", headers=USER).json()["items"]
+    assert len(approvals) == 1
+    approval = approvals[0]
+
+    approved = client.post(
+        f"/api/agent/v1/approvals/{approval['approval_id']}/approve",
+        json={"version": approval["version"]},
+        headers=USER,
+    )
+    assert approved.status_code == 200
+    assert approved.json()["status"] == "approved"
+
+    assert client.post(f"/api/agent/v1/tasks/{task_id}/run", headers=USER).json()["status"] == "succeeded"
+
+
+def test_approvals_report_whether_the_write_can_be_reconciled() -> None:
+    """The preview card warns before an action whose outcome cannot be read back.
+
+    ``fake.write`` cannot verify its outcome; the capability added below can.
+    Both still require approval, which is what the registration invariant
+    demands of a write that is not reconcilable.
+    """
+
+    class ReconcilableWrite:
+        descriptor = CapabilityDescriptor(
+            name="fake.write-reconcilable",
+            description="A write whose outcome can be read back.",
+            risk_level="external_write",
+            side_effect=True,
+            requires_approval=True,
+            idempotent=True,
+            reconcilable=True,
+            timeout_seconds=5,
+        )
+
+        def validate(self, arguments: dict) -> dict:
+            return dict(arguments)
+
+        def execute(self, arguments: dict) -> dict:
+            return {}
+
+    container, _store, _publisher, _registry = build_test_container(
+        extra_capabilities=[ReconcilableWrite()]
+    )
+    client = TestClient(make_app(container))
+
+    for capability, expected in (
+        ("fake.write", False),
+        ("fake.write-reconcilable", True),
+    ):
+        task_id = client.post(
+            "/api/agent/v1/tasks",
+            json={
+                "text": "write",
+                "steps": [{"capability": capability, "arguments": {"value": "x"}}],
+            },
+            headers=USER,
+        ).json()["task_id"]
+        assert (
+            client.post(f"/api/agent/v1/tasks/{task_id}/run", headers=USER).json()["status"]
+            == "waiting_approval"
+        )
+        approvals = client.get("/api/agent/v1/approvals", headers=USER).json()["items"]
+        mine = [item for item in approvals if item["task_id"] == task_id]
+        assert len(mine) == 1
+        assert mine[0]["reconcilable"] is expected
+
+
+def test_approval_rejects_stale_version() -> None:
+    container, _store, _publisher, _registry = build_test_container()
+    client = TestClient(make_app(container))
+    task_id = client.post(
+        "/api/agent/v1/tasks",
+        json={"text": "write", "steps": [{"capability": "fake.write", "arguments": {"value": "x"}}]},
+        headers=USER,
+    ).json()["task_id"]
+    client.post(f"/api/agent/v1/tasks/{task_id}/run", headers=USER)
+    approval = client.get("/api/agent/v1/approvals", headers=USER).json()["items"][0]
+
+    stale = client.post(
+        f"/api/agent/v1/approvals/{approval['approval_id']}/approve",
+        json={"version": approval["version"] + 5},
+        headers=USER,
+    )
+    assert stale.status_code == 409
+
+
+def test_input_and_cancel_endpoints() -> None:
+    container, _store, _publisher, _registry = build_test_container()
+    client = TestClient(make_app(container))
+
+    waiting = client.post(
+        "/api/agent/v1/tasks",
+        json={"text": "need info", "steps": [{"capability": "fake.ask", "arguments": {}}]},
+        headers=USER,
+    ).json()["task_id"]
+    client.post(f"/api/agent/v1/tasks/{waiting}/run", headers=USER)
+    provided = client.post(
+        f"/api/agent/v1/tasks/{waiting}/input", json={"text": "here it is"}, headers=USER
+    )
+    assert provided.status_code == 200
+    assert provided.json()["status"] == "planning"
+
+    cancelled = client.post(
+        "/api/agent/v1/tasks",
+        json={"text": "cancel me", "steps": [{"capability": "fake.read", "arguments": {"value": "a"}}]},
+        headers=USER,
+    ).json()["task_id"]
+    response = client.post(f"/api/agent/v1/tasks/{cancelled}/cancel", headers=USER)
+    assert response.status_code == 200
+    assert response.json()["status"] == "cancelled"
+
+
+def test_health_endpoint() -> None:
+    container, _store, _publisher, _registry = build_test_container()
+    client = TestClient(make_app(container))
+    assert client.get("/health").json() == {"service": "agent", "status": "ok"}

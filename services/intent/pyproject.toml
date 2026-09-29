@@ -1,0 +1,11 @@
+[project]
+name = "info-agent-intent"
+version = "0.1.0"
+description = "Laya multilingual intent classification sidecar"
+requires-python = ">=3.11,<3.13"
+dependencies = [
+    "laya[serve]>=0.3.21,<0.4",
+]
+
+[tool.uv]
+package = false

@@ -45,6 +45,8 @@ services:
       KNOWLEDGE_CORE_URL: ${KNOWLEDGE_CORE_URL:-http://core-service:8080}
       KNOWLEDGE_CORE_SERVICE_TOKEN: ${KNOWLEDGE_CORE_SERVICE_TOKEN:-local-development-only}
       KNOWLEDGE_INTERNAL_SERVICE_TOKEN: ${KNOWLEDGE_INTERNAL_SERVICE_TOKEN:-local-development-only}
+      KNOWLEDGE_RAG_URL: ${KNOWLEDGE_RAG_URL:-http://rag-service:8000}
+      KNOWLEDGE_RAG_TOKEN: ${KNOWLEDGE_RAG_TOKEN:-local-development-only}
       KNOWLEDGE_JWT_SECRET: ${KNOWLEDGE_JWT_SECRET:-}
       KNOWLEDGE_JWT_PUBLIC_KEY: ${KNOWLEDGE_JWT_PUBLIC_KEY:-}
       KNOWLEDGE_JWT_ISSUER: ${KNOWLEDGE_JWT_ISSUER:-info-agent-core}
@@ -194,7 +196,8 @@ services:
         psql --dbname="$${KNOWLEDGE_DATABASE_URL}" --set=ON_ERROR_STOP=1 --file=/migrations/20260927_rag_mvp_phase3_fencing.up.sql &&
         psql --dbname="$${KNOWLEDGE_DATABASE_URL}" --set=ON_ERROR_STOP=1 --file=/migrations/20260927_knowledge_rag_source_audit.sql &&
         psql --dbname="$${KNOWLEDGE_DATABASE_URL}" --set=ON_ERROR_STOP=1 --file=/migrations/20260927_knowledge_private_classification.up.sql &&
-        psql --dbname="$${KNOWLEDGE_DATABASE_URL}" --set=ON_ERROR_STOP=1 --file=/migrations/20260927_knowledge_rag_mvp_status.sql
+        psql --dbname="$${KNOWLEDGE_DATABASE_URL}" --set=ON_ERROR_STOP=1 --file=/migrations/20260927_knowledge_rag_mvp_status.sql &&
+        psql --dbname="$${KNOWLEDGE_DATABASE_URL}" --set=ON_ERROR_STOP=1 --file=/migrations/20260925_contact_profiles.sql
     depends_on:
       postgres:
         condition: service_healthy
@@ -218,6 +221,7 @@ services:
       - ../db/migrations/20260927_knowledge_private_classification.up.sql:/migrations/20260927_knowledge_private_classification.up.sql:ro
       - ../db/migrations/20260927_knowledge_private_classification.down.sql:/migrations/20260927_knowledge_private_classification.down.sql:ro
       - ../db/migrations/20260927_knowledge_rag_mvp_status.sql:/migrations/20260927_knowledge_rag_mvp_status.sql:ro
+      - ../db/migrations/20260925_contact_profiles.sql:/migrations/20260925_contact_profiles.sql:ro
     restart: "no"
 
   redis:

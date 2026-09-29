@@ -125,6 +125,12 @@ func (w *Worker) Tick(ctx context.Context) error {
 	if privacyErr := w.service.ProcessPrivacy(ctx); privacyErr != nil && firstErr == nil {
 		firstErr = privacyErr
 	}
+	if contactFactErr := w.service.ProcessContactFacts(ctx); contactFactErr != nil && firstErr == nil {
+		firstErr = contactFactErr
+	}
+	if contactProfileErr := w.service.ProcessContactProfiles(ctx); contactProfileErr != nil && firstErr == nil {
+		firstErr = contactProfileErr
+	}
 	if permissionErr := w.service.ProcessPermissions(ctx); permissionErr != nil && firstErr == nil {
 		firstErr = permissionErr
 	}

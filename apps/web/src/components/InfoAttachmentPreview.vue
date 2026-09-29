@@ -1,6 +1,6 @@
 <template>
   <section class="attachment-preview" aria-label="附件预览">
-    <div v-if="file.contentAccessRequired" class="attachment-preview__state"><t-icon name="lock-on" />受保护附件仅提供元数据</div>
+    <div v-if="accessState.status !== 'granted'" class="attachment-preview__state"><t-icon name="lock-on" /><strong>{{ accessState.status === 'requested' ? '权限申请已提交' : '受保护附件' }}</strong><span>当前账号暂无查看权限</span><t-button v-if="accessState.status !== 'requested' && accessState.share_reference_id" size="small" theme="primary" variant="outline" @click="emit('request', accessState)">申请查看</t-button></div>
     <div v-else-if="oversizedPresentation" class="attachment-preview__state attachment-preview__state--large"><t-icon name="file" /><strong>文件过大，暂不在浏览器中直接预览</strong><span>{{ file.size || '大型演示文稿' }} 在浏览器中完整解析会占用大量内存，请下载原文件查看。</span><t-button theme="primary" variant="outline" :loading="downloading" @click="downloadOriginal">下载原文件</t-button></div>
     <div v-else-if="loading" class="attachment-preview__state"><t-icon name="loading" />正在加载预览…</div>
     <div v-else-if="error" class="attachment-preview__state attachment-preview__state--error"><t-icon name="error-circle" />{{ error }}</div>
@@ -19,14 +19,17 @@
 </template>
 
 <script setup lang="ts">
-import { nextTick, onUnmounted, ref, watch, type ComponentPublicInstance } from 'vue'
+import { computed, nextTick, onUnmounted, ref, watch, type ComponentPublicInstance } from 'vue'
 import { getDocument, GlobalWorkerOptions, type PDFDocumentProxy } from 'pdfjs-dist/legacy/build/pdf.mjs'
 import pdfWorker from 'pdfjs-dist/legacy/build/pdf.worker.mjs?url'
 import type { InfoFile } from '@/mock'
 import { getKnowledgeAttachmentContent } from '@/api/info-knowledge'
 
 GlobalWorkerOptions.workerSrc = pdfWorker
-const props = defineProps<{ file: InfoFile; active: boolean }>()
+interface AttachmentAccess { status: string; share_reference_id?: string; resource_type?: string; resource_id?: string; requested_action?: string }
+const props = defineProps<{ file: InfoFile; active: boolean; access?: AttachmentAccess }>()
+const emit = defineEmits<{ request: [access: AttachmentAccess] }>()
+const accessState = computed<AttachmentAccess>(() => props.access || { status: props.file.contentAccessRequired ? 'locked' : 'granted' })
 const loading = ref(false); const error = ref(''); const textContent = ref(''); const blobUrl = ref('')
 const downloading = ref(false)
 const wordContainer = ref<HTMLElement | null>(null); const spreadsheetContainer = ref<HTMLElement | null>(null); const presentationContainer = ref<HTMLElement | null>(null)
@@ -69,7 +72,7 @@ async function sniffImageMime(blob: Blob) {
 async function load() {
   const version = ++loadVersion; release(); textContent.value = ''; error.value = ''; loading.value = false
   isImage.value = false; isPdf.value = false; isWord.value = false; isSpreadsheet.value = false; isPresentation.value = false; isText.value = false; oversizedPresentation.value = false
-  if (!props.active || props.file.contentAccessRequired) return
+  if (!props.active || accessState.value.status !== 'granted') return
   const ext = extension(); let mime = String(props.file.mimeType || '').toLowerCase()
   const setPresentationKind = () => {
     isImage.value = mime.startsWith('image/') || ['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp'].includes(ext)
@@ -126,13 +129,13 @@ async function load() {
     } else if (isText.value) textContent.value = await blob.text()
   } catch { if (version === loadVersion) error.value = '附件预览暂不可用' } finally { if (version === loadVersion) loading.value = false }
 }
-watch(() => [props.active, props.file.id, props.file.type, props.file.name, props.file.mimeType, props.file.contentAccessRequired, props.file.fileSizeBytes], load, { immediate: true })
+watch(() => [props.active, props.file.id, props.file.type, props.file.name, props.file.mimeType, props.file.contentAccessRequired, props.file.fileSizeBytes, props.access?.status], load, { immediate: true })
 onUnmounted(() => { loadVersion++; release() })
 </script>
 
 <style scoped>
 .attachment-preview { display: flex; width: 100%; min-height: 0; height: 100%; max-height: 100%; flex-direction: column; padding: 16px; overflow: hidden; box-sizing: border-box; border-radius: 8px; background: var(--td-bg-color-secondarycontainer); }
-.attachment-preview__state { display: grid; min-height: 180px; place-items: center; gap: 8px; color: var(--td-text-color-secondary); }.attachment-preview__state--error { color: var(--td-error-color); }
+.attachment-preview__state { display: grid; min-height: 180px; place-items: center; align-content: center; gap: 8px; color: var(--td-text-color-secondary); text-align: center; }.attachment-preview__state strong { color: var(--td-text-color-primary); }.attachment-preview__state--error { color: var(--td-error-color); }
 .attachment-preview__state--large { align-content:center; text-align:center; }.attachment-preview__state--large svg { width:36px; height:36px; color:var(--td-brand-color); }.attachment-preview__state--large strong { color:var(--td-text-color-primary); }.attachment-preview__state--large span { max-width:52ch; line-height:1.7; }
 .attachment-preview__image-box { display: grid; grid-template-rows: minmax(0, 1fr); width: 100%; min-width: 0; min-height: 0; flex: 1 1 0; margin: auto; place-items: center; overflow: hidden; background: #fff; border: 1px solid var(--td-border-level-1-color); border-radius: 8px; }.attachment-preview__image-box img { display: block; width: auto; height: auto; min-width: 0; min-height: 0; max-width: 100%; max-height: 100%; object-fit: contain; user-select: none; -webkit-user-drag: none; pointer-events: none; }
 .attachment-preview__pdf { display: grid; min-height: 0; flex: 1; gap: 14px; overflow: auto; padding: 4px; }.attachment-preview__pdf-page { display: block; width: min(100%, 1040px); height: auto; margin: 0 auto; background: #fff; box-shadow: 0 1px 5px rgb(0 0 0 / 16%); }

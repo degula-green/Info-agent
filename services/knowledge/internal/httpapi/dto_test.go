@@ -34,3 +34,26 @@ func TestNormalizedAttachmentMetadataInfersMimeFromExtension(t *testing.T) {
 		t.Fatalf("extension MIME inference failed: name=%q mime=%q", name, mimeType)
 	}
 }
+
+func TestPublicContactDetailUsesProfileFactsAndAttachments(t *testing.T) {
+	value := domain.ContactDetail{
+		ContactView: domain.ContactView{ID: "contact-1", Kind: "external", DisplayName: "联系人"},
+		Profile:     domain.ContactProfile{ContactKey: "contact-1", Status: "ready", Summary: "简介"},
+		Facts: []domain.ContactFact{{
+			ID: "fact-1", FactType: "phone", Label: "手机号",
+			Access: domain.ContactAccess{Status: "locked"},
+		}},
+		Attachments: []domain.Attachment{{
+			ID: "attachment-1", ConversationID: "conversation-1", ExternalAttachmentID: "external-1",
+			FileName: "report.pdf", MIMEType: "application/pdf", ContentVersion: 1, ContentStatus: "ready",
+			Access: domain.ContactAccess{Status: "granted"},
+		}},
+	}
+	out := publicContactDetailFromDomain(value)
+	if out.Contact.ID != "contact-1" || out.Profile.Summary != "简介" || len(out.Facts) != 1 || len(out.Attachments) != 1 {
+		t.Fatalf("unexpected contact detail projection: %+v", out)
+	}
+	if out.Facts[0].Access.Status != "locked" || out.Attachments[0].Access.Status != "granted" {
+		t.Fatalf("contact access state was not projected: %+v", out)
+	}
+}

@@ -12,9 +12,10 @@ import (
 )
 
 type AuthorizationHandler struct {
-	provider     application.AuthorizationProvider
-	organization OrganizationApplication
-	token        string
+	provider       application.AuthorizationProvider
+	organization   OrganizationApplication
+	ragToken       string
+	knowledgeToken string
 }
 
 type PermissionSyncApplication interface {
@@ -30,12 +31,8 @@ func NewPermissionSyncHandler(service PermissionSyncApplication, token string) *
 	return &PermissionSyncHandler{service: service, token: token}
 }
 
-func NewAuthorizationHandler(provider application.AuthorizationProvider, token string, organization ...OrganizationApplication) *AuthorizationHandler {
-	var org OrganizationApplication
-	if len(organization) > 0 {
-		org = organization[0]
-	}
-	return &AuthorizationHandler{provider: provider, organization: org, token: token}
+func NewAuthorizationHandler(provider application.AuthorizationProvider, ragToken string, organization OrganizationApplication, knowledgeToken string) *AuthorizationHandler {
+	return &AuthorizationHandler{provider: provider, organization: organization, ragToken: ragToken, knowledgeToken: knowledgeToken}
 }
 
 type authContext struct {
@@ -66,13 +63,28 @@ type checkItem struct {
 	Action       string `json:"action" binding:"required"`
 }
 
-func (h *AuthorizationHandler) authenticate(c *gin.Context) bool {
-	if h.token == "" || h.provider == nil {
+func (h *AuthorizationHandler) authenticate(c *gin.Context, callerTokens map[string]string) bool {
+	configured := h != nil && h.provider != nil
+	if configured {
+		configured = false
+		for _, token := range callerTokens {
+			if token != "" {
+				configured = true
+				break
+			}
+		}
+	}
+	if !configured {
 		writeError(c, http.StatusServiceUnavailable, "AUTHZ_NOT_CONFIGURED", "authorization service is not configured", true)
 		return false
 	}
 	parts := strings.Fields(c.GetHeader("Authorization"))
-	if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") || parts[1] != h.token || c.GetHeader("X-Caller-Service") != "rag" {
+	token := ""
+	if len(parts) == 2 && strings.EqualFold(parts[0], "Bearer") {
+		token = parts[1]
+	}
+	expected, allowedCaller := callerTokens[strings.TrimSpace(c.GetHeader("X-Caller-Service"))]
+	if !allowedCaller || expected == "" || token != expected {
 		writeError(c, http.StatusForbidden, "AUTHZ_CALLER_FORBIDDEN", "caller is not authorized", false)
 		return false
 	}
@@ -80,7 +92,7 @@ func (h *AuthorizationHandler) authenticate(c *gin.Context) bool {
 }
 
 func (h *AuthorizationHandler) Scope(c *gin.Context) {
-	if !h.authenticate(c) {
+	if !h.authenticate(c, map[string]string{"rag": h.ragToken}) {
 		return
 	}
 	var req authContext
@@ -166,7 +178,7 @@ func (h *AuthorizationHandler) Scope(c *gin.Context) {
 }
 
 func (h *AuthorizationHandler) CheckBatch(c *gin.Context) {
-	if !h.authenticate(c) {
+	if !h.authenticate(c, map[string]string{"rag": h.ragToken, "knowledge": h.knowledgeToken}) {
 		return
 	}
 	var req checkRequest

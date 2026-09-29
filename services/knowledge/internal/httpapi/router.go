@@ -320,7 +320,7 @@ func newApp(cfg config.Config) *App {
 		recordStartup(errors.New("knowledge database is required when jwt authentication is enabled"))
 	}
 	core := coreclient.New(cfg.CoreURL, cfg.CoreServiceToken)
-	app := &App{Service: service.New(repo, store, vault.New(store, keyring), objects, feishu, core, cfg), Auth: validator, Config: cfg, StartupError: startupErr}
+ 	app := &App{Service: service.New(repo, store, vault.New(store, keyring), objects, feishu, core, cfg), Auth: validator, Config: cfg, StartupError: startupErr}
 	if startupErr == nil {
 		app.worker = service.NewWorker(app.Service, cfg.WorkerInterval)
 	}
@@ -525,12 +525,22 @@ func registerUserRoutes(r *gin.Engine, app *App, prefix string) {
 		c.JSON(http.StatusOK, gin.H{"status": "removed"})
 	})
 	g.GET("/contacts/:contact_id", func(c *gin.Context) {
-		out, err := app.Service.GetContact(c, principal(c).UserID, c.Param("contact_id"))
+		p := principal(c)
+		out, err := app.Service.GetContact(c, p.UserID, c.Param("contact_id"), p.OrganizationID)
 		if err != nil {
 			writeError(c, err)
 			return
 		}
-		c.JSON(http.StatusOK, out)
+		c.JSON(http.StatusOK, publicContactDetailFromDomain(*out))
+	})
+	g.POST("/contacts/:contact_id/profile/refresh", func(c *gin.Context) {
+		p := principal(c)
+		profile, err := app.Service.RefreshContactProfile(c, p.UserID, c.Param("contact_id"), p.OrganizationID)
+		if err != nil {
+			writeError(c, err)
+			return
+		}
+		c.JSON(http.StatusOK, profile)
 	})
 	g.POST("/connectors/feishu/authorize", func(c *gin.Context) {
 		var body struct {
@@ -864,6 +874,19 @@ func registerUserRoutes(r *gin.Engine, app *App, prefix string) {
 	}
 	g.POST("/private-access-requests", accessHandler)
 	g.POST("/private-share-requests/access", accessHandler)
+	g.GET("/private-access-requests", func(c *gin.Context) {
+		p := principal(c)
+		scope := strings.TrimSpace(c.Query("scope"))
+		if scope == "" {
+			scope = "mine"
+		}
+		out, err := app.Service.ListPrivateAccessRequests(c, p.UserID, scope)
+		if err != nil {
+			writeError(c, err)
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"items": out})
+	})
 	g.GET("/conversations/:conversation_id", func(c *gin.Context) {
 		p := principal(c)
 		conversationID := c.Param("conversation_id")
@@ -1056,7 +1079,11 @@ func registerUserRoutes(r *gin.Engine, app *App, prefix string) {
 	})
 	g.GET("/attachments/:attachment_id/content", func(c *gin.Context) {
 		p := principal(c)
-		attachment, reader, err := app.Service.OpenAttachment(c, p.UserID, c.Param("attachment_id"), c.GetHeader("Authorization"))
+		action := strings.ToLower(strings.TrimSpace(c.Query("action")))
+		if action == "" {
+			action = "view"
+		}
+		attachment, reader, err := app.Service.OpenAttachmentWithAction(c, p.UserID, c.Param("attachment_id"), action, c.GetHeader("Authorization"))
 		if err != nil {
 			writeError(c, err)
 			return
@@ -1527,8 +1554,30 @@ func registerInternalRoutes(r *gin.Engine, app *App, prefix string) {
 			writeError(c, err)
 			return
 		}
-		c.JSON(http.StatusOK, result)
+			c.JSON(http.StatusOK, result)
+		})
+
+	// The Agent service and RAG share the internal token; the caller marker and
+	// the path allow-list keep the two capabilities apart.
+	g.GET("/agent/conversation-snapshot", func(c *gin.Context) {
+		if !agentCaller(c) {
+			return
+		}
+		snapshot, err := app.Service.ConversationSnapshot(c, c.Query("knowledge_item_id"))
+		if err != nil {
+			writeError(c, err)
+			return
+		}
+		c.JSON(http.StatusOK, snapshot)
 	})
+}
+
+func agentCaller(c *gin.Context) bool {
+	if !strings.EqualFold(strings.TrimSpace(c.GetHeader("X-Caller-Service")), "agent") {
+		writeError(c, apperror.New("invalid_caller_service", "X-Caller-Service must be agent", http.StatusForbidden, false))
+		return false
+	}
+	return true
 }
 
 type uploadMeta struct {
@@ -1790,7 +1839,7 @@ func internalMiddleware(app *App) gin.HandlerFunc {
 }
 
 func serviceTokenPathAllowed(path string) bool {
-	if strings.Contains(path, "/internal/knowledge/") || strings.Contains(path, "/internal/attachments/") {
+	if strings.Contains(path, "/internal/knowledge/") || strings.Contains(path, "/internal/attachments/") || strings.Contains(path, "/internal/agent/") {
 		return true
 	}
 	if strings.HasSuffix(path, "/internal/worker/publish") || strings.HasSuffix(path, "/internal/fixtures/replay") || strings.HasSuffix(path, "/internal/wechat/assignments") || strings.HasSuffix(path, "/internal/wechat/bootstrap") || strings.HasSuffix(path, "/internal/wechat/discovery") || strings.HasSuffix(path, "/internal/feishu/discovery") {

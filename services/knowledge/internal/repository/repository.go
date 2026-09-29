@@ -525,6 +525,19 @@ type PrivateAccessRequestInput struct {
 	Now              time.Time `json:"-"`
 }
 
+type ContactFactInput struct {
+	FactType  string
+	Label     string
+	RawValue  string
+	ValueHash string
+}
+
+type ContactProfileCandidate struct {
+	OwnerUserID string
+	ContactKey  string
+	IdentityIDs []string
+}
+
 type AgentPairingInput struct {
 	PairingID       string
 	CodeHash        string
@@ -619,7 +632,18 @@ type Repository interface {
 
 	IngestMessage(ctx context.Context, input IngestMessageInput) (*IngestResult, error)
 	ListPendingMessages(ctx context.Context, limit int) ([]PendingMessage, error)
+	ListPendingContactFactMessages(ctx context.Context, limit int) ([]domain.Message, error)
 	CompleteMessageClassification(ctx context.Context, messageID, displayContent string, sensitive bool) error
+	CompleteContactFactExtraction(ctx context.Context, messageID string, facts []ContactFactInput, status string) error
+	ListContactFacts(ctx context.Context, senderIdentityIDs []string) ([]domain.ContactFact, error)
+	ListContactMessages(ctx context.Context, userID, organizationID string, senderIdentityIDs []string, limit int) ([]domain.Message, error)
+	ListAttachmentsForMessages(ctx context.Context, messageIDs []string) ([]domain.Attachment, error)
+	GetContactKnowledgeItem(ctx context.Context, messageID, attachmentID, organizationID string) (string, error)
+	GetPrivateShareReference(ctx context.Context, resourceID, resourceType string) (*domain.PrivateShareReference, error)
+	ListPrivateAccessRequests(ctx context.Context, userID, scope string) ([]domain.PrivateAccessRequest, error)
+	GetContactProfile(ctx context.Context, ownerUserID, contactKey string) (*domain.ContactProfile, error)
+	ListContactProfileCandidates(ctx context.Context, limit int) ([]ContactProfileCandidate, error)
+	UpsertContactProfile(ctx context.Context, profile domain.ContactProfile) error
 	SharePrivateResources(ctx context.Context, input PrivateShareInput) (*PrivateShareResult, error)
 	CreatePrivateAccessRequest(ctx context.Context, input PrivateAccessRequestInput) (*domain.PrivateAccessRequest, error)
 	ReviewPrivateAccessRequest(ctx context.Context, requestID, reviewerUserID, status, note string, now time.Time) (*domain.PrivateAccessRequest, error)
@@ -633,6 +657,8 @@ type Repository interface {
 	GetKnowledgeItemByAttachment(ctx context.Context, attachmentID string) (*domain.KnowledgeItem, error)
 	GetKnowledgeContent(ctx context.Context, knowledgeItemID, variant string) (*domain.KnowledgeContent, error)
 	RecordRAGSourceAudit(ctx context.Context, input RAGSourceAuditInput) error
+	GetAgentMessageContext(ctx context.Context, messageID string) (*domain.AgentMessageContext, error)
+	ListAgentConversationMembers(ctx context.Context, conversationID string) ([]domain.AgentConversationMember, error)
 	ListKnowledgeLibraries(ctx context.Context, userID, organizationID string) ([]domain.KnowledgeLibrary, error)
 	ListKnowledgeLibraryItems(ctx context.Context, libraryID, userID, organizationID, kind, platform, query string, limit int) ([]domain.KnowledgeLibraryItem, error)
 	ApplyRAGResult(ctx context.Context, knowledgeItemID string, input RAGResultInput) (*RAGResultApply, error)

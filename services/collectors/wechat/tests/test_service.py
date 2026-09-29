@@ -40,6 +40,26 @@ class TextDB:
         return [{"local_id": 8, "sort_seq": 8, "type": "文本", "content": "hello", "create_time": 1_700_000_008}]
 
 
+class MediaReplayDB:
+    def get_messages(self, _chat_id, limit=1000, offset=0):
+        return [
+            {
+                "local_id": 1,
+                "sort_seq": 1,
+                "type": 3,
+                "content": "old image",
+                "create_time": "2026-09-26T04:58:00Z",
+            },
+            {
+                "local_id": 2,
+                "sort_seq": 2,
+                "type": 3,
+                "content": "new image",
+                "create_time": "2026-09-27T07:14:00Z",
+            },
+        ]
+
+
 class ContactDB:
     def __init__(self):
         self._db_files = [("contact.db", "contact.db", 0)]
@@ -132,6 +152,18 @@ class CollectorServiceTest(unittest.TestCase):
             since=0,
             start_at="2024-01-02T00:00:00Z",
         )
+        self.assertEqual([row["sort_seq"] for row in rows], [2])
+
+    def test_media_replay_respects_requested_start_time(self):
+        rows = service.media_replay_candidates(
+            MediaReplayDB(),
+            "chat",
+            start_at="2026-09-27T07:13:00Z",
+            seen_ids=set(),
+            already_replayed=set(),
+            limit=10,
+        )
+
         self.assertEqual([row["sort_seq"] for row in rows], [2])
 
     def test_media_payload_overrides_lossy_database_type(self):

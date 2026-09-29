@@ -365,7 +365,7 @@ async function sendQuestion() {
   try {
     await ensureOrganization()
     await askQaStream({ query: text, conversationId: conversationId.value ?? undefined, mode: mode.value, knowledgeBaseIds: selectedKnowledgeBaseIds.value, organizationId: organizationId.value }, {
-      onMeta: (value) => { if (value.conversation_id && !conversationId.value) { conversationId.value = value.conversation_id; void router.replace({ path: '/chat', query: { session: String(value.conversation_id) } }) } },
+      onMeta: (value) => { if (value.conversation_id && !conversationId.value) { conversationId.value = value.conversation_id; void router.replace({ path: route.path, query: { session: String(value.conversation_id) } }) } },
       onToken: (delta) => { assistant.text += delta },
       onCitation: (value) => { assistant.citations = mergeCitations([...(assistant.citations || []), value]); const citation = assistant.citations.find((item) => item.citation_id === (value?.citation_id || value?.source_id || `attachment:${value?.attachment_id}`)); if (citation) void hydrateCitationMetadata(citation) },
       onDone: (value) => { if (!assistant.text && value.answer) assistant.text = value.answer; if (value.citations?.length) { assistant.citations = mergeCitations(value.citations); assistant.citations.forEach((citation) => { void hydrateCitationMetadata(citation) }) }; assistant.streaming = false },

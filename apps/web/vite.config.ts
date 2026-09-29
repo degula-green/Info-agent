@@ -23,6 +23,11 @@ export default defineConfig({
 				changeOrigin: true,
 				rewrite: (path) => path.replace(/^\/api\/rag/, ''),
 			},
+			// The Agent service owns schedule drafts, approvals and the event stream.
+			'/api/agent': {
+				target: process.env.VITE_AGENT_DEV_PROXY || 'http://127.0.0.1:8095',
+				changeOrigin: true,
+			},
 		},
 	},
 })

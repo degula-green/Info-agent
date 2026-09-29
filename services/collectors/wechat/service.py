@@ -656,6 +656,48 @@ def messages_after(
         rows.sort(key=lambda row: int(row.get("sort_seq") or row.get("local_id") or 0))
         return rows[:limit]
 
+
+def media_replay_candidates(
+    db_instance: Any,
+    chat_id: str,
+    *,
+    start_at: Any,
+    seen_ids: set[str],
+    already_replayed: set[str],
+    limit: int,
+) -> list[dict[str, Any]]:
+    """Find historical media eligible for metadata reconciliation.
+
+    Media replay exists for records that predate the provider-aware parser, but
+    it must never escape the conversation's requested history boundary.
+    """
+
+    if limit <= 0:
+        return []
+    start = parse_time(start_at) if start_at else None
+    candidates: list[dict[str, Any]] = []
+    for candidate in db_instance.get_messages(chat_id, limit=1000, offset=0):
+        candidate_id = str(
+            candidate.get("local_id")
+            or candidate.get("server_id")
+            or candidate.get("sort_seq")
+            or ""
+        )
+        if (
+            not candidate_id
+            or candidate_id in seen_ids
+            or candidate_id in already_replayed
+            or media_type(candidate) not in {"file", "image", "video"}
+        ):
+            continue
+        if start is not None and parse_time(candidate.get("create_time")) < start:
+            continue
+        candidates.append(candidate)
+        if len(candidates) >= limit:
+            break
+    return candidates
+
+
 def collect_once() -> None:
     if binding.get("status") == "running" and config.get("enabled") and config.get("connector_id") and db is not None:
         assignments = knowledge("/api/knowledge/v1/internal/wechat/assignments?connector_id=" + str(config["connector_id"])).get("items", [])
@@ -699,13 +741,17 @@ def collect_once() -> None:
                 seen_ids = {str(row.get("local_id") or row.get("server_id") or row.get("sort_seq") or "") for row in rows}
                 already_replayed = replayed_media.get(collector_id, set())
                 replay_limit = max(0, int(os.getenv("WECHAT_MEDIA_REPLAY_BATCH_SIZE", "10")))
-                for candidate in db.get_messages(chat_id, limit=1000, offset=0):
+                for candidate in media_replay_candidates(
+                    db,
+                    chat_id,
+                    start_at=start_at,
+                    seen_ids=seen_ids,
+                    already_replayed=already_replayed,
+                    limit=replay_limit,
+                ):
                     candidate_id = str(candidate.get("local_id") or candidate.get("server_id") or candidate.get("sort_seq") or "")
-                    if candidate_id and candidate_id not in seen_ids and candidate_id not in already_replayed and media_type(candidate) in {"file", "image", "video"}:
-                        rows.append(candidate)
-                        replay_ids.add(candidate_id)
-                        if len(replay_ids) >= replay_limit:
-                            break
+                    rows.append(candidate)
+                    replay_ids.add(candidate_id)
             for raw in rows:
                 local_id = str(raw.get("local_id") or raw.get("server_id") or raw.get("sort_seq") or "0")
                 cursor = str(raw.get("sort_seq") or raw.get("local_id") or "")
@@ -936,9 +982,15 @@ def contacts(keyword: str = "", x_collector_token: str | None = Header(default=N
     items = [{"username": str(row.get("username") or ""), "nick_name": str(row.get("nick_name") or ""), "remark": str(row.get("remark") or "")} for row in rows if str(row.get("username") or "").strip()]
     return {"contacts": items, "total": len(items)}
 @app.get("/config")
-def get_config(x_collector_token: str | None = Header(default=None)) -> dict[str, Any]: auth(x_collector_token); return config
+def get_config(x_collector_token: str | None = Header(default=None)) -> dict[str, Any]:
+    auth(x_collector_token)
+    return dict(config)
 @app.put("/config")
-def save_config(value: dict[str, Any], x_collector_token: str | None = Header(default=None)) -> dict[str, Any]: auth(x_collector_token); config.update(value); save_state(); return config
+def save_config(value: dict[str, Any], x_collector_token: str | None = Header(default=None)) -> dict[str, Any]:
+    auth(x_collector_token)
+    config.update(value)
+    save_state()
+    return dict(config)
 
 if binding.get("status") == "running" and binding.get("db_dir") and binding.get("wxid"):
     try:
