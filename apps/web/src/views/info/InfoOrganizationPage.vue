@@ -5,10 +5,16 @@
         <h1>我的组织</h1>
         <p>查看组织成员及其管理身份</p>
       </div>
-      <t-button v-if="canInvite" theme="primary" :loading="pageLoading" @click="openInvitationDialog">
-        <template #icon><t-icon name="user-add" /></template>
-        生成邀请链接
-      </t-button>
+      <div class="organization-heading__actions">
+        <t-button variant="outline" @click="router.push('/organization/knowledge')">
+          <template #icon><t-icon name="folder-open" /></template>
+          知识结构
+        </t-button>
+        <t-button v-if="canInvite" theme="primary" :loading="pageLoading" @click="openInvitationDialog">
+          <template #icon><t-icon name="user-add" /></template>
+          生成邀请链接
+        </t-button>
+      </div>
     </header>
 
     <section class="organization-overview" aria-labelledby="organization-name">
@@ -131,6 +137,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import { MessagePlugin } from 'tdesign-vue-next'
+import { useRouter } from 'vue-router'
 import { CoreAuthError, getCurrentUser } from '@/api/core-auth'
 import { createOrganizationInvitation, getCurrentOrganization, grantOrganizationRole, listOrganizationMembers, revokeOrganizationInvitation, revokeOrganizationRole, type CoreOrganizationMember, type CoreOrganizationResponse } from '@/api/core-organization'
 
@@ -140,6 +147,7 @@ type Member = CoreOrganizationMember & { id: string; color: string; current?: bo
 type Invitation = { id: string; url: string; expiresAt: Date; status: 'pending' | 'revoked' }
 
 const roleLabel: Record<DisplayRole, string> = { owner: '管理员', information_admin: '信息管理员', membership_approver: '成员审批员', member: '成员' }
+const router = useRouter()
 const managementRoles: Array<{ code: ManagementRole; label: string; description: string }> = [
   { code: 'owner', label: '管理员', description: '拥有组织全部管理权限，包括角色管理' },
   { code: 'information_admin', label: '信息管理员', description: '管理组织信息资源，不包含成员准入权限' },
@@ -243,6 +251,9 @@ onMounted(() => { void loadOrganization() })
 <style lang="less" scoped>
 .organization-page { box-sizing: border-box; width: min(1100px, 100%); margin: 0 auto; padding: 34px 34px 56px; color: var(--td-text-color-primary); }
 .organization-heading { display: flex; align-items: flex-end; justify-content: space-between; gap: 24px; margin-bottom: 24px; }
+.organization-heading__actions { display: flex; align-items: center; gap: 9px; }
+.organization-heading__actions :deep(.t-button) { min-height: 32px; }
+.organization-heading__actions :deep(.t-button__text) { display: inline-flex; align-items: center; line-height: 1; }
 .organization-heading h1 { margin: 0; font-size: 28px; font-weight: 650; }
 .organization-heading p { margin: 7px 0 0; color: var(--td-text-color-secondary); font-size: 13px; }
 .organization-overview { display: flex; align-items: center; justify-content: space-between; gap: 32px; padding: 24px 28px; border: 1px solid var(--td-component-stroke); border-radius: 8px; background: var(--td-bg-color-container); }

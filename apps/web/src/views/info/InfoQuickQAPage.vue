@@ -10,7 +10,13 @@
       <div v-else class="qa-transcript">
         <h1 class="qa-transcript__title">{{ conversationTitle }}</h1>
         <div v-for="(message, index) in messages" :key="index" :class="['qa-message', `qa-message--${message.role}`]">
-          <div v-if="message.role === 'user'" class="qa-user-bubble">{{ message.text }}</div>
+          <div v-if="message.role === 'user'" class="qa-user-message">
+            <div class="qa-user-bubble">{{ message.text }}</div>
+            <div class="qa-user-actions" aria-label="问题操作">
+              <button type="button" title="复制问题" aria-label="复制问题" @click="copyQuestion(message.text)"><t-icon name="file-copy" /></button>
+              <button type="button" title="编辑问题" aria-label="编辑问题" @click="editQuestion(message.text)"><t-icon name="edit-1" /></button>
+            </div>
+          </div>
           <div v-else class="qa-answer">
             <div v-if="message.streaming && !message.text" class="qa-thinking" role="status" aria-live="polite">
               <span>AI 正在回答</span><i></i><i></i><i></i>
@@ -32,8 +38,6 @@
             </div>
             <div v-if="!message.streaming" class="qa-answer__actions" aria-label="回答操作">
               <button type="button" title="复制回答" aria-label="复制回答" @click="copyAnswer(message.text)"><t-icon name="file-copy" /></button>
-              <button type="button" title="编辑问题" aria-label="编辑问题" @click="editQuestion(message.text)"><t-icon name="edit-1" /></button>
-              <button type="button" title="反馈回答" aria-label="反馈回答" @click="reportAnswer"><t-icon name="error-circle" /></button>
             </div>
           </div>
         </div>
@@ -262,22 +266,26 @@ function imageHint() {
   MessagePlugin.info('图片上传将在接口接入后开放')
 }
 
-async function copyAnswer(text: string) {
+async function copyText(text: string, successMessage: string) {
   try {
     await navigator.clipboard.writeText(text)
-    MessagePlugin.success('回答已复制')
+    MessagePlugin.success(successMessage)
   } catch {
     MessagePlugin.info('复制功能将在接口接入后开放')
   }
 }
 
+function copyAnswer(text: string) {
+  void copyText(text, '回答已复制')
+}
+
+function copyQuestion(text: string) {
+  void copyText(text, '问题已复制')
+}
+
 function editQuestion(text: string) {
   question.value = text
   nextTick(() => textareaRef.value?.focus?.())
-}
-
-function reportAnswer() {
-  MessagePlugin.info('反馈功能将在接口接入后开放')
 }
 
 async function openCitation(citation: QaCitation) {
@@ -326,13 +334,20 @@ async function openCitationSource() {
 }
 
 // TDesign textarea emits (value, context) rather than a native KeyboardEvent.
-// Handle both shapes so Ctrl/Cmd+Enter works without Vue key modifiers
-// attempting to inspect the emitted string as an event object.
+// Enter sends, while Shift+Enter keeps the textarea's newline behavior.
 function handleTextareaKeydown(value: unknown, context?: { e?: KeyboardEvent }) {
   const event = context?.e || (value instanceof KeyboardEvent ? value : undefined)
-  if (!event || event.key !== 'Enter' || (!event.ctrlKey && !event.metaKey)) return
+  if (!event || event.key !== 'Enter' || event.shiftKey || event.isComposing) return
   event.preventDefault()
   void sendQuestion()
+}
+
+async function scrollToLatest(behavior: ScrollBehavior = 'auto') {
+  await nextTick()
+  await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()))
+  const container = scrollRef.value
+  if (!container) return
+  container.scrollTo({ top: container.scrollHeight, behavior })
 }
 
 async function sendQuestion() {
@@ -357,8 +372,7 @@ async function sendQuestion() {
       onError: () => { assistant.text = '本次回答失败，请稍后重试。'; assistant.streaming = false; MessagePlugin.error('问答服务暂时不可用') },
     })
   } catch { assistant.text = '检索服务暂时不可用，请稍后重试。'; assistant.streaming = false; MessagePlugin.error('问答请求失败') } finally { assistant.streaming = false; loading.value = false }
-  await nextTick()
-  scrollRef.value?.scrollTo({ top: scrollRef.value.scrollHeight, behavior: 'smooth' })
+  await scrollToLatest('smooth')
 }
 
 function onDocumentPointerdown(event: PointerEvent) {
@@ -377,6 +391,7 @@ async function loadConversation() {
         citations.forEach((citation) => { void hydrateCitationMetadata(citation) })
       }
     }
+    await scrollToLatest()
   } catch { MessagePlugin.error('加载历史会话失败') }
 }
 
@@ -401,7 +416,7 @@ onBeforeUnmount(() => {
 .qa-chat-page { position: relative; display: flex; flex-direction: column; width: 100%; height: 100%; min-height: 620px; background: var(--td-bg-color-container); }
 .qa-chat-scroll { flex: 1; min-height: 0; overflow-y: auto; padding: 32px 34px 200px; }
 .qa-welcome { display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 100%; padding-bottom: 120px; text-align: center; }.qa-welcome h1 { margin: 0 0 12px; color: var(--td-text-color-primary); font-size: 36px; font-weight: 600; letter-spacing: -0.02em; }.qa-welcome p { margin: 0; color: var(--td-text-color-secondary); font-size: 16px; }
-.qa-transcript { width: min(960px, 100%); margin: 0 auto; padding-bottom: 20px; }.qa-transcript__title { margin: 8px 0 42px; color: var(--td-text-color-primary); font-size: 24px; font-weight: 600; }.qa-message { display: flex; width: 100%; margin-bottom: 28px; }.qa-message--user { justify-content: flex-end; }.qa-user-bubble { max-width: min(620px, 75%); padding: 11px 15px; border-radius: 14px; color: var(--td-text-color-primary); background: var(--td-bg-color-secondarycontainer); font-size: 14px; line-height: 1.6; }.qa-answer { max-width: 760px; padding-left: 2px; }.qa-answer__content { color: var(--td-text-color-primary); font-size: 15px; line-height: 1.8; }.qa-answer__content :deep(p) { margin: 0 0 10px; }.qa-answer__content :deep(p:last-child) { margin-bottom: 0; }.qa-answer__content :deep(h1), .qa-answer__content :deep(h2), .qa-answer__content :deep(h3) { margin: 12px 0 7px; color: var(--td-text-color-primary); line-height: 1.4; }.qa-answer__content :deep(ul), .qa-answer__content :deep(ol) { margin: 6px 0 10px; padding-left: 24px; }.qa-answer__content :deep(li) { margin: 3px 0; }.qa-answer__content :deep(pre) { overflow-x: auto; margin: 10px 0; padding: 10px 12px; border-radius: 6px; background: var(--td-bg-color-secondarycontainer); font-size: 13px; line-height: 1.5; }.qa-answer__content :deep(code) { padding: 1px 4px; border-radius: 4px; background: var(--td-bg-color-secondarycontainer); font-size: .92em; }.qa-answer__content :deep(pre code) { padding: 0; background: transparent; }.qa-answer__content :deep(blockquote) { margin: 8px 0; padding-left: 12px; border-left: 3px solid var(--td-brand-color); color: var(--td-text-color-secondary); }.qa-stream-caret { display: inline-block; width: 2px; height: 1.05em; margin-left: 3px; vertical-align: -0.15em; background: var(--td-brand-color); animation: qa-caret-blink .9s steps(1) infinite; }.qa-answer__meta { display: inline-flex; align-items: center; gap: 5px; margin-top: 13px; padding: 5px 8px; border-radius: 5px; color: var(--td-brand-color); background: var(--td-brand-color-1); font-size: 11px; }.qa-answer__meta svg { width: 13px; }.qa-answer__actions { display: flex; align-items: center; gap: 7px; margin-top: 12px; }.qa-answer__actions button { display: inline-grid; place-items: center; width: 28px; height: 28px; padding: 0; border: 0; border-radius: 6px; color: var(--td-text-color-placeholder); background: transparent; cursor: pointer; }.qa-answer__actions button:hover { color: var(--td-text-color-secondary); background: var(--td-bg-color-secondarycontainer); }.qa-answer__actions svg { width: 16px; height: 16px; }
+.qa-transcript { width: min(960px, 100%); margin: 0 auto; padding-bottom: 20px; }.qa-transcript__title { margin: 8px 0 42px; color: var(--td-text-color-primary); font-size: 24px; font-weight: 600; }.qa-message { display: flex; width: 100%; margin-bottom: 28px; }.qa-message--user { justify-content: flex-end; }.qa-user-message { display: flex; max-width: min(620px, 75%); flex-direction: column; align-items: flex-end; gap: 6px; }.qa-user-bubble { max-width: 100%; padding: 11px 15px; border-radius: 14px; color: var(--td-text-color-primary); background: var(--td-bg-color-secondarycontainer); font-size: 14px; line-height: 1.6; }.qa-user-actions { display: flex; align-items: center; gap: 4px; padding-right: 3px; }.qa-answer { max-width: 760px; padding-left: 2px; }.qa-answer__content { color: var(--td-text-color-primary); font-size: 15px; line-height: 1.8; }.qa-answer__content :deep(p) { margin: 0 0 10px; }.qa-answer__content :deep(p:last-child) { margin-bottom: 0; }.qa-answer__content :deep(h1), .qa-answer__content :deep(h2), .qa-answer__content :deep(h3) { margin: 12px 0 7px; color: var(--td-text-color-primary); line-height: 1.4; }.qa-answer__content :deep(ul), .qa-answer__content :deep(ol) { margin: 6px 0 10px; padding-left: 24px; }.qa-answer__content :deep(li) { margin: 3px 0; }.qa-answer__content :deep(pre) { overflow-x: auto; margin: 10px 0; padding: 10px 12px; border-radius: 6px; background: var(--td-bg-color-secondarycontainer); font-size: 13px; line-height: 1.5; }.qa-answer__content :deep(code) { padding: 1px 4px; border-radius: 4px; background: var(--td-bg-color-secondarycontainer); font-size: .92em; }.qa-answer__content :deep(pre code) { padding: 0; background: transparent; }.qa-answer__content :deep(blockquote) { margin: 8px 0; padding-left: 12px; border-left: 3px solid var(--td-brand-color); color: var(--td-text-color-secondary); }.qa-stream-caret { display: inline-block; width: 2px; height: 1.05em; margin-left: 3px; vertical-align: -0.15em; background: var(--td-brand-color); animation: qa-caret-blink .9s steps(1) infinite; }.qa-answer__meta { display: inline-flex; align-items: center; gap: 5px; margin-top: 13px; padding: 5px 8px; border-radius: 5px; color: var(--td-brand-color); background: var(--td-brand-color-1); font-size: 11px; }.qa-answer__meta svg { width: 13px; }.qa-answer__actions, .qa-user-actions { display: flex; align-items: center; gap: 7px; margin-top: 12px; opacity: 0; pointer-events: none; transition: opacity .15s ease; }.qa-user-actions { margin-top: 0; gap: 4px; }.qa-user-message:hover .qa-user-actions, .qa-user-message:focus-within .qa-user-actions, .qa-answer:hover .qa-answer__actions, .qa-answer:focus-within .qa-answer__actions { opacity: 1; pointer-events: auto; }.qa-answer__actions button, .qa-user-actions button { display: inline-grid; place-items: center; width: 28px; height: 28px; padding: 0; border: 0; border-radius: 6px; color: var(--td-text-color-placeholder); background: transparent; cursor: pointer; }.qa-answer__actions button:hover, .qa-user-actions button:hover { color: var(--td-text-color-secondary); background: var(--td-bg-color-secondarycontainer); }.qa-answer__actions svg, .qa-user-actions svg { width: 16px; height: 16px; }
 .qa-thinking { display: inline-flex; align-items: center; gap: 4px; min-height: 27px; color: var(--td-text-color-secondary); font-size: 14px; line-height: 1.8; }.qa-thinking i { width: 4px; height: 4px; border-radius: 50%; background: var(--td-brand-color); animation: qa-thinking-dot 1.2s infinite ease-in-out; }.qa-thinking i:nth-of-type(2) { animation-delay: .15s; }.qa-thinking i:nth-of-type(3) { animation-delay: .3s; }.qa-stream-caret { display: inline-block; width: 2px; height: 1.05em; margin-left: 3px; vertical-align: -0.15em; background: var(--td-brand-color); animation: qa-caret-blink .9s steps(1) infinite; } @keyframes qa-thinking-dot { 0%, 60%, 100% { opacity: .3; transform: translateY(0); } 30% { opacity: 1; transform: translateY(-2px); } } @keyframes qa-caret-blink { 50% { opacity: 0; } }
 .qa-composer-area { position: absolute; z-index: 5; right: 0; bottom: 0; left: 0; display: flex; flex-direction: column; align-items: center; padding: 0 24px 22px; pointer-events: none; background: linear-gradient(to top, var(--td-bg-color-container) 62%, transparent); }.qa-composer, .qa-disclaimer { pointer-events: auto; }.qa-composer { position: relative; width: min(960px, 100%); border: 1px solid var(--td-component-stroke); border-radius: 14px; background: var(--td-bg-color-container); box-shadow: 0 2px 8px rgba(0, 0, 0, .04), 0 8px 16px -4px rgba(0, 0, 0, .06); transition: border-color .15s, box-shadow .15s; }.qa-composer--focused { border-color: var(--td-brand-color); box-shadow: 0 0 0 3px var(--td-brand-color-focus), 0 8px 18px -8px rgba(0, 0, 0, .18); }.qa-textarea :deep(.t-textarea__inner) { min-height: 112px; padding: 16px 18px 56px; border: 0; border-radius: 14px; resize: none; color: var(--td-text-color-primary); font-size: 16px; line-height: 1.5; box-shadow: none; }.qa-textarea :deep(.t-textarea__inner:focus) { box-shadow: none; }.qa-textarea :deep(.t-textarea__inner::placeholder) { color: var(--td-text-color-placeholder); font-size: 16px; }
 .qa-controls { position: absolute; right: 14px; bottom: 12px; left: 14px; display: flex; align-items: center; justify-content: space-between; gap: 10px; }.qa-controls__left { display: flex; align-items: center; gap: 8px; min-width: 0; }.qa-control-wrap { position: relative; }.qa-control { display: inline-flex; align-items: center; gap: 7px; min-height: 34px; padding: 6px 8px; border: 0; border-radius: 8px; color: var(--td-text-color-primary); background: transparent; font-size: 15px; white-space: nowrap; cursor: pointer; }.qa-control:hover, .qa-control[aria-expanded='true'] { background: var(--td-bg-color-secondarycontainer); }.qa-control > svg:first-child { width: 18px; height: 18px; }.qa-control__arrow { width: 13px; color: var(--td-text-color-secondary); }.qa-image-control { padding-right: 10px; }
@@ -409,7 +424,8 @@ onBeforeUnmount(() => {
 .qa-dropdown { position: absolute; z-index: 20; bottom: calc(100% + 9px); left: 0; width: 320px; padding: 14px 13px; border: 1px solid var(--td-component-stroke); border-radius: 12px; background: var(--td-bg-color-container); box-shadow: var(--td-shadow-2); }.qa-dropdown__heading { color: var(--td-text-color-primary); font-size: 16px; font-weight: 600; }.qa-dropdown__hint { margin: 4px 0 12px; color: var(--td-text-color-secondary); font-size: 12px; }.qa-kb-option { display: flex; align-items: center; gap: 9px; width: 100%; min-height: 39px; padding: 7px 8px; border: 0; border-radius: 7px; color: var(--td-text-color-primary); background: transparent; text-align: left; cursor: pointer; }.qa-kb-option:hover:not(:disabled), .qa-kb-option.selected { background: var(--td-bg-color-secondarycontainer); }.qa-kb-option:disabled { color: var(--td-text-color-disabled); cursor: not-allowed; }.qa-check { display: grid; place-items: center; width: 19px; height: 19px; border: 1px solid var(--td-component-border); border-radius: 5px; color: #fff; background: transparent; }.qa-kb-option.selected .qa-check { border-color: var(--td-brand-color); background: var(--td-brand-color); }.qa-check svg { width: 13px; }.qa-kb-option__name { flex: 1; font-size: 14px; }.qa-kb-option__count { color: var(--td-text-color-secondary); font-size: 11px; }
 .qa-mode-dropdown { width: 245px; padding: 8px; }.qa-mode-option { display: flex; align-items: flex-start; gap: 11px; width: 100%; padding: 12px 10px; border: 0; border-radius: 9px; color: var(--td-text-color-primary); background: transparent; text-align: left; cursor: pointer; }.qa-mode-option:hover, .qa-mode-option.selected { background: var(--td-bg-color-secondarycontainer); }.qa-mode-option > svg:first-child { width: 20px; height: 20px; margin-top: 1px; }.qa-mode-option span { display: flex; flex: 1; flex-direction: column; gap: 3px; }.qa-mode-option strong { font-size: 15px; font-weight: 500; }.qa-mode-option small { color: var(--td-text-color-secondary); font-size: 12px; }.qa-mode-option__check { width: 16px !important; color: var(--td-brand-color); }
 .qa-disclaimer { margin: 10px 0 0; color: var(--td-text-color-placeholder); font-size: 12px; }
-@media (max-width: 760px) { .qa-chat-page { min-height: 560px; }.qa-chat-scroll { padding: 24px 16px 185px; }.qa-welcome { padding-bottom: 80px; }.qa-welcome h1 { font-size: 28px; }.qa-welcome p { font-size: 14px; }.qa-composer-area { padding: 0 12px 14px; }.qa-composer { border-radius: 12px; }.qa-textarea :deep(.t-textarea__inner) { min-height: 100px; padding: 13px 14px 58px; font-size: 14px; }.qa-textarea :deep(.t-textarea__inner::placeholder) { font-size: 14px; }.qa-controls { right: 9px; bottom: 9px; left: 9px; }.qa-control { min-height: 31px; padding: 5px 6px; font-size: 13px; }.qa-control__arrow { width: 11px; }.qa-image-control { display: none; }.qa-send { width: 35px; height: 35px; }.qa-dropdown { width: min(300px, calc(100vw - 28px)); }.qa-mode-dropdown { width: 225px; }.qa-user-bubble { max-width: 88%; font-size: 13px; }.qa-answer__content { font-size: 14px; } }
+@media (max-width: 760px) { .qa-chat-page { min-height: 560px; }.qa-chat-scroll { padding: 24px 16px 185px; }.qa-welcome { padding-bottom: 80px; }.qa-welcome h1 { font-size: 28px; }.qa-welcome p { font-size: 14px; }.qa-composer-area { padding: 0 12px 14px; }.qa-composer { border-radius: 12px; }.qa-textarea :deep(.t-textarea__inner) { min-height: 100px; padding: 13px 14px 58px; font-size: 14px; }.qa-textarea :deep(.t-textarea__inner::placeholder) { font-size: 14px; }.qa-controls { right: 9px; bottom: 9px; left: 9px; }.qa-control { min-height: 31px; padding: 5px 6px; font-size: 13px; }.qa-control__arrow { width: 11px; }.qa-image-control { display: none; }.qa-send { width: 35px; height: 35px; }.qa-dropdown { width: min(300px, calc(100vw - 28px)); }.qa-mode-dropdown { width: 225px; }.qa-user-message { max-width: 88%; }.qa-user-bubble { font-size: 13px; }.qa-answer__content { font-size: 14px; } }
+@media (hover: none) { .qa-user-actions, .qa-answer__actions { opacity: 1; pointer-events: auto; } }
 .qa-citations { display: grid; gap: 7px; margin-top: 12px; width: min(680px, 100%); }
 .qa-citations__toggle { display: flex; align-items: center; justify-content: space-between; width: fit-content; min-width: 116px; min-height: 30px; padding: 5px 9px; border: 1px solid var(--td-component-stroke); border-radius: 7px; color: var(--td-brand-color); background: var(--td-brand-color-1); font-size: 12px; cursor: pointer; }
 .qa-citations__toggle > span { display: inline-flex; align-items: center; gap: 5px; }
