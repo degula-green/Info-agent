@@ -218,6 +218,23 @@ def test_laya_marks_uncertain_results(response: dict, reason: str) -> None:
     assert evaluation.understanding.intent_candidates == []
 
 
+def test_laya_provider_threshold_cannot_be_lowered_by_runtime() -> None:
+    provider = LayaUnderstandingProvider(
+        StubLayaClient(
+            _response("todo.create", {"todo.create": 0.82, "knowledge.answer": 0.02})
+        ),
+        min_confidence=0.90,
+    )
+
+    evaluation = provider.evaluate(
+        ChatIngress().create_task("user-1", {"text": "提醒我交房租"}),
+        min_confidence=0.70,
+    )
+
+    assert evaluation.accepted is False
+    assert evaluation.fallback_reason == "low_probability"
+
+
 def test_laya_rejects_unknown_labels() -> None:
     provider = LayaUnderstandingProvider(
         StubLayaClient(_response("unknown.intent", {"unknown.intent": 0.99}))

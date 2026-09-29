@@ -126,11 +126,14 @@ class LayaUnderstandingProvider:
                 accepted=True,
             )
 
-        threshold = (
+        runtime_threshold = (
             self.min_confidence
             if min_confidence is None
             else _clamp(min_confidence)
         )
+        # Runtime thresholds describe the minimum confidence exposed to the
+        # planner. Laya keeps its own stricter fast-path gate.
+        threshold = max(self.min_confidence, runtime_threshold)
         questions = {
             "intent": {
                 "type": "choice",
