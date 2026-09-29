@@ -1,5 +1,5 @@
 import { authenticatedFetch } from '../auth/request.ts'
-import { getAuthSession } from '../auth/session.ts'
+import { resolveOrganizationId } from '@/utils/info-search-scope'
 
 export class ApiError extends Error {
   code: string
@@ -55,15 +55,23 @@ function enqueueRequest<T>(run: () => Promise<T>): Promise<T> {
   })
 }
 
+let organizationHeaderID: string | undefined
+let organizationHeaderPromise: Promise<string | undefined> | null = null
+function organizationHeader() {
+  if (organizationHeaderID) return Promise.resolve(organizationHeaderID)
+  if (!organizationHeaderPromise) {
+    organizationHeaderPromise = resolveOrganizationId().then((id) => {
+      organizationHeaderID = id
+      return id
+    }).catch(() => undefined).finally(() => { organizationHeaderPromise = null })
+  }
+  return organizationHeaderPromise
+}
 export function knowledgeHeaders(initial?: HeadersInit, accept = 'application/json') {
   const headers = new Headers(initial)
   headers.set('Accept', accept)
   if (!headers.has('X-Request-ID')) headers.set('X-Request-ID', requestIdentifier())
   if (!headers.has('X-Trace-ID')) headers.set('X-Trace-ID', requestIdentifier())
-  if (!getAuthSession().accessToken) {
-    headers.set('X-User-ID', appEnv.VITE_KNOWLEDGE_DEV_USER_ID || 'dev-user')
-    headers.set('X-Organization-ID', appEnv.VITE_KNOWLEDGE_DEV_ORGANIZATION_ID || 'dev-org')
-  }
   return headers
 }
 
@@ -78,6 +86,8 @@ function requestIdentifier() {
 
 async function performKnowledgeRequest<T>(path: string, init: RequestInit): Promise<T> {
   const headers = knowledgeHeaders(init.headers)
+  const organizationID = await organizationHeader()
+  if (organizationID && !headers.has('X-Organization-ID')) headers.set('X-Organization-ID', organizationID)
   if (init.body && !(init.body instanceof FormData) && !headers.has('Content-Type')) headers.set('Content-Type', 'application/json')
   const response = await enqueueRequest(() => authenticatedFetch(`${baseURL}${path.startsWith('/') ? path : `/${path}`}`, { ...init, headers }))
   const raw = await response.text()

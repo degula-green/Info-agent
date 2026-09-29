@@ -153,17 +153,26 @@ def use_runtime(runtime: RuntimeState):
         _runtime_var.reset(token)
 
 class _RuntimeDictProxy:
+    def __init__(self, field: str) -> None:
+        self.field = field
+
+    def _value(self) -> dict[str, Any]:
+        return getattr(current_runtime(), self.field)
+
     def __getattr__(self, name: str) -> Any:
-        return getattr(current_runtime().binding, name)
-    def __getitem__(self, key: str) -> Any: return current_runtime().binding[key]
-    def __setitem__(self, key: str, value: Any) -> None: current_runtime().binding[key] = value
-    def __delitem__(self, key: str) -> None: del current_runtime().binding[key]
-    def __iter__(self): return iter(current_runtime().binding)
-    def __len__(self): return len(current_runtime().binding)
-    def get(self, *args): return current_runtime().binding.get(*args)
-    def update(self, *args, **kwargs): return current_runtime().binding.update(*args, **kwargs)
-    def clear(self): return current_runtime().binding.clear()
-    def pop(self, *args): return current_runtime().binding.pop(*args)
+        return getattr(self._value(), name)
+    def __getitem__(self, key: str) -> Any: return self._value()[key]
+    def __setitem__(self, key: str, value: Any) -> None: self._value()[key] = value
+    def __delitem__(self, key: str) -> None: del self._value()[key]
+    def __iter__(self): return iter(self._value())
+    def __len__(self): return len(self._value())
+    def get(self, *args): return self._value().get(*args)
+    def update(self, *args, **kwargs): return self._value().update(*args, **kwargs)
+    def clear(self): return self._value().clear()
+    def pop(self, *args): return self._value().pop(*args)
+    def __eq__(self, other: Any) -> bool: return self._value() == other
+    def __bool__(self) -> bool: return bool(self._value())
+    def __repr__(self) -> str: return repr(self._value())
 
 class _RuntimeObjectProxy:
     def __init__(self, field: str): self.field = field
@@ -171,8 +180,8 @@ class _RuntimeObjectProxy:
     def __getattr__(self, name: str) -> Any: return getattr(self._value(), name)
     def __bool__(self): return bool(self._value())
 
-binding = _RuntimeDictProxy()
-config = _RuntimeDictProxy()
+binding = _RuntimeDictProxy("binding")
+config = _RuntimeDictProxy("config")
 db = _RuntimeObjectProxy("db")
 media = _RuntimeObjectProxy("media")
 checkpoints: dict[str, int] = {}; replayed_media: dict[str, set[str]] = {}
@@ -605,7 +614,13 @@ def upload_attachment(collector_id: str, attachment_id: str, path: Path, name: s
     request = urllib.request.Request(f"{base}/api/knowledge/v1/internal/collectors/{collector_id}/attachments", data=body, method="POST", headers={"Content-Type": f"multipart/form-data; boundary={boundary}", "X-Service-Token": token, "Accept": "application/json"})
     with urllib.request.urlopen(request, timeout=60) as response: return json.loads(response.read().decode() or "{}")
 
-def messages_after(db_instance: Any, chat_id: str, since: int, limit: int = 200) -> list[dict[str, Any]]:
+def messages_after(
+    db_instance: Any,
+    chat_id: str,
+    since: int,
+    limit: int = 200,
+    start_at: Any = None,
+) -> list[dict[str, Any]]:
     """Read an incremental page, tolerating a concurrently rewritten shard.
 
     WeChat may rewrite one encrypted message shard while the desktop client is
@@ -615,7 +630,14 @@ def messages_after(db_instance: Any, chat_id: str, since: int, limit: int = 200)
     cursor contract; the next poll will retry any rows that were not returned.
     """
     if not since:
-        return list(reversed(db_instance.get_messages(chat_id, limit=1000, offset=0)))
+        rows = list(reversed(db_instance.get_messages(chat_id, limit=1000, offset=0)))
+        # A new attachment has no cursor yet. Restrict that initial historical
+        # page to the requested start time; otherwise private-chat collection
+        # replays the entire database and appears to move ever earlier.
+        if start_at:
+            start = parse_time(start_at)
+            rows = [row for row in rows if parse_time(row.get("create_time")) >= start]
+        return rows
     try:
         return db_instance.get_new_messages(chat_id, since_seq=since, limit=limit)
     except Exception as first_error:
@@ -666,9 +688,8 @@ def collect_once() -> None:
                     continue
             try: since = int(str(collector.get("last_cursor") or "0"))
             except ValueError: since = checkpoints.get(collector_id, 0)
-            rows = messages_after(db, chat_id, since, limit=200)
             start_at = conversation.get("effective_start_at") or conversation.get("requested_start_at") or config.get("history_start_at")
-            if not since and start_at: rows = [row for row in rows if parse_time(row.get("create_time")) >= parse_time(start_at)]
+            rows = messages_after(db, chat_id, since, limit=200, start_at=start_at)
             # Reconcile media rows already ingested before the provider-aware
             # parser was introduced. WeChat stores forwarded files as type=57;
             # replaying only rows that now classify as media lets Knowledge

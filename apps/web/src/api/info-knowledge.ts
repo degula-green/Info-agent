@@ -307,17 +307,19 @@ export async function getConversation(conversationID: string): Promise<Conversat
   return knowledgeRequest<ConversationDTO>(`/conversations/${encodeURIComponent(conversationID)}`)
 }
 
-export async function getConversationDetail(conversationID: string, limit = 50): Promise<ConversationDetail> {
+export async function getConversationDetail(conversationID: string, limit = 50, options: { shared?: boolean } = {}): Promise<ConversationDetail> {
   const encodedID = encodeURIComponent(conversationID)
+  const suffix = options.shared ? '&scope=shared' : ''
   const [conversation, timeline] = await Promise.all([
-    knowledgeRequest<ConversationDTO>(`/conversations/${encodedID}`),
-    knowledgeRequest<ConversationTimelinePageDTO>(`/conversations/${encodedID}/timeline?limit=${limit}`),
+    knowledgeRequest<ConversationDTO>(`/conversations/${encodedID}?scope=${options.shared ? 'shared' : 'full'}`),
+    knowledgeRequest<ConversationTimelinePageDTO>(`/conversations/${encodedID}/timeline?limit=${limit}${suffix}`),
   ])
   return { conversation, timeline: { ...timeline, items: timeline.items || [] } }
 }
 
-export async function getConversationTimeline(conversationID: string, cursor: string, limit = 50): Promise<ConversationTimelinePageDTO> {
+export async function getConversationTimeline(conversationID: string, cursor: string, limit = 50, options: { shared?: boolean } = {}): Promise<ConversationTimelinePageDTO> {
   const query = new URLSearchParams({ limit: String(limit), before: cursor })
+  if (options.shared) query.set('scope', 'shared')
   const page = await knowledgeRequest<ConversationTimelinePageDTO>(`/conversations/${encodeURIComponent(conversationID)}/timeline?${query}`)
   return { ...page, items: page.items || [] }
 }

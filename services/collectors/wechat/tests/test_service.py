@@ -15,6 +15,14 @@ class FakeDB:
         return [{"local_id": 7, "sort_seq": 7, "type": 3, "content": "image", "create_time": 1_700_000_000}]
 
 
+class HistoricalDB:
+    def get_messages(self, _chat_id, limit=1000, offset=0):
+        return [
+            {"local_id": 1, "sort_seq": 1, "create_time": "2024-01-01T00:00:00Z"},
+            {"local_id": 2, "sort_seq": 2, "create_time": "2024-01-03T00:00:00Z"},
+        ]
+
+
 class IncrementalFallbackDB:
     def get_new_messages(self, _chat_id, since_seq=0, limit=200):
         raise RuntimeError("database disk image is malformed")
@@ -116,6 +124,15 @@ class CollectorServiceTest(unittest.TestCase):
     def test_incremental_read_falls_back_when_wechat_shard_is_rewritten(self):
         rows = service.messages_after(IncrementalFallbackDB(), "chat", since=3, limit=10)
         self.assertEqual([row["sort_seq"] for row in rows], [8, 9])
+
+    def test_initial_history_page_respects_requested_start_time(self):
+        rows = service.messages_after(
+            HistoricalDB(),
+            "chat",
+            since=0,
+            start_at="2024-01-02T00:00:00Z",
+        )
+        self.assertEqual([row["sort_seq"] for row in rows], [2])
 
     def test_media_payload_overrides_lossy_database_type(self):
         image = '<msg><img fromusername="wxid_image" length="12" /></msg>'
