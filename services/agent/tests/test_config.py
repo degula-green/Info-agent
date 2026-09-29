@@ -42,6 +42,14 @@ def test_documented_defaults_and_numeric_parsing(monkeypatch) -> None:
         assert module.settings.task_max_execution_seconds == 12.5
         assert module.settings.retry_backoff_seconds == [0.0, 2.0]
         assert module.settings.redis_inbound_stream == "agent:tasks"
+        assert module.settings.understanding_mode == "off"
+        assert module.settings.understanding_provider == "rules"
+        assert module.settings.planner_provider == "deterministic"
+        assert module.settings.task_max_model_calls == 8
+        assert module.settings.laya_base_url == ""
+        assert module.settings.laya_model == "multilingual"
+        assert module.settings.laya_min_confidence == 0.8
+        assert module.settings.laya_min_margin == 0.15
     finally:
         for key in (
             "AGENT_TASK_MAX_STEPS",
@@ -93,4 +101,34 @@ def test_empty_knowledge_platform_override_falls_back_to_defaults(monkeypatch) -
         assert module.settings.knowledge_platform_allowlist == ("feishu", "wecom", "wechat")
     finally:
         monkeypatch.delenv("AGENT_KNOWLEDGE_PLATFORMS", raising=False)
+        importlib.reload(config_module)
+
+
+def test_laya_settings_parse(monkeypatch) -> None:
+    module = _reload_with(
+        monkeypatch,
+        AGENT_LAYAYA_BASE_URL="http://127.0.0.1:8110",
+        AGENT_LAYAYA_API_KEY="internal-token",
+        AGENT_LAYAYA_MODEL="multilingual",
+        AGENT_LAYAYA_TIMEOUT_SECONDS="3.5",
+        AGENT_LAYAYA_MIN_CONFIDENCE="0.82",
+        AGENT_LAYAYA_MIN_MARGIN="0.12",
+    )
+    try:
+        assert module.settings.laya_base_url == "http://127.0.0.1:8110"
+        assert module.settings.laya_api_key == "internal-token"
+        assert module.settings.laya_model == "multilingual"
+        assert module.settings.laya_timeout_seconds == 3.5
+        assert module.settings.laya_min_confidence == 0.82
+        assert module.settings.laya_min_margin == 0.12
+    finally:
+        for key in (
+            "AGENT_LAYAYA_BASE_URL",
+            "AGENT_LAYAYA_API_KEY",
+            "AGENT_LAYAYA_MODEL",
+            "AGENT_LAYAYA_TIMEOUT_SECONDS",
+            "AGENT_LAYAYA_MIN_CONFIDENCE",
+            "AGENT_LAYAYA_MIN_MARGIN",
+        ):
+            monkeypatch.delenv(key, raising=False)
         importlib.reload(config_module)

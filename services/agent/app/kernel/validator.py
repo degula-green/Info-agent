@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from app.kernel.errors import ContractValidationError
 from app.kernel.models import Plan, PlanStep, TaskEnvelope
+from app.kernel.references import has_references
 from app.kernel.registry import CapabilityRegistry
 
 
@@ -53,6 +54,11 @@ class PlanValidator:
         capability = self.registry.find(step.capability)
         if capability is None:
             errors.append(f"unknown capability: {step.capability}")
+            return errors
+        if has_references(step.arguments):
+            # References are resolved by Runtime before execution. Validating a
+            # placeholder against the final Capability schema would produce a
+            # false negative during initial planning or approval.
             return errors
         try:
             capability.validate(step.arguments)

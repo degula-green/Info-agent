@@ -85,6 +85,60 @@ class UnknownResultCapability:
         raise UnknownExternalResultError("gateway timeout after submit")
 
 
+class PreflightAskCapability:
+    """Write capability that knows before approval that input is missing."""
+
+    descriptor = CapabilityDescriptor(
+        name="test.preflight",
+        description="Pauses before approval until the required value is present.",
+        risk_level="external_write",
+        side_effect=True,
+        requires_approval=True,
+        idempotent=True,
+        timeout_seconds=5,
+    )
+
+    def __init__(self) -> None:
+        self.executed = 0
+
+    def validate(self, arguments: dict) -> ValueInputPayload:
+        return ValueInputPayload.model_validate({"value": arguments.get("value") or "x"})
+
+    def preflight(self, arguments: dict) -> dict | None:
+        if arguments.get("value") != "ready":
+            return {
+                "requires_user_input": True,
+                "missing_information": ["value"],
+                "reason": "value_missing",
+            }
+        return None
+
+    def execute(self, arguments: ValueInputPayload) -> dict:
+        self.executed += 1
+        return {"value": arguments.value}
+
+
+class BrokenPreflightCapability:
+    descriptor = CapabilityDescriptor(
+        name="test.broken-preflight",
+        description="Preflight raises instead of returning a decision.",
+        risk_level="read_only",
+        side_effect=False,
+        requires_approval=False,
+        idempotent=True,
+        timeout_seconds=5,
+    )
+
+    def validate(self, arguments: dict) -> ValueInputPayload:
+        return ValueInputPayload.model_validate({"value": arguments.get("value") or "x"})
+
+    def preflight(self, arguments: dict) -> dict:
+        raise PermanentCapabilityError("preflight exploded")
+
+    def execute(self, arguments: ValueInputPayload) -> dict:
+        return {"value": arguments.value}
+
+
 def test_sequential_read_task_completes_and_records_events() -> None:
     container, store, _publisher, _registry = build_test_container()
     task = create_task(
@@ -213,8 +267,70 @@ def test_task_pauses_for_user_input_and_replans_after_input() -> None:
     assert store.get_active_plan(task.task_id) is None
     assert len(store.list_inputs(task.task_id)) == 2
 
+    # The re-plan must take the next version instead of reusing the version of
+    # the Plan it replaces: the PostgreSQL store is unique on (task_id, version),
+    # and a collision used to leave the Task stuck in "planning" forever.
+    container.execution_service.run_task(task.task_id)
+    replanned = store.get_active_plan(task.task_id)
+    assert replanned is not None
+    assert replanned.version == 2
+    versions = {plan.version for plan in store.plans.values() if plan.task_id == task.task_id}
+    assert versions == {1, 2}
 
-def test_retryable_error_is_retried_with_same_idempotency_key() -> None:
+
+def test_preflight_pauses_before_approval_without_executing() -> None:
+    capability = PreflightAskCapability()
+    container, store, _publisher, _registry = build_test_container(
+        extra_capabilities=[capability]
+    )
+    task = create_task(
+        container, steps=[{"capability": "test.preflight", "arguments": {"value": "missing"}}]
+    )
+
+    status = container.execution_service.run_task(task.task_id)
+
+    assert status == "waiting_input"
+    assert store.list_approvals(task_id=task.task_id) == []
+    assert capability.executed == 0
+    assert "task.waiting_input" in event_types(store, task.task_id)
+    observation = store.list_observations(task.task_id)[0]
+    assert observation.output["missing_information"] == ["value"]
+
+
+def test_preflight_pass_keeps_the_normal_approval_flow() -> None:
+    capability = PreflightAskCapability()
+    container, store, _publisher, _registry = build_test_container(
+        extra_capabilities=[capability]
+    )
+    task = create_task(
+        container, steps=[{"capability": "test.preflight", "arguments": {"value": "ready"}}]
+    )
+
+    assert container.execution_service.run_task(task.task_id) == "waiting_approval"
+    assert len(store.list_approvals(task_id=task.task_id)) == 1
+    assert capability.executed == 0
+
+
+def test_broken_preflight_fails_the_task_like_a_capability_error() -> None:
+    container, store, _publisher, _registry = build_test_container(
+        extra_capabilities=[BrokenPreflightCapability()]
+    )
+    task = create_task(
+        container, steps=[{"capability": "test.broken-preflight", "arguments": {"value": "x"}}]
+    )
+
+    assert container.execution_service.run_task(task.task_id) == "failed"
+    assert store.get_task(task.task_id).last_error["classification"] == "permanent_error"
+    assert "step.failed" in event_types(store, task.task_id)
+
+
+def test_retryable_error_is_retried_in_place_on_the_same_call_row() -> None:
+    """A transient failure walks the same path again instead of re-planning.
+
+    Reusing the CapabilityCall row is what keeps the request_id stable, so an
+    external system deduplicates the retry instead of performing it twice.
+    """
+
     flaky = FlakyCapability()
     container, store, _publisher, _registry = build_test_container(extra_capabilities=[flaky])
     task = create_task(container, steps=[{"capability": "test.flaky", "arguments": {"value": "x"}}])
@@ -223,12 +339,10 @@ def test_retryable_error_is_retried_with_same_idempotency_key() -> None:
 
     assert status == "succeeded"
     assert flaky.calls == 2
-    assert "task.retrying" in event_types(store, task.task_id)
-    # One Step keeps one CapabilityCall: the retry reuses the same idempotency
-    # key and therefore the same external request id.
     calls = list(store.calls.values())
-    assert len(calls) == 1
+    assert len(calls) == 1, "the retry must reuse the existing call row"
     assert calls[0].attempt == 2
+    assert calls[0].status == "succeeded"
     assert calls[0].idempotency_key == f"{task.task_id}|{calls[0].plan_id}|{calls[0].step_id}"
 
 
@@ -457,3 +571,23 @@ def test_execution_service_uses_a_process_specific_lease_owner() -> None:
     assert default_service.lease_owner != "worker"
     assert str(os.getpid()) in default_service.lease_owner
     assert explicit.lease_owner != default_service.lease_owner
+
+
+def test_ready_task_without_an_active_plan_replans_instead_of_failing() -> None:
+    """A Task left ready with a dangling plan id must be re-planned, not crash.
+
+    This is the production shape seen after a plan row disappears while the Task
+    keeps ``current_plan_id``: the worker used to raise
+    ``InvalidStateTransitionError: ready -> planning`` and retry forever.
+    """
+
+    container, store, _publisher, _registry = build_test_container()
+    task = create_task(container, steps=[{"capability": "fake.read", "arguments": {"value": "a"}}])
+
+    record = store.get_task(task.task_id)
+    record.status = "ready"
+    record.current_plan_id = "plan-that-vanished"
+    store.commit(record)
+
+    assert container.execution_service.run_task(task.task_id) == "succeeded"
+    assert store.get_task(task.task_id).current_plan_id != "plan-that-vanished"

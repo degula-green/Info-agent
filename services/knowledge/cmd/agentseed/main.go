@@ -1,4 +1,4 @@
-// Command agentseed seeds one ready group message plus a calendar authorization
+// Command agentseed seeds one ready group message for the Agent contract.
 // so the Agent's stage-2b contract can be verified against a real stack.
 //
 // It is a development tool: run it with the same environment as the service.
@@ -19,11 +19,8 @@ import (
 	"github.com/google/uuid"
 	"info-agent/knowledge/internal/apperror"
 	"info-agent/knowledge/internal/config"
-	"info-agent/knowledge/internal/crypto"
 	"info-agent/knowledge/internal/domain"
-	"info-agent/knowledge/internal/kv"
 	"info-agent/knowledge/internal/repository"
-	"info-agent/knowledge/internal/vault"
 )
 
 type seedResult struct {
@@ -56,20 +53,6 @@ func run(ownerFlag, textFlag string) error {
 	if err != nil {
 		return err
 	}
-	store := kv.Store(kv.NewMemory())
-	if cfg.RedisURL != "" {
-		redisStore, err := kv.NewRedis(cfg.RedisURL)
-		if err != nil {
-			return err
-		}
-		store = redisStore
-	}
-	keyring, err := buildKeyring(cfg)
-	if err != nil {
-		return err
-	}
-	vaultStore := vault.New(store, keyring)
-
 	now := time.Now().UTC()
 	ownerUserID := uuid.NewString()
 	seedOwnerUserID := uuid.NewString()
@@ -175,18 +158,6 @@ func run(ownerFlag, textFlag string) error {
 		return err
 	}
 
-	credentialRef := "agent-seed-calendar-" + runID
-	token := vault.TokenSet{AccessToken: "seed-access-token", RefreshToken: "seed-refresh-token", ExpiresAt: now.Add(24 * time.Hour)}
-	if err := vaultStore.Put(ctx, credentialRef, token, vault.CredentialTTL(token, now)); err != nil {
-		return err
-	}
-	if _, err := repo.UpsertCalendarAuthorization(ctx, domain.CalendarAuthorization{
-		OwnerUserID: ownerUserID, Provider: domain.PlatformFeishu, CredentialRef: credentialRef,
-		ExternalAccountID: "agent-seed-account", Status: domain.CalendarAuthorizationActive,
-	}, now); err != nil {
-		return err
-	}
-
 	return json.NewEncoder(os.Stdout).Encode(seedResult{
 		KnowledgeItemID:         item.ID,
 		ConversationIngestionID: conversation.ID,
@@ -203,15 +174,4 @@ func collectorID(conversation *domain.ConversationIngestion) string {
 		return ""
 	}
 	return conversation.Collectors[0].ID
-}
-
-func buildKeyring(cfg config.Config) (*crypto.Keyring, error) {
-	values := map[string]string{}
-	for _, item := range strings.Split(cfg.EncryptionKeys, ",") {
-		parts := strings.SplitN(strings.TrimSpace(item), ":", 2)
-		if len(parts) == 2 {
-			values[strings.TrimSpace(parts[0])] = strings.TrimSpace(parts[1])
-		}
-	}
-	return crypto.NewKeyring(cfg.EncryptionKeyVersion, values)
 }

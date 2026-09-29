@@ -151,6 +151,8 @@ class TaskService:
         merged.update(payload)
         task.input = merged
         task.current_plan_id = None
+        task.understanding = None
+        task.result = None
         ensure_task_transition(task.status, "planning")
         task.status = "planning"
         task.updated_at = moment

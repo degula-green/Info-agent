@@ -16,12 +16,19 @@ class TaskEnvelope(BaseModel):
     created_at: datetime
 
 
+class UnderstandingIntent(BaseModel):
+    name: str
+    confidence: float = Field(default=0, ge=0, le=1)
+    evidence: str | None = None
+
+
 class TaskUnderstanding(BaseModel):
+    is_task: bool
     goal: str
-    intent: str | None = None
-    entities: dict[str, Any] = Field(default_factory=dict)
-    missing_information: list[str] = Field(default_factory=list)
+    task_kind: Literal["answer", "action", "mixed"] | None = None
+    intent_candidates: list[UnderstandingIntent] = Field(default_factory=list)
     confidence: float | None = Field(default=None, ge=0, le=1)
+    reason: str | None = None
 
 
 class PlanStep(BaseModel):
@@ -32,12 +39,19 @@ class PlanStep(BaseModel):
     arguments: dict[str, Any] = Field(default_factory=dict)
     status: str = "pending"
     attempt_count: int = Field(default=0, ge=0)
+    replaced_by_step_id: str | None = None
 
 
 class Plan(BaseModel):
     plan_id: str
     task_id: str
     version: int = Field(default=1, ge=1)
+    parent_plan_id: str | None = None
+    triggered_by_observation_id: str | None = None
+    replan_reason: str | None = None
+    unsupported_intents: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+    requires_user_confirmation: bool = False
     objective: str
     steps: list[PlanStep] = Field(default_factory=list)
     status: str = "draft"
@@ -46,15 +60,51 @@ class Plan(BaseModel):
 class CapabilityDescriptor(BaseModel):
     name: str
     description: str
+    # The argument and result shape the Planner may plan against, exported from
+    # the capability's own Pydantic models. Without them the model has to guess
+    # field names, and every guess costs a repair round at execution time.
+    input_schema: dict[str, Any] = Field(default_factory=dict)
+    output_schema: dict[str, Any] = Field(default_factory=dict)
     risk_level: str
     side_effect: bool
     requires_approval: bool
     idempotent: bool
     timeout_seconds: int = Field(gt=0)
+    # Whether the outcome of a call can be read back after the fact (for
+    # example by querying the external system with the ``request_id``). A
+    # side-effecting capability that is not reconcilable must ask for approval:
+    # once such a call is in flight there is no way to learn whether it landed.
+    reconcilable: bool = False
 
 
 class PolicyDecision(BaseModel):
     action: Literal["allow", "deny", "require_approval"]
+    reason: str | None = None
+
+
+class PlanningConstraints(BaseModel):
+    max_steps: int = Field(default=8, ge=1)
+    max_replans: int = Field(default=3, ge=0)
+    max_model_calls: int = Field(default=8, ge=0)
+    max_runtime_seconds: float = Field(default=300.0, gt=0)
+    max_step_attempts: int = Field(default=3, ge=1)
+    max_same_capability_calls: int = Field(default=2, ge=1)
+
+
+class PlannerDecision(BaseModel):
+    action: Literal[
+        "continue",
+        "replan",
+        "request_input",
+        "complete",
+        "fail",
+        "unsupported",
+    ]
+    plan: Plan | None = None
+    required_input: list[str] = Field(default_factory=list)
+    unsupported_intents: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+    requires_user_confirmation: bool = False
     reason: str | None = None
 
 
@@ -103,6 +153,11 @@ class TaskRecord(BaseModel):
     current_plan_version: int = 0
     objective: str | None = None
     checkpoint: dict[str, Any] | None = None
+    understanding: dict[str, Any] | None = None
+    result: dict[str, Any] | None = None
+    replan_count: int = Field(default=0, ge=0)
+    step_count: int = Field(default=0, ge=0)
+    model_call_count: int = Field(default=0, ge=0)
     last_error: dict[str, Any] | None = None
     lease_owner: str | None = None
     lease_expires_at: datetime | None = None
@@ -180,6 +235,10 @@ class ApprovalRecord(BaseModel):
     step_id: str
     capability: str
     arguments: dict[str, Any] = Field(default_factory=dict)
+    # Hash of the plan-time Step arguments the user actually saw. An approval is
+    # only valid for the exact arguments it was granted for: a re-plan that
+    # rewrites the Step (even reusing its step_id) must ask again.
+    arguments_hash: str | None = None
     version: int = Field(default=1, ge=1)
     status: str = "waiting_approval"
     reason: str | None = None
@@ -233,3 +292,34 @@ class TaskRunResult(BaseModel):
     plan_id: str | None = None
     executed_step_ids: list[str] = Field(default_factory=list)
     waiting_for: str | None = None
+    warnings: list[str] = Field(default_factory=list)
+
+
+class TodoRecord(BaseModel):
+    """A to-do the owner must still act on. Owned by the Agent service.
+
+    The Agent keeps this ledger itself: there is no external calendar or
+    Knowledge write behind ``todo.create``. The row is created only after the
+    owner approves the draft, and it stays until the owner deletes it on the
+    desktop, which is what makes an overdue to-do keep showing up.
+    """
+
+    todo_id: str
+    owner_user_id: str
+    title: str = Field(min_length=1, max_length=200)
+    # Optional by design: "完成登录模块代码" carries no time at all, and an
+    # uncertain meeting time must not block creating the to-do.
+    due_at: datetime | None = None
+    # The original phrase ("明天晚上八点") so the desktop can show what the owner
+    # actually wrote even after the resolved timestamp is edited.
+    due_expression: str | None = None
+    timezone: str | None = None
+    notes: str | None = None
+    status: str = "open"
+    source: dict[str, Any] = Field(default_factory=dict)
+    plan_id: str | None = None
+    step_id: str | None = None
+    idempotency_key: str | None = None
+    created_at: datetime
+    updated_at: datetime
+    completed_at: datetime | None = None

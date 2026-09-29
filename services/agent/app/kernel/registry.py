@@ -2,7 +2,11 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 
-from app.kernel.errors import CapabilityNotFoundError, DuplicateCapabilityError
+from app.kernel.errors import (
+    CapabilityNotFoundError,
+    ContractValidationError,
+    DuplicateCapabilityError,
+)
 from app.kernel.protocols import Capability
 from app.kernel.models import CapabilityDescriptor
 
@@ -16,9 +20,22 @@ class CapabilityRegistry:
             self.register(capability)
 
     def register(self, capability: Capability) -> None:
-        name = capability.descriptor.name
+        descriptor = capability.descriptor
+        name = descriptor.name
         if name in self._capabilities:
             raise DuplicateCapabilityError(name)
+        # A write whose outcome cannot be read back must be authorised before it
+        # happens. Deciding this at registration time means the question is
+        # answered when the capability is written, not when it is already in
+        # flight and nobody can tell whether the external effect landed.
+        if (
+            descriptor.side_effect
+            and not descriptor.reconcilable
+            and not descriptor.requires_approval
+        ):
+            raise ContractValidationError(
+                f"{name}: 有副作用又无法事后对账的能力，必须要求审批"
+            )
         self._capabilities[name] = capability
 
     def get(self, name: str) -> Capability:

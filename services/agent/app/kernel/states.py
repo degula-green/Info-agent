@@ -39,7 +39,21 @@ WAITING_TASK_STATUSES = frozenset({"waiting_input", "waiting_approval"})
 TASK_TRANSITIONS: dict[str, frozenset[str]] = {
     "received": frozenset({"planning", "ready", "executing", "waiting_input", "cancelled", "failed"}),
     "planning": frozenset({"ready", "waiting_input", "failed", "cancelled"}),
-    "ready": frozenset({"executing", "waiting_approval", "waiting_input", "succeeded", "failed", "cancelled"}),
+    # "ready" also allows "planning": a Task can be left ready with no active plan
+    # (an invalidated or lost plan), and the runtime must be able to re-plan it
+    # instead of failing with an invalid transition forever.
+    "ready": frozenset(
+        {
+            "planning",
+            "executing",
+            "waiting_approval",
+            "waiting_input",
+            "succeeded",
+            "failed",
+            "cancelled",
+            "unknown",
+        }
+    ),
     "executing": frozenset(
         {"ready", "waiting_approval", "waiting_input", "succeeded", "failed", "cancelled", "unknown"}
     ),
@@ -72,9 +86,15 @@ PLAN_TRANSITIONS: dict[str, frozenset[str]] = {
 }
 
 # Task Event types persisted to PostgreSQL and streamed to clients.
+# Emitted when the owner confirms the preview: the to-do now exists on the
+# desktop, so the client must drop the draft it was showing.
+EVENT_PREVIEW_CONFIRMED = "task.preview_confirmed"
 EVENT_TASK_ACCEPTED = "task.accepted"
 EVENT_TASK_PLANNING = "task.planning"
+EVENT_TASK_UNDERSTANDING = "task.understanding"
 EVENT_PLAN_CREATED = "plan.created"
+EVENT_PLAN_REPLANNED = "plan.replanned"
+EVENT_PLANNER_DECISION = "planner.decision"
 EVENT_STEP_STARTED = "step.started"
 EVENT_STEP_SUCCEEDED = "step.succeeded"
 EVENT_STEP_FAILED = "step.failed"
@@ -89,9 +109,13 @@ EVENT_APPROVAL_APPROVED = "approval.approved"
 EVENT_APPROVAL_REJECTED = "approval.rejected"
 
 KNOWN_EVENT_TYPES = (
+    EVENT_PREVIEW_CONFIRMED,
     EVENT_TASK_ACCEPTED,
     EVENT_TASK_PLANNING,
+    EVENT_TASK_UNDERSTANDING,
     EVENT_PLAN_CREATED,
+    EVENT_PLAN_REPLANNED,
+    EVENT_PLANNER_DECISION,
     EVENT_STEP_STARTED,
     EVENT_STEP_SUCCEEDED,
     EVENT_STEP_FAILED,

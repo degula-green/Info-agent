@@ -177,6 +177,13 @@ class InMemoryAgentStore:
             plan_id = self.active_plans.get(task_id)
             return self.get_plan(plan_id) if plan_id else None
 
+    def next_plan_version(self, task_id: str) -> int:
+        with self._lock:
+            return max(
+                (plan.version for plan in self.plans.values() if plan.task_id == task_id),
+                default=0,
+            ) + 1
+
     def invalidate_plans(self, task_id: str, *, except_plan_id: str | None = None) -> None:
         with self._lock:
             current = self.active_plans.get(task_id)
@@ -205,6 +212,7 @@ class InMemoryAgentStore:
             # same or retry accounting silently diverges from production.
             if attempt_count is not None:
                 stored.attempt_count = attempt_count
+            stored.replaced_by_step_id = step.replaced_by_step_id
             self.steps[step.step_id] = stored
             plan = self.plans.get(step.plan_id)
             if plan is not None:
@@ -245,6 +253,20 @@ class InMemoryAgentStore:
         with self._lock:
             call = self.calls.get(idempotency_key)
             return call.model_copy(deep=True) if call else None
+
+    def find_capability_call_for_step(
+        self, task_id: str, step_id: str
+    ) -> CapabilityCallRecord | None:
+        with self._lock:
+            matches = [
+                call
+                for call in self.calls.values()
+                if call.task_id == task_id and call.step_id == step_id
+            ]
+        if not matches:
+            return None
+        matches.sort(key=lambda item: (item.attempt, item.created_at))
+        return matches[-1].model_copy(deep=True)
 
     def save_capability_call(self, call: CapabilityCallRecord) -> None:
         with self._lock:

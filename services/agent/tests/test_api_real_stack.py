@@ -2,7 +2,7 @@
 
 Skipped unless AGENT_TEST_DATABASE_URL and AGENT_TEST_REDIS_URL are set. It
 starts the real application container (deterministic planner, descriptor policy
-and the calendar capability) and deletes every Task row it created.
+and the to-do capability) and deletes every Task row it created.
 """
 
 from __future__ import annotations
@@ -57,7 +57,7 @@ def test_api_startup_wires_the_real_agent_stack() -> None:
 
         created_ids: list[str] = []
         try:
-            # A schedule request plans a real calendar step and waits for approval.
+            # A schedule request plans a real todo step and waits for approval.
             created = client.post(
                 "/api/agent/v1/tasks",
                 json={"text": "明天晚上八点开个评审会"},
@@ -71,10 +71,10 @@ def test_api_startup_wires_the_real_agent_stack() -> None:
             assert wait_for_status(task_id, {"waiting_approval"}) == "waiting_approval"
 
             plan = client.get(f"/api/agent/v1/tasks/{task_id}/plan", headers=headers).json()["plan"]
-            assert [step["capability"] for step in plan["steps"]] == ["calendar.create"]
+            assert [step["capability"] for step in plan["steps"]] == ["todo.create"]
             approvals = client.get("/api/agent/v1/approvals", headers=headers).json()["items"]
             assert [item["capability"] for item in approvals if item["task_id"] == task_id] == [
-                "calendar.create"
+                "todo.create"
             ]
 
             # Plain chat has nothing to execute and completes immediately.

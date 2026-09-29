@@ -3404,18 +3404,22 @@ func normalizePrivateWechatSender(conversationType, conversationName, conversati
 
 var _ = fmt.Sprintf
 
-// -- Agent calendar support ------------------------------------------------
+// -- Agent support ---------------------------------------------------------
 
 func (s *PostgresStore) GetAgentMessageContext(ctx context.Context, messageID string) (*domain.AgentMessageContext, error) {
 	var item domain.AgentMessageContext
-	err := s.pool.QueryRow(ctx, `SELECT m.id::text,m.conversation_ingestion_id::text,m.message_type,COALESCE(m.normalized_content,''),m.sent_at,m.sensitive FROM knowledge.messages m WHERE m.id::text=$1`, messageID).
-		Scan(&item.MessageID, &item.ConversationID, &item.MessageType, &item.Text, &item.SentAt, &item.Sensitive)
+	var senderExternalID, conversationType, conversationName, externalConversationID, accountExternalID string
+	err := s.pool.QueryRow(ctx, `SELECT m.id::text,m.conversation_ingestion_id::text,m.message_type,COALESCE(m.normalized_content,''),m.sent_at,m.sensitive,COALESCE(NULLIF(ei.display_name,''),NULLIF(m.sender_display_name,''),''),COALESCE(ei.external_user_id,''),COALESCE(ci.conversation_type,''),COALESCE(ci.name,''),COALESCE(ci.external_conversation_id,''),COALESCE(account.external_account_id,'') FROM knowledge.messages m LEFT JOIN knowledge.external_identities ei ON ei.id=m.sender_identity_id LEFT JOIN knowledge.conversation_ingestions ci ON ci.id=m.conversation_ingestion_id LEFT JOIN LATERAL (SELECT ca.external_account_id FROM knowledge.conversation_collectors cc JOIN knowledge.connector_accounts ca ON ca.id=cc.connector_account_id WHERE cc.conversation_ingestion_id=m.conversation_ingestion_id AND cc.status<>'removed' ORDER BY CASE WHEN cc.status='active' THEN 0 ELSE 1 END,cc.joined_at DESC LIMIT 1) account ON TRUE WHERE m.id::text=$1`, messageID).
+		Scan(&item.MessageID, &item.ConversationID, &item.MessageType, &item.Text, &item.SentAt, &item.Sensitive, &item.SenderDisplayName, &senderExternalID, &conversationType, &conversationName, &externalConversationID, &accountExternalID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, apperror.New("message_not_found", "message was not found", 404, false)
 	}
 	if err != nil {
 		return nil, dbError(err)
 	}
+	// Private WeChat conversations store the collector account as the sender;
+	// the display name must read as the counterpart, exactly like the timeline.
+	item.SenderDisplayName = normalizePrivateWechatSender(conversationType, conversationName, externalConversationID, senderExternalID, accountExternalID, item.SenderDisplayName)
 	return &item, nil
 }
 
@@ -3436,50 +3440,6 @@ func (s *PostgresStore) ListAgentConversationMembers(ctx context.Context, conver
 	return items, dbError(rows.Err())
 }
 
-func (s *PostgresStore) GetCalendarAuthorization(ctx context.Context, ownerUserID, provider string) (*domain.CalendarAuthorization, error) {
-	var item domain.CalendarAuthorization
-	err := s.pool.QueryRow(ctx, `SELECT id::text,owner_user_id::text,provider,credential_ref,COALESCE(external_account_id,''),status,created_at,updated_at FROM knowledge.calendar_authorizations WHERE owner_user_id::text=$1 AND provider=$2`, ownerUserID, provider).
-		Scan(&item.ID, &item.OwnerUserID, &item.Provider, &item.CredentialRef, &item.ExternalAccountID, &item.Status, &item.CreatedAt, &item.UpdatedAt)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, apperror.New("calendar_not_bound", "the user has no calendar authorization", 404, false)
-	}
-	if err != nil {
-		return nil, dbError(err)
-	}
-	return &item, nil
-}
 
-func (s *PostgresStore) UpsertCalendarAuthorization(ctx context.Context, item domain.CalendarAuthorization, now time.Time) (*domain.CalendarAuthorization, error) {
-	var saved domain.CalendarAuthorization
-	err := s.pool.QueryRow(ctx, `INSERT INTO knowledge.calendar_authorizations (owner_user_id,provider,credential_ref,external_account_id,status,created_at,updated_at) VALUES ($1::uuid,$2,$3,$4,$5,$6,$6) ON CONFLICT (owner_user_id,provider) DO UPDATE SET credential_ref=EXCLUDED.credential_ref,external_account_id=EXCLUDED.external_account_id,status=EXCLUDED.status,updated_at=EXCLUDED.updated_at RETURNING id::text,owner_user_id::text,provider,credential_ref,COALESCE(external_account_id,''),status,created_at,updated_at`, item.OwnerUserID, item.Provider, item.CredentialRef, nilString(item.ExternalAccountID), item.Status, now).
-		Scan(&saved.ID, &saved.OwnerUserID, &saved.Provider, &saved.CredentialRef, &saved.ExternalAccountID, &saved.Status, &saved.CreatedAt, &saved.UpdatedAt)
-	if err != nil {
-		return nil, dbError(err)
-	}
-	return &saved, nil
-}
+// -- end Agent support -----------------------------------------------------
 
-func (s *PostgresStore) GetCalendarEventRequest(ctx context.Context, requestID string) (*domain.CalendarEventRequest, error) {
-	var item domain.CalendarEventRequest
-	var start, end *time.Time
-	err := s.pool.QueryRow(ctx, `SELECT request_id,owner_user_id::text,provider,status,event_id,COALESCE(event_url,''),COALESCE(title,''),start_time,end_time,created_at FROM knowledge.calendar_event_requests WHERE request_id=$1`, requestID).
-		Scan(&item.RequestID, &item.OwnerUserID, &item.Provider, &item.Status, &item.EventID, &item.EventURL, &item.Title, &start, &end, &item.CreatedAt)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, dbError(err)
-	}
-	if start != nil {
-		item.StartTime = *start
-	}
-	if end != nil {
-		item.EndTime = *end
-	}
-	return &item, nil
-}
-
-func (s *PostgresStore) SaveCalendarEventRequest(ctx context.Context, item domain.CalendarEventRequest) error {
-	_, err := s.pool.Exec(ctx, `INSERT INTO knowledge.calendar_event_requests (request_id,owner_user_id,provider,status,event_id,event_url,title,start_time,end_time,created_at) VALUES ($1,$2::uuid,$3,$4,$5,$6,$7,$8,$9,$10) ON CONFLICT (request_id) DO NOTHING`, item.RequestID, item.OwnerUserID, item.Provider, item.Status, item.EventID, nilString(item.EventURL), nilString(item.Title), item.StartTime, item.EndTime, item.CreatedAt)
-	return dbError(err)
-}

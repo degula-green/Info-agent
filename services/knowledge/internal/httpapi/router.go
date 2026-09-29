@@ -291,12 +291,6 @@ func newApp(cfg config.Config) *App {
 		recordStartup(errors.New("knowledge core service token is required"))
 	}
 	feishu := platform.NewHTTPFeishu(cfg.FeishuClientID, cfg.FeishuClientSecret, cfg.FeishuRedirectURI, cfg.FeishuAuthURL, cfg.FeishuAPIURL, cfg.FeishuScopes)
-	// The calendar provider is chosen explicitly so local environments can verify
-	// the Agent contract without real Feishu credentials.
-	var calendar platform.CalendarProvider = feishu
-	if strings.EqualFold(strings.TrimSpace(cfg.CalendarProvider), "fake") {
-		calendar = &platform.FakeCalendarProvider{}
-	}
 	repo := repository.Repository(repository.NewMemoryStore())
 	if cfg.DatabaseURL != "" {
 		pg, err := repository.NewPostgresStore(context.Background(), cfg.DatabaseURL)
@@ -309,7 +303,7 @@ func newApp(cfg config.Config) *App {
 		recordStartup(errors.New("knowledge database is required when jwt authentication is enabled"))
 	}
 	core := coreclient.New(cfg.CoreURL, cfg.CoreServiceToken)
-	app := &App{Service: service.New(repo, store, vault.New(store, keyring), objects, feishu, calendar, core, cfg), Auth: validator, Config: cfg, StartupError: startupErr}
+ 	app := &App{Service: service.New(repo, store, vault.New(store, keyring), objects, feishu, core, cfg), Auth: validator, Config: cfg, StartupError: startupErr}
 	if startupErr == nil {
 		app.worker = service.NewWorker(app.Service, cfg.WorkerInterval)
 	}
@@ -1558,22 +1552,6 @@ func registerInternalRoutes(r *gin.Engine, app *App, prefix string) {
 			return
 		}
 		c.JSON(http.StatusOK, snapshot)
-	})
-	g.POST("/agent/calendar/events", func(c *gin.Context) {
-		if !agentCaller(c) {
-			return
-		}
-		var body service.CalendarCreateInput
-		if err := c.ShouldBindJSON(&body); err != nil {
-			writeError(c, apperror.New("invalid_calendar_request", "invalid calendar request", 400, false))
-			return
-		}
-		result, err := app.Service.CreateCalendarEvent(c, body)
-		if err != nil {
-			writeError(c, err)
-			return
-		}
-		c.JSON(http.StatusOK, result)
 	})
 }
 

@@ -1,17 +1,18 @@
-"""Knowledge internal API client: conversation snapshot and calendar writes.
+"""Knowledge internal API client: the conversation snapshot.
 
-The Agent never reads the Knowledge database and never touches platform tokens;
-both interfaces are documented in ``Agent开发第2步-Calendar真实能力.md``.
+The Agent never reads the Knowledge database and never touches platform tokens.
+The snapshot is the only interface left: the Agent used to write calendar events
+through this client, but that surface was retired when the schedule and the to-do
+were merged into the Agent's own ledger.
 """
 
 from __future__ import annotations
 
-from typing import Any, Mapping, Protocol
+from typing import Any, Protocol
 
 from app.infrastructure.http import HttpClient, IntegrationError, join_url, with_query
 
 SNAPSHOT_PATH = "/api/knowledge/v1/internal/agent/conversation-snapshot"
-CALENDAR_EVENT_PATH = "/api/knowledge/v1/internal/agent/calendar/events"
 
 
 class KnowledgeError(RuntimeError):
@@ -51,31 +52,9 @@ class KnowledgeRejected(KnowledgeError):
     code = "request_rejected"
 
 
-class CalendarNotBound(KnowledgeError):
-    code = "calendar_not_bound"
-
-
-class CalendarAuthorizationInvalid(KnowledgeError):
-    code = "calendar_authorization_invalid"
-
-
-class CalendarRejected(KnowledgeError):
-    """Explicit 4xx rejection: permanent, the Task must fail."""
-
-    code = "calendar_rejected"
-
-
-class CalendarResultUnknown(KnowledgeError):
-    """The write may or may not have landed: never retry blindly."""
-
-    code = "calendar_result_unknown"
-
 
 class KnowledgeClient(Protocol):
     def conversation_snapshot(self, knowledge_item_id: str) -> dict[str, Any]:
-        ...
-
-    def create_calendar_event(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         ...
 
 
@@ -117,27 +96,6 @@ class HttpKnowledgeClient:
             raise KnowledgeUnavailable("snapshot response is not a JSON object")
         return body
 
-    def create_calendar_event(self, payload: Mapping[str, Any]) -> dict[str, Any]:
-        if not self.base_url:
-            raise CalendarResultUnknown("AGENT_KNOWLEDGE_BASE_URL is not configured")
-        url = join_url(self.base_url, CALENDAR_EVENT_PATH)
-        try:
-            result = self.http.request(
-                "POST",
-                url,
-                body=dict(payload),
-                headers=self._headers(),
-                token=self.token,
-                timeout=self.timeout_seconds,
-            )
-        except IntegrationError as exc:
-            # A timeout or 5xx may still have created the event.
-            raise self._calendar_transport_error(exc) from exc
-        body = _decode(result)
-        if not isinstance(body, dict) or not body.get("event_id"):
-            raise CalendarResultUnknown("calendar response has no event_id")
-        return body
-
     def _snapshot_transport_error(self, exc: IntegrationError) -> KnowledgeError:
         status = exc.status
         if status is None or exc.retryable:
@@ -150,16 +108,6 @@ class HttpKnowledgeClient:
             return KnowledgeForbidden("snapshot call is not authorized")
         return KnowledgeRejected(f"snapshot call was rejected ({status})")
 
-    def _calendar_transport_error(self, exc: IntegrationError) -> KnowledgeError:
-        status = exc.status
-        code = exc.error_code
-        if code == "calendar_not_bound":
-            return CalendarNotBound("the owner has no usable calendar authorization")
-        if code == "calendar_authorization_invalid":
-            return CalendarAuthorizationInvalid("calendar authorization must be renewed")
-        if status is None or exc.retryable:
-            return CalendarResultUnknown(str(exc))
-        return CalendarRejected(f"calendar call was rejected ({status})")
 
 
 def _decode(result) -> Any:

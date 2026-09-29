@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from fastapi.testclient import TestClient
 
+from app.kernel.models import CapabilityDescriptor
 from tests.support import build_test_container, make_app
 
 USER = {"X-Agent-User-Id": "user-1"}
@@ -119,6 +120,59 @@ def test_write_task_requires_approval_via_api() -> None:
     assert approved.json()["status"] == "approved"
 
     assert client.post(f"/api/agent/v1/tasks/{task_id}/run", headers=USER).json()["status"] == "succeeded"
+
+
+def test_approvals_report_whether_the_write_can_be_reconciled() -> None:
+    """The preview card warns before an action whose outcome cannot be read back.
+
+    ``fake.write`` cannot verify its outcome; the capability added below can.
+    Both still require approval, which is what the registration invariant
+    demands of a write that is not reconcilable.
+    """
+
+    class ReconcilableWrite:
+        descriptor = CapabilityDescriptor(
+            name="fake.write-reconcilable",
+            description="A write whose outcome can be read back.",
+            risk_level="external_write",
+            side_effect=True,
+            requires_approval=True,
+            idempotent=True,
+            reconcilable=True,
+            timeout_seconds=5,
+        )
+
+        def validate(self, arguments: dict) -> dict:
+            return dict(arguments)
+
+        def execute(self, arguments: dict) -> dict:
+            return {}
+
+    container, _store, _publisher, _registry = build_test_container(
+        extra_capabilities=[ReconcilableWrite()]
+    )
+    client = TestClient(make_app(container))
+
+    for capability, expected in (
+        ("fake.write", False),
+        ("fake.write-reconcilable", True),
+    ):
+        task_id = client.post(
+            "/api/agent/v1/tasks",
+            json={
+                "text": "write",
+                "steps": [{"capability": capability, "arguments": {"value": "x"}}],
+            },
+            headers=USER,
+        ).json()["task_id"]
+        assert (
+            client.post(f"/api/agent/v1/tasks/{task_id}/run", headers=USER).json()["status"]
+            == "waiting_approval"
+        )
+        approvals = client.get("/api/agent/v1/approvals", headers=USER).json()["items"]
+        mine = [item for item in approvals if item["task_id"] == task_id]
+        assert len(mine) == 1
+        assert mine[0]["reconcilable"] is expected
 
 
 def test_approval_rejects_stale_version() -> None:

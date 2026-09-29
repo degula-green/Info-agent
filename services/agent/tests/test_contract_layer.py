@@ -7,8 +7,12 @@ from pydantic import ValidationError
 
 from app.ingress.chat import ChatIngress
 from app.ingress.knowledge_events import KnowledgeEventIngress
-from app.kernel.errors import CapabilityNotFoundError, ContractValidationError
-from app.kernel.models import Plan, PlanStep, TaskEnvelope
+from app.kernel.errors import (
+    CapabilityNotFoundError,
+    ContractValidationError,
+    classify_error,
+)
+from app.kernel.models import CapabilityDescriptor, Plan, PlanStep, TaskEnvelope
 from app.kernel.registry import CapabilityRegistry
 from app.kernel.validator import PlanValidator
 from app.testing.fake_capabilities import FakeReadCapability, FakeWriteCapability
@@ -55,6 +59,7 @@ def knowledge_snapshot(**overrides: object) -> dict:
         "text": "今天晚上八点开会",
         "content_version": 1,
         "acl_version": 3,
+        "sender_display_name": "张三",
         "sent_at": "2026-09-25T06:12:30Z",
         "eligible_owners": [{"owner_user_id": "user-1", "reason_code": None}],
     }
@@ -78,6 +83,7 @@ def test_knowledge_event_ingress_creates_one_task_for_a_private_chat() -> None:
         "conversation_type": "private",
         "content_version": 1,
         "acl_version": 3,
+        "sender_display_name": "张三",
         "sent_at": "2026-09-25T06:12:30Z",
     }
 
@@ -142,6 +148,72 @@ def test_registry_exposes_trusted_descriptors_and_rejects_unknown() -> None:
     assert registry.find("missing") is None
     with pytest.raises(CapabilityNotFoundError, match="unknown capability"):
         registry.get("missing")
+
+
+def test_driver_connection_errors_are_classified_as_retryable() -> None:
+    """A dropped connection is transient, whichever library raised it.
+
+    psycopg raises its own ``OperationalError`` rather than the builtin
+    ``ConnectionError``. Before the name match, that fell through to
+    ``permanent_error`` and a broken connection was never retried.
+    """
+
+    class OperationalError(Exception):
+        """Same class name psycopg uses for a dropped connection."""
+
+    class InterfaceError(Exception):
+        """Same class name psycopg uses for a connection that is already gone."""
+
+    assert classify_error(OperationalError("server closed the connection")) == "retryable_error"
+    assert classify_error(InterfaceError("connection already closed")) == "retryable_error"
+    assert classify_error(TimeoutError("timed out")) == "retryable_error"
+    # A contract violation stays a validation error, and anything unrecognised
+    # keeps the safe default.
+    assert classify_error(ContractValidationError("bad")) == "validation_error"
+    assert classify_error(ValueError("nope")) == "permanent_error"
+
+
+def test_a_write_that_cannot_be_reconciled_must_require_approval() -> None:
+    """An unverifiable write has to be authorised before it happens.
+
+    Once such a call is in flight nobody can tell whether the external effect
+    landed, so the capability is refused at registration instead of the gap
+    being discovered after the fact.
+    """
+
+    descriptor = CapabilityDescriptor(
+        name="test.unsafe-write",
+        description="A write with no way to read its outcome back.",
+        risk_level="external_write",
+        side_effect=True,
+        requires_approval=False,
+        idempotent=False,
+        reconcilable=False,
+        timeout_seconds=5,
+    )
+
+    class UnsafeWrite:
+        def __init__(self) -> None:
+            self.descriptor = descriptor
+
+        def validate(self, arguments: dict) -> dict:
+            return dict(arguments)
+
+        def execute(self, arguments: dict) -> dict:
+            return {}
+
+    with pytest.raises(ContractValidationError, match="必须要求审批"):
+        CapabilityRegistry([UnsafeWrite()])
+
+    # The same capability is accepted once it is gated behind approval.
+    approved = descriptor.model_copy(update={"requires_approval": True})
+
+    class ApprovedWrite(UnsafeWrite):
+        def __init__(self) -> None:
+            self.descriptor = approved
+
+    registry = CapabilityRegistry([ApprovedWrite()])
+    assert registry.find("test.unsafe-write") is not None
 
 
 def test_validator_accepts_valid_plan_and_rejects_invalid_arguments() -> None:

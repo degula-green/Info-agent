@@ -65,7 +65,18 @@ def create_task(
     body: CreateTaskBody,
     x_agent_user_id: str | None = Header(default=None, alias="X-Agent-User-Id"),
 ) -> dict[str, Any]:
+    """Accepts a chat message or a collected message; the understanding layer decides.
+
+    There is no keyword gate here for chat the way there is for collected text.
+    A typed message is the owner talking to the Agent on purpose, so the only
+    input that never becomes a Task is one that carries nothing at all: a
+    message that is only the client-side "steps" of a legacy caller, with no
+    text to understand.
+    """
+
     container = get_container()
+    if not (body.text or "").strip() and not body.steps:
+        raise HTTPException(status_code=422, detail="text or steps is required")
     payload: dict[str, Any] = {"text": body.text}
     if body.steps:
         payload["steps"] = body.steps
@@ -145,7 +156,19 @@ def list_approvals(
 ) -> dict[str, Any]:
     container = get_container()
     items = container.store.list_approvals(owner_user_id=_current_user(x_agent_user_id))
-    return {"items": [item.model_dump(mode="json") for item in items]}
+    payload: list[dict[str, Any]] = []
+    for item in items:
+        body = item.model_dump(mode="json")
+        capability = container.registry.find(item.capability)
+        # The preview card has to warn *before* the owner confirms an action
+        # whose outcome cannot be read back afterwards. The registry is the only
+        # trusted source for that, so it is resolved here instead of being
+        # denormalised onto every approval row.
+        body["reconcilable"] = bool(
+            capability is not None and capability.descriptor.reconcilable
+        )
+        payload.append(body)
+    return {"items": payload}
 
 
 @router.post("/approvals/{approval_id}/approve")

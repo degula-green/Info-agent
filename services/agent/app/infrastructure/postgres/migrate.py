@@ -19,8 +19,22 @@ load_dotenv(SERVICE_ROOT / ".env", override=False)
 
 from app.config import settings  # noqa: E402
 
-DEFAULT_MIGRATION = REPO_ROOT / "db" / "migrations" / "20260925_agent_runtime_rebuild.sql"
-DEFAULT_ROLLBACK = REPO_ROOT / "db" / "migrations" / "20260925_agent_runtime_rebuild.down.sql"
+BOOTSTRAP_MIGRATIONS = [
+    REPO_ROOT / "db" / "migrations" / "20260925_agent_runtime_rebuild.sql",
+    REPO_ROOT / "db" / "migrations" / "20260927_agent_dynamic_plan.sql",
+    REPO_ROOT / "db" / "migrations" / "20260927_agent_approval_binding.sql",
+    REPO_ROOT / "db" / "migrations" / "20260927_agent_todo_ledger.sql",
+]
+BOOTSTRAP_ROLLBACKS = [
+    REPO_ROOT / "db" / "migrations" / "20260927_agent_todo_ledger.down.sql",
+    REPO_ROOT / "db" / "migrations" / "20260927_agent_approval_binding.down.sql",
+    REPO_ROOT / "db" / "migrations" / "20260927_agent_dynamic_plan.down.sql",
+    REPO_ROOT / "db" / "migrations" / "20260925_agent_runtime_rebuild.down.sql",
+]
+DEFAULT_MIGRATION = REPO_ROOT / "db" / "migrations" / "20260927_agent_approval_binding.sql"
+DEFAULT_ROLLBACK = (
+    REPO_ROOT / "db" / "migrations" / "20260927_agent_approval_binding.down.sql"
+)
 
 
 def apply_sql(path: Path) -> None:
@@ -41,15 +55,31 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Apply the Agent schema migration")
     parser.add_argument("--file", type=Path, default=None, help="SQL file to execute")
     parser.add_argument("--rollback", action="store_true", help="run the down migration instead")
+    parser.add_argument(
+        "--bootstrap",
+        action="store_true",
+        help="create the complete Agent schema from an empty database",
+    )
     args = parser.parse_args(argv)
 
-    target = args.file or (DEFAULT_ROLLBACK if args.rollback else DEFAULT_MIGRATION)
     try:
-        apply_sql(target)
+        targets = (
+            [args.file]
+            if args.file is not None
+            else (
+                BOOTSTRAP_ROLLBACKS
+                if args.bootstrap and args.rollback
+                else BOOTSTRAP_MIGRATIONS
+                if args.bootstrap
+                else [DEFAULT_ROLLBACK if args.rollback else DEFAULT_MIGRATION]
+            )
+        )
+        for target in targets:
+            apply_sql(target)
+            print(f"migration applied: {target}")
     except Exception as exc:  # pragma: no cover - operational tooling
         print(f"migration failed: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 1
-    print(f"migration applied: {target}")
     return 0
 
 

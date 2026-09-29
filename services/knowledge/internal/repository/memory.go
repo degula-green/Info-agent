@@ -45,8 +45,6 @@ type MemoryStore struct {
 	accessRequests     map[string]domain.PrivateAccessRequest
 	wechatConfigs      map[string]domain.WechatCollectionConfig
 	wechatRuntime      map[string]domain.WechatCollectorRuntime
-	calendarAuths      map[string]domain.CalendarAuthorization
-	calendarRequests   map[string]domain.CalendarEventRequest
 }
 
 type attachmentCursorReceipt struct {
@@ -68,7 +66,6 @@ func NewMemoryStore() *MemoryStore {
 		outbox:        map[string]domain.OutboxEvent{},
 		shareRequests: map[string]domain.PrivateShareRequest{}, shareRefs: map[string]domain.PrivateShareReference{}, accessRequests: map[string]domain.PrivateAccessRequest{},
 		wechatConfigs: map[string]domain.WechatCollectionConfig{}, wechatRuntime: map[string]domain.WechatCollectorRuntime{},
-		calendarAuths: map[string]domain.CalendarAuthorization{}, calendarRequests: map[string]domain.CalendarEventRequest{},
 	}
 }
 
@@ -3634,7 +3631,7 @@ func (s *MemoryStore) identityByIDLocked(id string) ExternalIdentity {
 	return ExternalIdentity{}
 }
 
-// -- Agent calendar support ------------------------------------------------
+// -- Agent support ---------------------------------------------------------
 
 func (s *MemoryStore) GetAgentMessageContext(_ context.Context, messageID string) (*domain.AgentMessageContext, error) {
 	s.mu.RLock()
@@ -3655,13 +3652,22 @@ func (s *MemoryStore) GetAgentMessageContext(_ context.Context, messageID string
 	if text == "" {
 		text = s.privateContent[messageID]
 	}
+	senderExternalID := ""
+	if identity, ok := s.identities[message.SenderIdentityID]; ok {
+		senderExternalID = identity.ExternalUserID
+	}
+	senderDisplayName := message.SenderDisplayName
+	if conversation, ok := s.conversations[message.ConversationID]; ok {
+		senderDisplayName = normalizePrivateWechatSender(conversation.ConversationType, conversation.Name, conversation.ExternalConversationID, senderExternalID, "", senderDisplayName)
+	}
 	return &domain.AgentMessageContext{
-		MessageID:      message.ID,
-		ConversationID: message.ConversationID,
-		MessageType:    message.MessageType,
-		Text:           text,
-		SentAt:         message.SentAt,
-		Sensitive:      message.Sensitive,
+		MessageID:         message.ID,
+		ConversationID:    message.ConversationID,
+		MessageType:       message.MessageType,
+		SenderDisplayName: senderDisplayName,
+		Text:              text,
+		SentAt:            message.SentAt,
+		Sensitive:         message.Sensitive,
 	}, nil
 }
 
@@ -3694,61 +3700,6 @@ func (s *MemoryStore) ListAgentConversationMembers(_ context.Context, conversati
 	return out, nil
 }
 
-func calendarAuthorizationKey(ownerUserID, provider string) string {
-	return ownerUserID + "|" + provider
-}
-
-func (s *MemoryStore) GetCalendarAuthorization(_ context.Context, ownerUserID, provider string) (*domain.CalendarAuthorization, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	item, ok := s.calendarAuths[calendarAuthorizationKey(ownerUserID, provider)]
-	if !ok {
-		return nil, apperror.New("calendar_not_bound", "the user has no calendar authorization", 404, false)
-	}
-	return &item, nil
-}
-
-func (s *MemoryStore) UpsertCalendarAuthorization(_ context.Context, item domain.CalendarAuthorization, now time.Time) (*domain.CalendarAuthorization, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	key := calendarAuthorizationKey(item.OwnerUserID, item.Provider)
-	if existing, ok := s.calendarAuths[key]; ok {
-		item.ID = existing.ID
-		item.CreatedAt = existing.CreatedAt
-	}
-	if item.ID == "" {
-		item.ID = uuid.NewString()
-	}
-	if item.Status == "" {
-		item.Status = domain.CalendarAuthorizationActive
-	}
-	item.UpdatedAt = now
-	if item.CreatedAt.IsZero() {
-		item.CreatedAt = now
-	}
-	s.calendarAuths[key] = item
-	return &item, nil
-}
-
-func (s *MemoryStore) GetCalendarEventRequest(_ context.Context, requestID string) (*domain.CalendarEventRequest, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	item, ok := s.calendarRequests[requestID]
-	if !ok {
-		return nil, nil
-	}
-	return &item, nil
-}
-
-func (s *MemoryStore) SaveCalendarEventRequest(_ context.Context, item domain.CalendarEventRequest) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if _, ok := s.calendarRequests[item.RequestID]; ok {
-		return nil
-	}
-	s.calendarRequests[item.RequestID] = item
-	return nil
-}
 
 func (s *MemoryStore) addEventLocked(ctx context.Context, eventType string, c domain.ConversationIngestion, payload map[string]any) {
 	traceID := trace.TraceID(ctx)

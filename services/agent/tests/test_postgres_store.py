@@ -1,7 +1,8 @@
 """PostgreSQL store integration tests.
 
 Skipped unless AGENT_TEST_DATABASE_URL points at a disposable database that has
-already run db/migrations/20260925_agent_runtime_rebuild.sql.
+already run db/migrations/20260925_agent_runtime_rebuild.sql and
+db/migrations/20260927_agent_dynamic_plan.sql.
 """
 
 from __future__ import annotations
@@ -120,3 +121,150 @@ def test_task_payload_survives_a_round_trip(store) -> None:
     reloaded.input = {**reloaded.input, "text": "明天晚上九点"}
     store.commit(reloaded)
     assert store.get_task(task.task_id).input == {"text": "明天晚上九点"}
+
+
+def test_replanning_takes_the_next_plan_version(store) -> None:
+    """``agent_plans`` is unique on (task_id, version).
+
+    Re-planning after user input must therefore allocate a fresh version: reusing
+    the replaced Plan's version made the INSERT fail and left the Task stuck in
+    "planning" while the worker retried forever.
+    """
+
+    from app.kernel.models import Plan
+
+    task = _record()
+    store.create_task(task, events=[], outbox_events=[])
+    store.created_task_ids.append(task.task_id)
+
+    first = Plan(plan_id=str(uuid.uuid4()), task_id=task.task_id, objective="first")
+    first.version = store.next_plan_version(task.task_id)
+    store.save_plan(first)
+
+    second = Plan(plan_id=str(uuid.uuid4()), task_id=task.task_id, objective="second")
+    second.version = store.next_plan_version(task.task_id)
+    store.save_plan(second)
+
+    assert (first.version, second.version) == (1, 2)
+    assert store.get_active_plan(task.task_id).plan_id == second.plan_id
+
+
+def test_dynamic_planning_fields_survive_a_round_trip(store) -> None:
+    from app.kernel.models import Plan, PlanStep
+
+    task = _record()
+    task.understanding = {
+        "is_task": True,
+        "goal": "create a todo",
+        "task_kind": "action",
+        "intent_candidates": [
+            {"name": "todo.create", "confidence": 0.9, "evidence": "开会"}
+        ],
+        "confidence": 0.9,
+        "reason": "test",
+    }
+    task.result = {"warnings": ["unsupported intent: web.research"]}
+    task.replan_count = 1
+    task.step_count = 2
+    task.model_call_count = 3
+    store.create_task(task, events=[], outbox_events=[])
+    store.created_task_ids.append(task.task_id)
+
+    reloaded = store.get_task(task.task_id)
+    assert reloaded.understanding == task.understanding
+    assert reloaded.result == task.result
+    assert reloaded.replan_count == 1
+    assert reloaded.step_count == 2
+    assert reloaded.model_call_count == 3
+
+    parent = Plan(
+        plan_id=str(uuid.uuid4()),
+        task_id=task.task_id,
+        version=1,
+        objective="parent",
+    )
+    store.save_plan(parent)
+    child = Plan(
+        plan_id=str(uuid.uuid4()),
+        task_id=task.task_id,
+        version=2,
+        parent_plan_id=parent.plan_id,
+        triggered_by_observation_id="obs-1",
+        replan_reason="retryable failure",
+        unsupported_intents=["web.research"],
+        warnings=["unsupported intent: web.research"],
+        requires_user_confirmation=True,
+        objective="child",
+        steps=[
+            PlanStep(
+                step_id=str(uuid.uuid4()),
+                plan_id="pending",
+                order=1,
+                capability="fake.read",
+                arguments={"value": "x"},
+            )
+        ],
+    )
+    child.steps[0].plan_id = child.plan_id
+    store.save_plan(child)
+    store.save_steps(task.task_id, child.steps)
+
+    stored_child = store.get_active_plan(task.task_id)
+    assert stored_child.parent_plan_id == parent.plan_id
+    assert stored_child.triggered_by_observation_id == "obs-1"
+    assert stored_child.replan_reason == "retryable failure"
+    assert stored_child.unsupported_intents == ["web.research"]
+    assert stored_child.warnings == ["unsupported intent: web.research"]
+    assert stored_child.requires_user_confirmation is True
+
+
+def test_observation_evidence_and_evidence_rows_round_trip(store) -> None:
+    """The provenance a capability returned has to survive a restart."""
+
+    from app.kernel.models import EvidenceRecord, Observation
+
+    task = _record()
+    store.create_task(task, events=[], outbox_events=[])
+    store.created_task_ids.append(task.task_id)
+
+    observation = Observation(
+        observation_id=str(uuid.uuid4()),
+        task_id=task.task_id,
+        plan_id="plan-1",
+        step_id="plan-1-step-2",
+        capability="web.extract",
+        status="succeeded",
+        output={"title": "示例页面"},
+        evidence=[
+            {
+                "evidence_id": "ev-abc",
+                "source": "web",
+                "url": "https://93.184.216.34/page",
+                "snippet": "正文片段",
+                "version": 1,
+            }
+        ],
+        created_at=datetime.now(timezone.utc),
+    )
+    store.save_observation(observation)
+
+    record = EvidenceRecord(
+        evidence_id=f"{observation.observation_id}:ev-abc",
+        task_id=task.task_id,
+        plan_id=observation.plan_id,
+        step_id=observation.step_id,
+        observation_id=observation.observation_id,
+        payload=observation.evidence[0],
+        created_at=datetime.now(timezone.utc),
+    )
+    store.save_evidence(record)
+    # A retry of the same step must not raise or duplicate the row.
+    store.save_evidence(record)
+
+    reloaded = [
+        item
+        for item in store.list_observations(task.task_id)
+        if item.observation_id == observation.observation_id
+    ][0]
+    assert reloaded.evidence[0]["evidence_id"] == "ev-abc"
+    assert reloaded.evidence[0]["url"] == "https://93.184.216.34/page"

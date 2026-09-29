@@ -645,10 +645,6 @@ type Repository interface {
 	GetKnowledgeContent(ctx context.Context, knowledgeItemID string) (*domain.KnowledgeContent, error)
 	GetAgentMessageContext(ctx context.Context, messageID string) (*domain.AgentMessageContext, error)
 	ListAgentConversationMembers(ctx context.Context, conversationID string) ([]domain.AgentConversationMember, error)
-	GetCalendarAuthorization(ctx context.Context, ownerUserID, provider string) (*domain.CalendarAuthorization, error)
-	UpsertCalendarAuthorization(ctx context.Context, item domain.CalendarAuthorization, now time.Time) (*domain.CalendarAuthorization, error)
-	GetCalendarEventRequest(ctx context.Context, requestID string) (*domain.CalendarEventRequest, error)
-	SaveCalendarEventRequest(ctx context.Context, item domain.CalendarEventRequest) error
 	ListKnowledgeLibraries(ctx context.Context, userID, organizationID string) ([]domain.KnowledgeLibrary, error)
 	ListKnowledgeLibraryItems(ctx context.Context, libraryID, userID, organizationID, kind, platform, query string, limit int) ([]domain.KnowledgeLibraryItem, error)
 	ApplyRAGResult(ctx context.Context, knowledgeItemID string, input RAGResultInput) (*RAGResultApply, error)

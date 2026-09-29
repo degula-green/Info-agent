@@ -9,7 +9,7 @@ from app.kernel.registry import CapabilityRegistry
 class DescriptorPolicy:
     """Reads the registered descriptor instead of any planner supplied metadata.
 
-    ``calendar.create`` declares ``side_effect`` and ``requires_approval``, so it
+    ``todo.create`` declares ``side_effect`` and ``requires_approval``, so it
     always pauses for approval; an unregistered capability is denied.
     """
 

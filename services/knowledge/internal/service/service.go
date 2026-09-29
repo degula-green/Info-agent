@@ -39,7 +39,6 @@ type Service struct {
 	Vault   *vault.Vault
 	Objects objectstore.Store
 	Feishu  platform.OAuthProvider
-	Calendar platform.CalendarProvider
 	Core    *coreclient.Client
 	RAG     *ragclient.Client
 	Config  config.Config
@@ -311,12 +310,12 @@ type oauthCompletion struct {
 	Retryable bool                     `json:"retryable,omitempty"`
 }
 
-func New(repo repository.Repository, store kv.Store, vaultStore *vault.Vault, objects objectstore.Store, feishu platform.OAuthProvider, calendar platform.CalendarProvider, core *coreclient.Client, cfg config.Config) *Service {
+func New(repo repository.Repository, store kv.Store, vaultStore *vault.Vault, objects objectstore.Store, feishu platform.OAuthProvider, core *coreclient.Client, cfg config.Config) *Service {
 	var rag *ragclient.Client
 	if strings.TrimSpace(cfg.RAGURL) != "" && strings.TrimSpace(cfg.RAGServiceToken) != "" {
 		rag = ragclient.New(cfg.RAGURL, cfg.RAGServiceToken)
 	}
-	return &Service{Repo: repo, KV: store, Vault: vaultStore, Objects: objects, Feishu: feishu, Calendar: calendar, Core: core, RAG: rag, Config: cfg, Now: func() time.Time { return time.Now().UTC() }}
+ 	return &Service{Repo: repo, KV: store, Vault: vaultStore, Objects: objects, Feishu: feishu, Core: core, RAG: rag, Config: cfg, Now: func() time.Time { return time.Now().UTC() }}
 }
 
 func (s *Service) ListConnectors(ctx context.Context, userID string) ([]domain.ConnectorView, error) {
@@ -520,14 +519,6 @@ func (s *Service) CompleteFeishuOAuth(ctx context.Context, state, code, provider
 	if err != nil {
 		_ = s.Vault.Delete(ctx, key)
 		return fail(err)
-	}
-	// One Feishu authorization can serve both message collection and calendar
-	// writes; record the calendar authorization only when the scope was asked for.
-	if s.ScopesGrantCalendar() {
-		if err := s.BindCalendarAuthorization(ctx, data.UserID, domain.PlatformFeishu, key, profile.ExternalAccountID); err != nil {
-			slog.Default().WarnContext(ctx, "calendar authorization could not be recorded",
-				"error", err.Error())
-		}
 	}
 	if oldCredentialRef != "" && oldCredentialRef != key {
 		_ = s.Vault.Delete(ctx, oldCredentialRef)

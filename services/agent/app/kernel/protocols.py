@@ -12,6 +12,8 @@ from app.kernel.models import (
     OutboxEvent,
     Plan,
     PlanStep,
+    PlannerDecision,
+    PlanningConstraints,
     PolicyDecision,
     Observation,
     TaskEvent,
@@ -19,11 +21,59 @@ from app.kernel.models import (
     TaskInput,
     TaskRecord,
     TaskUnderstanding,
+    TodoRecord,
 )
 
 
+class TodoStore(Protocol):
+    """Authoritative ledger for ``todo.create``.
+
+    Kept separate from :class:`AgentStore` on purpose: the execution kernel never
+    reads a to-do, and the desktop surface never reads a Plan. PostgreSQL is the
+    production implementation; the in-memory one backs tests and local runs.
+    """
+
+    def create_todo(self, todo: TodoRecord) -> TodoRecord:
+        ...
+
+    def get_todo(self, todo_id: str) -> TodoRecord | None:
+        ...
+
+    def find_todo_by_idempotency_key(self, idempotency_key: str) -> TodoRecord | None:
+        """Lets a retried Step reuse the row it already wrote."""
+        ...
+
+    def list_todos(
+        self,
+        owner_user_id: str,
+        *,
+        statuses: list[str] | None = None,
+        limit: int = 200,
+    ) -> list[TodoRecord]:
+        """Read-only listing for the desktop; the runtime never calls this."""
+        ...
+
+    def update_todo(
+        self,
+        todo_id: str,
+        *,
+        owner_user_id: str,
+        changes: dict[str, Any],
+    ) -> TodoRecord | None:
+        """Partial update from the desktop (title, due time, status)."""
+        ...
+
+    def delete_todo(self, todo_id: str, *, owner_user_id: str) -> bool:
+        ...
+
+
 class TaskUnderstandingProvider(Protocol):
-    def understand(self, task: TaskEnvelope) -> TaskUnderstanding:
+    def understand(
+        self,
+        task: TaskEnvelope,
+        *,
+        min_confidence: float | None = None,
+    ) -> TaskUnderstanding:
         ...
 
 
@@ -33,7 +83,19 @@ class Planner(Protocol):
         task: TaskEnvelope,
         capabilities: list[CapabilityDescriptor],
         observations: list[Observation],
+        constraints: PlanningConstraints,
+        understanding: TaskUnderstanding | None = None,
     ) -> Plan:
+        ...
+
+    def decide_after_observation(
+        self,
+        task: TaskEnvelope,
+        current_plan: Plan,
+        observations: list[Observation],
+        constraints: PlanningConstraints,
+        understanding: TaskUnderstanding | None = None,
+    ) -> PlannerDecision:
         ...
 
 
@@ -44,6 +106,32 @@ class Capability(Protocol):
         ...
 
     def execute(self, arguments: BaseModel) -> dict[str, Any]:
+        ...
+
+
+class PreflightCapability(Protocol):
+    """Optional capability extension: report missing input before approval.
+
+    The kernel only calls it when a registered capability implements it. The
+    return value uses the same shape as an execution result
+    (``{"requires_user_input": True, "missing_information": [...]}``); ``None``
+    or a result without ``requires_user_input`` means the capability is ready.
+    """
+
+    def preflight(self, arguments: dict[str, Any]) -> dict[str, Any] | None:
+        ...
+
+
+class ReconcilableCapability(Protocol):
+    """Optional capability extension: look up what became of an earlier call.
+
+    Only capabilities whose descriptor declares ``reconcilable = True`` need to
+    implement it. The kernel calls it when a call's outcome is unknown, to find
+    out whether the external effect actually happened instead of re-issuing it
+    blindly. Reading is side-effect free, so it may be called repeatedly.
+    """
+
+    def reconcile(self, request_id: str) -> dict[str, Any]:
         ...
 
 
@@ -143,6 +231,14 @@ class AgentStore(Protocol):
     def get_active_plan(self, task_id: str) -> Plan | None:
         ...
 
+    def next_plan_version(self, task_id: str) -> int:
+        """Version for a new Plan of this Task: existing maximum + 1.
+
+        ``agent_plans`` is unique on ``(task_id, version)``, so a re-plan after
+        user input must never reuse the version of the Plan it replaces.
+        """
+        ...
+
     def invalidate_plans(self, task_id: str, *, except_plan_id: str | None = None) -> None:
         ...
 
@@ -172,6 +268,12 @@ class AgentStore(Protocol):
         ...
 
     def get_capability_call(self, idempotency_key: str) -> CapabilityCallRecord | None:
+        ...
+
+    def find_capability_call_for_step(
+        self, task_id: str, step_id: str
+    ) -> CapabilityCallRecord | None:
+        """Latest persisted call for a Step; used to resume an interrupted Step."""
         ...
 
     def save_capability_call(self, call: CapabilityCallRecord) -> None:

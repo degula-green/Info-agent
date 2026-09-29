@@ -1,4 +1,4 @@
-"""Deterministic fan-out for ``knowledge.ready`` calendar candidates.
+"""Deterministic fan-out for ``knowledge.ready`` task candidates.
 
 Visibility is decided by Knowledge: it returns the owners that are both
 identity-mapped and still active in the conversation. This module only applies
@@ -17,7 +17,9 @@ from app.ingress.vocabulary import (  # noqa: F401 - re-exported for callers
     CJK_DIGITS,
     SCHEDULE_KEYWORDS,
     TIME_PHRASE_PATTERN,
+    chitchat_only,
     schedule_hint,
+    task_candidate_hint,
 )
 from app.kernel.models import TaskEnvelope
 
@@ -52,7 +54,7 @@ class KnowledgeEventIngress:
         message_type = fields.get("message_type", fields.get("type"))
         if str(message_type or "").strip().lower() != "text":
             return False
-        return self.schedule_hint(self.resolve_text(event, snapshot, text=text))
+        return self.task_candidate_hint(self.resolve_text(event, snapshot, text=text))
 
     def create_tasks(
         self,
@@ -82,6 +84,7 @@ class KnowledgeEventIngress:
                 "conversation_type": fields.get("conversation_type"),
                 "content_version": fields.get("content_version"),
                 "acl_version": fields.get("acl_version"),
+                "sender_display_name": fields.get("sender_display_name"),
                 "sent_at": fields.get("sent_at"),
             }.items()
             if value is not None
@@ -118,6 +121,24 @@ class KnowledgeEventIngress:
         """Deterministic hint: a time expression or a schedule keyword."""
 
         return schedule_hint(text)
+
+    @staticmethod
+    def chitchat_only(text: str | None) -> bool:
+        """True when the text is nothing but social noise."""
+
+        return chitchat_only(text)
+
+    @staticmethod
+    def task_candidate_hint(text: str | None) -> bool:
+        """The ingress gate: a Task is created unless the text is pure noise.
+
+        This is intentionally wider than schedule_hint. A to-do such as
+        "完成登录模块代码" has no time expression and no schedule keyword, so a
+        schedule-only gate dropped it before task understanding could see it.
+        The real verdict belongs to the understanding layer.
+        """
+
+        return task_candidate_hint(text)
 
     @staticmethod
     def client_message_id(knowledge_item_id: str, content_version: Any) -> str:

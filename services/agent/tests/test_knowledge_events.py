@@ -24,7 +24,8 @@ def build(*, client: FakeKnowledgeClient, platforms=None):
 
 
 def test_private_message_creates_exactly_one_task() -> None:
-    client = FakeKnowledgeClient(snapshots={"item-1": snapshot()})
+    raw = snapshot()
+    client = FakeKnowledgeClient(snapshots={"item-1": raw})
     service, store, _container = build(client=client)
 
     outcome = service.handle(knowledge_event())
@@ -37,7 +38,7 @@ def test_private_message_creates_exactly_one_task() -> None:
     assert task.source_type == "knowledge_event"
     assert task.idempotency_key == "knowledge_event:user-1:item-1:1"
     assert task.source_ref["knowledge_item_id"] == "item-1"
-    assert task.source_ref["sent_at"] == "2026-09-25T06:12:30Z"
+    assert task.source_ref["sent_at"] == raw["sent_at"]
     assert task.input["text"] == "明天晚上八点开个评审会，会议室 A"
 
 

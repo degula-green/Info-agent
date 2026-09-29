@@ -18,6 +18,7 @@ from fastapi import FastAPI  # noqa: E402
 from app.config import settings  # noqa: E402
 from app.container import build_container  # noqa: E402
 from app.routers import health, tasks  # noqa: E402
+from app.routers import todos  # noqa: E402
 
 logger = logging.getLogger("agent.main")
 
@@ -27,6 +28,7 @@ async def lifespan(application: FastAPI):
     logging.basicConfig(level=getattr(logging, settings.log_level.upper(), logging.INFO))
     container = build_container(settings)
     tasks.set_container(container)
+    todos.set_container(container)
     logger.info("agent api started with %s store", type(container.store).__name__)
     try:
         yield
@@ -38,3 +40,4 @@ app = FastAPI(title="info-agent-agent", version="0.1.0", lifespan=lifespan)
 
 app.include_router(health.router)
 app.include_router(tasks.router)
+app.include_router(todos.router)

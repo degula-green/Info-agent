@@ -25,6 +25,7 @@ from app.kernel.models import (
     TaskEvent,
     TaskInput,
     TaskRecord,
+    TodoRecord,
 )
 
 
@@ -94,6 +95,11 @@ class PostgresAgentStore:
             current_plan_version=row["current_plan_version"],
             idempotency_key=row["idempotency_key"],
             checkpoint=row["checkpoint"],
+            understanding=row.get("understanding"),
+            result=row.get("result"),
+            replan_count=row.get("replan_count", 0),
+            step_count=row.get("step_count", 0),
+            model_call_count=row.get("model_call_count", 0),
             last_error=row["last_error"],
             lease_owner=row["lease_owner"],
             lease_expires_at=row["lease_expires_at"],
@@ -107,6 +113,14 @@ class PostgresAgentStore:
             plan_id=row["plan_id"],
             task_id=row["task_id"],
             version=row["version"],
+            parent_plan_id=row.get("parent_plan_id"),
+            triggered_by_observation_id=row.get("triggered_by_observation_id"),
+            replan_reason=row.get("replan_reason"),
+            unsupported_intents=row.get("unsupported_intents") or [],
+            warnings=row.get("warnings") or [],
+            requires_user_confirmation=bool(
+                row.get("requires_user_confirmation", False)
+            ),
             objective=row["objective"],
             status=row["status"],
             steps=[],
@@ -121,6 +135,8 @@ class PostgresAgentStore:
             capability=row["capability"],
             arguments=row["arguments"] or {},
             status=row["status"],
+            attempt_count=int(row.get("attempt_count") or 0),
+            replaced_by_step_id=row.get("replaced_by_step_id"),
         )
 
     @staticmethod
@@ -147,6 +163,7 @@ class PostgresAgentStore:
             step_id=row["step_id"],
             capability=row["capability"],
             arguments=row["arguments"] or {},
+            arguments_hash=row.get("arguments_hash"),
             version=row["version"],
             status=row["status"],
             reason=row["reason"],
@@ -257,16 +274,25 @@ class PostgresAgentStore:
             f"""
             INSERT INTO {self._tasks} (
                 task_id, source_type, owner_user_id, status, objective, current_plan_id,
-                current_plan_version, idempotency_key, checkpoint, last_error,
+                current_plan_version, idempotency_key, checkpoint, understanding, result,
+                replan_count, step_count, model_call_count, last_error,
                 lease_owner, lease_expires_at, input, source_ref, constraints,
                 created_at, updated_at
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ) VALUES (
+                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+            )
             ON CONFLICT (task_id) DO UPDATE SET
                 status = EXCLUDED.status,
                 objective = EXCLUDED.objective,
                 current_plan_id = EXCLUDED.current_plan_id,
                 current_plan_version = EXCLUDED.current_plan_version,
                 checkpoint = EXCLUDED.checkpoint,
+                understanding = EXCLUDED.understanding,
+                result = EXCLUDED.result,
+                replan_count = EXCLUDED.replan_count,
+                step_count = EXCLUDED.step_count,
+                model_call_count = EXCLUDED.model_call_count,
                 last_error = EXCLUDED.last_error,
                 input = EXCLUDED.input,
                 source_ref = EXCLUDED.source_ref,
@@ -283,6 +309,11 @@ class PostgresAgentStore:
                 task.current_plan_version,
                 task.idempotency_key,
                 _json(task.checkpoint),
+                _json(task.understanding),
+                _json(task.result),
+                task.replan_count,
+                task.step_count,
+                task.model_call_count,
                 _json(task.last_error),
                 task.lease_owner,
                 task.lease_expires_at,
@@ -449,15 +480,36 @@ class PostgresAgentStore:
                 )
                 cursor.execute(
                     f"""
-                    INSERT INTO {self._plans} (plan_id, task_id, version, objective, status, is_active, created_at, updated_at)
-                    VALUES (%s, %s, %s, %s, %s, TRUE, NOW(), NOW())
+                    INSERT INTO {self._plans} (
+                        plan_id, task_id, version, parent_plan_id,
+                        triggered_by_observation_id, replan_reason,
+                        unsupported_intents, warnings, requires_user_confirmation,
+                        objective, status, is_active, created_at, updated_at
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, TRUE, NOW(), NOW())
                     ON CONFLICT (plan_id) DO UPDATE SET
                         status = EXCLUDED.status,
                         objective = EXCLUDED.objective,
+                        replan_reason = EXCLUDED.replan_reason,
+                        unsupported_intents = EXCLUDED.unsupported_intents,
+                        warnings = EXCLUDED.warnings,
+                        requires_user_confirmation = EXCLUDED.requires_user_confirmation,
                         is_active = TRUE,
                         updated_at = NOW()
                     """,
-                    (plan.plan_id, plan.task_id, plan.version, plan.objective, plan.status),
+                    (
+                        plan.plan_id,
+                        plan.task_id,
+                        plan.version,
+                        plan.parent_plan_id,
+                        plan.triggered_by_observation_id,
+                        plan.replan_reason,
+                        _json(plan.unsupported_intents),
+                        _json(plan.warnings),
+                        plan.requires_user_confirmation,
+                        plan.objective,
+                        plan.status,
+                    ),
                 )
                 for step in plan.steps:
                     self._upsert_step(cursor, plan.task_id, step)
@@ -467,15 +519,27 @@ class PostgresAgentStore:
             f"""
             INSERT INTO {self._steps} (
                 step_id, plan_id, task_id, step_order, capability, arguments, status,
-                attempt_count, created_at, updated_at
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, 0, NOW(), NOW())
+                attempt_count, replaced_by_step_id, created_at, updated_at
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, NOW(), NOW())
             ON CONFLICT (step_id) DO UPDATE SET
                 status = EXCLUDED.status,
                 arguments = EXCLUDED.arguments,
                 capability = EXCLUDED.capability,
+                attempt_count = EXCLUDED.attempt_count,
+                replaced_by_step_id = EXCLUDED.replaced_by_step_id,
                 updated_at = NOW()
             """,
-            (step.step_id, step.plan_id, task_id, step.order, step.capability, _json(step.arguments), step.status),
+            (
+                step.step_id,
+                step.plan_id,
+                task_id,
+                step.order,
+                step.capability,
+                _json(step.arguments),
+                step.status,
+                step.attempt_count,
+                step.replaced_by_step_id,
+            ),
         )
 
     def get_plan(self, plan_id: str) -> Plan | None:
@@ -521,6 +585,16 @@ class PostgresAgentStore:
                         (task_id, except_plan_id),
                     )
 
+    def next_plan_version(self, task_id: str) -> int:
+        with self.pool.connection() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    f"SELECT COALESCE(MAX(version), 0) + 1 FROM {self._plans} WHERE task_id = %s",
+                    (task_id,),
+                )
+                row = cursor.fetchone()
+                return int(row[0]) if row is not None else 1
+
     def save_steps(self, task_id: str, steps: list[PlanStep]) -> None:
         with self.pool.connection() as connection:
             with connection.cursor() as cursor:
@@ -545,6 +619,7 @@ class PostgresAgentStore:
                         attempt_count = COALESCE(%s, attempt_count),
                         approved_version = COALESCE(%s, approved_version),
                         last_error = COALESCE(%s, last_error),
+                        replaced_by_step_id = COALESCE(%s, replaced_by_step_id),
                         updated_at = NOW()
                     WHERE step_id = %s
                     """,
@@ -554,6 +629,7 @@ class PostgresAgentStore:
                         attempt_count,
                         approved_version,
                         _json(last_error),
+                        step.replaced_by_step_id,
                         step.step_id,
                     ),
                 )
@@ -608,6 +684,25 @@ class PostgresAgentStore:
                 cursor.execute(
                     f"SELECT * FROM {self._calls} WHERE idempotency_key = %s",
                     (idempotency_key,),
+                )
+                row = cursor.fetchone()
+                return self._call_model(row) if row else None
+
+    def find_capability_call_for_step(
+        self, task_id: str, step_id: str
+    ) -> CapabilityCallRecord | None:
+        """Latest call recorded for one Step.
+
+        Used to resume a Step whose worker died mid-call: the persisted row, not
+        an in-memory attempt counter, tells whether the external call happened.
+        """
+
+        with self.pool.connection() as connection:
+            with connection.cursor(row_factory=dict_row) as cursor:
+                cursor.execute(
+                    f"SELECT * FROM {self._calls} WHERE task_id = %s AND step_id = %s "
+                    "ORDER BY attempt DESC, created_at DESC LIMIT 1",
+                    (task_id, step_id),
                 )
                 row = cursor.fetchone()
                 return self._call_model(row) if row else None
@@ -673,12 +768,13 @@ class PostgresAgentStore:
                 cursor.execute(
                     f"""
                     INSERT INTO {self._approvals} (
-                        approval_id, task_id, plan_id, step_id, capability, arguments, version,
+                        approval_id, task_id, plan_id, step_id, capability, arguments, arguments_hash, version,
                         status, reason, expires_at, decided_at, decided_by, created_at, updated_at
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT (approval_id) DO UPDATE SET
                         status = EXCLUDED.status,
                         arguments = EXCLUDED.arguments,
+                        arguments_hash = EXCLUDED.arguments_hash,
                         reason = EXCLUDED.reason,
                         decided_at = EXCLUDED.decided_at,
                         decided_by = EXCLUDED.decided_by,
@@ -691,6 +787,7 @@ class PostgresAgentStore:
                         approval.step_id,
                         approval.capability,
                         _json(approval.arguments),
+                        approval.arguments_hash,
                         approval.version,
                         approval.status,
                         approval.reason,
@@ -776,3 +873,185 @@ class PostgresAgentStore:
                     "WHERE event_id = %s",
                     (error[:500], event_id),
                 )
+
+
+class PostgresTodoStore:
+    """PostgreSQL implementation of the TodoStore protocol.
+
+    The table is {schema}.agent_todos (see the Agent todo-ledger migration).
+    It is intentionally independent of the runtime tables: the execution kernel
+    never reads a to-do, and the desktop never reads a Plan.
+    """
+
+    # -- the desktop may edit exactly these columns -------------------------
+    MUTABLE_COLUMNS = (
+        "title",
+        "due_at",
+        "due_expression",
+        "timezone",
+        "notes",
+        "status",
+    )
+
+    def __init__(self, pool: ConnectionPool, schema: str = "agent") -> None:
+        self.pool = pool
+        self.schema = schema
+
+    @property
+    def _todos(self) -> str:
+        return f"{self.schema}.agent_todos"
+
+    @staticmethod
+    def _todo_model(row: dict[str, Any]) -> TodoRecord:
+        return TodoRecord(
+            todo_id=row["todo_id"],
+            owner_user_id=row["owner_user_id"],
+            title=row["title"],
+            due_at=row["due_at"],
+            due_expression=row["due_expression"],
+            timezone=row["timezone"],
+            notes=row["notes"],
+            status=row["status"],
+            source=row["source"] or {},
+            plan_id=row["plan_id"],
+            step_id=row["step_id"],
+            idempotency_key=row["idempotency_key"],
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+            completed_at=row["completed_at"],
+        )
+
+    def create_todo(self, todo: TodoRecord) -> TodoRecord:
+        sql = f"""
+            INSERT INTO {self._todos} (
+                todo_id, owner_user_id, title, due_at, due_expression,
+                timezone, notes, status, source, plan_id, step_id,
+                idempotency_key, created_at, updated_at, completed_at
+            ) VALUES (
+                %(todo_id)s, %(owner_user_id)s, %(title)s, %(due_at)s, %(due_expression)s,
+                %(timezone)s, %(notes)s, %(status)s, %(source)s, %(plan_id)s, %(step_id)s,
+                %(idempotency_key)s, %(created_at)s, %(updated_at)s, %(completed_at)s
+            )
+            ON CONFLICT (idempotency_key) DO NOTHING
+            RETURNING *
+        """
+        params = {
+            "todo_id": todo.todo_id,
+            "owner_user_id": todo.owner_user_id,
+            "title": todo.title,
+            "due_at": todo.due_at,
+            "due_expression": todo.due_expression,
+            "timezone": todo.timezone,
+            "notes": todo.notes,
+            "status": todo.status,
+            "source": _json(todo.source),
+            "plan_id": todo.plan_id,
+            "step_id": todo.step_id,
+            "idempotency_key": todo.idempotency_key,
+            "created_at": todo.created_at,
+            "updated_at": todo.updated_at,
+            "completed_at": todo.completed_at,
+        }
+        with self.pool.connection() as connection:
+            with connection.cursor(row_factory=dict_row) as cursor:
+                cursor.execute(sql, params)
+                row = cursor.fetchone()
+            connection.commit()
+        if row is not None:
+            return self._todo_model(row)
+        # The idempotency key already existed: the retried Step reuses that row.
+        existing = self.find_todo_by_idempotency_key(todo.idempotency_key or "")
+        return existing if existing is not None else todo
+
+    def get_todo(self, todo_id: str) -> TodoRecord | None:
+        with self.pool.connection() as connection:
+            with connection.cursor(row_factory=dict_row) as cursor:
+                cursor.execute(
+                    f"SELECT * FROM {self._todos} WHERE todo_id = %s", (todo_id,)
+                )
+                row = cursor.fetchone()
+        return self._todo_model(row) if row else None
+
+    def find_todo_by_idempotency_key(self, idempotency_key: str) -> TodoRecord | None:
+        if not idempotency_key:
+            return None
+        with self.pool.connection() as connection:
+            with connection.cursor(row_factory=dict_row) as cursor:
+                cursor.execute(
+                    f"SELECT * FROM {self._todos} WHERE idempotency_key = %s",
+                    (idempotency_key,),
+                )
+                row = cursor.fetchone()
+        return self._todo_model(row) if row else None
+
+    def list_todos(
+        self,
+        owner_user_id: str,
+        *,
+        statuses: list[str] | None = None,
+        limit: int = 200,
+    ) -> list[TodoRecord]:
+        sql = f"SELECT * FROM {self._todos} WHERE owner_user_id = %s"
+        params: list[Any] = [owner_user_id]
+        if statuses:
+            sql += " AND status = ANY(%s)"
+            params.append(list(statuses))
+        # Overdue rows are deliberately not filtered out: an unfinished to-do
+        # keeps showing on the desktop until the owner deletes it.
+        sql += " ORDER BY due_at ASC NULLS LAST, created_at ASC LIMIT %s"
+        params.append(max(0, int(limit)))
+        with self.pool.connection() as connection:
+            with connection.cursor(row_factory=dict_row) as cursor:
+                cursor.execute(sql, params)
+                rows = cursor.fetchall()
+        return [self._todo_model(row) for row in rows]
+
+    def update_todo(
+        self,
+        todo_id: str,
+        *,
+        owner_user_id: str,
+        changes: dict,
+    ) -> TodoRecord | None:
+        assignments: list[str] = []
+        params: dict[str, Any] = {
+            "todo_id": todo_id,
+            "owner_user_id": owner_user_id,
+            "updated_at": datetime.now(timezone.utc),
+        }
+        for column in self.MUTABLE_COLUMNS:
+            if column not in changes:
+                continue
+            assignments.append(f"{column} = %({column})s")
+            params[column] = _json(changes[column]) if column == "source" else changes[column]
+        if not assignments:
+            return self.get_todo(todo_id)
+        assignments.append("updated_at = %(updated_at)s")
+        assignments.append(
+            "completed_at = CASE WHEN %(status_expr)s = 'done' "
+            "THEN COALESCE(completed_at, %(updated_at)s) ELSE NULL END"
+        )
+        params["status_expr"] = changes.get("status", "")
+        sql = (
+            f"UPDATE {self._todos} SET {', '.join(assignments)} "
+            "WHERE todo_id = %(todo_id)s AND owner_user_id = %(owner_user_id)s "
+            "RETURNING *"
+        )
+        with self.pool.connection() as connection:
+            with connection.cursor(row_factory=dict_row) as cursor:
+                cursor.execute(sql, params)
+                row = cursor.fetchone()
+            connection.commit()
+        return self._todo_model(row) if row else None
+
+    def delete_todo(self, todo_id: str, *, owner_user_id: str) -> bool:
+        with self.pool.connection() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    f"DELETE FROM {self._todos} "
+                    "WHERE todo_id = %s AND owner_user_id = %s",
+                    (todo_id, owner_user_id),
+                )
+                deleted = cursor.rowcount > 0
+            connection.commit()
+        return deleted

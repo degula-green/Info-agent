@@ -30,6 +30,7 @@ class ExecutionService:
         policy,
         publisher: TaskEventPublisher,
         settings: Settings,
+        understanding_provider=None,
         lease_owner: str | None = None,
     ) -> None:
         self.store = store
@@ -50,6 +51,8 @@ class ExecutionService:
             executor=CapabilityExecutor(registry, store),
             approval_gateway=self.approval_gateway,
             limits=limits,
+            understanding_provider=understanding_provider,
+            understanding_mode=settings.understanding_mode,
         )
         self.dispatcher = OutboxDispatcher(
             store, publisher, batch_size=settings.outbox_batch_size

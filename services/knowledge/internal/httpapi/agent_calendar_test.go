@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 	"time"
 
@@ -18,7 +17,6 @@ import (
 	"info-agent/knowledge/internal/crypto"
 	"info-agent/knowledge/internal/domain"
 	"info-agent/knowledge/internal/kv"
-	"info-agent/knowledge/internal/platform"
 	"info-agent/knowledge/internal/repository"
 	"info-agent/knowledge/internal/service"
 	"info-agent/knowledge/internal/vault"
@@ -29,13 +27,12 @@ const agentToken = "agent-token"
 type agentFixture struct {
 	router   *gin.Engine
 	service  *service.Service
-	provider *platform.FakeCalendarProvider
 	userID   string
 	itemID   string
 }
 
 // newAgentFixture seeds one ready group message whose only mapped member is the
-// calendar owner, plus a bound calendar authorization backed by a Vault token.
+// snapshot owner, so the Agent contract can be exercised end to end.
 func newAgentFixture(t *testing.T, withMembers bool) *agentFixture {
 	t.Helper()
 	ctx := context.Background()
@@ -71,7 +68,7 @@ func newAgentFixture(t *testing.T, withMembers bool) *agentFixture {
 	input := repository.IngestMessageInput{
 		CollectorID: conversation.Collectors[0].ID, ExternalConversationID: conversation.ExternalConversationID,
 		ExternalMessageID: "agent-message", MessageType: "text", Content: content,
-		ContentHash: hex.EncodeToString(sum[:]), SentAt: now,
+		ContentHash: hex.EncodeToString(sum[:]), SentAt: now, SenderDisplayName: "张三",
 	}
 	input.PayloadHash, _ = repository.CalculatePayloadHash(input)
 	ingested, err := repo.IngestMessage(ctx, input)
@@ -98,14 +95,10 @@ func newAgentFixture(t *testing.T, withMembers bool) *agentFixture {
 		t.Fatal(err)
 	}
 	vaultStore := vault.New(store, keyring)
-	if err := vaultStore.Put(ctx, "calendar-ref", vault.TokenSet{AccessToken: "token", RefreshToken: "refresh", ExpiresAt: now.Add(time.Hour)}, time.Hour); err != nil {
-		t.Fatal(err)
-	}
-	provider := &platform.FakeCalendarProvider{}
-	cfg := config.Config{InternalServiceToken: agentToken, FeishuCalendarID: "primary", CalendarProvider: "fake"}
-	svc := service.New(repo, store, vaultStore, nil, nil, provider, nil, cfg)
+	cfg := config.Config{InternalServiceToken: agentToken}
+	svc := service.New(repo, store, vaultStore, nil, nil, nil, cfg)
 	app := &App{Service: svc, Config: cfg}
-	return &agentFixture{router: NewRouterWithApp(app), service: svc, provider: provider, userID: userID, itemID: item.ID}
+	return &agentFixture{router: NewRouterWithApp(app), service: svc, userID: userID, itemID: item.ID}
 }
 
 func (f *agentFixture) call(method, path, caller, token string, body any) *httptest.ResponseRecorder {
@@ -182,6 +175,9 @@ func TestAgentSnapshotReturnsEligibleOwnersAndReasons(t *testing.T) {
 	if snapshot.Text != "明天晚上八点开个评审会" || snapshot.MessageType != "text" {
 		t.Fatalf("snapshot must carry the displayable text: %+v", snapshot)
 	}
+	if snapshot.SenderDisplayName != "张三" {
+		t.Fatalf("snapshot must carry the message sender: %+v", snapshot)
+	}
 }
 
 func TestAgentSnapshotReportsUnknownVisibilityWithoutMembers(t *testing.T) {
@@ -197,60 +193,3 @@ func TestAgentSnapshotReportsUnknownVisibilityWithoutMembers(t *testing.T) {
 	}
 }
 
-func TestAgentCalendarCreateIsIdempotentOnRequestID(t *testing.T) {
-	fixture := newAgentFixture(t, true)
-	payload := map[string]any{
-		"request_id":    "knowledge_event:" + fixture.userID + ":" + fixture.itemID + ":1",
-		"owner_user_id": fixture.userID,
-		"provider":      "feishu",
-		"title":         "评审会",
-		"start_time":    "2026-09-26T12:00:00Z",
-		"end_time":      "2026-09-26T13:00:00Z",
-		"timezone":      "Asia/Shanghai",
-	}
-	path := "/api/knowledge/v1/internal/agent/calendar/events"
-
-	// The owner has no calendar authorization yet.
-	unbound := fixture.call(http.MethodPost, path, "agent", agentToken, payload)
-	if unbound.Code != http.StatusNotFound || !strings.Contains(unbound.Body.String(), "calendar_not_bound") {
-		t.Fatalf("unbound calendar must return calendar_not_bound, got %d %s", unbound.Code, unbound.Body.String())
-	}
-
-	if err := fixture.service.BindCalendarAuthorization(context.Background(), fixture.userID, domain.PlatformFeishu, "calendar-ref", "ou_owner"); err != nil {
-		t.Fatal(err)
-	}
-	created := fixture.call(http.MethodPost, path, "agent", agentToken, payload)
-	if created.Code != http.StatusOK {
-		t.Fatalf("create status=%d body=%s", created.Code, created.Body.String())
-	}
-	var first service.CalendarCreateResult
-	if err := json.Unmarshal(created.Body.Bytes(), &first); err != nil {
-		t.Fatal(err)
-	}
-	if first.Status != "created" || first.EventID == "" || first.RequestID != payload["request_id"] {
-		t.Fatalf("unexpected create result: %+v", first)
-	}
-
-	repeated := fixture.call(http.MethodPost, path, "agent", agentToken, payload)
-	var second service.CalendarCreateResult
-	if err := json.Unmarshal(repeated.Body.Bytes(), &second); err != nil {
-		t.Fatal(err)
-	}
-	if second.Status != "already_exists" || second.EventID != first.EventID {
-		t.Fatalf("repeated request must reuse the event: %+v", second)
-	}
-	if len(fixture.provider.Events) != 1 {
-		t.Fatalf("provider must be called once, got %d", len(fixture.provider.Events))
-	}
-}
-
-func TestAgentCalendarCreateRejectsInvalidInput(t *testing.T) {
-	fixture := newAgentFixture(t, true)
-	path := "/api/knowledge/v1/internal/agent/calendar/events"
-
-	result := fixture.call(http.MethodPost, path, "agent", agentToken, map[string]any{"owner_user_id": fixture.userID})
-
-	if result.Code != http.StatusBadRequest {
-		t.Fatalf("invalid payload must be rejected, got %d", result.Code)
-	}
-}

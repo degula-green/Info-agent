@@ -107,8 +107,8 @@ class Settings:
         60000, "AGENT_REDIS_CLAIM_IDLE_MS", "agent_REDIS_CLAIM_IDLE_MS"
     )
 
-    # Knowledge owns conversation visibility, calendar authorization and the
-    # platform tokens; the Agent only calls its internal API.
+    # Knowledge owns conversation visibility and the platform tokens; the Agent
+    # only calls its internal API, and only for the conversation snapshot.
     knowledge_base_url: str = _text(
         "", "AGENT_KNOWLEDGE_BASE_URL", "agent_KNOWLEDGE_BASE_URL"
     )
@@ -132,10 +132,66 @@ class Settings:
     default_timezone: str = _text(
         "Asia/Shanghai", "AGENT_DEFAULT_TIMEZONE", "agent_DEFAULT_TIMEZONE"
     )
-    calendar_default_duration_minutes: int = _int(
-        60,
-        "AGENT_CALENDAR_DEFAULT_DURATION_MINUTES",
-        "agent_CALENDAR_DEFAULT_DURATION_MINUTES",
+    # Semantic understanding is opt-in. ``shadow`` records model output without
+    # changing planning, so it can be enabled before ``enforce``.
+    understanding_mode: str = _text(
+        "off", "AGENT_UNDERSTANDING_MODE", "agent_UNDERSTANDING_MODE"
+    )
+    understanding_provider: str = _text(
+        "rules", "AGENT_UNDERSTANDING_PROVIDER", "agent_UNDERSTANDING_PROVIDER"
+    )
+    planner_provider: str = _text(
+        "deterministic", "AGENT_PLANNER_PROVIDER", "agent_PLANNER_PROVIDER"
+    )
+    llm_base_url: str = _text(
+        "", "AGENT_LLM_BASE_URL", "agent_LLM_BASE_URL"
+    )
+    llm_api_key: str = _text(
+        "", "AGENT_LLM_API_KEY", "agent_LLM_API_KEY"
+    )
+    llm_model: str = _text(
+        "", "AGENT_LLM_MODEL", "agent_LLM_MODEL"
+    )
+    llm_timeout_seconds: float = _float(
+        10.0, "AGENT_LLM_TIMEOUT_SECONDS", "agent_LLM_TIMEOUT_SECONDS"
+    )
+    llm_max_output_tokens: int = _int(
+        300, "AGENT_LLM_MAX_OUTPUT_TOKENS", "agent_LLM_MAX_OUTPUT_TOKENS"
+    )
+    llm_response_format: str = _text(
+        "json_object", "AGENT_LLM_RESPONSE_FORMAT", "agent_LLM_RESPONSE_FORMAT"
+    )
+    laya_base_url: str = _text(
+        "", "AGENT_LAYAYA_BASE_URL", "agent_LAYAYA_BASE_URL"
+    )
+    laya_api_key: str = _text(
+        "", "AGENT_LAYAYA_API_KEY", "agent_LAYAYA_API_KEY"
+    )
+    laya_model: str = _text(
+        "multilingual", "AGENT_LAYAYA_MODEL", "agent_LAYAYA_MODEL"
+    )
+    laya_timeout_seconds: float = _float(
+        5.0, "AGENT_LAYAYA_TIMEOUT_SECONDS", "agent_LAYAYA_TIMEOUT_SECONDS"
+    )
+    laya_min_confidence: float = _float(
+        0.80,
+        "AGENT_LAYAYA_MIN_CONFIDENCE",
+        "agent_LAYAYA_MIN_CONFIDENCE",
+    )
+    laya_min_margin: float = _float(
+        0.15,
+        "AGENT_LAYAYA_MIN_MARGIN",
+        "agent_LAYAYA_MIN_MARGIN",
+    )
+    understanding_min_confidence: float = _float(
+        0.70,
+        "AGENT_UNDERSTANDING_MIN_CONFIDENCE",
+        "agent_UNDERSTANDING_MIN_CONFIDENCE",
+    )
+    understanding_min_confidence_collected: float = _float(
+        0.85,
+        "AGENT_UNDERSTANDING_MIN_CONFIDENCE_COLLECTED",
+        "agent_UNDERSTANDING_MIN_CONFIDENCE_COLLECTED",
     )
 
     # Execution budgets from the step-1 specification.
@@ -144,8 +200,47 @@ class Settings:
         300.0, "AGENT_TASK_MAX_EXECUTION_SECONDS", "agent_TASK_MAX_EXECUTION_SECONDS"
     )
     task_max_retries: int = _int(3, "AGENT_TASK_MAX_RETRIES", "agent_TASK_MAX_RETRIES")
+    task_max_model_calls: int = _int(
+        8, "AGENT_TASK_MAX_MODEL_CALLS", "agent_TASK_MAX_MODEL_CALLS"
+    )
+    task_max_replans: int = _int(
+        3, "AGENT_TASK_MAX_REPLANS", "agent_TASK_MAX_REPLANS"
+    )
+    # How many times in a row one capability may be retried before the kernel
+    # treats it as a loop. A research Plan legitimately fetches several pages,
+    # so the limit counts an unbroken run rather than every use.
+    task_max_same_capability_calls: int = _int(
+        4,
+        "AGENT_TASK_MAX_SAME_CAPABILITY_CALLS",
+        "agent_TASK_MAX_SAME_CAPABILITY_CALLS",
+    )
     task_retry_backoff_seconds: str = _text(
-        "1,5,20", "AGENT_TASK_RETRY_BACKOFF_SECONDS", "agent_TASK_RETRY_BACKOFF_SECONDS"
+        "1,2,4", "AGENT_TASK_RETRY_BACKOFF_SECONDS", "agent_TASK_RETRY_BACKOFF_SECONDS"
+    )
+
+    # Step 4 web capabilities: public pages only, read-only, size capped.
+    web_timeout_seconds: float = _float(
+        10.0, "AGENT_WEB_TIMEOUT_SECONDS", "agent_WEB_TIMEOUT_SECONDS"
+    )
+    web_max_bytes: int = _int(
+        512 * 1024, "AGENT_WEB_MAX_BYTES", "agent_WEB_MAX_BYTES"
+    )
+    web_max_redirects: int = _int(
+        3, "AGENT_WEB_MAX_REDIRECTS", "agent_WEB_MAX_REDIRECTS"
+    )
+    # Off by default: only switch it on where the resolver hands out non-public
+    # addresses on purpose (fake-IP proxies), otherwise the fetch guard blocks
+    # every request in that environment.
+    web_allow_private_addresses: bool = _bool(
+        False,
+        "AGENT_WEB_ALLOW_PRIVATE_ADDRESSES",
+        "agent_WEB_ALLOW_PRIVATE_ADDRESSES",
+    )
+    answer_timeout_seconds: float = _float(
+        60.0, "AGENT_ANSWER_TIMEOUT_SECONDS", "agent_ANSWER_TIMEOUT_SECONDS"
+    )
+    answer_max_output_tokens: int = _int(
+        1200, "AGENT_ANSWER_MAX_OUTPUT_TOKENS", "agent_ANSWER_MAX_OUTPUT_TOKENS"
     )
     approval_expires_seconds: float = _float(
         3600.0, "AGENT_APPROVAL_EXPIRES_SECONDS", "agent_APPROVAL_EXPIRES_SECONDS"

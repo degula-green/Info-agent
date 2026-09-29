@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from fastapi import FastAPI
@@ -20,6 +21,7 @@ from app.testing.fake_capabilities import (
 from app.testing.fake_planner import InputDrivenFakePlanner
 from app.testing.fake_publisher import FakeTaskPublisher
 from app.testing.in_memory_runtime_store import InMemoryAgentStore
+from app.testing.in_memory_todo_store import InMemoryTodoStore
 
 
 class ValueInputPayload(BaseModel):
@@ -59,7 +61,6 @@ def make_settings(**overrides: Any) -> Settings:
         "task_max_retries": 3,
         "approval_expires_seconds": 3600.0,
         "default_timezone": "Asia/Shanghai",
-        "calendar_default_duration_minutes": 60,
         "knowledge_ready_stream": "knowledge:ready",
         "knowledge_consumer_group": "agent-workers",
     }
@@ -67,7 +68,14 @@ def make_settings(**overrides: Any) -> Settings:
     return Settings(**base)
 
 
-def build_test_container(*, extra_capabilities=(), planner=None, policy=None, **settings_overrides):
+def build_test_container(
+    *,
+    extra_capabilities=(),
+    planner=None,
+    policy=None,
+    understanding_provider=None,
+    **settings_overrides,
+):
     settings = make_settings(**settings_overrides)
     registry = CapabilityRegistry(
         [
@@ -78,14 +86,17 @@ def build_test_container(*, extra_capabilities=(), planner=None, policy=None, **
         ]
     )
     store = InMemoryAgentStore()
+    todo_store = InMemoryTodoStore()
     publisher = FakeTaskPublisher()
     container = build_container(
         settings=settings,
         store=store,
+        todo_store=todo_store,
         publisher=publisher,
         registry=registry,
         planner=planner or InputDrivenFakePlanner(),
         policy=policy,
+        understanding_provider=understanding_provider,
     )
     return container, store, publisher, registry
 
@@ -120,24 +131,36 @@ def event_types(store, task_id: str) -> list[str]:
     return [event.event_type for event in store.list_events(task_id)]
 
 
-def build_step2_container(*, knowledge=None, **settings_overrides):
-    """Real step-2 wiring (deterministic planner, descriptor policy, calendar
-    capability) over the in-memory store and a fake Knowledge service."""
+def build_step2_container(
+    *,
+    knowledge=None,
+    planner=None,
+    understanding_provider=None,
+    **settings_overrides,
+):
+    """Real wiring (deterministic planner, descriptor policy, todo capability)
+    over the in-memory storage and a fake Knowledge service.
 
-    from app.capabilities.calendar import CalendarCreateCapability
+    The fixture name is kept so the step-2/2.5/3 tests keep pointing at one
+    place, but the capability under it is ``todo.create``: a schedule and a
+    to-do are the same product object now, so there is no calendar capability
+    to wire and nothing is written through Knowledge.
+    """
+
+    from app.capabilities.todo import TodoCreateCapability
     from app.planning.deterministic import DeterministicPlanner
     from app.policy.descriptor import DescriptorPolicy
     from app.testing.fake_knowledge import FakeKnowledgeClient
 
     settings = make_settings(**settings_overrides)
     client = knowledge if knowledge is not None else FakeKnowledgeClient()
+    todo_store = InMemoryTodoStore()
     registry = CapabilityRegistry(
         [
-            CalendarCreateCapability(
-                client,
+            TodoCreateCapability(
+                todo_store,
                 default_timezone=settings.default_timezone,
-                default_duration_minutes=settings.calendar_default_duration_minutes,
-            )
+            ),
         ]
     )
     store = InMemoryAgentStore()
@@ -145,13 +168,23 @@ def build_step2_container(*, knowledge=None, **settings_overrides):
     container = build_container(
         settings=settings,
         store=store,
+        todo_store=todo_store,
         publisher=publisher,
         registry=registry,
-        planner=DeterministicPlanner(default_timezone=settings.default_timezone),
+        planner=planner or DeterministicPlanner(default_timezone=settings.default_timezone),
         policy=DescriptorPolicy(registry),
         knowledge=client,
+        understanding_provider=understanding_provider,
     )
     return container, store, publisher, client
+
+
+def recent_sent_at(hours: float = 2.0) -> str:
+    """A collected-message timestamp that keeps relative phrases in the future."""
+
+    return (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat().replace(
+        "+00:00", "Z"
+    )
 
 
 def snapshot(**overrides):
@@ -168,7 +201,8 @@ def snapshot(**overrides):
         "conversation_type": "private",
         "conversation_name": "研发组",
         "message_type": "text",
-        "sent_at": "2026-09-25T06:12:30Z",
+        "sender_display_name": "张三",
+        "sent_at": recent_sent_at(),
         "text": "明天晚上八点开个评审会，会议室 A",
         "visibility": "resolved",
         "eligible_owners": [{"owner_user_id": "user-1"}],

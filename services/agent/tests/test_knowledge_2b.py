@@ -6,6 +6,10 @@ HTTP contract end to end. Point it at a running service with::
 
     AGENT_TEST_KNOWLEDGE_URL=http://127.0.0.1:8099
     AGENT_TEST_KNOWLEDGE_TOKEN=<KNOWLEDGE_INTERNAL_SERVICE_TOKEN>
+
+Knowledge's only remaining Agent interface is the conversation snapshot: the
+to-do itself is written into the Agent's own ledger, so nothing here reaches a
+calendar provider.
 """
 
 from __future__ import annotations
@@ -17,7 +21,7 @@ from pathlib import Path
 
 import pytest
 
-from app.infrastructure.knowledge.client import CalendarNotBound, HttpKnowledgeClient
+from app.infrastructure.knowledge.client import HttpKnowledgeClient
 from tests.support import build_step2_container, knowledge_event
 
 KNOWLEDGE_URL = os.getenv("AGENT_TEST_KNOWLEDGE_URL", "")
@@ -93,33 +97,12 @@ def test_collected_message_completes_the_whole_loop_against_knowledge(seeded) ->
 
     observation = store.list_observations(task_id)[0]
     assert observation.status == "succeeded"
-    assert observation.output["event_id"].startswith("fake-event-")
-    assert observation.output["request_id"] == (
-        f"knowledge_event:{seeded['owner_user_id']}:{seeded['knowledge_item_id']}:1"
-    )
+    # The write lands in the Agent's own ledger: no Knowledge call is involved.
+    assert observation.output["todo_id"]
+    assert container.todo_store.list_todos(owner_user_id=seeded["owner_user_id"])
 
 
-def test_knowledge_deduplicates_the_same_request_id(seeded) -> None:
-    client = build_client()
-    payload = {
-        "request_id": f"b2b-dedupe:{seeded['knowledge_item_id']}",
-        "owner_user_id": seeded["owner_user_id"],
-        "provider": "feishu",
-        "title": "重复请求去重验证",
-        "start_time": "2026-09-27T01:00:00Z",
-        "end_time": "2026-09-27T02:00:00Z",
-        "timezone": "Asia/Shanghai",
-    }
-
-    first = client.create_calendar_event(payload)
-    second = client.create_calendar_event(payload)
-
-    assert first["status"] == "created"
-    assert second["status"] == "already_exists"
-    assert first["event_id"] == second["event_id"]
-
-
-def test_chat_entry_also_writes_through_the_real_knowledge(seeded) -> None:
+def test_chat_entry_also_creates_the_todo_locally(seeded) -> None:
     client = build_client()
     container, store = build_container(client)
     task = container.task_service.create_task(
@@ -134,21 +117,6 @@ def test_chat_entry_also_writes_through_the_real_knowledge(seeded) -> None:
     assert container.execution_service.run_task(task.task_id) == "succeeded"
 
     observation = store.list_observations(task.task_id)[0]
-    assert observation.output["event_id"].startswith("fake-event-")
-    assert observation.output["request_id"] == f"chat:{seeded['owner_user_id']}:{task.task_id}"
-
-
-def test_unbound_owner_is_reported_as_not_bound(seeded) -> None:
-    client = build_client()
-    payload = {
-        "request_id": f"b2b-unbound:{seeded['knowledge_item_id']}",
-        "owner_user_id": "00000000-0000-0000-0000-000000000000",
-        "provider": "feishu",
-        "title": "未绑定验证",
-        "start_time": "2026-09-27T01:00:00Z",
-        "end_time": "2026-09-27T02:00:00Z",
-        "timezone": "Asia/Shanghai",
-    }
-
-    with pytest.raises(CalendarNotBound):
-        client.create_calendar_event(payload)
+    assert observation.output["todo_id"]
+    stored = container.todo_store.list_todos(owner_user_id=seeded["owner_user_id"])[-1]
+    assert stored.title

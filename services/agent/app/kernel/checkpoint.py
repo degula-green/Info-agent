@@ -32,6 +32,20 @@ def next_pending_step(steps: list[PlanStep]) -> PlanStep | None:
             return step
     return None
 
+def resume_step(steps: list[PlanStep]) -> PlanStep | None:
+    """First Step that still needs work, including one caught mid-execution.
+
+    A Step is marked ``running`` before its Capability is called, so a worker
+    that dies during the call leaves it ``running`` forever. Treating that as
+    "finished" is what let a crashed Task skip its own external write, so the
+    resume point deliberately includes ``running``.
+    """
+
+    for step in sorted(steps, key=lambda item: item.order):
+        if step.status in {"pending", "ready", "running"}:
+            return step
+    return None
+
 
 def all_steps_finished(steps: list[PlanStep]) -> bool:
     return bool(steps) and all(

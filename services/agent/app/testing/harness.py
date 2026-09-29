@@ -5,7 +5,15 @@ from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
 
-from app.kernel.models import ApprovalRequest, Observation, Plan, PolicyDecision, TaskEnvelope, TaskUnderstanding
+from app.kernel.models import (
+    ApprovalRequest,
+    Observation,
+    Plan,
+    PlanningConstraints,
+    PolicyDecision,
+    TaskEnvelope,
+    TaskUnderstanding,
+)
 from app.kernel.registry import CapabilityRegistry
 from app.kernel.validator import PlanValidator
 from app.kernel.protocols import Planner, TaskUnderstandingProvider
@@ -44,7 +52,13 @@ class FakeHarness:
     def run(self, task: TaskEnvelope) -> HarnessResult:
         self.store.save_task(task)
         understanding = self.understanding_provider.understand(task) if self.understanding_provider is not None else None
-        plan = self.planner.create_plan(task, self.registry.list_descriptors(), self.store.list_for_task(task.task_id))
+        plan = self.planner.create_plan(
+            task,
+            self.registry.list_descriptors(),
+            self.store.list_for_task(task.task_id),
+            PlanningConstraints(),
+            understanding,
+        )
         self.validator.validate(plan, task)
         self.store.save_plan(plan)
         result = HarnessResult(task=task, plan=plan, understanding=understanding)

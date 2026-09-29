@@ -54,6 +54,31 @@ class UnknownExternalResultError(AgentContractError):
     classification = "unknown_external_result"
 
 
+# Driver-level connection errors arrive under their own class names rather than
+# the builtin ones: psycopg raises ``OperationalError`` / ``InterfaceError``
+# when the connection drops or the transaction is interrupted, and HTTP clients
+# use names such as ``ConnectTimeout`` / ``RemoteProtocolError``. The kernel
+# must not import those drivers, so it matches on the type name.
+#
+# Tradeoff: this is a heuristic. ``OperationalError`` also covers a few
+# non-transient conditions (out of memory, admin shutdown). Translating errors
+# explicitly in the infrastructure layer would be cleaner, but that would touch
+# every client; matching names keeps the kernel free of driver imports.
+_RETRYABLE_EXCEPTION_NAMES = frozenset(
+    {
+        "OperationalError",
+        "InterfaceError",
+        "TimeoutError",
+        "ConnectTimeout",
+        "ReadTimeout",
+        "RemoteProtocolError",
+        "ConnectionResetError",
+        "BrokenPipeError",
+        "ServiceUnavailable",
+    }
+)
+
+
 def classify_error(exc: BaseException) -> str:
     """Map an exception to the documented error classification."""
 
@@ -76,5 +101,7 @@ def classify_error(exc: BaseException) -> str:
     except ImportError:  # pragma: no cover - pydantic is a hard dependency
         pass
     if isinstance(exc, (TimeoutError, ConnectionError)):
+        return "retryable_error"
+    if type(exc).__name__ in _RETRYABLE_EXCEPTION_NAMES:
         return "retryable_error"
     return "permanent_error"
