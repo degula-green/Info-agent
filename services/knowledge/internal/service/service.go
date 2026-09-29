@@ -1607,30 +1607,16 @@ func containsString(values []string, target string) bool {
 }
 
 func (s *Service) GetContact(ctx context.Context, userID, relationID string, organizationID ...string) (*domain.ContactDetail, error) {
-	relations, err := s.Repo.ListContactRelations(ctx, userID, "")
-	if err != nil {
-		return nil, err
-	}
-	var relation *repository.ContactRelation
-	for index := range relations {
-		if relations[index].ID == relationID {
-			relation = &relations[index]
-			break
-		}
-	}
-	if relation == nil {
-		return nil, apperror.New("contact_not_found", "contact relation was not found", 404, false)
-	}
 	// Resolve the complete merged view. Filtering by the clicked identity's
 	// platform would hide other mapped identities for the same internal user.
-	view, err := s.ListContacts(ctx, userID, "")
+	views, err := s.ListContacts(ctx, userID, "")
 	if err != nil {
 		return nil, err
 	}
 	var matched *domain.ContactView
-	for index := range view {
-		if containsIdentity(view[index].Identities, relation.ExternalIdentity.ID) {
-			matched = &view[index]
+	for index := range views {
+		if views[index].ID == relationID {
+			matched = &views[index]
 			break
 		}
 	}
@@ -1691,30 +1677,35 @@ func (s *Service) GetContact(ctx context.Context, userID, relationID string, org
 		return canManageConversation(conversation, userID)
 	}
 	for index := range facts {
-		reference, referenceErr := s.Repo.GetPrivateShareReference(ctx, facts[index].MessageID, "message")
-		if referenceErr != nil {
-			return nil, referenceErr
-		}
-		knowledgeItemID, itemErr := s.Repo.GetContactKnowledgeItem(ctx, facts[index].MessageID, "", organization)
-		if itemErr != nil {
-			return nil, itemErr
+		direct := directConversation(facts[index].ConversationID)
+		var reference *domain.PrivateShareReference
+		knowledgeItemID := ""
+		if !direct {
+			reference, err = s.Repo.GetPrivateShareReference(ctx, facts[index].MessageID, "message")
+			if err != nil {
+				return nil, err
+			}
+			knowledgeItemID, err = s.Repo.GetContactKnowledgeItem(ctx, facts[index].MessageID, "", organization)
+			if err != nil {
+				return nil, err
+			}
 		}
 		evaluator.add(contactAccessTarget{
-			Key: "fact:" + facts[index].ID, Direct: directConversation(facts[index].ConversationID),
+			Key: "fact:" + facts[index].ID, Direct: direct,
 			ResourceType: "knowledge_item", ResourcePart: "display", ResourceID: knowledgeItemID, Action: "view",
 			RequestType: "message", RequestResourceID: facts[index].MessageID, ShareReference: reference,
 		})
 	}
 	for index := range attachments {
-		reference, referenceErr := s.Repo.GetPrivateShareReference(ctx, attachments[index].ID, "attachment")
-		if referenceErr != nil {
-			return nil, referenceErr
-		}
 		direct := directConversation(attachments[index].ConversationID)
-		requiresApproval := attachments[index].Sensitive && attachments[index].ContentAccessRequired
-		if item, itemErr := s.Repo.GetKnowledgeItemByAttachment(ctx, attachments[index].ID); itemErr == nil && item != nil {
-			requiresApproval = item.ContentAccessRequired
+		var reference *domain.PrivateShareReference
+		if !direct {
+			reference, err = s.Repo.GetPrivateShareReference(ctx, attachments[index].ID, "attachment")
+			if err != nil {
+				return nil, err
+			}
 		}
+		requiresApproval := attachments[index].ContentAccessRequired
 		common := contactAccessTarget{
 			Direct: direct, ResourceType: "attachment", ResourceID: attachments[index].ID,
 			RequestType: "attachment", RequestResourceID: attachments[index].ID, ShareReference: reference,
