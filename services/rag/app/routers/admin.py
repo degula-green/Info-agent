@@ -1,0 +1,387 @@
+from __future__ import annotations
+
+from typing import Any
+
+from fastapi import APIRouter, Depends, Header, HTTPException, Query
+from pydantic import BaseModel, Field
+
+from app.application.bootstrap import ApplicationContainer
+from app.application.entity_review_service import InvalidReviewIdempotency
+from app.application.rag_service import RAGRetrievalService
+from app.dependencies import get_container
+from app.domain.rag import DOMAINS, normalized_text
+router = APIRouter(prefix="/api/v1/admin", tags=["rag-admin"])
+
+
+class CandidateReviewBody(BaseModel):
+    review_request_id: str | None = None
+    action: str = Field(pattern="^(promote|merge|ignore|defer)$")
+    target_entity_id: str | None = None
+    canonical_name: str | None = None
+    domain: str | None = None
+    note: str | None = None
+    expected_status: str | None = None
+
+
+class EntityBody(BaseModel):
+    entity_id: str | None = None
+    canonical_name: str = Field(min_length=1, max_length=512)
+    domain: str
+    aliases: list[str] = Field(default_factory=list, max_length=100)
+    status: str = Field(default="active", pattern="^(active|disabled|merged)$")
+
+
+class EntityPatchBody(BaseModel):
+    canonical_name: str | None = Field(default=None, min_length=1, max_length=512)
+    domain: str | None = None
+    status: str | None = Field(default=None, pattern="^(active|disabled|merged)$")
+
+
+class EntityAliasBody(BaseModel):
+    alias: str = Field(min_length=1, max_length=512)
+    source: str = Field(default="manual", max_length=32)
+
+
+def _admin_scope(
+    *,
+    x_user_id: str | None,
+    x_organization_id: str | None,
+    scope_type: str,
+    service: RAGRetrievalService,
+) -> tuple[str, str, str]:
+    user_id = str(x_user_id or "").strip()
+    if not user_id:
+        raise HTTPException(status_code=401, detail="unauthorized")
+    if scope_type == "organization":
+        scope_id = str(x_organization_id or "").strip()
+        if not scope_id:
+            raise HTTPException(status_code=422, detail="invalid_scope")
+    else:
+        scope_id = user_id
+    checker = getattr(service.authorization, "check_organization_capability", None)
+    if scope_type == "user":
+        allowed = user_id == scope_id
+    elif callable(checker):
+        allowed = checker(
+            user_id=user_id,
+            scope_type=scope_type,
+            scope_id=scope_id,
+            capability="entity:review",
+        )
+    else:
+        allowed = False
+    if not allowed:
+        raise HTTPException(status_code=403, detail="forbidden")
+    return user_id, scope_type, scope_id
+
+
+@router.get("/entity-tree")
+def get_entity_tree(
+    scope_type: str = Query(default="organization", pattern="^(organization|user)$"),
+    x_user_id: str | None = Header(default=None),
+    x_organization_id: str | None = Header(default=None),
+    container: ApplicationContainer = Depends(get_container),
+) -> dict[str, Any]:
+    _, scope_type, scope_id = _admin_scope(
+        x_user_id=x_user_id,
+        x_organization_id=x_organization_id,
+        scope_type=scope_type,
+        service=container.retrieval_service,
+    )
+    return container.repository.get_tree(scope_type=scope_type, scope_id=scope_id)
+
+
+@router.get("/entity-tree/nodes/{node_id}")
+def get_entity_tree_node(
+    node_id: str,
+    scope_type: str = Query(default="organization", pattern="^(organization|user)$"),
+    x_user_id: str | None = Header(default=None),
+    x_organization_id: str | None = Header(default=None),
+    container: ApplicationContainer = Depends(get_container),
+) -> dict[str, Any]:
+    _, scope_type, scope_id = _admin_scope(
+        x_user_id=x_user_id,
+        x_organization_id=x_organization_id,
+        scope_type=scope_type,
+        service=container.retrieval_service,
+    )
+    tree = container.repository.get_tree(scope_type=scope_type, scope_id=scope_id)
+    node = next((item for item in tree["nodes"] if item["node_id"] == node_id), None)
+    if not node:
+        raise HTTPException(status_code=404, detail="node_not_found")
+    node["children"] = [
+        item for item in tree["nodes"] if item.get("parent_id") == node_id
+    ]
+    return node
+
+
+@router.get("/entity-candidates")
+def list_candidates(
+    status: str | None = None,
+    domain: str | None = None,
+    query: str | None = None,
+    min_score: float = Query(default=0, ge=0, le=1),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1, le=100),
+    scope_type: str = Query(default="organization", pattern="^(organization|user)$"),
+    x_user_id: str | None = Header(default=None),
+    x_organization_id: str | None = Header(default=None),
+    container: ApplicationContainer = Depends(get_container),
+) -> dict[str, Any]:
+    _, scope_type, scope_id = _admin_scope(
+        x_user_id=x_user_id,
+        x_organization_id=x_organization_id,
+        scope_type=scope_type,
+        service=container.retrieval_service,
+    )
+    items, total = container.repository.list_candidates(
+        scope_type=scope_type,
+        scope_id=scope_id,
+        status=status,
+        domain=domain,
+        query=query,
+        page=page,
+        page_size=page_size,
+    )
+    items = [item for item in items if float(item.get("score") or 0) >= min_score]
+    return {"items": items, "page": page, "page_size": page_size, "total": total}
+
+
+@router.get("/entity-candidates/{candidate_id}")
+def get_candidate(
+    candidate_id: str,
+    scope_type: str = Query(default="organization", pattern="^(organization|user)$"),
+    x_user_id: str | None = Header(default=None),
+    x_organization_id: str | None = Header(default=None),
+    container: ApplicationContainer = Depends(get_container),
+) -> dict[str, Any]:
+    _, scope_type, scope_id = _admin_scope(
+        x_user_id=x_user_id,
+        x_organization_id=x_organization_id,
+        scope_type=scope_type,
+        service=container.retrieval_service,
+    )
+    value = container.repository.get_candidate(
+        scope_type=scope_type,
+        scope_id=scope_id,
+        candidate_id=candidate_id,
+    )
+    if not value:
+        raise HTTPException(status_code=404, detail="candidate_not_found")
+    return value
+
+
+@router.post("/entity-candidates/{candidate_id}/review")
+def review_candidate(
+    candidate_id: str,
+    body: CandidateReviewBody,
+    scope_type: str = Query(default="organization", pattern="^(organization|user)$"),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    x_user_id: str | None = Header(default=None),
+    x_organization_id: str | None = Header(default=None),
+    container: ApplicationContainer = Depends(get_container),
+) -> dict[str, Any]:
+    user_id, scope_type, scope_id = _admin_scope(
+        x_user_id=x_user_id,
+        x_organization_id=x_organization_id,
+        scope_type=scope_type,
+        service=container.retrieval_service,
+    )
+    try:
+        return container.entity_review_service.review(
+            scope_type=scope_type,
+            scope_id=scope_id,
+            candidate_id=candidate_id,
+            reviewer_id=user_id,
+            review_request_id=body.review_request_id,
+            idempotency_key=idempotency_key,
+            action=body.action,
+            expected_status=body.expected_status,
+            canonical_name=body.canonical_name,
+            domain=body.domain,
+            target_entity_id=body.target_entity_id,
+            note=body.note,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail="candidate_not_found") from exc
+    except InvalidReviewIdempotency as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.get("/branch-refresh-jobs/{job_id}")
+def get_branch_refresh_job(
+    job_id: str,
+    scope_type: str = Query(default="organization", pattern="^(organization|user)$"),
+    x_user_id: str | None = Header(default=None),
+    x_organization_id: str | None = Header(default=None),
+    container: ApplicationContainer = Depends(get_container),
+) -> dict[str, Any]:
+    _, _, scope_id = _admin_scope(
+        x_user_id=x_user_id,
+        x_organization_id=x_organization_id,
+        scope_type=scope_type,
+        service=container.retrieval_service,
+    )
+    value = container.repository.get_branch_refresh_job(job_id)
+    if not value or value.get("scope_id") != scope_id:
+        raise HTTPException(status_code=404, detail="branch_refresh_job_not_found")
+    return value
+
+
+@router.get("/entities")
+def list_entities(
+    scope_type: str = Query(default="organization", pattern="^(organization|user)$"),
+    x_user_id: str | None = Header(default=None),
+    x_organization_id: str | None = Header(default=None),
+    container: ApplicationContainer = Depends(get_container),
+) -> dict[str, Any]:
+    _, scope_type, scope_id = _admin_scope(
+        x_user_id=x_user_id,
+        x_organization_id=x_organization_id,
+        scope_type=scope_type,
+        service=container.retrieval_service,
+    )
+    return {
+        "items": container.repository.list_entities(
+            scope_type=scope_type,
+            scope_id=scope_id,
+        )
+    }
+
+
+@router.get("/entities/{entity_id}")
+def get_entity(
+    entity_id: str,
+    scope_type: str = Query(default="organization", pattern="^(organization|user)$"),
+    x_user_id: str | None = Header(default=None),
+    x_organization_id: str | None = Header(default=None),
+    container: ApplicationContainer = Depends(get_container),
+) -> dict[str, Any]:
+    _, scope_type, scope_id = _admin_scope(
+        x_user_id=x_user_id,
+        x_organization_id=x_organization_id,
+        scope_type=scope_type,
+        service=container.retrieval_service,
+    )
+    value = container.repository.get_entity(
+        scope_type=scope_type,
+        scope_id=scope_id,
+        entity_id=entity_id,
+    )
+    if not value:
+        raise HTTPException(status_code=404, detail="entity_not_found")
+    return value
+
+
+@router.post("/entities")
+def create_entity(
+    body: EntityBody,
+    scope_type: str = Query(default="organization", pattern="^(organization|user)$"),
+    x_user_id: str | None = Header(default=None),
+    x_organization_id: str | None = Header(default=None),
+    container: ApplicationContainer = Depends(get_container),
+) -> dict[str, Any]:
+    user_id, scope_type, scope_id = _admin_scope(
+        x_user_id=x_user_id,
+        x_organization_id=x_organization_id,
+        scope_type=scope_type,
+        service=container.retrieval_service,
+    )
+    if body.domain not in DOMAINS:
+        raise HTTPException(status_code=422, detail="invalid_domain")
+    repository = container.repository
+    entity = repository.upsert_entity(
+        entity_id=body.entity_id,
+        scope_type=scope_type,
+        scope_id=scope_id,
+        domain=body.domain,
+        canonical_name=body.canonical_name,
+        normalized_key=normalized_text(body.canonical_name),
+        created_by=user_id,
+        status=body.status,
+    )
+    for alias in body.aliases:
+        repository.upsert_alias(
+            entity_id=entity["id"],
+            scope_type=scope_type,
+            scope_id=scope_id,
+            domain=body.domain,
+            display_alias=alias,
+            normalized_alias=normalized_text(alias),
+            source="manual",
+        )
+    return {**entity, "aliases": body.aliases}
+
+
+@router.patch("/entities/{entity_id}")
+def patch_entity(
+    entity_id: str,
+    body: EntityPatchBody,
+    scope_type: str = Query(default="organization", pattern="^(organization|user)$"),
+    x_user_id: str | None = Header(default=None),
+    x_organization_id: str | None = Header(default=None),
+    container: ApplicationContainer = Depends(get_container),
+) -> dict[str, Any]:
+    user_id, scope_type, scope_id = _admin_scope(
+        x_user_id=x_user_id,
+        x_organization_id=x_organization_id,
+        scope_type=scope_type,
+        service=container.retrieval_service,
+    )
+    current = container.repository.get_entity(
+        scope_type=scope_type,
+        scope_id=scope_id,
+        entity_id=entity_id,
+    )
+    if not current:
+        raise HTTPException(status_code=404, detail="entity_not_found")
+    domain = body.domain or current["domain"]
+    if domain not in DOMAINS:
+        raise HTTPException(status_code=422, detail="invalid_domain")
+    value = container.repository.upsert_entity(
+        entity_id=entity_id,
+        scope_type=scope_type,
+        scope_id=scope_id,
+        domain=domain,
+        canonical_name=body.canonical_name or current["canonical_name"],
+        normalized_key=normalized_text(body.canonical_name or current["canonical_name"]),
+        created_by=user_id,
+        status=body.status or current["status"],
+    )
+    return {**current, **value}
+
+
+@router.post("/entities/{entity_id}/aliases")
+def create_entity_alias(
+    entity_id: str,
+    body: EntityAliasBody,
+    scope_type: str = Query(default="organization", pattern="^(organization|user)$"),
+    x_user_id: str | None = Header(default=None),
+    x_organization_id: str | None = Header(default=None),
+    container: ApplicationContainer = Depends(get_container),
+) -> dict[str, Any]:
+    _, scope_type, scope_id = _admin_scope(
+        x_user_id=x_user_id,
+        x_organization_id=x_organization_id,
+        scope_type=scope_type,
+        service=container.retrieval_service,
+    )
+    entity = container.repository.get_entity(
+        scope_type=scope_type,
+        scope_id=scope_id,
+        entity_id=entity_id,
+    )
+    if not entity:
+        raise HTTPException(status_code=404, detail="entity_not_found")
+    alias_id = container.repository.upsert_alias(
+        entity_id=entity_id,
+        scope_type=scope_type,
+        scope_id=scope_id,
+        domain=entity["domain"],
+        display_alias=body.alias,
+        normalized_alias=normalized_text(body.alias),
+        source=body.source,
+    )
+    return {"id": alias_id, "entity_id": entity_id, "alias": body.alias}

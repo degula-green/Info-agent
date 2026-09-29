@@ -5,6 +5,8 @@ COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev
 COPY app ./app
 COPY worker.py ./worker.py
+# The Elasticsearch mappings are loaded from `config/` at runtime.
+COPY config ./config
 ENV PATH="/app/.venv/bin:$PATH"
 EXPOSE 8000
 CMD ["uv", "run", "--frozen", "--no-dev", "python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

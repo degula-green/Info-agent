@@ -16,6 +16,7 @@ type OrganizationApplication interface {
 	CreateOrganization(context.Context, string, string) (domain.Organization, domain.OrganizationMember, error)
 	CurrentOrganization(context.Context, string) (domain.Organization, domain.OrganizationMember, error)
 	CheckOrganizationMember(context.Context, string, string) (bool, error)
+	CheckOrganizationCapability(context.Context, string, string, string) (bool, error)
 	CreateInvitation(context.Context, string, string) (domain.Invitation, string, error)
 	AcceptInvitation(context.Context, string, string) (domain.Organization, domain.OrganizationMember, error)
 	RevokeInvitation(context.Context, string, string, string) error
@@ -46,7 +47,8 @@ func (h *InternalOrganizationHandler) CheckMember(c *gin.Context) {
 		return
 	}
 	parts := strings.Fields(c.GetHeader("Authorization"))
-	if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") || parts[1] != h.token || c.GetHeader("X-Caller-Service") != "knowledge" {
+	caller := strings.TrimSpace(c.GetHeader("X-Caller-Service"))
+	if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") || parts[1] != h.token || (caller != "knowledge" && caller != "rag") {
 		writeError(c, http.StatusForbidden, "ORG_CALLER_FORBIDDEN", "caller is not authorized", false)
 		return
 	}
@@ -55,12 +57,19 @@ func (h *InternalOrganizationHandler) CheckMember(c *gin.Context) {
 		writeError(c, http.StatusBadRequest, "INVALID_REQUEST", "organization and user are required", false)
 		return
 	}
-	allowed, err := h.service.CheckOrganizationMember(c.Request.Context(), userID, organizationID)
+	capability := strings.TrimSpace(c.Query("capability"))
+	var allowed bool
+	var err error
+	if capability != "" {
+		allowed, err = h.service.CheckOrganizationCapability(c.Request.Context(), userID, organizationID, capability)
+	} else {
+		allowed, err = h.service.CheckOrganizationMember(c.Request.Context(), userID, organizationID)
+	}
 	if err != nil {
 		writeError(c, http.StatusServiceUnavailable, "ORG_SERVICE_UNAVAILABLE", "organization service unavailable", true)
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"allowed": allowed, "is_member": allowed})
+	c.JSON(http.StatusOK, gin.H{"allowed": allowed, "is_member": allowed, "capability": capability})
 }
 
 type createOrganizationRequest struct {

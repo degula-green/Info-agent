@@ -1,13 +1,12 @@
 from __future__ import annotations
 
+import http.client
 import json
-import urllib.error
-import urllib.request
+import urllib.parse
 from typing import Any, Iterable
 
-from app.application.ports import AnswerProvider
 from app.config import settings
-from app.domain.models import SearchResult
+from app.domain.rag import SearchResult
 from app.infrastructure.http import HttpClient, IntegrationError, join_url
 
 
@@ -15,7 +14,7 @@ class QAUnavailable(RuntimeError):
     pass
 
 
-class OpenAICompatibleAnswerProvider(AnswerProvider):
+class OpenAICompatibleAnswerProvider:
     """Small adapter for OpenAI-compatible chat completion endpoints."""
 
     def __init__(self, *, http: HttpClient | None = None) -> None:
@@ -45,29 +44,17 @@ class OpenAICompatibleAnswerProvider(AnswerProvider):
             yield self.generate(question, results)
             return
         payload = self._payload(question, results, stream=True)
-        request = urllib.request.Request(
-            join_url(settings.qa_api_base_url, "/chat/completions"),
-            data=json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8"),
-            headers={"Accept": "text/event-stream", "Content-Type": "application/json", "Authorization": f"Bearer {settings.qa_api_key}"},
-            method="POST",
-        )
         try:
-            with urllib.request.urlopen(request, timeout=settings.qa_timeout_seconds) as response:
-                for raw in response:
-                    line = raw.decode("utf-8", errors="replace").strip()
-                    if not line.startswith("data:"):
-                        continue
-                    value = line[5:].strip()
-                    if not value or value == "[DONE]":
-                        continue
-                    try:
-                        payload = json.loads(value)
-                    except json.JSONDecodeError:
-                        continue
-                    delta = _extract_delta(payload)
-                    if delta:
-                        yield delta
-        except (urllib.error.URLError, urllib.error.HTTPError, OSError, TimeoutError) as exc:
+            for data in _stream_completion(
+                join_url(settings.qa_api_base_url, "/chat/completions"),
+                payload,
+                token=settings.qa_api_key,
+                timeout=settings.qa_timeout_seconds,
+            ):
+                delta = _extract_delta(data)
+                if delta:
+                    yield delta
+        except (http.client.HTTPException, OSError, TimeoutError, ValueError) as exc:
             raise QAUnavailable("QA provider stream failed") from exc
 
     def _payload(self, question: str, results: list[SearchResult], *, stream: bool) -> dict[str, Any]:
@@ -113,3 +100,56 @@ def _extract_delta(value: Any) -> str:
     if isinstance(delta, dict) and isinstance(delta.get("content"), str):
         return delta["content"]
     return ""
+
+
+def _stream_completion(
+    url: str,
+    payload: dict[str, Any],
+    *,
+    token: str,
+    timeout: float,
+) -> Iterable[Any]:
+    parsed = urllib.parse.urlsplit(url)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise ValueError("QA provider URL is invalid")
+    connection_type = (
+        http.client.HTTPSConnection
+        if parsed.scheme == "https"
+        else http.client.HTTPConnection
+    )
+    path = urllib.parse.urlunsplit(("", "", parsed.path or "/", parsed.query, ""))
+    connection = connection_type(
+        parsed.hostname,
+        parsed.port,
+        timeout=max(0.1, timeout),
+    )
+    try:
+        connection.request(
+            "POST",
+            path,
+            body=json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8"),
+            headers={
+                "Accept": "text/event-stream",
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {token}",
+            },
+        )
+        response = connection.getresponse()
+        if response.status < 200 or response.status >= 300:
+            raise ValueError(f"QA provider returned HTTP {response.status}")
+        while True:
+            raw = response.readline()
+            if not raw:
+                break
+            line = raw.decode("utf-8", errors="replace").strip()
+            if not line.startswith("data:"):
+                continue
+            value = line[5:].strip()
+            if not value or value == "[DONE]":
+                continue
+            try:
+                yield json.loads(value)
+            except json.JSONDecodeError:
+                continue
+    finally:
+        connection.close()

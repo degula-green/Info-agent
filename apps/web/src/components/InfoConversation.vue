@@ -53,8 +53,9 @@
         <button
           v-for="item in items"
           :key="item.key"
+          :id="itemRowID(item)"
           type="button"
-          class="conversation-row"
+          :class="['conversation-row', { 'conversation-row--highlight': highlightedItemKey === item.key }]"
           :aria-label="`打开${item.kind === 'file' ? '文件' : '消息'}：${item.name}`"
           @click="openItem(item)"
         >
@@ -181,7 +182,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import { getKnowledgeAttachmentContent } from '@/api/info-knowledge'
 import InfoAttachmentPreview from '@/components/InfoAttachmentPreview.vue'
 import type { CollectionStatus, InfoChat, InfoFile, InfoMessage } from '@/mock'
@@ -204,7 +205,12 @@ type ConversationItem = {
   file?: InfoFile
 }
 
-const props = defineProps<{ chat: InfoChat; sharedView?: boolean }>()
+const props = defineProps<{
+  chat: InfoChat
+  sharedView?: boolean
+  targetMessageId?: string | null
+  targetAttachmentId?: string | null
+}>()
 const emit = defineEmits<{
   (event: 'back'): void
   (event: 'toggle', chat: InfoChat): void
@@ -218,10 +224,12 @@ const messageDialogVisible = ref(false)
 const fileDialogVisible = ref(false)
 const activeMessage = ref<InfoMessage | null>(null)
 const activeFile = ref<InfoFile | null>(null)
+const highlightedItemKey = ref<string | null>(null)
 const fileDownloading = ref(false)
 const shareSelecting = ref(false)
 const selectedMessageIDs = ref<string[]>([])
 const selectedAttachmentIDs = ref<string[]>([])
+let highlightTimer: number | undefined
 const displayCount = computed(() => chat.value.messageCount != null && chat.value.attachmentCount != null
   ? chat.value.messageCount + chat.value.attachmentCount
   : items.value.length)
@@ -267,6 +275,32 @@ const collectionHint = computed(() => chat.value.collectionStatus === 'collectin
       : '尚未开始采集')
 
 function statusLabel(status: CollectionStatus) { return status === 'collecting' ? '采集中' : status === 'paused' ? '已停止采集' : status === 'detached' ? '已解除接入' : status === 'missing' ? '群聊已不存在' : status === 'error' ? '采集异常' : '未开始' }
+function itemRowID(item: Pick<ConversationItem, 'key'>) {
+  return `conversation-${chat.value.id}-${item.key}`
+}
+async function focusTargetResult() {
+  const attachmentTarget = String(props.targetAttachmentId || '').trim()
+  const messageTarget = String(props.targetMessageId || '').trim()
+  const attachment = attachmentTarget ? chat.value.files.find((item) => item.id === attachmentTarget) : null
+  const message = !attachment && messageTarget ? chat.value.messages.find((item) => item.id === messageTarget || item.sourceMessageId === messageTarget) : null
+  const key = attachment ? `file-${attachment.id}` : message ? `message-${message.id}` : ''
+  if (!key) return
+  await nextTick()
+  const element = document.getElementById(itemRowID({ key }))
+  if (!element) return
+  element.scrollIntoView({ behavior: 'smooth', block: 'center' })
+  highlightedItemKey.value = key
+  if (highlightTimer != null) window.clearTimeout(highlightTimer)
+  highlightTimer = window.setTimeout(() => { highlightedItemKey.value = null }, 2600)
+}
+watch(
+  [() => props.targetAttachmentId, () => props.targetMessageId, () => chat.value.id, () => chat.value.messages.length, () => chat.value.files.length],
+  () => { void focusTargetResult() },
+  { immediate: true },
+)
+onBeforeUnmount(() => {
+  if (highlightTimer != null) window.clearTimeout(highlightTimer)
+})
 function openItem(item: ConversationItem) { if (item.kind === 'message' && item.message) openMessage(item.message); if (item.kind === 'file' && item.file) openFile(item.file) }
 function openMessage(message: InfoMessage) { activeMessage.value = message; activeFile.value = null; messageDialogVisible.value = true }
 function openFile(file: InfoFile) { activeFile.value = file; activeMessage.value = null; fileDialogVisible.value = true }
@@ -378,13 +412,11 @@ function attachmentStatus(file: InfoFile) {
 }
 
 function attachmentDisplayStatus(file: InfoFile): KnowledgeDisplayStatus {
-  return mapKnowledgeDisplayStatus({ contentStatus: file.documentStatus || file.parseStatus, ragStatus: file.vectorStatus, searchable: file.searchable })
+  return mapKnowledgeDisplayStatus({ contentStatus: file.parseStatus || file.documentStatus, ragStatus: file.vectorStatus, searchable: file.searchable })
 }
 
 function messageDisplayStatus(message: InfoMessage): KnowledgeDisplayStatus {
-  if (message.vectorStatus === 'ready' || message.vectorStatus === 'succeeded') return 'searchable'
-  if (message.vectorStatus === 'failed') return 'failed'
-  return 'collected'
+  return mapKnowledgeDisplayStatus({ ragStatus: message.vectorStatus })
 }
 
 function messageDisplayLabel(message: InfoMessage) {
@@ -463,6 +495,7 @@ async function downloadFile() {
 .conversation-table__head { min-height: 58px; padding: 0 20px; color: var(--td-text-color-secondary); font-size: 12px; }
 .conversation-row { width: 100%; min-height: 76px; padding: 12px 20px; border: 0; border-top: 1px solid var(--td-component-stroke); color: var(--td-text-color-primary); background: var(--td-bg-color-container); text-align: left; cursor: pointer; }
 .conversation-row:hover { background: var(--td-bg-color-container-hover); }
+.conversation-row--highlight { background: var(--td-brand-color-1); box-shadow: inset 3px 0 0 var(--td-brand-color); }
 .conversation-list__more { display: flex; justify-content: center; padding: 10px 16px; border-top: 1px solid var(--td-component-stroke); }
 .conversation-cell { min-width: 0; overflow: hidden; color: var(--td-text-color-secondary); font-size: 12px; }
 .conversation-cell--name { display: flex; align-items: center; gap: 11px; color: var(--td-text-color-primary); }

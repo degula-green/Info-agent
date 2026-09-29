@@ -33,8 +33,8 @@ def validate_envelope(value: dict[str, Any]) -> dict[str, Any]:
     if value["event_type"] == "knowledge.ready":
         payload_fields = (
             "resource_type", "resource_id", "knowledge_item_id",
-            "content_version", "acl_version", "content_variant",
-            "content_access_required",
+            "source_audience_policy", "content_version", "acl_version",
+            "content_hash", "content_access_required",
         )
         if any(name not in value["payload"] for name in payload_fields):
             raise ValueError("knowledge.ready payload is missing required fields")

@@ -62,7 +62,7 @@ export interface QASession {
 
 export interface SearchResult {
   id: string; kind: 'chat' | 'message' | 'file' | 'qa'; title: string; subtitle: string
-  source: string; platform: SourceKey | 'all' | 'qa'; chatId?: string; recordId?: string
+  source: string; platform: SourceKey | 'all' | 'qa'; chatId?: string; recordId?: string; messageId?: string
   content?: string; context?: InfoMessage[]; sender?: string; uploader?: string
   time?: string; score?: number; question?: string; answer?: string; citations?: Array<Record<string, unknown>>; conversationId?: string; excerpt?: string; contentAccessRequired?: boolean
 }

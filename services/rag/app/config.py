@@ -12,6 +12,11 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
+from dotenv import load_dotenv
+
+
+load_dotenv(Path(__file__).resolve().parents[1] / ".env", override=False)
+
 
 def _text(name: str, default: str = "") -> str:
     return os.getenv(name, default).strip()
@@ -56,7 +61,7 @@ class Settings:
     # RAG-owned PostgreSQL state (jobs, index records, search history, QA and
     # the RAG outbox). Knowledge/IAM tables remain owned by their services.
     database_url: str = _text("RAG_DATABASE_URL")
-    database_schema: str = _text("RAG_DATABASE_SCHEMA", "rag")
+    database_schema: str = _text("RAG_DATABASE_SCHEMA", "rag_mvp")
     database_min_pool_size: int = _int("RAG_DATABASE_MIN_POOL_SIZE", 1)
     database_max_pool_size: int = _int("RAG_DATABASE_MAX_POOL_SIZE", 10)
     database_connect_timeout_seconds: float = _float(
@@ -73,15 +78,23 @@ class Settings:
     elasticsearch_api_key: str = _text("ELASTICSEARCH_API_KEY")
     elasticsearch_ca_cert_path: str = _text("ELASTICSEARCH_CA_CERT_PATH")
     elasticsearch_display_index: str = _text(
-        "ELASTICSEARCH_DISPLAY_INDEX", _text("ELASTICSEARCH_INDEX", "knowledge_display_chunks_read")
+        "ELASTICSEARCH_DISPLAY_INDEX", "rag_chunks_display_write"
     )
     elasticsearch_protected_index: str = _text(
-        "ELASTICSEARCH_PROTECTED_INDEX", "knowledge_protected_chunks_read"
+        "ELASTICSEARCH_PROTECTED_INDEX", "rag_chunks_protected_write"
     )
-    memory_display_facts_index: str = _text("MEMORY_DISPLAY_FACTS_INDEX", "memory_display_facts_read")
-    memory_protected_facts_index: str = _text("MEMORY_PROTECTED_FACTS_INDEX", "memory_protected_facts_read")
-    memory_display_nodes_index: str = _text("MEMORY_DISPLAY_NODES_INDEX", "memory_display_nodes_read")
-    memory_protected_nodes_index: str = _text("MEMORY_PROTECTED_NODES_INDEX", "memory_protected_nodes_read")
+    elasticsearch_display_read_index: str = _text(
+        "ELASTICSEARCH_DISPLAY_READ_INDEX", "rag_chunks_display_read"
+    )
+    elasticsearch_display_write_index: str = _text(
+        "ELASTICSEARCH_DISPLAY_WRITE_INDEX", "rag_chunks_display_write"
+    )
+    elasticsearch_protected_read_index: str = _text(
+        "ELASTICSEARCH_PROTECTED_READ_INDEX", "rag_chunks_protected_read"
+    )
+    elasticsearch_protected_write_index: str = _text(
+        "ELASTICSEARCH_PROTECTED_WRITE_INDEX", "rag_chunks_protected_write"
+    )
     elasticsearch_verify_certs: bool = _bool("ELASTICSEARCH_VERIFY_CERTS", False)
     elasticsearch_connect_timeout_seconds: float = _float(
         "ELASTICSEARCH_CONNECT_TIMEOUT_SECONDS", 0.3
@@ -152,7 +165,22 @@ class Settings:
         _text("RAG_PREPROCESS_WORK_DIR", ".runtime/preprocess")
     )
     preprocess_max_file_bytes: int = _int(
-        "RAG_PREPROCESS_MAX_FILE_BYTES", 209715200
+        "RAG_PREPROCESS_MAX_FILE_BYTES", 104857600
+    )
+    preprocess_max_text_bytes: int = _int(
+        "RAG_PREPROCESS_MAX_TEXT_BYTES", 10485760
+    )
+    preprocess_max_table_bytes: int = _int(
+        "RAG_PREPROCESS_MAX_TABLE_BYTES", 20971520
+    )
+    preprocess_max_office_bytes: int = _int(
+        "RAG_PREPROCESS_MAX_OFFICE_BYTES", 52428800
+    )
+    preprocess_max_pdf_bytes: int = _int(
+        "RAG_PREPROCESS_MAX_PDF_BYTES", 104857600
+    )
+    preprocess_max_image_bytes: int = _int(
+        "RAG_PREPROCESS_MAX_IMAGE_BYTES", 20971520
     )
     preprocess_max_pages: int = _int("RAG_PREPROCESS_MAX_PAGES", 200)
     preprocess_max_unpack_files: int = _int(
@@ -219,10 +247,6 @@ class Settings:
     qa_max_context_tokens: int = _int("QA_MAX_CONTEXT_TOKENS", 6000)
     qa_max_chunks: int = _int("QA_MAX_CHUNKS", 8)
     qa_max_output_tokens: int = _int("QA_MAX_OUTPUT_TOKENS", 1200)
-    memory_extraction_version: str = _text("RAG_MEMORY_EXTRACTION_VERSION", "v1")
-    memory_tree_strategy_version: str = _text("RAG_MEMORY_TREE_STRATEGY_VERSION", "v1")
-    memory_summary_strategy_version: str = _text("RAG_MEMORY_SUMMARY_STRATEGY_VERSION", "v1")
-
     rerank_enabled: bool = _bool("RERANK_ENABLED", False)
     rerank_api_base_url: str = _text("RERANK_API_BASE_URL")
     rerank_api_key: str = _text("RERANK_API_KEY")
@@ -236,21 +260,29 @@ class Settings:
     bm25_top_k: int = _int("RAG_BM25_TOP_K", 24)
     knn_top_k: int = _int("RAG_KNN_TOP_K", 24)
     knn_num_candidates: int = _int("RAG_KNN_NUM_CANDIDATES", 96)
+    anchors_per_item: int = _int("RAG_ANCHORS_PER_ITEM", 2)
+    neighbor_radius: int = _int("RAG_NEIGHBOR_RADIUS", 1)
+    qa_vector_min_score: float = _float("RAG_QA_VECTOR_MIN_SCORE", 0.72)
+    qa_bm25_min_score: float = _float("RAG_QA_BM25_MIN_SCORE", 0.0)
     rrf_k: int = _int("RAG_RRF_K", 60)
     rrf_keyword_weight: float = _float("RAG_RRF_KEYWORD_WEIGHT", 0.5)
     rrf_vector_weight: float = _float("RAG_RRF_VECTOR_WEIGHT", 0.5)
     final_top_k: int = _int("RAG_FINAL_TOP_K", 8)
-    max_chunks_per_item: int = _int("RAG_MAX_CHUNKS_PER_ITEM", 2)
+    max_chunks_per_item: int = _int("RAG_MAX_CHUNKS_PER_ITEM", 4)
     # The tree defines a candidate set (branch T) and the unscoped Chunk search
     # always runs alongside it (branch G). These weights are the RRF votes that
     # express "prefer the navigated branch" without ever excluding branch G, so
     # a navigation miss cannot drop the answer.
-    tree_branch_weight: float = _float("RAG_TREE_BRANCH_WEIGHT", 1.0)
-    global_branch_weight: float = _float("RAG_GLOBAL_BRANCH_WEIGHT", 0.5)
+    tree_mode: str = _text("RAG_TREE_MODE", "shadow").lower()
+    tree_shadow_sample_rate: float = _float("RAG_TREE_SHADOW_SAMPLE_RATE", 1.0)
+    tree_branch_weight: float = _float("RAG_TREE_BRANCH_WEIGHT", 0.5)
+    tree_max_branches: int = _int("RAG_TREE_MAX_BRANCHES", 8)
+    tree_max_branch_keys_per_chunk: int = _int("RAG_TREE_MAX_BRANCH_KEYS_PER_CHUNK", 8)
     query_rewrite_enabled: bool = _bool("RAG_QUERY_REWRITE_ENABLED", False)
     query_rewrite_max: int = _int("RAG_QUERY_REWRITE_MAX", 1)
     highlight_final_only: bool = _bool("RAG_HIGHLIGHT_FINAL_ONLY", True)
 
+    processing_version: str = _text("RAG_PROCESSING_VERSION", "v1")
     chunking_version: str = _text("RAG_CHUNKING_VERSION", "v1")
     chunk_max_tokens: int = _int("RAG_CHUNK_MAX_TOKENS", 512)
     chunk_overlap_tokens: int = _int("RAG_CHUNK_OVERLAP_TOKENS", 64)
@@ -260,6 +292,10 @@ class Settings:
 
     worker_concurrency: int = _int("RAG_WORKER_CONCURRENCY", 4)
     worker_prefetch: int = _int("RAG_WORKER_PREFETCH", 10)
+    lane_queue_size: int = _int("RAG_LANE_QUEUE_SIZE", 256)
+    lane_poll_interval_seconds: float = _float("RAG_LANE_POLL_INTERVAL_SECONDS", 0.5)
+    task_lease_seconds: int = _int("RAG_TASK_LEASE_SECONDS", 300)
+    task_heartbeat_seconds: int = _int("RAG_TASK_HEARTBEAT_SECONDS", 60)
     task_max_retries: int = _int("RAG_TASK_MAX_RETRIES", 3)
     task_visibility_timeout_seconds: int = _int(
         "RAG_TASK_VISIBILITY_TIMEOUT_SECONDS", 900
@@ -289,8 +325,35 @@ class Settings:
 
     @property
     def elasticsearch_index(self) -> str:
-        """Legacy single-index name; callers should use display/protected fields."""
-        return self.elasticsearch_display_index
+        return self.elasticsearch_display_read_index
+
+    @property
+    def development_like(self) -> bool:
+        return self.environment.lower() in {"development", "test"}
+
+    def validate_mvp(self) -> None:
+        """Fail fast on configuration that would write outside the MVP contract."""
+        if not self.database_schema.startswith("rag"):
+            raise RuntimeError("RAG_DATABASE_SCHEMA must point at the RAG-owned schema")
+        for name in (
+            self.elasticsearch_display_read_index,
+            self.elasticsearch_display_write_index,
+            self.elasticsearch_protected_read_index,
+            self.elasticsearch_protected_write_index,
+        ):
+            if not name.startswith("rag_chunks_"):
+                raise RuntimeError(f"Elasticsearch alias must use rag_chunks_*: {name}")
+        if self.tree_mode not in {"off", "shadow", "boost"}:
+            raise RuntimeError("RAG_TREE_MODE must be off, shadow, or boost")
+        if not self.development_like:
+            if not self.authz_base_url:
+                raise RuntimeError(
+                    "RAG_AUTHZ_BASE_URL is required outside development/test"
+                )
+            if not self.authz_api_token:
+                raise RuntimeError(
+                    "RAG_AUTHZ_API_TOKEN is required outside development/test"
+                )
 
 
 settings = Settings()

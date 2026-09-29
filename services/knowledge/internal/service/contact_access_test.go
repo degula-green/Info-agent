@@ -82,7 +82,7 @@ func TestGetAttachmentForRAGReturnsMetadataAfterPermissionSync(t *testing.T) {
 	if _, err := service.Repo.TryMarkKnowledgeReady(ctx, item.ID, "test"); err != nil {
 		t.Fatal(err)
 	}
-	attachment, err := service.GetAttachmentForRAG(ctx, attachmentID, item.ContentVersion, 1)
+	attachment, err := service.GetAttachmentForRAG(ctx, attachmentID, item.ContentVersion, 1, "view")
 	if err != nil {
 		t.Fatal(err)
 	}

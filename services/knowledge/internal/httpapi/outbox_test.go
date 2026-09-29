@@ -11,7 +11,7 @@ import (
 // outbox row was still marked published, silently dropping the event. The relay
 // must refuse to publish instead of losing events.
 func TestOutboxPublishRefusesAnUnconfiguredStream(t *testing.T) {
-	router, _ := readySourceRouter(t)
+	router, _, _ := readySourceRouter(t)
 
 	call := func() *httptest.ResponseRecorder {
 		request := httptest.NewRequest(http.MethodPost, "/api/knowledge/v1/internal/worker/publish", nil)

@@ -1,6 +1,9 @@
 package domain
 
-import "time"
+import (
+	"strings"
+	"time"
+)
 
 const (
 	PlatformFeishu = "feishu"
@@ -382,6 +385,7 @@ type KnowledgeItem struct {
 	OrganizationID         string         `json:"organization_id,omitempty"`
 	ConversationID         string         `json:"conversation_ingestion_id"`
 	ExternalConversationID string         `json:"external_conversation_id,omitempty"`
+	SourceConversationType string         `json:"source_conversation_type,omitempty"`
 	SourceType             string         `json:"source_type"`
 	SourceMessageID        string         `json:"source_message_id,omitempty"`
 	SourceAttachmentID     string         `json:"source_attachment_id,omitempty"`
@@ -422,6 +426,32 @@ type KnowledgeItem struct {
 	Attachment             *Attachment    `json:"attachment,omitempty"`
 	CreatedAt              time.Time      `json:"created_at"`
 	UpdatedAt              time.Time      `json:"updated_at"`
+}
+
+func (i KnowledgeItem) SourceAudiencePolicy() string {
+	if i.SourceType == "shared_private_item" || i.SourceType == "local_upload" {
+		if i.OrganizationID != "" {
+			return "organization_members"
+		}
+		return "owner_only"
+	}
+	if i.SourceConversationType == "group" && i.OrganizationID != "" {
+		return "source_conversation_members"
+	}
+	if i.KnowledgeScope == "private" || i.OwnerUserID != "" {
+		return "owner_only"
+	}
+	return "organization_members"
+}
+
+func (i KnowledgeItem) ProcessingResource() (string, string) {
+	if strings.TrimSpace(i.SourceAttachmentID) != "" {
+		return "attachment", i.SourceAttachmentID
+	}
+	if strings.TrimSpace(i.SourceMessageID) != "" {
+		return "message", i.SourceMessageID
+	}
+	return "message", i.ID
 }
 
 // KnowledgeLibrary is a logical directory node presented by the web client.
