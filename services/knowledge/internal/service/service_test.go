@@ -849,14 +849,20 @@ func TestConcurrentRefreshUsesOneProviderCall(t *testing.T) {
 	}
 	results := make(chan vault.TokenSet, 2)
 	errs := make(chan error, 2)
-	for range 2 {
-		go func() {
-			token, err := service.RefreshToken(context.Background(), &account)
-			results <- token
-			errs <- err
-		}()
-	}
+	go func() {
+		token, err := service.RefreshToken(context.Background(), &account)
+		results <- token
+		errs <- err
+	}()
 	<-provider.started
+	go func() {
+		token, err := service.RefreshToken(context.Background(), &account)
+		results <- token
+		errs <- err
+	}()
+	// Give the second caller time to observe the held refresh lock before
+	// releasing the provider response.
+	time.Sleep(20 * time.Millisecond)
 	close(provider.release)
 	for range 2 {
 		if err := <-errs; err != nil {

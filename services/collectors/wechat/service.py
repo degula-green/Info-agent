@@ -153,17 +153,26 @@ def use_runtime(runtime: RuntimeState):
         _runtime_var.reset(token)
 
 class _RuntimeDictProxy:
+    def __init__(self, field: str) -> None:
+        self.field = field
+
+    def _value(self) -> dict[str, Any]:
+        return getattr(current_runtime(), self.field)
+
     def __getattr__(self, name: str) -> Any:
-        return getattr(current_runtime().binding, name)
-    def __getitem__(self, key: str) -> Any: return current_runtime().binding[key]
-    def __setitem__(self, key: str, value: Any) -> None: current_runtime().binding[key] = value
-    def __delitem__(self, key: str) -> None: del current_runtime().binding[key]
-    def __iter__(self): return iter(current_runtime().binding)
-    def __len__(self): return len(current_runtime().binding)
-    def get(self, *args): return current_runtime().binding.get(*args)
-    def update(self, *args, **kwargs): return current_runtime().binding.update(*args, **kwargs)
-    def clear(self): return current_runtime().binding.clear()
-    def pop(self, *args): return current_runtime().binding.pop(*args)
+        return getattr(self._value(), name)
+    def __getitem__(self, key: str) -> Any: return self._value()[key]
+    def __setitem__(self, key: str, value: Any) -> None: self._value()[key] = value
+    def __delitem__(self, key: str) -> None: del self._value()[key]
+    def __iter__(self): return iter(self._value())
+    def __len__(self): return len(self._value())
+    def get(self, *args): return self._value().get(*args)
+    def update(self, *args, **kwargs): return self._value().update(*args, **kwargs)
+    def clear(self): return self._value().clear()
+    def pop(self, *args): return self._value().pop(*args)
+    def __eq__(self, other: Any) -> bool: return self._value() == other
+    def __bool__(self) -> bool: return bool(self._value())
+    def __repr__(self) -> str: return repr(self._value())
 
 class _RuntimeObjectProxy:
     def __init__(self, field: str): self.field = field
@@ -171,8 +180,8 @@ class _RuntimeObjectProxy:
     def __getattr__(self, name: str) -> Any: return getattr(self._value(), name)
     def __bool__(self): return bool(self._value())
 
-binding = _RuntimeDictProxy()
-config = _RuntimeDictProxy()
+binding = _RuntimeDictProxy("binding")
+config = _RuntimeDictProxy("config")
 db = _RuntimeObjectProxy("db")
 media = _RuntimeObjectProxy("media")
 checkpoints: dict[str, int] = {}; replayed_media: dict[str, set[str]] = {}

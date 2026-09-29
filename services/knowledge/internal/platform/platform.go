@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -975,6 +976,9 @@ func parseFeishuMessage(apiURL, messageID, messageType, raw string) (string, []A
 				}
 			}
 			mimeType := firstString(payload, "mime_type", "mime")
+			if mimeType == "" {
+				mimeType = mimeTypeForFileName(name)
+			}
 			if mimeType == "" && strings.EqualFold(messageType, "image") {
 				mimeType = "image/*"
 			}
@@ -1009,6 +1013,31 @@ func parseFeishuMessage(apiURL, messageID, messageType, raw string) (string, []A
 		return content, attachments
 	}
 	return content, nil
+}
+
+func mimeTypeForFileName(name string) string {
+	switch strings.ToLower(filepath.Ext(strings.TrimSpace(name))) {
+	case ".docx":
+		return "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+	case ".xlsx":
+		return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+	case ".pptx":
+		return "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+	case ".pdf":
+		return "application/pdf"
+	case ".txt":
+		return "text/plain"
+	case ".md":
+		return "text/markdown"
+	case ".json":
+		return "application/json"
+	case ".png":
+		return "image/png"
+	case ".jpg", ".jpeg":
+		return "image/jpeg"
+	default:
+		return ""
+	}
 }
 
 // extractFeishuText converts text/post/rich_text bodies to plain user text.

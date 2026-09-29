@@ -43,6 +43,7 @@ type MemoryStore struct {
 	accessRequests     map[string]domain.PrivateAccessRequest
 	wechatConfigs      map[string]domain.WechatCollectionConfig
 	wechatRuntime      map[string]domain.WechatCollectorRuntime
+	ragSourceAudits    []RAGSourceAuditInput
 }
 
 type attachmentCursorReceipt struct {
@@ -64,6 +65,7 @@ func NewMemoryStore() *MemoryStore {
 		outbox:        map[string]domain.OutboxEvent{},
 		shareRequests: map[string]domain.PrivateShareRequest{}, shareRefs: map[string]domain.PrivateShareReference{}, accessRequests: map[string]domain.PrivateAccessRequest{},
 		wechatConfigs: map[string]domain.WechatCollectionConfig{}, wechatRuntime: map[string]domain.WechatCollectorRuntime{},
+		ragSourceAudits: []RAGSourceAuditInput{},
 	}
 }
 
@@ -2015,15 +2017,28 @@ func (s *MemoryStore) TryMarkKnowledgeReady(ctx context.Context, id, traceID str
 	if traceID == "" {
 		traceID = uuid.NewString()
 	}
+	resourceType, resourceID := item.ProcessingResource()
+	scopeType, scopeID := "user", item.OwnerUserID
+	if item.KnowledgeScope == "organization" || item.OrganizationID != "" {
+		scopeType, scopeID = "organization", item.OrganizationID
+	}
 	event := domain.OutboxEvent{
 		ID: uuid.NewString(), EventType: "knowledge.ready", SchemaVersion: 1,
 		OccurredAt: time.Now().UTC(), TraceID: traceID, OrganizationID: item.OrganizationID,
 		Producer: "module-2", AvailableAt: time.Now().UTC(),
 		Payload: map[string]any{
-			"resource_type": "knowledge_item", "resource_id": item.ID, "knowledge_item_id": item.ID,
-			"source_message_id": item.SourceMessageID, "source_attachment_id": item.SourceAttachmentID, "attachment_id": item.SourceAttachmentID,
-			"content_version": item.ContentVersion, "acl_version": item.ACLVersion,
-			"content_variant": "display", "content_access_required": item.ContentAccessRequired,
+			"resource_type": resourceType, "resource_id": resourceID,
+			"knowledge_item_id":        item.ID,
+			"scope_type":               scopeType,
+			"scope_id":                 scopeID,
+			"owner_user_id":            nilString(item.OwnerUserID),
+			"organization_id":          nilString(item.OrganizationID),
+			"knowledge_scope":          item.KnowledgeScope,
+			"source_conversation_id":   nilString(item.ConversationID),
+			"source_conversation_type": nilString(item.SourceConversationType),
+			"source_audience_policy":   item.SourceAudiencePolicy(),
+			"content_version":          item.ContentVersion, "acl_version": item.ACLVersion,
+			"content_hash": item.ContentHash, "content_access_required": item.ContentAccessRequired,
 		},
 	}
 	s.outbox[event.ID] = event
@@ -2075,7 +2090,7 @@ func (s *MemoryStore) ApplyRAGResult(_ context.Context, id string, input RAGResu
 	if item.RAGSourceEventID == input.SourceEventID && item.RAGJobID == input.RAGJobID && status == input.Status {
 		return &RAGResultApply{Applied: false, Status: status, Reason: "duplicate"}, nil
 	}
-	if status == "succeeded" && item.RAGContentVersion == input.ContentVersion && item.RAGACLVersion == input.ACLVersion {
+	if (status == "ready" || status == "metadata_only") && item.RAGContentVersion == input.ContentVersion && item.RAGACLVersion == input.ACLVersion && !(status == "metadata_only" && input.Status == "ready") {
 		return &RAGResultApply{Applied: false, Status: status, Reason: "terminal_state"}, nil
 	}
 	if status == "failed" && input.Status == "processing" && item.RAGJobID == input.RAGJobID {
@@ -2090,7 +2105,7 @@ func (s *MemoryStore) ApplyRAGResult(_ context.Context, id string, input RAGResu
 		}
 		item.RAGFinishedAt = nil
 	}
-	if input.Status == "succeeded" || input.Status == "failed" {
+	if input.Status == "ready" || input.Status == "metadata_only" || input.Status == "failed" {
 		at := input.OccurredAt
 		item.RAGFinishedAt = &at
 	}
@@ -2099,7 +2114,7 @@ func (s *MemoryStore) ApplyRAGResult(_ context.Context, id string, input RAGResu
 	} else {
 		item.RAGLastError = ""
 	}
-	if input.Status == "succeeded" {
+	if input.Status == "ready" || input.Status == "metadata_only" {
 		item.RAGResult = input.Result
 	}
 	item.UpdatedAt = time.Now().UTC()
@@ -2147,7 +2162,7 @@ func (s *MemoryStore) GetKnowledgeItemByAttachment(ctx context.Context, attachme
 	return s.GetKnowledgeItem(ctx, id)
 }
 
-func (s *MemoryStore) GetKnowledgeContent(_ context.Context, id string) (*domain.KnowledgeContent, error) {
+func (s *MemoryStore) GetKnowledgeContent(_ context.Context, id, variant string) (*domain.KnowledgeContent, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	item, ok := s.knowledgeItems[id]
@@ -2157,12 +2172,38 @@ func (s *MemoryStore) GetKnowledgeContent(_ context.Context, id string) (*domain
 	if item.SourceAttachmentID != "" {
 		return nil, apperror.New("knowledge_content_is_attachment", "knowledge content is an attachment", 409, false)
 	}
+	if variant == "" {
+		variant = "display"
+	}
+	if variant != "display" && variant != "original" {
+		return nil, apperror.New("knowledge_invalid_variant", "content variant must be display or original", 400, false)
+	}
 	for _, message := range s.messages {
 		if message.ID == item.SourceMessageID {
-			return &domain.KnowledgeContent{KnowledgeItemID: id, ContentVersion: item.ContentVersion, ContentVariant: "display", ContentHash: item.ContentHash, Text: message.Content}, nil
+			text := message.Content
+			if variant == "original" {
+				text = s.privateContent[message.ID]
+				if strings.TrimSpace(text) == "" {
+					return nil, apperror.New("knowledge_original_unavailable", "original content is unavailable", 409, false)
+				}
+			}
+			return &domain.KnowledgeContent{KnowledgeItemID: id, ContentVersion: item.ContentVersion, ContentVariant: variant, ContentHash: item.ContentHash, Text: text}, nil
 		}
 	}
 	return nil, apperror.New("knowledge_content_not_found", "knowledge content not found", 404, false)
+}
+
+func (s *MemoryStore) RecordRAGSourceAudit(_ context.Context, input RAGSourceAuditInput) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.ragSourceAudits = append(s.ragSourceAudits, input)
+	return nil
+}
+
+func (s *MemoryStore) RAGSourceAudits() []RAGSourceAuditInput {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return append([]RAGSourceAuditInput(nil), s.ragSourceAudits...)
 }
 
 const (

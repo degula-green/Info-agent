@@ -1,0 +1,252 @@
+{
+  "settings": {
+    "number_of_shards": 1,
+    "number_of_replicas": 0
+  },
+  "mappings": {
+    "dynamic": "strict",
+    "date_detection": false,
+    "_source": {
+      "excludes": [
+        "embedding"
+      ]
+    },
+    "properties": {
+      "chunk_id": {
+        "type": "keyword"
+      },
+      "logical_position_key": {
+        "type": "keyword"
+      },
+      "resource_snapshot_id": {
+        "type": "keyword"
+      },
+      "knowledge_item_id": {
+        "type": "keyword"
+      },
+      "resource_type": {
+        "type": "keyword"
+      },
+      "resource_id": {
+        "type": "keyword"
+      },
+      "knowledge_base_id": {
+        "type": "keyword"
+      },
+      "document_id": {
+        "type": "keyword"
+      },
+      "message_id": {
+        "type": "keyword"
+      },
+      "source_conversation_id": {
+        "type": "keyword"
+      },
+      "external_conversation_id": {
+        "type": "keyword"
+      },
+      "scope_type": {
+        "type": "keyword"
+      },
+      "scope_id": {
+        "type": "keyword"
+      },
+      "scope_key": {
+        "type": "keyword"
+      },
+      "source_conversation_type": {
+        "type": "keyword"
+      },
+      "source_audience_policy": {
+        "type": "keyword"
+      },
+      "auth_partition_key": {
+        "type": "keyword"
+      },
+      "auth_object_key": {
+        "type": "keyword"
+      },
+      "acl_version": {
+        "type": "long"
+      },
+      "sensitivity": {
+        "type": "keyword"
+      },
+      "rag_eligible": {
+        "type": "boolean"
+      },
+      "lifecycle_status": {
+        "type": "keyword"
+      },
+      "content": {
+        "type": "text",
+        "analyzer": "ik_max_word",
+        "search_analyzer": "ik_smart"
+      },
+      "content_hash": {
+        "type": "keyword"
+      },
+      "content_version": {
+        "type": "integer"
+      },
+      "processing_version": {
+        "type": "keyword"
+      },
+      "chunking_version": {
+        "type": "keyword"
+      },
+      "content_variant": {
+        "type": "keyword"
+      },
+      "chunk_index": {
+        "type": "integer"
+      },
+      "chunk_count": {
+        "type": "integer"
+      },
+      "title": {
+        "type": "text",
+        "analyzer": "ik_max_word",
+        "search_analyzer": "ik_smart",
+        "fields": {
+          "keyword": {
+            "type": "keyword",
+            "ignore_above": 512
+          }
+        }
+      },
+      "file_name": {
+        "type": "text",
+        "analyzer": "ik_max_word",
+        "search_analyzer": "ik_smart",
+        "fields": {
+          "keyword": {
+            "type": "keyword",
+            "ignore_above": 512
+          }
+        }
+      },
+      "heading_path": {
+        "type": "text",
+        "analyzer": "ik_max_word",
+        "search_analyzer": "ik_smart",
+        "fields": {
+          "keyword": {
+            "type": "keyword",
+            "ignore_above": 512
+          }
+        }
+      },
+      "sender_identity_id": {
+        "type": "keyword"
+      },
+      "sender_platform": {
+        "type": "keyword"
+      },
+      "sender_display_name": {
+        "type": "text",
+        "analyzer": "ik_max_word",
+        "search_analyzer": "ik_smart",
+        "fields": {
+          "keyword": {
+            "type": "keyword",
+            "ignore_above": 256
+          }
+        }
+      },
+      "sent_at": {
+        "type": "date"
+      },
+      "context_header": {
+        "type": "object",
+        "dynamic": "strict",
+        "properties": {
+          "title": {
+            "type": "text",
+            "analyzer": "ik_max_word",
+            "search_analyzer": "ik_smart"
+          },
+          "file_name": {
+            "type": "text",
+            "analyzer": "ik_max_word",
+            "search_analyzer": "ik_smart"
+          },
+          "heading_path": {
+            "type": "text",
+            "analyzer": "ik_max_word",
+            "search_analyzer": "ik_smart"
+          },
+          "source_kind": {
+            "type": "keyword"
+          }
+        }
+      },
+      "source_locator": {
+        "type": "object",
+        "dynamic": "strict",
+        "properties": {
+          "page_number": {
+            "type": "integer"
+          },
+          "paragraph_index": {
+            "type": "integer"
+          },
+          "slide_number": {
+            "type": "integer"
+          },
+          "sheet_name": {
+            "type": "keyword",
+            "ignore_above": 512
+          },
+          "row_start": {
+            "type": "integer"
+          },
+          "row_end": {
+            "type": "integer"
+          },
+          "column_start": {
+            "type": "integer"
+          },
+          "column_end": {
+            "type": "integer"
+          },
+          "char_start": {
+            "type": "integer"
+          },
+          "char_end": {
+            "type": "integer"
+          }
+        }
+      },
+      "branch_keys": {
+        "type": "keyword"
+      },
+      "registry_version": {
+        "type": "long"
+      },
+      "embedding": {
+        "type": "dense_vector",
+        "dims": 1536,
+        "index": true,
+        "similarity": "cosine",
+        "index_options": {
+          "type": "hnsw",
+          "m": 16,
+          "ef_construction": 100
+        }
+      },
+      "embedding_model": {
+        "type": "keyword"
+      },
+      "embedding_dimensions": {
+        "type": "integer"
+      },
+      "created_at": {
+        "type": "date"
+      },
+      "indexed_at": {
+        "type": "date"
+      }
+    }
+  }
+}

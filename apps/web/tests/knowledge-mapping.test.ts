@@ -4,8 +4,10 @@ import {
   isHistoryStartAllowed,
   isPrivateConversation,
   discoveryAction,
+  knowledgeDisplayLabel,
   mapAttachmentStatus,
   mapCollectionStatus,
+  mapKnowledgeDisplayStatus,
   oauthCallbackNotice,
   searchLoadedSources,
 } from '../src/knowledge-mapping.ts'
@@ -22,6 +24,18 @@ test('maps attachment processing states', () => {
   assert.equal(mapAttachmentStatus('pending'), 'processing')
   assert.equal(mapAttachmentStatus('ready'), 'completed')
   assert.equal(mapAttachmentStatus('failed'), 'failed')
+})
+
+test('maps knowledge processing and terminal states for list and conversation views', () => {
+  assert.equal(mapKnowledgeDisplayStatus({ ragStatus: 'ready', searchable: true }), 'searchable')
+  assert.equal(mapKnowledgeDisplayStatus({ ragStatus: 'succeeded' }), 'searchable')
+  assert.equal(mapKnowledgeDisplayStatus({ ragStatus: 'processing' }), 'processing')
+  assert.equal(mapKnowledgeDisplayStatus({ ragStatus: 'metadata_only' }), 'metadata_only')
+  assert.equal(mapKnowledgeDisplayStatus({ contentStatus: 'ready' }), 'parsed')
+  assert.equal(mapKnowledgeDisplayStatus({ ragStatus: 'failed' }), 'failed')
+  assert.equal(mapKnowledgeDisplayStatus({}), 'collected')
+  assert.equal(knowledgeDisplayLabel('processing'), '入库中')
+  assert.equal(knowledgeDisplayLabel('metadata_only'), '仅元数据')
 })
 
 test('maps private conversations and OAuth callback results', () => {

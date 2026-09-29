@@ -23,7 +23,7 @@
           <template #icon><t-icon name="add" /></template>
           {{ isPrivateLibrary ? '接入私聊' : '接入群聊' }}
         </t-button>
-        <t-button variant="outline" :loading="loading" @click="loadItems">
+        <t-button variant="outline" :loading="loading" @click="loadItems()">
           <template #icon><t-icon name="refresh" /></template>
           刷新
         </t-button>
@@ -48,7 +48,7 @@
       <span class="library-toolbar__count">{{ query.trim() ? `${searchResults.length} 条检索` : `${filteredItems.length} 项` }}</span>
     </div>
 
-    <div v-if="error" class="library-alert" role="alert"><t-icon name="error-circle" /><span>{{ error }}</span><t-button size="small" variant="outline" @click="loadItems">重试</t-button></div>
+    <div v-if="error" class="library-alert" role="alert"><t-icon name="error-circle" /><span>{{ error }}</span><t-button size="small" variant="outline" @click="loadItems()">重试</t-button></div>
     <div v-if="searchError" class="library-alert" role="alert"><t-icon name="error-circle" /><span>{{ searchError }}</span></div>
 
     <template v-if="query.trim()">
@@ -202,6 +202,7 @@ const drawerVisible = ref(false)
 const drawerResult = ref<SearchResult | null>(null)
 let searchAbort: AbortController | null = null
 let searchTimer: ReturnType<typeof setTimeout> | undefined
+let itemsRefreshTimer: number | null = null
 
 const filteredItems = computed(() => {
   // Directory view only; RAG results use searchResults when query is set.
@@ -209,6 +210,14 @@ const filteredItems = computed(() => {
   if (platform.value) rows = rows.filter((item) => item.platform === platform.value)
   return rows
 })
+const hasActiveLibraryWork = computed(() => items.value.some((item) => {
+  const status = mapKnowledgeDisplayStatus({
+    contentStatus: item.content_status || item.processing_status,
+    ragStatus: item.rag_status,
+    searchable: item.searchable,
+  })
+  return status === 'processing'
+}))
 const emptyTitle = computed(() => isFileLibrary.value ? '还没有附件' : isPrivateLibrary.value ? '还没有接入私聊' : props.libraryKind === 'organization_private_shared' ? '还没有共享私聊' : '还没有接入群聊')
 const emptyDescription = computed(() => isFileLibrary.value ? '上传附件后，它会出现在这个知识库中。' : isPrivateLibrary.value ? '接入私聊后，内容默认只归你所有。' : props.libraryKind === 'organization_private_shared' ? '在私人私聊详情中选择消息或附件后，它们会出现在这里。' : '接入群聊后，组织成员可按群聊权限访问内容。')
 const discoveryVisible = ref(false); const discoveryLoading = ref(false); const discoveryError = ref(''); const discoveryQuery = ref(''); const discoveryPlatform = ref(''); const discovery = ref<{ discovery_id: string; platform: any; conversations: AvailableConversationDTO[] } | null>(null)
@@ -366,15 +375,24 @@ watch(query, (value) => {
   const normalized = value.trim()
   if (!normalized) {
     clearLibrarySearch()
+    void loadItems({ silent: true })
+    scheduleItemsRefresh()
     return
   }
   searchTimer = setTimeout(() => { void runLibrarySearch() }, 300)
 })
 
-async function loadItems() {
+async function loadItems(options: { silent?: boolean } = {}) {
   if (!library.value) { await store.ensureLibraries(); if (!library.value) return }
-  loading.value = true; error.value = ''
-  try { items.value = await getKnowledgeLibraryItems(library.value!.id, { kind: isConversationLibrary.value ? 'conversations' : 'files', platform: platform.value, limit: 200 }) } catch (e: any) { error.value = e?.message || '目录加载失败' } finally { loading.value = false }
+  if (!options.silent) loading.value = true
+  error.value = ''
+  try {
+    items.value = await getKnowledgeLibraryItems(library.value!.id, { kind: isConversationLibrary.value ? 'conversations' : 'files', platform: platform.value, limit: 200 })
+  } catch (e: any) {
+    error.value = e?.message || '目录加载失败'
+  } finally {
+    if (!options.silent) loading.value = false
+  }
 }
 function openDiscovery() { discoveryVisible.value = true; discoveryQuery.value = ''; void loadDiscovery() }
 async function loadDiscovery() {
@@ -432,10 +450,36 @@ async function shareSelected() {
   sharing.value = true
   try { await sharePrivateResources({ requestID: `web-share-${Date.now()}`, privateConversationID, messageIDs: selectedMessageIDs.value, attachmentIDs: selectedAttachmentIDs.value }); shareVisible.value = false; MessagePlugin.success('已共享到组织'); await loadItems() } catch (e: any) { MessagePlugin.error(e?.message || '共享失败') } finally { sharing.value = false }
 }
-onMounted(async () => { await store.ensureSources(); await store.ensureLibraries(); await loadItems() })
+function scheduleItemsRefresh() {
+  if (itemsRefreshTimer != null) window.clearTimeout(itemsRefreshTimer)
+  const delay = hasActiveLibraryWork.value ? 5000 : 30000
+  itemsRefreshTimer = window.setTimeout(async () => {
+    if (document.visibilityState === 'visible' && !query.value.trim()) {
+      await loadItems({ silent: true })
+    }
+    scheduleItemsRefresh()
+  }, delay)
+}
+async function refreshItemsOnReturn() {
+  if (document.visibilityState !== 'visible' || query.value.trim()) return
+  await loadItems({ silent: true })
+  scheduleItemsRefresh()
+}
+onMounted(async () => {
+  document.addEventListener('visibilitychange', refreshItemsOnReturn)
+  window.addEventListener('focus', refreshItemsOnReturn)
+  await store.ensureSources()
+  await store.ensureLibraries()
+  await loadItems()
+  scheduleItemsRefresh()
+})
+watch(hasActiveLibraryWork, scheduleItemsRefresh)
 onBeforeUnmount(() => {
   if (searchTimer) clearTimeout(searchTimer)
+  if (itemsRefreshTimer != null) window.clearTimeout(itemsRefreshTimer)
   searchAbort?.abort()
+  document.removeEventListener('visibilitychange', refreshItemsOnReturn)
+  window.removeEventListener('focus', refreshItemsOnReturn)
 })
 </script>
 

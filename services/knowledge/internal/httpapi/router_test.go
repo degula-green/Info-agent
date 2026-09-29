@@ -132,7 +132,14 @@ func TestLocalUploadLifecycleAndIdempotency(t *testing.T) {
 	if err != nil || len(events) != 1 {
 		t.Fatalf("duplicate upload published extra event: count=%d err=%v", len(events), err)
 	}
-	if events[0].EventType != "knowledge.ready" || events[0].Payload["knowledge_item_id"] != resourceID || events[0].Payload["attachment_id"] != attachmentID {
+	if events[0].EventType != "knowledge.ready" ||
+		events[0].Payload["knowledge_item_id"] != resourceID ||
+		events[0].Payload["resource_type"] != "attachment" ||
+		events[0].Payload["resource_id"] != attachmentID ||
+		events[0].Payload["source_audience_policy"] != "owner_only" ||
+		events[0].Payload["scope_type"] != "user" ||
+		events[0].Payload["scope_id"] == "" ||
+		events[0].Payload["owner_user_id"] == "" {
 		t.Fatalf("ready event does not follow the knowledge contract: %+v", events[0])
 	}
 	// A different user cannot inspect the private task.
@@ -694,6 +701,9 @@ func TestFixtureReplayHTTPRoundTripPersistsAndDeduplicates(t *testing.T) {
 	allTimeline := append([]publicConversationTimelineItem{}, timelinePage.Items...)
 	for _, item := range timelinePage.Items {
 		if item.Message != nil {
+			if item.Message.CollectedAt.IsZero() || !item.Message.CollectedAt.Equal(item.CollectedAt) {
+				t.Fatalf("timeline message lost its collected_at: item=%+v message=%+v", item, item.Message)
+			}
 			seenTimelineIDs["message:"+item.Message.ID] = true
 		}
 		if item.Attachment != nil {

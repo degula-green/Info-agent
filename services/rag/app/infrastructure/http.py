@@ -45,7 +45,14 @@ class HttpClient:
         token: str | None = None,
         content_type: str = "application/json",
     ) -> HttpResult:
-        request_headers = {"Accept": "application/json", **(headers or {})}
+        request_headers = {
+            "Accept": "application/json",
+            **{
+                key: value
+                for key, value in (headers or {}).items()
+                if value is not None
+            },
+        }
         payload: bytes | None = None
         if body is not None:
             if isinstance(body, bytes):

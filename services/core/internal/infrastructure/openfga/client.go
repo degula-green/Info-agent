@@ -45,18 +45,31 @@ func (c *Client) Check(ctx context.Context, subjectID, organizationID string, ch
 }
 
 func (c *Client) ListObjects(ctx context.Context, subjectID, organizationID, objectType, relation string) ([]string, error) {
-	if objectType != "knowledge_original" && objectType != "attachment_content" {
-		return nil, fmt.Errorf("unsupported protected object type")
+	result, err := c.ListObjectsWithMetadata(ctx, subjectID, organizationID, objectType, relation)
+	if err != nil {
+		return nil, err
 	}
-	body := map[string]any{"user": "user:" + subjectID, "relation": relation, "type": objectType}
+	return result.Objects, nil
+}
+
+func (c *Client) ListObjectsWithMetadata(ctx context.Context, subjectID, organizationID, objectType, relation string) (application.ListObjectsResult, error) {
+	if objectType != "knowledge_original" && objectType != "attachment_content" && objectType != "conversation_group" && objectType != "organization" {
+		return application.ListObjectsResult{}, fmt.Errorf("unsupported protected object type")
+	}
+	body := map[string]any{
+		"user":     "user:" + subjectID,
+		"relation": relation,
+		"type":     objectType,
+	}
 	if c.modelID != "" {
 		body["authorization_model_id"] = c.modelID
 	}
 	var response struct {
-		Objects []string `json:"objects"`
+		Objects           []string `json:"objects"`
+		ContinuationToken string   `json:"continuation_token"`
 	}
 	if err := c.post(ctx, "/list-objects", body, &response); err != nil {
-		return nil, err
+		return application.ListObjectsResult{}, err
 	}
 	result := make([]string, 0, len(response.Objects))
 	for _, id := range response.Objects {
@@ -64,9 +77,16 @@ func (c *Client) ListObjects(ctx context.Context, subjectID, organizationID, obj
 		if id == "" || id == "*" || strings.Contains(id, ":") {
 			continue
 		}
+		if objectType == "conversation_group" || objectType == "organization" {
+			result = append(result, id)
+			continue
+		}
 		result = append(result, objectType+":"+id)
 	}
-	return result, nil
+	return application.ListObjectsResult{
+		Objects:   result,
+		Truncated: strings.TrimSpace(response.ContinuationToken) != "",
+	}, nil
 }
 
 func (c *Client) WriteRelations(ctx context.Context, tuples []application.RelationTuple) error {

@@ -1,5 +1,6 @@
 import { createRouter, createWebHistory } from 'vue-router'
 import { useAuthStore } from './stores/auth'
+import { ensureFreshToken, getAuthSession } from './auth/session'
 
 const router = createRouter({
   history: createWebHistory(import.meta.env.BASE_URL),
@@ -20,6 +21,7 @@ const router = createRouter({
       { path: 'knowledge/:platform', name: 'knowledgePlatform', component: () => import('./views/info/InfoKnowledgePage.vue') },
       { path: 'knowledge/:platform/conversations/:conversationId', name: 'conversation', component: () => import('./views/info/InfoConversationPage.vue') },
       { path: 'organization', name: 'organization', component: () => import('./views/info/InfoOrganizationPage.vue') },
+      { path: 'organization/knowledge', name: 'organizationKnowledge', component: () => import('./views/info/InfoKnowledgeStructurePage.vue') },
       { path: 'contacts', name: 'contacts', component: () => import('./views/info/InfoContactsPage.vue') },
       { path: 'chat', name: 'chat', component: () => import('./views/info/InfoQuickQAPage.vue') },
       { path: 'profile', name: 'profile', component: () => import('./views/info/InfoProfilePage.vue') },
@@ -28,16 +30,26 @@ const router = createRouter({
   ],
 })
 
-router.beforeEach((to) => {
+router.beforeEach(async (to) => {
   const store = useAuthStore()
-  // Pick up cross-tab logins/logouts and locally-detectable token expiry.
-  store.sync()
-  if (to.meta.requiresAuth && !store.isAuthenticated) {
-    // An expired or missing token must never keep a protected route mounted.
-    if (store.accessToken) store.clear()
-    return { name: 'login', query: { redirect: to.fullPath } }
+  if (to.meta.requiresAuth) {
+    if (!getAuthSession().accessToken) return { name: 'login', query: { redirect: to.fullPath } }
+    try {
+      if (!(await ensureFreshToken())) return { name: 'login', query: { redirect: to.fullPath } }
+    } catch {
+      // Keep the current page during a transient auth-service outage. API
+      // calls will surface the service error without clearing the session.
+    }
   }
-  if ((to.name === 'login' || to.name === 'register') && store.isAuthenticated) return '/chat'
+  if (to.name === 'login' || to.name === 'register') {
+    if (store.isAuthenticated) {
+      try {
+        if (await ensureFreshToken()) return '/chat'
+      } catch {
+        // Let the login page render while the auth service is unavailable.
+      }
+    }
+  }
   return true
 })
 

@@ -303,6 +303,10 @@ export async function setConversationStatus(conversationID: string, status: 'pau
   return knowledgeRequest<{ status: string }>(`/conversations/${encodeURIComponent(conversationID)}/${status}`, { method: 'POST' })
 }
 
+export async function getConversation(conversationID: string): Promise<ConversationDTO> {
+  return knowledgeRequest<ConversationDTO>(`/conversations/${encodeURIComponent(conversationID)}`)
+}
+
 export async function getConversationDetail(conversationID: string, limit = 50, options: { shared?: boolean } = {}): Promise<ConversationDetail> {
   const encodedID = encodeURIComponent(conversationID)
   const suffix = options.shared ? '&scope=shared' : ''

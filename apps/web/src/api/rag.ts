@@ -1,4 +1,5 @@
-import { getAccessToken, getCurrentUser } from './core-auth.ts'
+import { authenticatedFetch } from '../auth/request.ts'
+import { getCurrentUser } from './core-auth.ts'
 
 const env = ((import.meta as ImportMeta & { env?: Record<string, string> }).env || {})
 const baseURL = String(env.VITE_RAG_BASE_URL || '/api/rag/api/v1').replace(/\/$/, '')
@@ -26,19 +27,17 @@ async function currentUserID() {
 
 async function headers(accept = 'application/json') {
   const value = new Headers({ Accept: accept, 'Content-Type': 'application/json' })
-  const token = getAccessToken()
-  if (token) value.set('Authorization', `Bearer ${token}`)
   const userID = await currentUserID()
   if (userID) value.set('X-User-ID', userID)
   return value
 }
 
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
-  const response = await fetch(`${baseURL}${path}`, { ...init, headers: await headers() })
+  const response = await authenticatedFetch(`${baseURL}${path}`, { ...init, headers: await headers() })
   const raw = await response.text()
   let body: any = null
   try { body = raw ? JSON.parse(raw) : null } catch { body = raw }
-  if (!response.ok) throw new Error(body?.detail || body?.message || `RAG request failed (${response.status})`)
+  if (!response.ok) throw new Error(response.status === 401 ? '登录已过期，请重新登录' : body?.detail || body?.message || `RAG request failed (${response.status})`)
   return body as T
 }
 
@@ -106,8 +105,8 @@ export function searchKnowledge(input: RagSearchInput & { knowledgeBaseId?: stri
 }
 
 export async function askQaStream(input: { query: string; conversationId?: string | number; mode?: 'quick' | 'deep'; knowledgeBaseIds?: string[]; organizationId?: string }, handlers: { onMeta?: (value: any) => void; onToken?: (value: string) => void; onCitation?: (value: any) => void; onDone?: (value: any) => void; onError?: (value: any) => void }) {
-  const response = await fetch(`${baseURL}/ai/documents/stream`, { method: 'POST', headers: await headers('text/event-stream'), body: JSON.stringify({ query: input.query, conversation_id: input.conversationId ? String(input.conversationId) : undefined, mode: input.mode || 'quick', knowledge_base_ids: input.knowledgeBaseIds || [], organization_id: input.organizationId }) })
-  if (!response.ok || !response.body) throw new Error(`RAG stream failed (${response.status})`)
+  const response = await authenticatedFetch(`${baseURL}/ai/documents/stream`, { method: 'POST', headers: await headers('text/event-stream'), body: JSON.stringify({ query: input.query, conversation_id: input.conversationId ? String(input.conversationId) : undefined, mode: input.mode || 'quick', knowledge_base_ids: input.knowledgeBaseIds || [], organization_id: input.organizationId }) })
+  if (!response.ok || !response.body) throw new Error(response.status === 401 ? '登录已过期，请重新登录' : `RAG stream failed (${response.status})`)
   const reader = response.body.getReader(); const decoder = new TextDecoder(); let buffer = ''
   const dispatch = (raw: string) => {
     const lines = raw.split(/\r?\n/); const event = lines.find((line) => line.startsWith('event:'))?.slice(6).trim() || 'message'; const data = lines.filter((line) => line.startsWith('data:')).map((line) => line.slice(5).trim()).join('\n')

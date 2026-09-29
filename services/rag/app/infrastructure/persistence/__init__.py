@@ -1,5 +1,8 @@
 """RAG-owned PostgreSQL persistence adapters."""
 
-from app.infrastructure.persistence.repository import InMemoryRagRepository, PostgresRagRepository
+from app.infrastructure.persistence.mvp import (
+    InMemoryRagMVPRepository,
+    PostgresRagMVPRepository,
+)
 
-__all__ = ["InMemoryRagRepository", "PostgresRagRepository"]
+__all__ = ["InMemoryRagMVPRepository", "PostgresRagMVPRepository"]
