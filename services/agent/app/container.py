@@ -139,7 +139,11 @@ def build_planner(settings: Settings):
                 model=settings.llm_model,
                 timeout_seconds=settings.llm_timeout_seconds,
                 max_output_tokens=settings.llm_max_output_tokens,
-                response_format=settings.llm_response_format,
+                # The Planner is the one caller that passes a real JSON Schema
+                # per request; the client is told it may ask for strict
+                # decoding here, and to fall back when the provider refuses.
+                response_format=settings.llm_planner_response_format,
+                json_schema_fallback=settings.llm_json_schema_fallback,
             )
         )
     raise RuntimeError(f"unsupported AGENT_PLANNER_PROVIDER: {provider}")

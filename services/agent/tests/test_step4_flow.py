@@ -348,7 +348,8 @@ def test_the_prompt_names_the_step_ids_the_model_must_write(monkeypatch) -> None
 
     system = client.calls[0][0]["content"]
     assert "plan-fixed-step-" in system
-    assert "$steps.<step_id>.output.<field>" in system
+    assert "document_ref" in system
+    assert '"step"' in system and '"output"' in system
 
 
 def test_a_replan_that_echoes_step_ids_is_still_accepted(monkeypatch) -> None:
@@ -594,3 +595,79 @@ def test_the_container_registers_four_capabilities_with_matching_timeouts() -> N
     assert fetch.descriptor.timeout_seconds == 7
     assert fetch.fetcher.timeout_seconds == 7
     assert registry.get("answer.compose").descriptor.timeout_seconds == 42
+
+
+STRICT_REFERENCE_PLAN = (
+    '{"objective": "读网页并回答", "steps": ['
+    '{"capability": "web.fetch", "arguments": {"url": "' + URL + '"}}, '
+    '{"capability": "web.extract", "arguments": '
+    '{"document_ref": {"step": 1, "output": "content"}, "url": "' + URL + '"}}, '
+    '{"capability": "answer.compose", "arguments": '
+    '{"question": "这个页面讲了什么", '
+    '"evidence_ref": {"step": 2, "output": "evidence"}}}]}'
+)
+
+
+def test_a_plan_written_with_strict_references_runs_end_to_end() -> None:
+    """The model names the steps; the binder and Runtime do the rest.
+
+    This is the shape the strict Planner schema asks for: no copied page text
+    and no hand-written ``$steps`` path, just the index of the step that has
+    the value.
+    """
+
+    fetcher = FakePageFetcher({URL: {"content": HTML}})
+    provider = FakeAnswerProvider("页面介绍的是示例内容")
+    client = StubPlannerClient(
+        [
+            STRICT_REFERENCE_PLAN,
+            '{"action": "continue", "reason": "还有步骤", "steps": []}',
+            '{"action": "continue", "reason": "还有步骤", "steps": []}',
+            '{"action": "complete", "reason": "已经回答"}',
+        ]
+    )
+    container, store = build_step4_container(
+        fetcher=fetcher,
+        answer_provider=provider,
+        planner=OpenAICompatiblePlanner(client),
+        task_max_model_calls=24,
+    )
+    task = create_task(container, text="读一下这个网页并总结")
+
+    assert container.execution_service.run_task(task.task_id) == "succeeded"
+
+    stored = store.get_task(task.task_id)
+    assert stored.result["answer"] == "页面介绍的是示例内容"
+    extract = [
+        item
+        for item in store.list_observations(task.task_id)
+        if item.capability == "web.extract"
+    ][0]
+    assert extract.evidence[0]["url"] == URL
+    # The answer step really received the fetched page's evidence.
+    assert provider.calls[0][1][0]["evidence_id"] == extract.evidence[0]["evidence_id"]
+
+
+def test_a_strict_reference_plan_is_bound_before_the_runtime_sees_it() -> None:
+    """The planner-facing object becomes a $steps path inside the planner."""
+
+    client = StubPlannerClient([STRICT_REFERENCE_PLAN])
+    planner = OpenAICompatiblePlanner(client)
+    descriptors = [
+        *reference_descriptors(),
+        AnswerComposeCapability(FakeAnswerProvider()).descriptor,
+    ]
+
+    plan = planner.create_plan(envelope(), descriptors, [], PlanningConstraints())
+
+    assert len(client.calls) == 1  # binding is not a model round trip
+    assert plan.steps[1].arguments["document"] == (
+        f"$steps.{plan.plan_id}-step-1.output.content"
+    )
+    assert plan.steps[2].arguments["evidence"] == (
+        f"$steps.{plan.plan_id}-step-2.output.evidence"
+    )
+    assert all(
+        "document_ref" not in step.arguments and "evidence_ref" not in step.arguments
+        for step in plan.steps
+    )

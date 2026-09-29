@@ -161,6 +161,18 @@ class Settings:
     llm_response_format: str = _text(
         "json_object", "AGENT_LLM_RESPONSE_FORMAT", "agent_LLM_RESPONSE_FORMAT"
     )
+    # The Planner is the one caller that can hand the model a real JSON Schema,
+    # so it gets its own switch: understanding and answer.compose still ask for
+    # plain JSON objects. When a provider rejects the schema the client drops
+    # back to json_object instead of failing the Task.
+    llm_planner_response_format: str = _text(
+        "json_schema",
+        "AGENT_LLM_PLANNER_RESPONSE_FORMAT",
+        "agent_LLM_PLANNER_RESPONSE_FORMAT",
+    )
+    llm_json_schema_fallback: bool = _bool(
+        True, "AGENT_LLM_JSON_SCHEMA_FALLBACK", "agent_LLM_JSON_SCHEMA_FALLBACK"
+    )
     laya_base_url: str = _text(
         "", "AGENT_LAYAYA_BASE_URL", "agent_LAYAYA_BASE_URL"
     )

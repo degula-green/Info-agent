@@ -9,6 +9,8 @@ from uuid import uuid4
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from app.infrastructure.llm.client import LLMError, parse_json_object
+from app.kernel.bindings import bind_plan_references
+from app.kernel.errors import ContractValidationError
 from app.kernel.references import has_references
 from app.kernel.models import (
     CapabilityDescriptor,
@@ -20,6 +22,7 @@ from app.kernel.models import (
     TaskEnvelope,
     TaskUnderstanding,
 )
+from app.planning.schema import decision_draft_schema, plan_draft_schema
 
 
 class PlannerClient(Protocol):
@@ -135,21 +138,36 @@ class OpenAICompatiblePlanner:
         messages = _plan_messages(
             task, capabilities, observations, constraints, understanding, plan_id
         )
-        draft = self._call(PlanDraft, messages)
-        plan = Plan(
-            plan_id=plan_id,
-            task_id=task.task_id,
-            objective=draft.objective,
-            steps=_draft_steps(draft.steps, plan_id),
+        schema = plan_draft_schema(capabilities)
+        draft = self._call(
+            PlanDraft, messages, schema=schema, schema_name="agent_plan"
         )
-        plan = self._repair_unusable_steps(
-            task, plan, capabilities, observations, constraints, understanding
+        plan, binding_problems = _bound_plan(
+            Plan(
+                plan_id=plan_id,
+                task_id=task.task_id,
+                objective=draft.objective,
+                steps=_draft_steps(draft.steps, plan_id),
+            ),
+            capabilities,
+        )
+        plan = self._repair_plan(
+            task,
+            plan,
+            capabilities,
+            observations,
+            constraints,
+            understanding,
+            schema=schema,
+            # A reference the binder refused leaves the planner-facing argument
+            # in place, so the schema problems it would also produce are noise.
+            problems=binding_problems or _unusable_steps(plan, self._validators),
         )
         return self._repair_unresolved_references(
             task, plan, capabilities, observations, constraints, understanding
         )
 
-    def _repair_unusable_steps(
+    def _repair_plan(
         self,
         task: TaskEnvelope,
         plan: Plan,
@@ -157,15 +175,20 @@ class OpenAICompatiblePlanner:
         observations: list[Observation],
         constraints: PlanningConstraints,
         understanding: TaskUnderstanding | None,
+        *,
+        schema: dict[str, Any],
+        problems: list[str],
     ) -> Plan:
         """Re-asks the model once when a step's arguments are not usable.
 
         The deterministic planner runs the same signature validation, so an LLM
         plan whose arguments do not match the capability schema would otherwise
-        be accepted here and only rejected when the step executes.
+        be accepted here and only rejected when the step executes. A cross-step
+        reference that names a future step (or an output the source capability
+        never produces) is unusable in the same way, so it is repaired here too
+        instead of dying at resolution time.
         """
 
-        problems = _unusable_steps(plan, self._validators)
         if not problems:
             return plan
         messages = _plan_messages(
@@ -188,19 +211,35 @@ class OpenAICompatiblePlanner:
             {
                 "role": "user",
                 "content": (
-                    "上一步生成的计划有步骤参数无法通过 capability 校验："
+                    "上一步生成的计划有步骤参数无法执行："
                     + "；".join(problems)
-                    + "。请只使用该 capability 真正接受的字段名，重新输出完整 JSON 计划。"
+                    + "。请只使用该 capability 的 planner_input_schema（没有就用 input_schema）"
+                    "里声明的字段名；需要引用更早步骤的输出时，把 *_ref 参数写成 "
+                    "{\"step\": <更早步骤的序号>, \"output\": \"<那个步骤输出的字段名>\"}，"
+                    "不要指向未来步骤，也不要写来源 capability 不会产出的字段。"
+                    "重新输出完整 JSON 计划。"
                 ),
             },
         ]
-        draft = self._call(PlanDraft, messages)
-        return Plan(
-            plan_id=plan.plan_id,
-            task_id=plan.task_id,
-            objective=draft.objective,
-            steps=_draft_steps(draft.steps, plan.plan_id),
+        draft = self._call(
+            PlanDraft, messages, schema=schema, schema_name="agent_plan"
         )
+        repaired, remaining = _bound_plan(
+            Plan(
+                plan_id=plan.plan_id,
+                task_id=plan.task_id,
+                objective=draft.objective,
+                steps=_draft_steps(draft.steps, plan.plan_id),
+            ),
+            capabilities,
+        )
+        if not remaining:
+            remaining = _unusable_steps(repaired, self._validators)
+        if remaining:
+            raise PlannerValidationError(
+                "plan arguments could not be repaired: " + "；".join(remaining)
+            )
+        return repaired
 
     def _repair_unresolved_references(
         self,
@@ -251,13 +290,25 @@ class OpenAICompatiblePlanner:
                 ),
             },
         ]
-        draft = self._call(PlanDraft, messages)
-        repaired = Plan(
-            plan_id=plan.plan_id,
-            task_id=plan.task_id,
-            objective=draft.objective,
-            steps=_draft_steps(draft.steps, plan.plan_id),
+        draft = self._call(
+            PlanDraft,
+            messages,
+            schema=plan_draft_schema(capabilities),
+            schema_name="agent_plan",
         )
+        repaired, binding_problems = _bound_plan(
+            Plan(
+                plan_id=plan.plan_id,
+                task_id=plan.task_id,
+                objective=draft.objective,
+                steps=_draft_steps(draft.steps, plan.plan_id),
+            ),
+            capabilities,
+        )
+        if binding_problems:
+            raise PlannerValidationError(
+                "plan reference binding failed: " + "；".join(binding_problems)
+            )
         still = unresolved_references(repaired, observations)
         if still:
             raise PlannerValidationError(
@@ -285,8 +336,14 @@ class OpenAICompatiblePlanner:
             understanding,
             plan_id,
         )
+        schema = decision_draft_schema(self._capabilities)
         try:
-            draft = self._call(DecisionDraft, messages)
+            draft = self._call(
+                DecisionDraft,
+                messages,
+                schema=schema,
+                schema_name="agent_decision",
+            )
         except PlannerValidationError as exc:
             # The model answered twice and neither answer fit the schema.
             # Escaping as an exception would fail the Task with a stack trace;
@@ -298,11 +355,16 @@ class OpenAICompatiblePlanner:
         decision = _decision_from_draft(
             draft, task, current_plan, observations, plan_id
         )
+        # An isolated planner (no capability catalog injected yet) has nothing
+        # to bind a reference against; the Runtime always supplies the catalog
+        # before it asks for a decision.
         problems = (
-            unresolved_references(decision.plan, observations)
-            if decision.plan is not None
+            _bind_decision_plan(decision, self._capabilities)
+            if self._capabilities
             else []
         )
+        if not problems and decision.plan is not None:
+            problems = unresolved_references(decision.plan, observations)
         if not problems:
             return decision
         messages = messages + [
@@ -313,15 +375,22 @@ class OpenAICompatiblePlanner:
             {
                 "role": "user",
                 "content": (
-                    "上一步返回的 steps 有无法解析的引用："
+                    "上一步返回的 steps 有无法执行的参数或引用："
                     + "；".join(problems)
-                    + "。引用只能指向本计划中更早的步骤或本任务已有的 Observation，"
+                    + "。引用更早步骤用 {\"step\": <序号>, \"output\": \"<字段名>\"} 形式的 *_ref 参数，"
+                    "只能指向本计划中更早的步骤；引用本任务已有的 Observation 用 "
+                    "$observations.<observation_id>.output.<field>，不要编造字段名。"
                     "请重新输出完整 JSON 决策。"
                 ),
             },
         ]
         try:
-            repaired = self._call(DecisionDraft, messages)
+            repaired = self._call(
+                DecisionDraft,
+                messages,
+                schema=schema,
+                schema_name="agent_decision",
+            )
         except PlannerValidationError as exc:
             return PlannerDecision(
                 action="fail",
@@ -331,7 +400,13 @@ class OpenAICompatiblePlanner:
             repaired, task, current_plan, observations, plan_id
         )
         if decision.plan is not None:
-            still = unresolved_references(decision.plan, observations)
+            still = (
+                _bind_decision_plan(decision, self._capabilities)
+                if self._capabilities
+                else []
+            )
+            if not still:
+                still = unresolved_references(decision.plan, observations)
             if still:
                 return PlannerDecision(
                     action="fail",
@@ -340,10 +415,17 @@ class OpenAICompatiblePlanner:
                 )
         return decision
 
-    def _call(self, model_type, messages: list[dict[str, str]]):
+    def _call(
+        self,
+        model_type,
+        messages: list[dict[str, str]],
+        *,
+        schema: dict[str, Any] | None = None,
+        schema_name: str = "agent_output",
+    ):
         self.last_call_count = 0
         try:
-            raw = self.client.complete(messages)
+            raw = self._complete(messages, schema=schema, schema_name=schema_name)
         except LLMError as exc:
             raise PlannerProviderError(
                 str(exc), retryable=exc.classification == "retryable_error"
@@ -358,7 +440,7 @@ class OpenAICompatiblePlanner:
                 if attempt:
                     break
                 try:
-                    raw = self.client.complete(
+                    raw = self._complete(
                         [
                             *messages,
                             {"role": "assistant", "content": raw},
@@ -369,7 +451,9 @@ class OpenAICompatiblePlanner:
                                     f"错误：{last_error}"
                                 ),
                             },
-                        ]
+                        ],
+                        schema=schema,
+                        schema_name=schema_name,
                     )
                 except LLMError as exc:
                     raise PlannerProviderError(
@@ -381,6 +465,19 @@ class OpenAICompatiblePlanner:
                 )
         raise PlannerValidationError(f"planner output failed validation: {last_error}")
 
+    def _complete(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        schema: dict[str, Any] | None,
+        schema_name: str,
+    ) -> str:
+        """Use the client's strict-schema call when it has one."""
+
+        structured = getattr(self.client, "complete_structured", None)
+        if schema and callable(structured):
+            return structured(messages, schema=schema, name=schema_name)
+        return self.client.complete(messages)
 
 
 def _unusable_steps(plan: Plan, validators: dict[str, Any]) -> list[str]:
@@ -401,6 +498,35 @@ def _unusable_steps(plan: Plan, validators: dict[str, Any]) -> list[str]:
             validator(step.arguments)
         except Exception as exc:
             problems.append(f"{step.capability}: {exc}")
+    return problems
+
+
+def _bound_plan(
+    plan: Plan, capabilities: list[CapabilityDescriptor]
+) -> tuple[Plan, list[str]]:
+    """Binds planner-facing ``*_ref`` arguments into Runtime references.
+
+    A binding failure is returned rather than raised: a reference aimed at the
+    wrong step is a bad answer, so the caller gets to spend its repair round on
+    it instead of failing the Task on the first draft.
+    """
+
+    try:
+        return bind_plan_references(plan, capabilities), []
+    except ContractValidationError as exc:
+        return plan, list(exc.errors)
+
+
+def _bind_decision_plan(
+    decision: PlannerDecision, capabilities: list[CapabilityDescriptor]
+) -> list[str]:
+    """Binds a re-plan's references in place; returns what could not be bound."""
+
+    if decision.plan is None:
+        return []
+    bound, problems = _bound_plan(decision.plan, capabilities)
+    if not problems:
+        decision.plan = bound
     return problems
 
 
@@ -554,13 +680,18 @@ def _plan_messages(
                 f"本计划的 plan_id 是 \"{plan_id}\"，本计划所有 step_id 形如 \"{plan_id}-step-<n>\"，"
                 f"第 k 步就是 \"{plan_id}-step-k\"。"
                 "steps 里每个对象只能有 capability 与 arguments 两个字段，不要写 step_id。"
-                "后一步要引用前一步的输出，必须写成 \"$steps.<step_id>.output.<field>\"，"
-                f"例如第一步是 \"$steps.{plan_id}-step-1.output.content\"；"
-                "引用只能指向本计划里更早的步骤。引用历史结果用 "
+                "跨步骤引用：capability 的 planner_input_schema 里以 _ref 结尾的参数接收一个"
+                "对象 {\"step\": <更早步骤的序号>, \"output\": \"<那个步骤输出的字段名>\"}。"
+                "例如先 web.fetch 再 web.extract，就是 "
+                "{\"document_ref\": {\"step\": 1, \"output\": \"content\"}}；"
+                "再把 web.extract 的结果交给 answer.compose，就是 "
+                "{\"evidence_ref\": {\"step\": 2, \"output\": \"evidence\"}}。"
+                "step 只能指向本计划中比当前步更早的步骤，output 只能用来源 capability 的 "
+                "output_schema 里声明的字段名。"
+                "引用本任务已有的 Observation 时写 "
                 "\"$observations.<observation_id>.output.<field>\"。"
-                "不要编造 field 名：每条 capability 的 input_schema / output_schema "
-                "就是它的字段表。要把来源证据交给 answer.compose 时，把上游输出的 "
-                "evidence 原样传过去：\"evidence\": \"$steps.<step_id>.output.evidence\"。"
+                "其它参数按该 capability 的 planner_input_schema（没有就用 input_schema）填写，"
+                "不要编造字段名。"
                 "也不要用 {{...}} 之类的模板语法。"
             ),
         },
@@ -603,8 +734,8 @@ def _decision_messages(
                 "replan 时可以输出 steps，steps 只能使用当前 capabilities。"
                 f"如果你带 steps，这些新步骤的 plan_id 是 \"{plan_id}\"，第 k 步的 step_id 是 "
                 f"\"{plan_id}-step-k\"，steps 里每个对象只能有 capability 与 arguments 两个字段；"
-                "步骤之间引用前一步输出写 "
-                "\"$steps.<step_id>.output.<field>\"，只能指向本计划更早的步骤；"
+                "步骤之间引用更早步骤的输出，把 *_ref 参数写成 "
+                "{\"step\": <更早步骤的序号>, \"output\": \"<字段名>\"}，只能指向本计划更早的步骤；"
                 "引用历史结果写 \"$observations.<observation_id>.output.<field>\"。"
                 "steps[].capability 必须是 capabilities 列表里真实存在的名称；"
                 "request_input、complete、fail 这些是 action，不是能力，绝对不要写进 steps。"

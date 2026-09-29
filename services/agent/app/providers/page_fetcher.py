@@ -20,7 +20,12 @@ from typing import Protocol
 from pydantic import BaseModel, ConfigDict
 
 ALLOWED_SCHEMES = frozenset({"http", "https"})
-ALLOWED_CONTENT_TYPES = frozenset({"text/html", "application/xhtml+xml", "text/plain"})
+# Documentation sites increasingly publish a markdown twin of each page and
+# advertise it as the better version for a model to read. It is still plain
+# text to this service, so refusing it only pushed the Planner into a re-plan.
+ALLOWED_CONTENT_TYPES = frozenset(
+    {"text/html", "application/xhtml+xml", "text/plain", "text/markdown"}
+)
 DEFAULT_USER_AGENT = "info-agent/0.1 (+web.fetch)"
 
 
@@ -187,7 +192,10 @@ class HttpPageFetcher:
             target,
             headers={
                 "User-Agent": self.user_agent,
-                "Accept": "text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.1",
+                "Accept": (
+                    "text/html,application/xhtml+xml,text/markdown,"
+                    "text/plain;q=0.9,*/*;q=0.1"
+                ),
             },
             method="GET",
         )

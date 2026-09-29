@@ -55,6 +55,21 @@ class PlanValidator:
         if capability is None:
             errors.append(f"unknown capability: {step.capability}")
             return errors
+        # A planner-facing reference argument is bound into its Runtime
+        # counterpart before the Plan is stored. Seeing one here means the
+        # binding never happened, and executing it would silently drop the
+        # argument the capability actually needs.
+        planner_arguments = [
+            binding.planner_argument
+            for binding in capability.descriptor.input_bindings
+            if binding.planner_argument in step.arguments
+        ]
+        if planner_arguments:
+            errors.extend(
+                f"unbound planner argument {name} for {step.capability}"
+                for name in planner_arguments
+            )
+            return errors
         if has_references(step.arguments):
             # References are resolved by Runtime before execution. Validating a
             # placeholder against the final Capability schema would produce a

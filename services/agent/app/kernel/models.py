@@ -42,6 +42,13 @@ class PlanStep(BaseModel):
     replaced_by_step_id: str | None = None
 
 
+class StepOutputRef(BaseModel):
+    """Planner-facing reference to an earlier Step output."""
+
+    step: int = Field(ge=1)
+    output: str = Field(min_length=1, max_length=200)
+
+
 class Plan(BaseModel):
     plan_id: str
     task_id: str
@@ -57,6 +64,15 @@ class Plan(BaseModel):
     status: str = "draft"
 
 
+class CapabilityInputBinding(BaseModel):
+    """Maps a planner-facing reference argument to a runtime argument."""
+
+    planner_argument: str
+    runtime_argument: str
+    source_capability: str
+    source_output: str
+
+
 class CapabilityDescriptor(BaseModel):
     name: str
     description: str
@@ -65,6 +81,10 @@ class CapabilityDescriptor(BaseModel):
     # field names, and every guess costs a repair round at execution time.
     input_schema: dict[str, Any] = Field(default_factory=dict)
     output_schema: dict[str, Any] = Field(default_factory=dict)
+    # The planner sees *_ref arguments for cross-step dependencies. The
+    # runtime still receives the original argument after binding.
+    planner_input_schema: dict[str, Any] = Field(default_factory=dict)
+    input_bindings: list[CapabilityInputBinding] = Field(default_factory=list)
     risk_level: str
     side_effect: bool
     requires_approval: bool

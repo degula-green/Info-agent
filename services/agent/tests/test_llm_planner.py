@@ -7,9 +7,13 @@ following a repaired plan must not break the runtime.
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 
+import pytest
+
 from app.capabilities.todo import TodoCreateCapability
+from app.capabilities.web import WebExtractCapability, WebFetchCapability
 from app.kernel.models import (
     CapabilityDescriptor,
     Plan,
@@ -17,7 +21,8 @@ from app.kernel.models import (
     PlanStep,
     TaskEnvelope,
 )
-from app.planning.llm import OpenAICompatiblePlanner
+from app.planning.llm import OpenAICompatiblePlanner, PlannerValidationError
+from app.testing.fake_providers import FakePageFetcher
 from app.testing.in_memory_todo_store import InMemoryTodoStore
 
 
@@ -218,3 +223,123 @@ def test_a_required_input_written_as_a_string_is_still_request_input() -> None:
     assert decision.action == "request_input"
     assert decision.required_input == ["请提供文件"]
     assert len(client.outputs) == 0
+
+
+def reading_descriptors() -> list[CapabilityDescriptor]:
+    return [
+        WebFetchCapability(FakePageFetcher()).descriptor,
+        WebExtractCapability().descriptor,
+    ]
+
+
+def test_a_strict_reference_draft_is_bound_before_the_plan_is_returned(
+    monkeypatch,
+) -> None:
+    """The model names step 1 instead of copying its output into the plan."""
+
+    monkeypatch.setattr("app.planning.llm.uuid4", lambda: "plan-fixed")
+    draft = (
+        '{"objective": "读网页", "steps": ['
+        '{"capability": "web.fetch", "arguments": {"url": "https://example.com"}}, '
+        '{"capability": "web.extract", '
+        '"arguments": {"document_ref": {"step": 1, "output": "content"}}}]}'
+    )
+    client = StubPlannerClient([draft])
+    planner = OpenAICompatiblePlanner(client)
+
+    plan = planner.create_plan(
+        envelope("读网页"), reading_descriptors(), [], PlanningConstraints()
+    )
+
+    assert len(client.calls) == 1
+    assert plan.steps[1].arguments == {
+        "document": "$steps.plan-fixed-step-1.output.content"
+    }
+
+
+def test_an_unbindable_reference_is_repaired_once(monkeypatch) -> None:
+    """A reference to a future step is a bad answer, not a dead Task."""
+
+    monkeypatch.setattr("app.planning.llm.uuid4", lambda: "plan-fixed")
+    bad = (
+        '{"objective": "读网页", "steps": ['
+        '{"capability": "web.extract", '
+        '"arguments": {"document_ref": {"step": 2, "output": "content"}}}, '
+        '{"capability": "web.fetch", "arguments": {"url": "https://example.com"}}]}'
+    )
+    good = (
+        '{"objective": "读网页", "steps": ['
+        '{"capability": "web.fetch", "arguments": {"url": "https://example.com"}}, '
+        '{"capability": "web.extract", '
+        '"arguments": {"document_ref": {"step": 1, "output": "content"}}}]}'
+    )
+    client = StubPlannerClient([bad, good])
+    planner = OpenAICompatiblePlanner(client)
+
+    plan = planner.create_plan(
+        envelope("读网页"), reading_descriptors(), [], PlanningConstraints()
+    )
+
+    assert len(client.calls) == 2
+    repair_prompt = client.calls[1][-1]["content"]
+    assert "earlier step" in repair_prompt  # the binder's own reason is passed on
+    assert "更早步骤" in repair_prompt  # along with the instruction that fixes it
+    assert plan.steps[1].arguments["document"] == (
+        "$steps.plan-fixed-step-1.output.content"
+    )
+
+
+def test_a_reference_that_stays_unbindable_fails_the_plan(monkeypatch) -> None:
+    monkeypatch.setattr("app.planning.llm.uuid4", lambda: "plan-fixed")
+    bad = (
+        '{"objective": "读网页", "steps": ['
+        '{"capability": "web.extract", '
+        '"arguments": {"document_ref": {"step": 2, "output": "content"}}}, '
+        '{"capability": "web.fetch", "arguments": {"url": "https://example.com"}}]}'
+    )
+    client = StubPlannerClient([bad, bad])
+    planner = OpenAICompatiblePlanner(client)
+
+    with pytest.raises(PlannerValidationError) as excinfo:
+        planner.create_plan(
+            envelope("读网页"), reading_descriptors(), [], PlanningConstraints()
+        )
+
+    assert "earlier" in str(excinfo.value)
+    assert len(client.calls) == 2
+
+
+class StructuredStubClient(StubPlannerClient):
+    """Records the schema the planner asked for instead of sending it."""
+
+    def __init__(self, outputs: list[str]) -> None:
+        super().__init__(outputs)
+        self.schemas: list[tuple[str, dict]] = []
+
+    def complete_structured(
+        self, messages: list[dict[str, str]], *, schema: dict, name: str = "x"
+    ) -> str:
+        self.schemas.append((name, schema))
+        return super().complete(messages)
+
+
+def test_the_planner_asks_for_the_capability_schema(monkeypatch) -> None:
+    monkeypatch.setattr("app.planning.llm.uuid4", lambda: "plan-fixed")
+    draft = (
+        '{"objective": "读网页", "steps": ['
+        '{"capability": "web.fetch", "arguments": {"url": "https://example.com"}}, '
+        '{"capability": "web.extract", '
+        '"arguments": {"document_ref": {"step": 1, "output": "content"}}}]}'
+    )
+    client = StructuredStubClient([draft])
+    planner = OpenAICompatiblePlanner(client)
+
+    planner.create_plan(
+        envelope("读网页"), reading_descriptors(), [], PlanningConstraints()
+    )
+
+    name, schema = client.schemas[0]
+    assert name == "agent_plan"
+    rendered = json.dumps(schema, ensure_ascii=False)
+    assert "document_ref" in rendered
+    assert "web.fetch" in rendered and "web.extract" in rendered

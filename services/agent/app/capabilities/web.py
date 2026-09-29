@@ -17,7 +17,11 @@ from urllib.parse import urljoin
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.kernel.models import CapabilityDescriptor
+from app.kernel.models import (
+    CapabilityDescriptor,
+    CapabilityInputBinding,
+    StepOutputRef,
+)
 
 CAPABILITY_FETCH = "web.fetch"
 CAPABILITY_EXTRACT = "web.extract"
@@ -75,6 +79,23 @@ class WebExtractInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     document: str = Field(min_length=1)
+    url: str | None = Field(default=None, max_length=2000)
+
+
+class WebExtractPlanInput(BaseModel):
+    """The Planner-facing shape of web.extract.
+
+    A model writing a plan cannot carry the fetched bytes in its answer, so it
+    names the step that has them. The Runtime binder turns that name into the
+    ``document`` argument this capability actually reads; because the reference
+    is required, a plan cannot reach execution with nothing to extract.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    document_ref: StepOutputRef = Field(
+        description="引用更早 web.fetch 步骤输出的 content"
+    )
     url: str | None = Field(default=None, max_length=2000)
 
 
@@ -171,7 +192,9 @@ class WebFetchCapability:
         name=CAPABILITY_FETCH,
         description=(
             "抓取一个公开网页的原文（只读）。只支持 http/https 公开地址，"
-            "响应上限 512KB。输出里的 content 交给 web.extract 处理。"
+            "响应上限 512KB。支持 text/html、text/plain、text/markdown 文本响应；"
+            "文档站常提供 .md 版本，内容比 HTML 壳更完整。"
+            "输出里的 content 交给 web.extract 处理。"
         ),
         input_schema=WebFetchInput.model_json_schema(),
         output_schema=WebFetchResult.model_json_schema(),
@@ -214,9 +237,18 @@ class WebExtractCapability:
         name=CAPABILITY_EXTRACT,
         description=(
             "从网页或纯文本里抽出标题、正文、链接，并产出来源证据（只读）。"
-            "输入 document 用 $steps.<step_id>.output.content 引用抓取结果。"
+            "正文来源用 document_ref 指向更早 web.fetch 步骤输出的 content。"
         ),
         input_schema=WebExtractInput.model_json_schema(),
+        planner_input_schema=WebExtractPlanInput.model_json_schema(),
+        input_bindings=[
+            CapabilityInputBinding(
+                planner_argument="document_ref",
+                runtime_argument="document",
+                source_capability=CAPABILITY_FETCH,
+                source_output="content",
+            )
+        ],
         output_schema=WebExtractResult.model_json_schema(),
         risk_level="read_only",
         side_effect=False,

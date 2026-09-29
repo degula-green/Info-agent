@@ -8,6 +8,7 @@ import time
 from datetime import datetime, timezone
 from typing import Any, Callable
 
+from app.kernel.bindings import bind_plan_references
 from app.kernel.checkpoint import build_checkpoint, next_pending_step, resume_step
 from app.kernel.errors import ContractValidationError, TaskNotFoundError, classify_error
 from app.kernel.events import new_task_event, utcnow
@@ -698,6 +699,11 @@ class AgentRuntime:
             self._planner_calls_actually_spent(),
         )
         try:
+            # The LLM planner binds before returning. A Plan that arrives from
+            # anywhere else (an older version, a test double, a future planner)
+            # gets the same normalization here, so the Runtime never has to
+            # interpret a planner-facing reference object as an argument.
+            plan = bind_plan_references(plan, self.registry.list_descriptors())
             self.validator.validate(plan, task.to_envelope())
         except ContractValidationError as exc:
             return self._fail(
@@ -1013,6 +1019,9 @@ class AgentRuntime:
                 plan=old_plan,
             )
         try:
+            new_plan = bind_plan_references(
+                new_plan, self.registry.list_descriptors()
+            )
             self.validator.validate(new_plan, task.to_envelope())
         except ContractValidationError as exc:
             return self._fail(

@@ -12,7 +12,11 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.kernel.models import CapabilityDescriptor
+from app.kernel.models import (
+    CapabilityDescriptor,
+    CapabilityInputBinding,
+    StepOutputRef,
+)
 
 CAPABILITY_NAME = "answer.compose"
 DEFAULT_TIMEOUT_SECONDS = 60
@@ -27,6 +31,23 @@ class AnswerComposeInput(BaseModel):
     # Passed as a reference in the Plan: evidence="$steps.<id>.output.evidence".
     evidence: list[dict[str, Any]] = Field(
         default_factory=list, max_length=MAX_EVIDENCE_ITEMS
+    )
+
+
+class AnswerComposePlanInput(BaseModel):
+    """The Planner-facing shape of answer.compose.
+
+    The Planner points at the step that produced the evidence instead of
+    retyping it; the Runtime binder resolves that pointer into the list the
+    capability reads. Making it required is the point: an answer written
+    without its sources is not the work this step exists to do.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    question: str = Field(min_length=1, max_length=2000)
+    evidence_ref: StepOutputRef = Field(
+        description="引用更早 web.extract 步骤输出的 evidence"
     )
 
 
@@ -77,9 +98,18 @@ class AnswerComposeCapability:
         name=CAPABILITY_NAME,
         description=(
             "依据已检索到的 evidence 组织一段带来源的回答（只读）。"
-            "evidence 用 $steps.<step_id>.output.evidence 引用上游步骤的产出。"
+            "证据用 evidence_ref 指向更早 web.extract 步骤输出的 evidence。"
         ),
         input_schema=AnswerComposeInput.model_json_schema(),
+        planner_input_schema=AnswerComposePlanInput.model_json_schema(),
+        input_bindings=[
+            CapabilityInputBinding(
+                planner_argument="evidence_ref",
+                runtime_argument="evidence",
+                source_capability="web.extract",
+                source_output="evidence",
+            )
+        ],
         output_schema=AnswerComposeResult.model_json_schema(),
         risk_level="read_only",
         side_effect=False,

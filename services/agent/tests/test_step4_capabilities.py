@@ -191,6 +191,34 @@ def test_fetch_rejects_a_non_text_content_type() -> None:
     assert "content type" in str(excinfo.value)
 
 
+def test_fetch_accepts_the_markdown_twin_of_a_page() -> None:
+    """Docs sites publish .md next to the HTML and say it is better for AI."""
+
+    fetcher = _StubFetcher(
+        _StubResponse(
+            "# 智能助手\n\n自然语言生成可执行代码。".encode("utf-8"),
+            content_type="text/markdown; charset=utf-8",
+        )
+    )
+
+    document = fetcher.fetch(PUBLIC_URL)
+
+    assert document.content_type == "text/markdown"
+    assert document.content.startswith("# 智能助手")
+
+
+def test_extract_reads_markdown_as_text() -> None:
+    capability = WebExtractCapability()
+    markdown = "# 标题\n\n第一段正文。\n\n- 要点"
+
+    result = capability.execute(
+        capability.validate({"document": markdown, "url": PUBLIC_URL})
+    )
+
+    assert "第一段正文。" in result["text"]
+    assert result["evidence"][0]["url"] == PUBLIC_URL
+
+
 @pytest.mark.parametrize(
     "status, expected",
     [
