@@ -83,7 +83,7 @@ class CoreTokenAuthentication:
 
         user_id = str(claims.get("sub") or "").strip()
         session_id = str(claims.get("sid") or "").strip()
-        if claims.get("token_type") != ACCESS_TOKEN_TYPE:
+        if claims.get("typ") != ACCESS_TOKEN_TYPE:
             raise AuthenticationError("invalid token type")
         try:
             uuid.UUID(user_id)

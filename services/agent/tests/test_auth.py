@@ -38,7 +38,7 @@ def _token(
         {
             "sub": user_id,
             "sid": "session-1",
-            "token_type": token_type,
+            "typ": token_type,
             "iss": issuer,
             "aud": audience,
             "iat": now,

@@ -55,7 +55,7 @@ def test_api_startup_wires_the_real_agent_stack(tmp_path) -> None:
         {
             "sub": "7d0779ab-9ea4-409e-a51c-842b5b9fb875",
             "sid": "session-1",
-            "token_type": "access",
+            "typ": "access",
             "iss": "info-agent-core",
             "aud": "info-agent-api",
             "iat": now,
