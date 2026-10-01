@@ -15,6 +15,10 @@ from app.kernel.models import (
 
 SEARCH_SOURCES_NAME = "knowledge.search_sources"
 SEARCH_CONTENT_NAME = "knowledge.search_content"
+KNOWLEDGE_ANSWER_NAME = "knowledge.answer"
+
+MAX_ANSWER_CHUNKS = 50
+QUOTE_CHARS = 500
 
 ATTACHMENT_EXTENSIONS = {
     "pdf": ("pdf",),
@@ -88,6 +92,7 @@ class SearchContentInput(BaseModel):
     resource_ids: list[str] = Field(default_factory=list, max_length=20)
     knowledge_base_ids: list[str] = Field(default_factory=list, max_length=5)
     include_personal: bool = False
+    restrict_to_resource_ids: bool = False
     top_k: int = Field(default=10, ge=1, le=50)
 
 
@@ -98,6 +103,7 @@ class SearchContentPlanInput(BaseModel):
     resource_ids_ref: StepOutputRef | None = None
     knowledge_base_ids: list[str] = Field(default_factory=list, max_length=5)
     include_personal: bool = False
+    restrict_to_resource_ids: bool = False
     top_k: int = Field(default=10, ge=1, le=50)
 
 
@@ -135,6 +141,36 @@ class SearchContentOutput(BaseModel):
     has_more: bool
     summary: str
     metadata_coverage: str
+
+
+class KnowledgeAnswerInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    query: str = Field(min_length=1, max_length=2000)
+    results: list[ContentResult] = Field(default_factory=list, max_length=50)
+    metadata_coverage: str = "complete"
+
+
+class KnowledgeAnswerPlanInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    query: str = Field(min_length=1, max_length=2000)
+    results_ref: StepOutputRef = Field(
+        description="引用更早 knowledge.search_content 步骤输出的 results"
+    )
+    metadata_coverage_ref: StepOutputRef | None = Field(
+        default=None,
+        description="引用 knowledge.search_content 步骤输出的 metadata_coverage",
+    )
+
+
+class KnowledgeAnswerOutput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    answer: str
+    citations: list[dict[str, Any]]
+    metadata_coverage: str = "complete"
+    model_calls: int = 0
 
 
 class KnowledgeSearchSourcesCapability:
@@ -235,6 +271,15 @@ class KnowledgeSearchContentCapability:
 
     def execute(self, arguments: SearchContentInput) -> dict[str, Any]:
         context = current_execution_context()
+        if arguments.restrict_to_resource_ids and not arguments.resource_ids:
+            return SearchContentOutput(
+                results=[],
+                returned_source_count=0,
+                returned_chunk_count=0,
+                has_more=False,
+                summary="未找到可继续检索的来源",
+                metadata_coverage="complete",
+            ).model_dump()
         requests = _scope_requests(
             owner_user_id=context.owner_user_id,
             organization_id=context.organization_id,
@@ -268,6 +313,66 @@ class KnowledgeSearchContentCapability:
             metadata_coverage=_coverage(responses),
         )
         return output.model_dump()
+
+
+class KnowledgeAnswerCapability:
+    descriptor = CapabilityDescriptor(
+        name=KNOWLEDGE_ANSWER_NAME,
+        description=(
+            "依据 knowledge.search_content 返回的 chunks 生成带引用的回答（只读）。"
+            "无检索结果时不调用模型，返回明确的空结果。"
+        ),
+        input_schema=KnowledgeAnswerInput.model_json_schema(),
+        planner_input_schema=KnowledgeAnswerPlanInput.model_json_schema(),
+        input_bindings=[
+            CapabilityInputBinding(
+                planner_argument="results_ref",
+                runtime_argument="results",
+                source_capability=SEARCH_CONTENT_NAME,
+                source_output="results",
+            ),
+            CapabilityInputBinding(
+                planner_argument="metadata_coverage_ref",
+                runtime_argument="metadata_coverage",
+                source_capability=SEARCH_CONTENT_NAME,
+                source_output="metadata_coverage",
+            ),
+        ],
+        output_schema=KnowledgeAnswerOutput.model_json_schema(),
+        risk_level="read_only",
+        side_effect=False,
+        requires_approval=False,
+        idempotent=True,
+        timeout_seconds=60,
+    )
+
+    def __init__(self, provider, *, timeout_seconds: int | None = None) -> None:
+        self.provider = provider
+        if timeout_seconds is not None:
+            self.descriptor = type(self).descriptor.model_copy(
+                update={"timeout_seconds": int(timeout_seconds)}
+            )
+
+    def validate(self, arguments: dict[str, Any]) -> KnowledgeAnswerInput:
+        return KnowledgeAnswerInput.model_validate(arguments)
+
+    def execute(self, arguments: KnowledgeAnswerInput) -> dict[str, Any]:
+        evidence = _answer_evidence(arguments.results)
+        if not evidence:
+            return KnowledgeAnswerOutput(
+                answer="没有找到满足条件的内容。",
+                citations=[],
+                metadata_coverage=arguments.metadata_coverage,
+                model_calls=0,
+            ).model_dump()
+
+        draft = self.provider.compose(arguments.query, evidence)
+        return KnowledgeAnswerOutput(
+            answer=str(draft.answer),
+            citations=_known_knowledge_citations(draft.citations, evidence),
+            metadata_coverage=arguments.metadata_coverage,
+            model_calls=max(int(getattr(draft, "model_calls", 0) or 0), 0),
+        ).model_dump()
 
 
 def _scope_requests(
@@ -439,6 +544,69 @@ def _content_summary(results: list[ContentResult], arguments: SearchContentInput
     if not results:
         return f"未找到与“{arguments.query}”相关的内容"
     return f"在{len(results)}个资源中找到与“{arguments.query}”相关的内容"
+
+
+def _answer_evidence(results: list[ContentResult]) -> list[dict[str, Any]]:
+    evidence: list[dict[str, Any]] = []
+    for result in results:
+        for chunk in result.chunks:
+            if len(evidence) >= MAX_ANSWER_CHUNKS:
+                return evidence
+            quote = str(chunk.text or "").strip()[:QUOTE_CHARS]
+            if not quote:
+                continue
+            evidence.append(
+                {
+                    "evidence_id": chunk.chunk_id,
+                    "resource_id": result.resource_id,
+                    "resource_type": result.resource_type,
+                    "title": result.title,
+                    "sender_name": result.sender_name,
+                    "conversation_name": result.conversation_name,
+                    "sent_at": result.sent_at,
+                    "position": chunk.position,
+                    "quote": quote,
+                    "snippet": quote,
+                }
+            )
+    return evidence
+
+
+def _known_knowledge_citations(
+    citations: list[dict[str, Any]],
+    evidence: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    known = {
+        str(item.get("evidence_id")): item
+        for item in evidence
+        if isinstance(item, dict) and item.get("evidence_id")
+    }
+    kept: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in citations or []:
+        if not isinstance(item, dict):
+            continue
+        evidence_id = str(item.get("evidence_id") or "").strip()
+        source = known.get(evidence_id)
+        if not evidence_id or source is None or evidence_id in seen:
+            continue
+        seen.add(evidence_id)
+        kept.append(
+            {
+                "evidence_id": evidence_id,
+                "quote": str(item.get("quote") or source.get("quote") or "")[
+                    :QUOTE_CHARS
+                ],
+                "resource_id": source.get("resource_id"),
+                "resource_type": source.get("resource_type"),
+                "title": source.get("title"),
+                "sender_name": source.get("sender_name"),
+                "conversation_name": source.get("conversation_name"),
+                "sent_at": source.get("sent_at"),
+                "position": source.get("position"),
+            }
+        )
+    return kept
 
 
 def _text(value: Any) -> str | None:

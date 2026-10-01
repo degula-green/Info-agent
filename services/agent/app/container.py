@@ -14,6 +14,7 @@ from app.application.knowledge_events import KnowledgeEventService
 from app.application.task_service import TaskService
 from app.capabilities.answer import AnswerComposeCapability
 from app.capabilities.knowledge import (
+    KnowledgeAnswerCapability,
     KnowledgeSearchContentCapability,
     KnowledgeSearchSourcesCapability,
 )
@@ -31,6 +32,7 @@ from app.kernel.models import OutboxEvent
 from app.kernel.protocols import AgentStore, TaskEventPublisher, TodoStore
 from app.kernel.registry import CapabilityRegistry
 from app.planning.deterministic import DeterministicPlanner
+from app.planning.knowledge import KnowledgeRoutingPlanner
 from app.policy.descriptor import DescriptorPolicy
 from app.testing.in_memory_runtime_store import InMemoryAgentStore
 from app.testing.in_memory_todo_store import InMemoryTodoStore
@@ -94,6 +96,10 @@ def _timeout_seconds(value: float) -> int:
     return max(1, int(round(float(value))))
 
 
+def knowledge_tools_enabled(settings: Settings) -> bool:
+    return settings.rag_agent_tools_enabled or settings.planner_provider.strip().lower() == "routing"
+
+
 def build_registry(
     settings: Settings,
     todo_store: TodoStore,
@@ -108,6 +114,16 @@ def build_registry(
     """
 
     web_timeout = _timeout_seconds(settings.web_timeout_seconds)
+    answer_provider = LlmAnswerProvider(
+        OpenAIChatClient(
+            base_url=settings.llm_base_url,
+            api_key=settings.llm_api_key,
+            model=settings.llm_model,
+            timeout_seconds=settings.answer_timeout_seconds,
+            max_output_tokens=settings.answer_max_output_tokens,
+            response_format=settings.llm_response_format,
+        )
+    )
     capabilities = [
         TodoCreateCapability(
             todo_store,
@@ -124,24 +140,19 @@ def build_registry(
         ),
         WebExtractCapability(timeout_seconds=web_timeout),
         AnswerComposeCapability(
-            LlmAnswerProvider(
-                OpenAIChatClient(
-                    base_url=settings.llm_base_url,
-                    api_key=settings.llm_api_key,
-                    model=settings.llm_model,
-                    timeout_seconds=settings.answer_timeout_seconds,
-                    max_output_tokens=settings.answer_max_output_tokens,
-                    response_format=settings.llm_response_format,
-                )
-            ),
+            answer_provider,
             timeout_seconds=_timeout_seconds(settings.answer_timeout_seconds),
         ),
     ]
-    if settings.rag_agent_tools_enabled and rag_client is not None:
+    if knowledge_tools_enabled(settings) and rag_client is not None:
         capabilities.extend(
             [
                 KnowledgeSearchSourcesCapability(rag_client),
                 KnowledgeSearchContentCapability(rag_client),
+                KnowledgeAnswerCapability(
+                    answer_provider,
+                    timeout_seconds=_timeout_seconds(settings.answer_timeout_seconds),
+                ),
             ]
         )
     return CapabilityRegistry(capabilities)
@@ -158,29 +169,50 @@ def build_rag_client(settings: Settings) -> RAGClient:
 def build_planner(settings: Settings):
     provider = (settings.planner_provider or "deterministic").strip().lower()
     if provider == "deterministic":
-        return DeterministicPlanner(
+        planner = DeterministicPlanner(
             default_timezone=settings.default_timezone,
             min_confidence=settings.understanding_min_confidence,
         )
-    if provider == "llm":
+        if knowledge_tools_enabled(settings):
+            return KnowledgeRoutingPlanner(
+                planner,
+                default_timezone=settings.default_timezone,
+            )
+        return planner
+    if provider in {"llm", "routing"}:
         from app.infrastructure.llm.client import OpenAIChatClient
         from app.planning.llm import OpenAICompatiblePlanner
 
-        return OpenAICompatiblePlanner(
-            OpenAIChatClient(
-                base_url=settings.llm_base_url,
-                api_key=settings.llm_api_key,
-                model=settings.llm_model,
-                timeout_seconds=settings.llm_timeout_seconds,
-                max_output_tokens=settings.llm_max_output_tokens,
-                # The Planner is the one caller that passes a real JSON Schema
-                # per request; the client is told it may ask for strict
-                # decoding here, and to fall back when the provider refuses.
-                response_format=settings.llm_planner_response_format,
-                json_schema_fallback=settings.llm_json_schema_fallback,
+        if provider == "routing" and (
+            not settings.llm_base_url or not settings.llm_model
+        ):
+            planner = DeterministicPlanner(
+                default_timezone=settings.default_timezone,
+                min_confidence=settings.understanding_min_confidence,
             )
+        else:
+            planner = OpenAICompatiblePlanner(
+                OpenAIChatClient(
+                    base_url=settings.llm_base_url,
+                    api_key=settings.llm_api_key,
+                    model=settings.llm_model,
+                    timeout_seconds=settings.llm_timeout_seconds,
+                    max_output_tokens=settings.llm_max_output_tokens,
+                    # The Planner is the one caller that passes a real JSON Schema
+                    # per request; the client is told it may ask for strict
+                    # decoding here, and to fall back when the provider refuses.
+                    response_format=settings.llm_planner_response_format,
+                    json_schema_fallback=settings.llm_json_schema_fallback,
+                )
+            )
+    else:
+        raise RuntimeError(f"unsupported AGENT_PLANNER_PROVIDER: {provider}")
+    if knowledge_tools_enabled(settings):
+        return KnowledgeRoutingPlanner(
+            planner,
+            default_timezone=settings.default_timezone,
         )
-    raise RuntimeError(f"unsupported AGENT_PLANNER_PROVIDER: {provider}")
+    return planner
 
 
 def understanding_min_confidence(settings: Settings, *, source_type: str = "chat") -> float:

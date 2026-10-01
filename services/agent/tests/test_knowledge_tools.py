@@ -8,13 +8,24 @@ import pytest
 from pydantic import ValidationError
 
 from app.capabilities.knowledge import (
+    KnowledgeAnswerCapability,
+    KnowledgeAnswerInput,
     KnowledgeSearchContentCapability,
     KnowledgeSearchSourcesCapability,
     KnowledgeToolUnavailable,
     SearchContentInput,
     SearchSourcesInput,
 )
-from app.container import build_registry
+from app.container import build_container, build_planner, build_registry
+from app.kernel.registry import CapabilityRegistry
+from app.planning.knowledge import (
+    KnowledgeRoutingPlanner,
+    build_knowledge_plan,
+    classify_knowledge_question,
+)
+from app.policy.descriptor import DescriptorPolicy
+from app.testing.fake_publisher import FakeTaskPublisher
+from app.testing.in_memory_runtime_store import InMemoryAgentStore
 from app.testing.in_memory_todo_store import InMemoryTodoStore
 from tests.support import make_settings
 from app.kernel.execution_context import (
@@ -24,6 +35,7 @@ from app.kernel.execution_context import (
 )
 from app.kernel.bindings import bind_plan_references
 from app.kernel.models import Plan, PlanStep
+from app.planning.deterministic import DeterministicPlanner
 
 
 def context(*, organization_id: str | None = "org-1") -> ExecutionContext:
@@ -84,6 +96,14 @@ class _RAG:
 
     def search_content(self, body, **identity):
         self.content_calls.append(dict(body))
+        if body.get("restrict_to_resource_ids") and not body.get("resource_ids"):
+            return {
+                "items": [],
+                "returned_source_count": 0,
+                "returned_chunk_count": 0,
+                "has_more": False,
+                "diagnostics": {"metadata_coverage": "complete"},
+            }
         return {
             "items": [
                 {
@@ -110,6 +130,30 @@ class _RAG:
             "has_more": False,
             "diagnostics": {"metadata_coverage": "complete"},
         }
+
+
+class _AnswerProvider:
+    def __init__(self, *, citations: list[dict[str, Any]] | None = None) -> None:
+        self.calls: list[tuple[str, list[dict[str, Any]]]] = []
+        self.citations = citations
+
+    def compose(self, question: str, evidence: list[dict[str, Any]]):
+        self.calls.append((question, [dict(item) for item in evidence]))
+        citations = self.citations
+        if citations is None:
+            citations = [
+                {"evidence_id": item["evidence_id"], "quote": item["snippet"]}
+                for item in evidence
+            ]
+        return type(
+            "Draft",
+            (),
+            {
+                "answer": "检索到的回答",
+                "citations": citations,
+                "model_calls": 1,
+            },
+        )()
 
 
 def test_execution_context_is_isolated_and_reset() -> None:
@@ -230,3 +274,218 @@ def test_knowledge_tools_are_registered_only_when_enabled() -> None:
     )
     assert enabled.find("knowledge.search_sources") is not None
     assert enabled.find("knowledge.search_content") is not None
+    assert enabled.find("knowledge.answer") is not None
+
+
+def test_routing_provider_enables_knowledge_tools_and_router() -> None:
+    settings = make_settings(planner_provider="routing")
+    registry = build_registry(
+        settings,
+        InMemoryTodoStore(),
+        _RAG(),
+    )
+
+    assert registry.find("knowledge.search_sources") is not None
+    assert isinstance(build_planner(settings), KnowledgeRoutingPlanner)
+
+
+def test_metadata_question_routes_to_search_sources() -> None:
+    route = classify_knowledge_question("张三上个月在财务群发过哪些文件？")
+
+    assert route is not None
+    assert route.mode == "sources"
+    assert route.source_arguments["sender_names"] == ["张三"]
+    assert route.source_arguments["conversation_names"] == ["财务群"]
+    assert route.source_arguments["resource_types"] == ["attachment"]
+
+
+def test_content_question_routes_to_search_content_and_answer() -> None:
+    route = classify_knowledge_question("采购合同的违约责任是什么？")
+    assert route is not None
+    assert route.mode == "content"
+
+    task = type(
+        "Task",
+        (),
+        {"task_id": "task-1"},
+    )()
+    plan = build_knowledge_plan(
+        route,
+        task,
+        [
+            KnowledgeSearchContentCapability.descriptor,
+            KnowledgeAnswerCapability.descriptor,
+        ],
+    )
+
+    assert plan is not None
+    assert [step.capability for step in plan.steps] == [
+        "knowledge.search_content",
+        "knowledge.answer",
+    ]
+    assert plan.steps[1].arguments["results_ref"] == {
+        "step": 1,
+        "output": "results",
+    }
+
+
+def test_content_with_sources_question_builds_three_step_plan() -> None:
+    route = classify_knowledge_question("张三发的采购合同写了什么？")
+    assert route is not None
+    assert route.mode == "content_with_sources"
+
+    task = type(
+        "Task",
+        (),
+        {"task_id": "task-1"},
+    )()
+    plan = build_knowledge_plan(
+        route,
+        task,
+        [
+            KnowledgeSearchSourcesCapability.descriptor,
+            KnowledgeSearchContentCapability.descriptor,
+            KnowledgeAnswerCapability.descriptor,
+        ],
+    )
+
+    assert plan is not None
+    assert [step.capability for step in plan.steps] == [
+        "knowledge.search_sources",
+        "knowledge.search_content",
+        "knowledge.answer",
+    ]
+    assert plan.steps[1].arguments["resource_ids_ref"] == {
+        "step": 1,
+        "output": "resource_ids",
+    }
+    assert plan.steps[1].arguments["restrict_to_resource_ids"] is True
+
+
+def test_knowledge_answer_empty_results_does_not_call_provider() -> None:
+    provider = _AnswerProvider()
+    capability = KnowledgeAnswerCapability(provider)
+
+    output = capability.execute(
+        KnowledgeAnswerInput(
+            query="不存在的内容",
+            results=[],
+            metadata_coverage="partial",
+        )
+    )
+
+    assert output["answer"] == "没有找到满足条件的内容。"
+    assert output["citations"] == []
+    assert output["metadata_coverage"] == "partial"
+    assert output["model_calls"] == 0
+    assert provider.calls == []
+
+
+def test_knowledge_answer_keeps_only_known_enriched_citations() -> None:
+    provider = _AnswerProvider(
+        citations=[
+            {"evidence_id": "chunk-1", "quote": "预算内容"},
+            {"evidence_id": "invented", "quote": "不该出现"},
+        ]
+    )
+    content = KnowledgeSearchContentCapability(_RAG())
+    with bind_execution_context(context()):
+        search_output = content.execute(SearchContentInput(query="预算"))
+    result = search_output["results"][0]
+    capability = KnowledgeAnswerCapability(provider)
+
+    output = capability.execute(
+        KnowledgeAnswerInput(query="预算内容", results=[result])
+    )
+
+    assert output["citations"] == [
+        {
+            "evidence_id": "chunk-1",
+            "quote": "预算内容",
+            "resource_id": "resource-1",
+            "resource_type": "attachment",
+            "title": "预算表.xlsx",
+            "sender_name": "张三",
+            "conversation_name": "财务群",
+            "sent_at": "2026-10-01T10:30:00+08:00",
+            "position": {"paragraph_index": 2},
+        }
+    ]
+
+
+def test_knowledge_routing_planner_intercepts_only_knowledge_questions() -> None:
+    planner = KnowledgeRoutingPlanner(
+        DeterministicPlanner(),
+    )
+    task = type(
+        "Task",
+        (),
+        {
+            "task_id": "task-1",
+            "input": {"text": "张三发过哪些文件？"},
+        },
+    )()
+
+    plan = planner.create_plan(
+        task,
+        [
+            KnowledgeSearchSourcesCapability.descriptor,
+            KnowledgeSearchContentCapability.descriptor,
+            KnowledgeAnswerCapability.descriptor,
+        ],
+        [],
+    )
+
+    assert [step.capability for step in plan.steps] == ["knowledge.search_sources"]
+
+
+def test_routing_planner_executes_content_pipeline_end_to_end() -> None:
+    rag = _RAG()
+    answer = _AnswerProvider()
+    registry = CapabilityRegistry(
+        [
+            KnowledgeSearchSourcesCapability(rag),
+            KnowledgeSearchContentCapability(rag),
+            KnowledgeAnswerCapability(answer),
+        ]
+    )
+    store = InMemoryAgentStore()
+    container = build_container(
+        settings=make_settings(planner_provider="routing"),
+        store=store,
+        todo_store=InMemoryTodoStore(),
+        publisher=FakeTaskPublisher(),
+        registry=registry,
+        planner=KnowledgeRoutingPlanner(DeterministicPlanner()),
+        policy=DescriptorPolicy(registry),
+    )
+    task = container.task_service.create_task(
+        owner_user_id="user-1",
+        payload={"text": "预算表里写了什么？"},
+        source_ref={"organization_id": "org-1"},
+    )
+
+    status = container.execution_service.run_task(task.task_id)
+
+    assert status == "succeeded"
+    observations = store.list_observations(task.task_id)
+    assert [item.capability for item in observations] == [
+        "knowledge.search_content",
+        "knowledge.answer",
+    ]
+    assert answer.calls
+    completed = store.get_task(task.task_id)
+    assert completed.result["answer"] == "检索到的回答"
+    assert completed.result["presentation_mode"] == "answer_with_sources"
+    previews = [
+        event.payload.get("result_preview")
+        for event in store.list_events(task.task_id)
+        if event.event_type == "step.succeeded"
+    ]
+    assert {"block_type": "content_results", "summary": "在1个资源中找到与“预算表里写了什么？”相关的内容", "item_count": 1, "chunk_count": 1, "metadata_coverage": "complete"} in previews
+    assert any(
+        item
+        and item.get("block_type") == "answer"
+        and item.get("citation_count") == 1
+        for item in previews
+    )

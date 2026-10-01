@@ -1222,6 +1222,7 @@ class AgentRuntime:
                             "capability": step.capability,
                             "observation_id": observation.observation_id,
                             "recovered": True,
+                            "result_preview": self._result_preview(observation),
                         },
                     )
                 ],
@@ -1402,6 +1403,7 @@ class AgentRuntime:
                         "capability": step.capability,
                         "observation_id": observation.observation_id,
                         "requires_user_input": bool(output.get("requires_user_input")),
+                        "result_preview": self._result_preview(observation),
                     },
                 )
             ]
@@ -1617,7 +1619,11 @@ class AgentRuntime:
         task = self.store.get_task(task.task_id)
         ensure_task_transition(task.status, "succeeded")
         task.status = "succeeded"
-        result: dict = {"warnings": list(warnings or [])}
+        presentation_mode = self._presentation_mode(task)
+        result: dict = {
+            "warnings": list(warnings or []),
+            "presentation_mode": presentation_mode,
+        }
         answer = self._answer_payload(task)
         if answer is not None:
             result["answer"] = answer["answer"]
@@ -1629,6 +1635,7 @@ class AgentRuntime:
             "plan_id": plan.plan_id,
             "executed_steps": executed,
             "warnings": list(warnings or []),
+            "presentation_mode": presentation_mode,
         }
         if answer is not None:
             payload["answer"] = answer["answer"]
@@ -1754,6 +1761,25 @@ class AgentRuntime:
             warnings=warnings,
         )
 
+    def _result_preview(self, observation) -> dict[str, Any] | None:
+        """A small, sanitized summary safe to put on the event stream."""
+
+        return _result_preview(observation.capability, observation.output or {})
+
+    def _presentation_mode(self, task: TaskRecord) -> str | None:
+        observations = self.store.list_observations(task.task_id)
+        for observation in reversed(observations):
+            output = observation.output or {}
+            if output.get("answer"):
+                return "answer_with_sources"
+            if output.get("results"):
+                return "source_list"
+            if output.get("sources"):
+                return "source_list"
+            if output.get("todo_id"):
+                return "action_result"
+        return None
+
 
 def _merge_warnings(*groups: list[str]) -> list[str]:
     merged: list[str] = []
@@ -1762,3 +1788,49 @@ def _merge_warnings(*groups: list[str]) -> list[str]:
             if item and item not in merged:
                 merged.append(item)
     return merged
+
+
+def _result_preview(capability: str, output: dict[str, Any]) -> dict[str, Any] | None:
+    if capability == "knowledge.search_sources":
+        sources = output.get("sources")
+        items = sources if isinstance(sources, list) else []
+        return {
+            "block_type": "source_list",
+            "summary": str(output.get("summary") or f"找到 {len(items)} 个来源"),
+            "item_count": len(items),
+            "metadata_coverage": _coverage_value(output),
+        }
+    if capability == "knowledge.search_content":
+        results = output.get("results")
+        items = results if isinstance(results, list) else []
+        chunk_count = sum(
+            len(item.get("chunks") or [])
+            for item in items
+            if isinstance(item, dict)
+        )
+        return {
+            "block_type": "content_results",
+            "summary": str(output.get("summary") or f"找到 {len(items)} 个相关内容来源"),
+            "item_count": len(items),
+            "chunk_count": chunk_count,
+            "metadata_coverage": _coverage_value(output),
+        }
+    if capability == "knowledge.answer":
+        citations = output.get("citations")
+        return {
+            "block_type": "answer",
+            "summary": "回答已生成" if output.get("answer") else "没有找到满足条件的内容",
+            "citation_count": len(citations) if isinstance(citations, list) else 0,
+            "metadata_coverage": _coverage_value(output),
+        }
+    if capability == "todo.create" and output.get("todo_id"):
+        return {
+            "block_type": "todo",
+            "summary": "待办已创建",
+            "item_count": 1,
+        }
+    return None
+
+
+def _coverage_value(output: dict[str, Any]) -> str:
+    return "partial" if output.get("metadata_coverage") == "partial" else "complete"
