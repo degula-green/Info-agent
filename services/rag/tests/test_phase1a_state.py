@@ -25,6 +25,9 @@ class Phase1AStateTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "illegal projection transition"):
             validate_projection_transition("ready", "indexing")
 
+    def test_retry_wait_can_refresh_retry_schedule(self) -> None:
+        validate_projection_transition("retry_wait", "retry_wait")
+
 
 if __name__ == "__main__":
     unittest.main()
