@@ -1,7 +1,6 @@
 import assert from 'node:assert/strict'
 import { afterEach, test } from 'node:test'
 import {
-  AgentApiError,
   approveAgentApproval,
   buildScheduleDraft,
   cancelAgentTask,
@@ -233,13 +232,12 @@ test('a failed draft surfaces the failure reason', () => {
   assert.equal(draft.errorMessage, 'calendar provider rejected the request')
 })
 
-test('loading drafts joins tasks, approvals and observations with the agent user header', async () => {
+test('loading drafts joins tasks, approvals and observations with bearer authentication', async () => {
   installStorage()
   const calls: Array<{ url: string; headers: Headers }> = []
   globalThis.fetch = async (input, init = {}) => {
     const url = String(input)
     calls.push({ url, headers: new Headers(init.headers) })
-    if (url.endsWith('/auth/me')) return json({ id: USER_ID, email: 'user@example.com', nickname: 'user', status: 'active' })
     if (url.includes('/tasks?status=')) {
       return json({
         items: [
@@ -275,10 +273,42 @@ test('loading drafts joins tasks, approvals and observations with the agent user
   assert.equal(drafts[1].sourceLabel, '飞书 · 群聊')
   const agentCalls = calls.filter((call) => call.url.includes('/api/agent/v1'))
   assert.ok(agentCalls.length >= 3)
-  assert.ok(agentCalls.every((call) => call.headers.get('X-Agent-User-Id') === USER_ID))
+  assert.ok(agentCalls.every((call) => call.headers.get('Authorization') === 'Bearer access-token'))
+  assert.ok(agentCalls.every((call) => call.headers.get('X-Agent-User-Id') === null))
   assert.ok(agentCalls.some((call) => call.url.includes('status=waiting_approval,waiting_input')))
   // The approved task keeps its approval arguments, so no plan lookup is needed.
   assert.ok(!agentCalls.some((call) => call.url.endsWith('/plan')))
+})
+
+test('agent requests refresh once and retry without a client identity header', async () => {
+  installStorage('old-token')
+  const authorizations: string[] = []
+  let taskCalls = 0
+  globalThis.fetch = async (input, init = {}) => {
+    const url = String(input)
+    if (url.endsWith('/api/core/auth/refresh')) {
+      return json({
+        access_token: 'new-token',
+        token_type: 'Bearer',
+        expires_at: '2026-10-01T12:00:00Z',
+      })
+    }
+    if (url.endsWith('/api/agent/v1/tasks')) {
+      taskCalls += 1
+      const headers = new Headers(init.headers)
+      authorizations.push(headers.get('Authorization') || '')
+      assert.equal(headers.get('X-Agent-User-Id'), null)
+      return taskCalls === 1
+        ? json({ code: 'AUTH_UNAUTHENTICATED' }, 401)
+        : json({ task_id: 'task-1', status: 'received', events_url: '/events' }, 202)
+    }
+    throw new Error(`unexpected request: ${url}`)
+  }
+
+  const result = await createAgentTask({ text: '测试认证刷新' })
+
+  assert.equal(result.task_id, 'task-1')
+  assert.deepEqual(authorizations, ['Bearer old-token', 'Bearer new-token'])
 })
 
 test('confirming sends the approval version', async () => {
@@ -423,17 +453,18 @@ test('confirming with edited arguments posts them with the approval version', as
   })
 })
 
-test('an unusable identity fails closed instead of listing someone else\'s drafts', async () => {
-  installStorage('another-token')
+test('an Agent request without a session fails closed before calling the API', async () => {
+  installStorage('')
   let agentCalls = 0
-  globalThis.fetch = async (input) => {
-    const url = String(input)
-    if (url.endsWith('/auth/me')) return json({ id: 'dev-user', email: 'dev@example.com', nickname: 'dev', status: 'active' })
+  globalThis.fetch = async () => {
     agentCalls += 1
     return json({ items: [] })
   }
 
-  await assert.rejects(() => loadScheduleDrafts(), (error: unknown) => error instanceof AgentApiError)
+  await assert.rejects(
+    () => loadScheduleDrafts(),
+    (error: any) => error?.status === 401 && error?.code === 'AUTH_UNAUTHENTICATED',
+  )
   assert.equal(agentCalls, 0)
 })
 

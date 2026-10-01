@@ -1,4 +1,4 @@
-import { getAccessToken, getCurrentUser } from './core-auth.ts'
+import { authenticatedFetch } from '../auth/request.ts'
 import { listConversations, type ConnectorPlatform } from './info-knowledge.ts'
 
 const env = ((import.meta as ImportMeta & { env?: Record<string, string> }).env || {})
@@ -18,47 +18,12 @@ export class AgentApiError extends Error {
   }
 }
 
-// The Agent API authorises every call by owner, and that owner must be the Core
-// user uuid (the same value Knowledge maps external identities to). A bogus or
-// placeholder identity must fail closed instead of returning someone else's
-// drafts.
-let userIDPromise: Promise<string> | null = null
-let cachedToken = ''
-
-function isUserID(value: unknown): value is string {
-  return typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value.trim())
-}
-
-export async function currentAgentUserID(): Promise<string> {
-  // Re-resolve when the session token changes: a different token can be a
-  // different user, and the drafts of the previous user must never leak through.
-  const token = getAccessToken()
-  if (!userIDPromise || cachedToken !== token) {
-    cachedToken = token
-    userIDPromise = getCurrentUser()
-      .then((user) => {
-        const userID = String(user?.id || '').trim()
-        if (!isUserID(userID)) throw new AgentApiError('authenticated user identity is unavailable', 'identity_unavailable', 401, false)
-        return userID
-      })
-      .catch((error) => {
-        userIDPromise = null
-        throw error
-      })
-  }
-  return userIDPromise
-}
-
-async function agentHeaders(): Promise<Headers> {
-  const headers = new Headers({ Accept: 'application/json', 'Content-Type': 'application/json' })
-  const token = getAccessToken()
-  if (token) headers.set('Authorization', `Bearer ${token}`)
-  headers.set('X-Agent-User-Id', await currentAgentUserID())
-  return headers
+function agentHeaders(): Headers {
+  return new Headers({ Accept: 'application/json', 'Content-Type': 'application/json' })
 }
 
 async function agentRequest<T>(path: string, init: RequestInit = {}): Promise<T> {
-  const response = await fetch(`${baseURL}${path}`, { ...init, headers: await agentHeaders() })
+  const response = await authenticatedFetch(`${baseURL}${path}`, { ...init, headers: agentHeaders() })
   const raw = await response.text()
   let body: any = null
   if (raw) {
@@ -70,8 +35,8 @@ async function agentRequest<T>(path: string, init: RequestInit = {}): Promise<T>
   }
   if (!response.ok) {
     throw new AgentApiError(
-      body?.message || body?.detail || `Agent request failed (${response.status})`,
-      body?.code || 'request_failed',
+      response.status === 401 ? '登录已过期，请重新登录' : body?.message || body?.detail || `Agent request failed (${response.status})`,
+      response.status === 401 ? 'AUTH_UNAUTHENTICATED' : body?.code || 'request_failed',
       response.status,
       Boolean(body?.retryable),
     )
@@ -187,9 +152,9 @@ export async function streamAgentTaskEvents(
 
   while (!signal?.aborted) {
     try {
-      const response = await fetch(
+      const response = await authenticatedFetch(
         `${baseURL}/tasks/${encodeURIComponent(taskID)}/events?after=${cursor}&timeout_seconds=${timeoutSeconds}`,
-        { headers: await agentHeaders(), signal },
+        { headers: agentHeaders(), signal },
       )
       if (!response.ok || !response.body) {
         throw new AgentApiError(
@@ -236,7 +201,7 @@ export async function streamAgentTaskEvents(
       await wait(Math.min(250 * 2 ** (reconnects - 1), 2000), signal)
     } catch (error) {
       if (signal?.aborted || (error instanceof DOMException && error.name === 'AbortError')) return cursor
-      if (error instanceof AgentApiError && !error.retryable) throw error
+      if ((error as any)?.status === 401 || (error instanceof AgentApiError && !error.retryable)) throw error
       if (reconnects >= maxReconnects) throw error
       reconnects += 1
       handlers.onReconnect?.(reconnects)
