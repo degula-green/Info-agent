@@ -16,6 +16,11 @@ class RepositoryTests(unittest.TestCase):
                 "resource_id": "00000000-0000-0000-0000-000000000001",
                 "knowledge_item_id": "00000000-0000-0000-0000-000000000002",
                 "source_audience_policy": "organization_members",
+                "source_conversation_name": "aims",
+                "source_platform": "feishu",
+                "sender_platform": "feishu",
+                "sender_identity_id": "00000000-0000-0000-0000-000000000004",
+                "sender_display_name": "degula",
                 "content_version": 1,
                 "acl_version": 1,
             },
@@ -23,6 +28,10 @@ class RepositoryTests(unittest.TestCase):
         first = repository.create_or_get_job(base)
         second = repository.create_or_get_job(base)
         self.assertEqual(first["id"], second["id"])
+        stored = repository.get_job(first["id"])
+        self.assertEqual(stored["source_payload"]["source_conversation_name"], "aims")
+        self.assertEqual(stored["source_payload"]["source_platform"], "feishu")
+        self.assertEqual(stored["source_payload"]["sender_platform"], "feishu")
         changed = {**base, "payload": {**base["payload"], "content_version": 2}}
         with self.assertRaises(ValueError):
             repository.create_or_get_job(changed)

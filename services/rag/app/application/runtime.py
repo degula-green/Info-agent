@@ -482,6 +482,9 @@ class MVPWorkerRuntime:
 
 
 def _event_payload_from_job(job: dict[str, Any]) -> dict[str, Any]:
+    payload = job.get("source_payload")
+    if isinstance(payload, dict) and payload:
+        return dict(payload)
     return {
         "resource_type": job["resource_type"],
         "resource_id": job["resource_id"],

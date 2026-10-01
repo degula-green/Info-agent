@@ -117,6 +117,7 @@ class PostgresRagMVPRepository:
         self.schema = _safe_schema(settings.database_schema)
         self._connection_factory = connection_factory
         self._pool: Any | None = None
+        self._source_payload_ready = False
 
     @property
     def configured(self) -> bool:
@@ -167,7 +168,19 @@ class PostgresRagMVPRepository:
             self._pool.close()
             self._pool = None
 
+    def _ensure_source_payload_column(self) -> None:
+        if self._source_payload_ready:
+            return
+        with self._connection() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    f"""ALTER TABLE IF EXISTS {self.schema}.processing_jobs
+                        ADD COLUMN IF NOT EXISTS source_payload jsonb"""
+                )
+        self._source_payload_ready = True
+
     def create_or_get_job(self, envelope: dict[str, Any], *, processing_version: str | None = None) -> dict[str, Any]:
+        self._ensure_source_payload_column()
         payload = envelope.get("payload") if isinstance(envelope.get("payload"), dict) else {}
         source_event_id = str(envelope.get("event_id") or "")
         if not source_event_id:
@@ -188,10 +201,11 @@ class PostgresRagMVPRepository:
                     f"""INSERT INTO {self.schema}.processing_jobs
                     (source_event_id,payload_hash,job_type,knowledge_item_id,resource_type,resource_id,
                      knowledge_base_id,scope_type,scope_id,source_conversation_id,source_audience_policy,
-                     content_version,processing_version,acl_version)
+                     content_version,processing_version,acl_version,source_payload)
                     VALUES (%s::uuid,%s,'full_process',%s::uuid,%s,%s::uuid,%s::uuid,%s,%s::uuid,
-                            %s::uuid,%s,%s,%s,%s)
-                    ON CONFLICT (source_event_id) DO UPDATE SET payload_hash={self.schema}.processing_jobs.payload_hash
+                            %s::uuid,%s,%s,%s,%s,%s::jsonb)
+                    ON CONFLICT (source_event_id) DO UPDATE SET
+                        source_payload=EXCLUDED.source_payload
                     RETURNING id::text,payload_hash,status,current_stage""",
                     (
                         source_event_id, hash_value, knowledge_item_id, resource_type, resource_id,
@@ -199,6 +213,7 @@ class PostgresRagMVPRepository:
                         _uuid_or_none(payload.get("source_conversation_id")), audience or None,
                         int(payload.get("content_version") or 1), version,
                         int(payload.get("acl_version") or 0),
+                        _as_json(payload),
                     ),
                 )
                 row = cursor.fetchone()
@@ -222,7 +237,8 @@ class PostgresRagMVPRepository:
                     f"""SELECT id::text,status,current_stage,lease_owner,lease_until,lease_epoch,retry_count,next_retry_at,parse_status,
                                source_event_id::text,knowledge_item_id::text,resource_type,resource_id::text,
                                knowledge_base_id::text,scope_type,scope_id::text,source_conversation_id::text,
-                               source_audience_policy,content_version,processing_version,acl_version,last_error
+                               source_audience_policy,content_version,processing_version,acl_version,last_error,
+                               source_payload
                         FROM {self.schema}.processing_jobs WHERE {where}""",
                     (value,),
                 )
@@ -278,7 +294,8 @@ class PostgresRagMVPRepository:
                                   j.knowledge_item_id::text,j.resource_type,j.resource_id::text,
                                   j.knowledge_base_id::text,j.scope_type,j.scope_id::text,
                                   j.source_conversation_id::text,j.source_audience_policy,
-                                  j.content_version,j.processing_version,j.acl_version,j.last_error""",
+                                  j.content_version,j.processing_version,j.acl_version,j.last_error,
+                                  j.source_payload""",
                     (
                         *job_params,
                         limit,
@@ -304,7 +321,8 @@ class PostgresRagMVPRepository:
                                knowledge_item_id::text,resource_type,resource_id::text,
                                knowledge_base_id::text,scope_type,scope_id::text,
                                source_conversation_id::text,source_audience_policy,
-                               content_version,processing_version,acl_version,last_error
+                               content_version,processing_version,acl_version,last_error,
+                               source_payload
                         FROM {self.schema}.processing_jobs
                         WHERE {stage_clause}
                           AND next_retry_at<=CURRENT_TIMESTAMP
@@ -1742,6 +1760,7 @@ class PostgresRagMVPRepository:
             "source_audience_policy": row[17], "content_version": int(row[18]),
             "processing_version": row[19], "acl_version": int(row[20] or 0),
             "last_error": row[21],
+            "source_payload": row[22] if len(row) > 22 and isinstance(row[22], dict) else {},
         }
 
     @staticmethod
@@ -1839,6 +1858,7 @@ class InMemoryRagMVPRepository:
             "current_stage": None, "lease_owner": None, "lease_until": None, "lease_epoch": 0,
             "parse_status": "pending",
             "retry_count": 0, "next_retry_at": datetime.now(timezone.utc), "last_error": None,
+            "source_payload": dict(payload),
         }
         self.jobs[job_id] = value
         self.events[event_id] = digest

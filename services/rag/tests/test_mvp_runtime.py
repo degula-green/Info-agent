@@ -6,7 +6,7 @@ from app.application.callback_service import CallbackLane
 from app.application.index_service import MVPIndexService
 from app.application.memory_service import MemoryCandidateService
 from app.application.parse_service import MVPParseService
-from app.application.runtime import MVPWorkerRuntime
+from app.application.runtime import MVPWorkerRuntime, _event_payload_from_job
 from app.domain.rag import Chunk
 from app.infrastructure.embedding.client import HashEmbeddingProvider
 from app.infrastructure.persistence.mvp import InMemoryRagMVPRepository
@@ -42,6 +42,19 @@ class _Knowledge:
             "content_hash": "a" * 64,
             "text": "青云项目已进入交付阶段，张三负责延期处理。",
         }
+
+
+def test_event_payload_from_job_prefers_full_source_payload() -> None:
+    payload = {
+        "resource_type": "message",
+        "resource_id": RESOURCE_ID,
+        "knowledge_item_id": KNOWLEDGE_ITEM,
+        "source_conversation_name": "aims",
+        "source_platform": "feishu",
+        "sender_platform": "feishu",
+    }
+
+    assert _event_payload_from_job({"source_payload": payload}) == payload
 
 
 class _ArtifactStore:
