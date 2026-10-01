@@ -11,7 +11,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from app.application.task_service import TaskNotFoundError, TaskPermissionError, TaskStateError
-from app.auth import current_user_id
+from app.auth import AuthenticatedUser, current_user, current_user_id
 from app.container import AgentContainer
 from app.kernel.approval import ApprovalError
 from app.kernel.errors import AgentContractError
@@ -55,7 +55,7 @@ class DecisionBody(BaseModel):
 @router.post("/tasks", status_code=202)
 def create_task(
     body: CreateTaskBody,
-    owner_user_id: str = Depends(current_user_id),
+    user: AuthenticatedUser = Depends(current_user),
 ) -> dict[str, Any]:
     """Accepts a chat message or a collected message; the understanding layer decides.
 
@@ -72,11 +72,16 @@ def create_task(
     payload: dict[str, Any] = {"text": body.text}
     if body.steps:
         payload["steps"] = body.steps
+    source_ref = dict(body.source_ref)
+    source_ref.pop("organization_id", None)
+    organization_id = container.core_client.current_organization(user.access_token)
+    if organization_id:
+        source_ref["organization_id"] = organization_id
     task = container.task_service.create_task(
-        owner_user_id=owner_user_id,
+        owner_user_id=user.user_id,
         source_type=body.source_type,
         payload=payload,
-        source_ref=body.source_ref,
+        source_ref=source_ref,
         constraints=body.constraints,
         client_message_id=body.client_message_id,
     )

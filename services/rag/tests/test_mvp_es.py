@@ -51,6 +51,7 @@ def _context() -> ResourceContext:
             "knowledge_item_id": "00000000-0000-0000-0000-000000000002",
             "source_audience_policy": "organization_members",
             "source_message_id": "00000000-0000-0000-0000-000000000001",
+            "message_type": "text",
             "sender_identity_id": "00000000-0000-0000-0000-000000000005",
             "sender_display_name": "张三",
             "sender_platform": "feishu",
@@ -85,6 +86,9 @@ class ElasticsearchContractTests(unittest.TestCase):
         self.assertIn("sender_display_name", properties)
         self.assertIn("source_conversation_name", properties)
         self.assertIn("source_platform", properties)
+        self.assertIn("message_type", properties)
+        self.assertIn("file_extension", properties)
+        self.assertIn("mime_type", properties)
         context_properties = properties["context_header"]["properties"]
         self.assertIn("sender_display_name", context_properties)
         self.assertIn("source_conversation_name", context_properties)
@@ -109,6 +113,7 @@ class ElasticsearchContractTests(unittest.TestCase):
         self.assertEqual(document["sender_display_name"], "张三")
         self.assertEqual(document["source_conversation_name"], "财务项目群")
         self.assertEqual(document["source_platform"], "feishu")
+        self.assertEqual(document["message_type"], "text")
 
 
 if __name__ == "__main__":

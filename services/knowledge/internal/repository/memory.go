@@ -2445,6 +2445,7 @@ func (s *MemoryStore) TryMarkKnowledgeReady(ctx context.Context, id, traceID str
 			"source_conversation_name": nilString(conversation.Name),
 			"source_platform":          nilString(conversation.Platform),
 			"external_conversation_id": nilString(conversation.ExternalConversationID),
+			"message_type":             nilString(message.MessageType),
 		},
 	}
 	s.outbox[event.ID] = event

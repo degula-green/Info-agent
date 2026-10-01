@@ -13,10 +13,16 @@ from app.application.execution_service import ExecutionService
 from app.application.knowledge_events import KnowledgeEventService
 from app.application.task_service import TaskService
 from app.capabilities.answer import AnswerComposeCapability
+from app.capabilities.knowledge import (
+    KnowledgeSearchContentCapability,
+    KnowledgeSearchSourcesCapability,
+)
 from app.capabilities.todo import TodoCreateCapability
 from app.capabilities.web import WebExtractCapability, WebFetchCapability
 from app.config import Settings, settings as default_settings
 from app.infrastructure.knowledge.client import HttpKnowledgeClient, KnowledgeClient
+from app.infrastructure.core.client import CoreClient, HttpCoreClient, NullCoreClient
+from app.infrastructure.rag.client import HttpRAGClient, RAGClient
 from app.infrastructure.llm.client import OpenAIChatClient
 from app.providers.answer import LlmAnswerProvider
 from app.providers.page_fetcher import HttpPageFetcher
@@ -52,6 +58,7 @@ class AgentContainer:
     knowledge_ingress: KnowledgeEventIngress
     knowledge_client: KnowledgeClient
     knowledge_events: KnowledgeEventService
+    core_client: CoreClient
 
     def close(self) -> None:
         # The two stores normally share one pool; closing it twice is a no-op
@@ -72,13 +79,26 @@ def build_knowledge_client(settings: Settings) -> KnowledgeClient:
     )
 
 
+def build_core_client(settings: Settings) -> CoreClient:
+    if not settings.core_base_url:
+        return NullCoreClient()
+    return HttpCoreClient(
+        base_url=settings.core_base_url,
+        timeout_seconds=settings.core_timeout_seconds,
+    )
+
+
 def _timeout_seconds(value: float) -> int:
     """Descriptor timeouts are whole seconds; a sub-second setting still means 1."""
 
     return max(1, int(round(float(value))))
 
 
-def build_registry(settings: Settings, todo_store: TodoStore) -> CapabilityRegistry:
+def build_registry(
+    settings: Settings,
+    todo_store: TodoStore,
+    rag_client: RAGClient | None = None,
+) -> CapabilityRegistry:
     """Every capability the Agent can actually execute.
 
     The capability and the provider it calls are given the same timeout, so the
@@ -88,36 +108,50 @@ def build_registry(settings: Settings, todo_store: TodoStore) -> CapabilityRegis
     """
 
     web_timeout = _timeout_seconds(settings.web_timeout_seconds)
-    return CapabilityRegistry(
-        [
-            TodoCreateCapability(
-                todo_store,
-                default_timezone=settings.default_timezone,
+    capabilities = [
+        TodoCreateCapability(
+            todo_store,
+            default_timezone=settings.default_timezone,
+        ),
+        WebFetchCapability(
+            HttpPageFetcher(
+                timeout_seconds=settings.web_timeout_seconds,
+                max_bytes=settings.web_max_bytes,
+                max_redirects=settings.web_max_redirects,
+                allow_private_addresses=settings.web_allow_private_addresses,
             ),
-            WebFetchCapability(
-                HttpPageFetcher(
-                    timeout_seconds=settings.web_timeout_seconds,
-                    max_bytes=settings.web_max_bytes,
-                    max_redirects=settings.web_max_redirects,
-                    allow_private_addresses=settings.web_allow_private_addresses,
-                ),
-                timeout_seconds=web_timeout,
+            timeout_seconds=web_timeout,
+        ),
+        WebExtractCapability(timeout_seconds=web_timeout),
+        AnswerComposeCapability(
+            LlmAnswerProvider(
+                OpenAIChatClient(
+                    base_url=settings.llm_base_url,
+                    api_key=settings.llm_api_key,
+                    model=settings.llm_model,
+                    timeout_seconds=settings.answer_timeout_seconds,
+                    max_output_tokens=settings.answer_max_output_tokens,
+                    response_format=settings.llm_response_format,
+                )
             ),
-            WebExtractCapability(timeout_seconds=web_timeout),
-            AnswerComposeCapability(
-                LlmAnswerProvider(
-                    OpenAIChatClient(
-                        base_url=settings.llm_base_url,
-                        api_key=settings.llm_api_key,
-                        model=settings.llm_model,
-                        timeout_seconds=settings.answer_timeout_seconds,
-                        max_output_tokens=settings.answer_max_output_tokens,
-                        response_format=settings.llm_response_format,
-                    )
-                ),
-                timeout_seconds=_timeout_seconds(settings.answer_timeout_seconds),
-            ),
-        ]
+            timeout_seconds=_timeout_seconds(settings.answer_timeout_seconds),
+        ),
+    ]
+    if settings.rag_agent_tools_enabled and rag_client is not None:
+        capabilities.extend(
+            [
+                KnowledgeSearchSourcesCapability(rag_client),
+                KnowledgeSearchContentCapability(rag_client),
+            ]
+        )
+    return CapabilityRegistry(capabilities)
+
+
+def build_rag_client(settings: Settings) -> RAGClient:
+    return HttpRAGClient(
+        base_url=settings.rag_base_url,
+        service_token=settings.rag_service_token,
+        timeout_seconds=settings.rag_timeout_seconds,
     )
 
 
@@ -257,6 +291,8 @@ def build_container(
     planner=None,
     policy=None,
     knowledge: KnowledgeClient | None = None,
+    core: CoreClient | None = None,
+    rag_client: RAGClient | None = None,
     ingress: KnowledgeEventIngress | None = None,
     understanding_provider=None,
 ) -> AgentContainer:
@@ -264,7 +300,12 @@ def build_container(
     resolved_store = store or build_store(resolved)
     resolved_todo_store = todo_store or build_todo_store(resolved)
     resolved_knowledge = knowledge or build_knowledge_client(resolved)
-    registry = registry or build_registry(resolved, resolved_todo_store)
+    resolved_rag_client = rag_client or build_rag_client(resolved)
+    registry = registry or build_registry(
+        resolved,
+        resolved_todo_store,
+        resolved_rag_client,
+    )
     resolved_planner = planner or build_planner(resolved)
     # The LLM planner re-asks the model when a step's arguments miss the
     # capability schema; it can only do that if it is handed the same
@@ -313,4 +354,5 @@ def build_container(
             knowledge=resolved_knowledge,
             task_service=task_service,
         ),
+        core_client=core or build_core_client(resolved),
     )

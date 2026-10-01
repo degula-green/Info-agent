@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hmac
 import uuid
 from typing import Any, Iterator
 
@@ -25,9 +26,11 @@ from app.domain.rag import SearchRequest
 from app.infrastructure.qa import QAUnavailable
 from app.schemas.search import (
     AIDocumentBody,
+    ContentSearchBody,
     QAConversationBody,
     QATitleBody,
     SearchBody,
+    SourceSearchBody,
     TreeSearchBody,
 )
 
@@ -82,6 +85,15 @@ def _request(
         qa_mode=getattr(body, "mode", "quick"),
         conversation_id=getattr(body, "conversation_id", None),
         source_conversation_id=body.source_conversation_id,
+        sender_ids=tuple(body.sender_ids),
+        sender_names=tuple(body.sender_names),
+        conversation_ids=tuple(body.conversation_ids),
+        conversation_names=tuple(body.conversation_names),
+        resource_ids=tuple(body.resource_ids),
+        resource_types=tuple(body.resource_types),
+        file_extensions=tuple(body.file_extensions),
+        message_types=tuple(body.message_types),
+        group_by_source=body.group_by_source,
     )
 
 
@@ -131,6 +143,44 @@ def tree_search(
         header_organization_id=x_organization_id,
     )
     return _search_response(_run_search(request, service))
+
+
+@router.post("/search/sources")
+def search_sources(
+    body: SourceSearchBody,
+    x_user_id: str | None = Header(default=None),
+    x_organization_id: str | None = Header(default=None),
+    x_agent_service_token: str | None = Header(default=None),
+    service: RAGRetrievalService = Depends(get_retrieval_service),
+) -> dict[str, object]:
+    _require_agent_service(x_agent_service_token)
+    request = _request(
+        body,
+        entry="sources",
+        header_user_id=x_user_id,
+        header_organization_id=x_organization_id,
+    )
+    response = _run_search(request, service)
+    return _sources_response(response, top_k=request.top_k)
+
+
+@router.post("/search/content")
+def search_content(
+    body: ContentSearchBody,
+    x_user_id: str | None = Header(default=None),
+    x_organization_id: str | None = Header(default=None),
+    x_agent_service_token: str | None = Header(default=None),
+    service: RAGRetrievalService = Depends(get_retrieval_service),
+) -> dict[str, object]:
+    _require_agent_service(x_agent_service_token)
+    request = _request(
+        body,
+        entry="content",
+        header_user_id=x_user_id,
+        header_organization_id=x_organization_id,
+    )
+    response = _run_search(request, service)
+    return _content_response(response, top_k=request.top_k)
 
 
 @router.post("/ai/documents")
@@ -328,6 +378,150 @@ def _search_response(response: RetrievalResponse) -> dict[str, Any]:
         "citations": [],
         "diagnostics": response.diagnostics,
     }
+
+
+def _require_agent_service(token: str | None) -> None:
+    expected = str(settings.agent_service_token or "").strip()
+    supplied = str(token or "").strip()
+    if expected and not hmac.compare_digest(expected, supplied):
+        raise HTTPException(status_code=401, detail="unauthorized")
+    if not expected and settings.environment not in {"development", "test"}:
+        raise HTTPException(status_code=503, detail="agent_service_token_unconfigured")
+
+
+def _sources_response(response: RetrievalResponse, *, top_k: int) -> dict[str, Any]:
+    items = [_source_item(result) for result in response.results]
+    resource_ids = [item["resource_id"] for item in items if item.get("resource_id")]
+    return {
+        "request_id": response.request_id,
+        "items": items,
+        "resource_ids": resource_ids,
+        "returned_count": len(items),
+        "has_more": len(items) >= max(1, top_k),
+        "diagnostics": {
+            **response.diagnostics,
+            "metadata_coverage": _metadata_coverage(response.results),
+        },
+    }
+
+
+def _source_item(result: Any) -> dict[str, Any]:
+    source = result.source
+    return {
+        "resource_id": source.get("resource_id"),
+        "resource_type": source.get("resource_type"),
+        "knowledge_item_id": source.get("knowledge_item_id"),
+        "title": source.get("title") or source.get("file_name"),
+        "file_name": source.get("file_name"),
+        "message_type": source.get("message_type"),
+        "sender": {
+            "id": source.get("sender_identity_id"),
+            "name": source.get("sender_display_name"),
+            "platform": source.get("sender_platform"),
+        },
+        "conversation": {
+            "id": source.get("source_conversation_id"),
+            "name": source.get("source_conversation_name"),
+            "type": source.get("source_conversation_type"),
+            "platform": source.get("source_platform"),
+        },
+        "knowledge_base": {"id": source.get("knowledge_base_id")},
+        "sent_at": source.get("sent_at"),
+        "score": result.score,
+        "score_type": "rrf",
+        "preview": _preview(result.content),
+    }
+
+
+def _content_response(response: RetrievalResponse, *, top_k: int) -> dict[str, Any]:
+    grouped: dict[str, dict[str, Any]] = {}
+    for result in response.results:
+        source = result.source
+        key = ":".join(
+            (
+                str(source.get("resource_type") or ""),
+                str(source.get("resource_id") or result.chunk_id),
+                str(source.get("content_version") or ""),
+            )
+        )
+        item = grouped.setdefault(
+            key,
+            {
+                "resource_id": source.get("resource_id"),
+                "resource_type": source.get("resource_type"),
+                "knowledge_item_id": source.get("knowledge_item_id"),
+                "title": source.get("title") or source.get("file_name"),
+                "sender": {
+                    "id": source.get("sender_identity_id"),
+                    "name": source.get("sender_display_name"),
+                    "platform": source.get("sender_platform"),
+                },
+                "conversation": {
+                    "id": source.get("source_conversation_id"),
+                    "name": source.get("source_conversation_name"),
+                    "type": source.get("source_conversation_type"),
+                    "platform": source.get("source_platform"),
+                },
+                "sent_at": source.get("sent_at"),
+                "best_score": result.score,
+                "score_type": "rrf",
+                "matched_chunk_count": 0,
+                "chunks": [],
+            },
+        )
+        item["best_score"] = max(float(item["best_score"]), float(result.score))
+        if len(item["chunks"]) >= 3:
+            continue
+        item["matched_chunk_count"] += 1
+        item["chunks"].append(
+            {
+                "chunk_id": result.chunk_id,
+                "text": result.content,
+                "score": result.score,
+                "score_type": "rrf",
+                "position": dict(source.get("source_locator") or {}) or None,
+            }
+        )
+    items = sorted(grouped.values(), key=lambda value: value["best_score"], reverse=True)
+    items = items[: max(1, top_k)]
+    return {
+        "request_id": response.request_id,
+        "items": items,
+        "returned_source_count": len(items),
+        "returned_chunk_count": sum(len(item["chunks"]) for item in items),
+        "has_more": len(items) >= max(1, top_k),
+        "diagnostics": {
+            **response.diagnostics,
+            "metadata_coverage": _metadata_coverage(response.results),
+        },
+    }
+
+
+def _metadata_coverage(results: list[Any]) -> str:
+    conversation_scoped = [
+        result
+        for result in results
+        if result.source.get("source_conversation_id")
+    ]
+    if not conversation_scoped:
+        return "complete"
+    missing = any(
+        not all(
+            (
+                result.source.get("sender_identity_id"),
+                result.source.get("sender_display_name"),
+                result.source.get("source_conversation_name"),
+                result.source.get("source_platform"),
+            )
+        )
+        for result in conversation_scoped
+    )
+    return "partial" if missing else "complete"
+
+
+def _preview(value: str, limit: int = 200) -> str:
+    text = " ".join(str(value or "").split())
+    return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
 def _legacy_item(result: Any) -> dict[str, Any]:

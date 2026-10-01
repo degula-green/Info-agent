@@ -336,6 +336,7 @@ func TestPrivacyPermissionAndReadyOutboxContract(t *testing.T) {
 		events[0].Payload["source_conversation_name"] != domain.PlatformWechat+"-chat-name" ||
 		events[0].Payload["source_platform"] != domain.PlatformWechat ||
 		events[0].Payload["external_conversation_id"] != domain.PlatformWechat+"-chat" ||
+		events[0].Payload["message_type"] != "text" ||
 		events[0].Payload["sent_at"] == nil {
 		t.Fatalf("ready payload is missing source metadata: %+v", events[0].Payload)
 	}

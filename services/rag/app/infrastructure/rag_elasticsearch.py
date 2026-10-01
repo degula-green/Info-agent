@@ -146,6 +146,11 @@ class RagChunkIndex:
                 index=index,
                 query=_bm25_query(request.query, filters),
                 size=size or settings.bm25_top_k,
+                sort=(
+                    [{"sent_at": {"order": "desc", "missing": "_last"}}]
+                    if not request.query.strip()
+                    else None
+                ),
             )
             output.extend(_results(response))
         return _dedupe_display_protected(output)
@@ -242,7 +247,9 @@ class RagChunkIndex:
             unique[result.chunk_id] = result
         return list(unique.values())
 
-    def _search(self, **kwargs: Any) -> Any:
+    def _search(self, *, sort: list[dict[str, Any]] | None = None, **kwargs: Any) -> Any:
+        if sort:
+            kwargs["sort"] = sort
         try:
             return self.client.search(
                 **kwargs,
@@ -259,6 +266,8 @@ class RagChunkIndex:
 
 
 def _bm25_query(query: str, filters: list[dict[str, Any]]) -> dict[str, Any]:
+    if not str(query or "").strip():
+        return {"bool": {"filter": filters}}
     return {
         "bool": {
             "must": [{
@@ -290,8 +299,93 @@ def _filters(
         output.append({"range": {"sent_at": {"gte": request.occurred_after}}})
     if request.occurred_before:
         output.append({"range": {"sent_at": {"lte": request.occurred_before}}})
-    if request.source_conversation_id:
-        output.append({"term": {"source_conversation_id": request.source_conversation_id}})
+    conversation_ids = tuple(
+        dict.fromkeys(
+            [
+                value
+                for value in (
+                    request.source_conversation_id,
+                    *request.conversation_ids,
+                )
+                if value
+            ]
+        )
+    )
+    conversation_should: list[dict[str, Any]] = []
+    if conversation_ids:
+        conversation_should.append(
+            {"terms": {"source_conversation_id": list(conversation_ids)}}
+        )
+    if request.conversation_names:
+        conversation_should.extend(
+            {
+                "match": {
+                    "source_conversation_name": {
+                        "query": name,
+                        "operator": "and",
+                    }
+                }
+            }
+            for name in request.conversation_names
+        )
+    if (
+        len(conversation_ids) == 1
+        and request.source_conversation_id
+        and not request.conversation_ids
+        and not request.conversation_names
+    ):
+        output.append({"term": {"source_conversation_id": conversation_ids[0]}})
+    elif conversation_should:
+        output.append(
+            {
+                "bool": {
+                    "should": conversation_should,
+                    "minimum_should_match": 1,
+                }
+            }
+        )
+    sender_should: list[dict[str, Any]] = []
+    if request.sender_ids:
+        sender_should.append(
+            {"terms": {"sender_identity_id": list(request.sender_ids)}}
+        )
+    if request.sender_names:
+        sender_should.extend(
+            {
+                "match": {
+                    "sender_display_name": {
+                        "query": name,
+                        "operator": "and",
+                    }
+                }
+            }
+            for name in request.sender_names
+        )
+    if sender_should:
+        output.append(
+            {
+                "bool": {
+                    "should": sender_should,
+                    "minimum_should_match": 1,
+                }
+            }
+        )
+    if request.resource_ids:
+        output.append({"terms": {"resource_id": list(request.resource_ids)}})
+    if request.resource_types:
+        output.append({"terms": {"resource_type": list(request.resource_types)}})
+    if request.file_extensions:
+        output.append(
+            {
+                "terms": {
+                    "file_extension": [
+                        str(value).lower().lstrip(".") for value in request.file_extensions
+                    ]
+                }
+            }
+        )
+    if request.message_types:
+        output.append({"terms": {"message_type": list(request.message_types)}})
     if branch_keys:
         should: list[dict[str, Any]] = []
         exact: list[str] = []

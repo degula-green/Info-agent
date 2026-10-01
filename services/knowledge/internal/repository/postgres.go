@@ -2782,6 +2782,7 @@ func (s *PostgresStore) TryMarkKnowledgeReady(ctx context.Context, id, traceID s
 	var sentAt *time.Time
 	var sourceConversationName string
 	var externalConversationID string
+	var messageType string
 	err = tx.QueryRow(ctx, `
 		SELECT
 			COALESCE(ki.source_message_id::text, a.message_id::text, ''),
@@ -2790,7 +2791,8 @@ func (s *PostgresStore) TryMarkKnowledgeReady(ctx context.Context, id, traceID s
 			COALESCE(ci.platform, ''),
 			m.sent_at,
 			COALESCE(ci.name, ''),
-			COALESCE(ci.external_conversation_id, '')
+			COALESCE(ci.external_conversation_id, ''),
+			COALESCE(m.message_type, '')
 		FROM knowledge.knowledge_items ki
 		LEFT JOIN knowledge.attachments a ON a.id = ki.source_attachment_id
 		LEFT JOIN knowledge.messages m ON m.id = COALESCE(ki.source_message_id, a.message_id)
@@ -2805,6 +2807,7 @@ func (s *PostgresStore) TryMarkKnowledgeReady(ctx context.Context, id, traceID s
 		&sentAt,
 		&sourceConversationName,
 		&externalConversationID,
+		&messageType,
 	)
 	if err != nil {
 		return false, dbError(err)
@@ -2836,6 +2839,7 @@ func (s *PostgresStore) TryMarkKnowledgeReady(ctx context.Context, id, traceID s
 		"source_conversation_name": nilString(sourceConversationName),
 		"source_platform":          nilString(sourcePlatform),
 		"external_conversation_id": nilString(externalConversationID),
+		"message_type":             nilString(messageType),
 	})
 	if _, err = tx.Exec(ctx, `UPDATE knowledge.knowledge_items SET processing_status='ready',lifecycle_status=CASE WHEN source_type='local_upload' THEN 'ready' ELSE lifecycle_status END,last_error=NULL,updated_at=now() WHERE id=$1`, id); err != nil {
 		return false, dbError(err)

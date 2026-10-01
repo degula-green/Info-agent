@@ -146,6 +146,24 @@ class Settings:
     knowledge_consumer_group: str = _text(
         "agent-workers", "AGENT_KNOWLEDGE_CONSUMER_GROUP", "agent_KNOWLEDGE_CONSUMER_GROUP"
     )
+    core_base_url: str = _text("", "AGENT_CORE_BASE_URL", "agent_CORE_BASE_URL")
+    core_timeout_seconds: float = _float(
+        5.0, "AGENT_CORE_TIMEOUT_SECONDS", "agent_CORE_TIMEOUT_SECONDS"
+    )
+    rag_base_url: str = _text("", "AGENT_RAG_BASE_URL", "agent_RAG_BASE_URL")
+    rag_service_token: str = _text(
+        "", "AGENT_RAG_SERVICE_TOKEN", "agent_RAG_SERVICE_TOKEN"
+    )
+    rag_timeout_seconds: float = _float(
+        30.0, "AGENT_RAG_TIMEOUT_SECONDS", "agent_RAG_TIMEOUT_SECONDS"
+    )
+    rag_agent_tools_enabled: bool = _bool(
+        False,
+        "AGENT_RAG_AGENT_TOOLS_ENABLED",
+        "agent_RAG_AGENT_TOOLS_ENABLED",
+        "RAG_AGENT_METADATA_TOOLS_ENABLED",
+        "rag_AGENT_METADATA_TOOLS_ENABLED",
+    )
     default_timezone: str = _text(
         "Asia/Shanghai", "AGENT_DEFAULT_TIMEZONE", "agent_DEFAULT_TIMEZONE"
     )

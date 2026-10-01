@@ -11,6 +11,11 @@ USER = {"Authorization": "Bearer user-1-token"}
 OTHER_USER = {"Authorization": "Bearer user-2-token"}
 
 
+class _Core:
+    def current_organization(self, access_token: str) -> str:
+        return "org-verified"
+
+
 def test_create_task_returns_accepted_with_events_url() -> None:
     container, _store, _publisher, _registry = build_test_container()
     client = TestClient(make_app(container))
@@ -44,6 +49,25 @@ def test_create_task_is_idempotent_on_client_message_id() -> None:
 
     assert first["task_id"] == second["task_id"]
     assert len(store.list_unfinished_tasks()) == 1
+
+
+def test_create_task_overwrites_client_organization_with_core_result() -> None:
+    container, store, _publisher, _registry = build_test_container()
+    container.core_client = _Core()
+    client = TestClient(make_app(container))
+
+    response = client.post(
+        "/api/agent/v1/tasks",
+        json={
+            "text": "预算",
+            "source_ref": {"organization_id": "spoofed"},
+        },
+        headers=USER,
+    )
+
+    assert response.status_code == 202
+    task = store.get_task(response.json()["task_id"])
+    assert task.source_ref["organization_id"] == "org-verified"
 
 
 def test_list_tasks_returns_only_the_callers_tasks() -> None:

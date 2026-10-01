@@ -85,6 +85,7 @@ def test_knowledge_event_ingress_creates_one_task_for_a_private_chat() -> None:
         "acl_version": 3,
         "sender_display_name": "张三",
         "sent_at": "2026-09-25T06:12:30Z",
+            "message_type": "text",
     }
 
 

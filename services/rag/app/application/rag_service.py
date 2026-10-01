@@ -75,7 +75,7 @@ class RAGRetrievalService:
         branch_keys, entity_matches = self._resolve_branches(request)
         query_vector: list[float] | None = None
         degraded: list[str] = []
-        if request.entry != "knowledge":
+        if request.entry not in {"knowledge", "sources"}:
             try:
                 vectors = self.embedding.embed([request.query])
                 query_vector = vectors[0] if vectors else None
@@ -148,10 +148,19 @@ class RAGRetrievalService:
             },
         )
         fused = dedupe_logical_positions(fused)
+        if request.entry == "sources":
+            anchor_max_per_resource = 1
+            final_max_per_resource = 1
+        elif request.entry == "content":
+            anchor_max_per_resource = 3
+            final_max_per_resource = 3
+        else:
+            anchor_max_per_resource = max(1, settings.anchors_per_item)
+            final_max_per_resource = max(1, settings.max_chunks_per_item)
         anchor_candidates = select_anchors(
             fused,
-            max_per_resource=max(1, settings.anchors_per_item),
-            limit=max(request.top_k * 3, settings.anchors_per_item),
+            max_per_resource=anchor_max_per_resource,
+            limit=max(request.top_k * 3, anchor_max_per_resource),
         )
         authorized_anchors = self._authorize_results(request, anchor_candidates, scope)
         neighbors: list[SearchResult] = []
@@ -173,8 +182,8 @@ class RAGRetrievalService:
         results = finalize_resource_chunks(
             authorized_anchors,
             authorized_neighbors,
-            limit=request.top_k,
-            max_per_resource=max(1, settings.max_chunks_per_item),
+            limit=request.top_k * final_max_per_resource,
+            max_per_resource=final_max_per_resource,
         )
         diagnostics = {
             "tree_mode": settings.tree_mode,
@@ -200,12 +209,14 @@ class RAGRetrievalService:
                 "knn_top_k": settings.knn_top_k,
             },
             "effective_execution_path": (
-                "tree_boost" if settings.tree_mode == "boost" and branch_branches
+                "metadata_filter" if request.entry == "sources"
+                else "tree_boost" if settings.tree_mode == "boost" and branch_branches
                 else "tree_shadow" if settings.tree_mode == "shadow"
                 else "traditional"
             ),
             "fallback_reason": (
-                "no_entity_match" if settings.tree_mode != "off" and not branch_keys
+                None if request.entry == "sources"
+                else "no_entity_match" if settings.tree_mode != "off" and not branch_keys
                 else "branch_failed" if "branch_failed" in degraded
                 else None
             ),
@@ -254,7 +265,7 @@ class RAGRetrievalService:
         }
 
     def _resolve_branches(self, request: SearchRequest) -> tuple[tuple[str, ...], list[Any]]:
-        if settings.tree_mode == "off":
+        if settings.tree_mode == "off" or request.entry == "sources":
             return (), []
         entities, aliases, version = self.repository.load_entity_registry(
             scope_type=request.scope_type,

@@ -157,3 +157,66 @@ DELETE /api/v1/qa/conversations/{id}
 503 authz_unavailable
 503 qa_unavailable
 ```
+
+## 7. Agent 知识工具接口
+
+以下接口仅供 Agent 内部调用。调用方必须发送：
+
+```text
+X-Agent-Service-Token
+X-User-ID
+X-Organization-ID
+X-Request-ID
+X-Trace-ID
+```
+
+Planner 不能填写用户、组织或 Scope。
+
+### 来源定位
+
+```text
+POST /api/v1/search/sources
+```
+
+支持：
+
+```text
+query
+sender_ids / sender_names
+conversation_ids / conversation_names
+resource_ids / resource_types
+file_extensions / message_types
+occurred_after / occurred_before
+knowledge_base_ids
+top_k
+```
+
+空 query 使用 metadata-only 查询并按 `sent_at` 倒序。
+
+响应包含：
+
+```text
+items
+resource_ids
+returned_count
+has_more
+diagnostics.metadata_coverage
+```
+
+### 内容检索
+
+```text
+POST /api/v1/search/content
+```
+
+支持：
+
+```text
+query
+resource_ids
+knowledge_base_ids
+top_k
+group_by_source
+```
+
+默认按资源聚合，每个资源最多返回 3 个 chunks。

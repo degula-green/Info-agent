@@ -112,6 +112,7 @@ class ResourceContext:
     source_audience_policy: str | None = None
     external_conversation_id: str | None = None
     source_message_id: str | None = None
+    message_type: str | None = None
     source_attachment_id: str | None = None
     sender_identity_id: str | None = None
     sender_platform: str | None = None
@@ -206,6 +207,7 @@ class ResourceContext:
             source_audience_policy=_text_or_none(merged.get("source_audience_policy")),
             external_conversation_id=_text_or_none(merged.get("external_conversation_id")),
             source_message_id=_text_or_none(merged.get("source_message_id")),
+            message_type=_text_or_none(merged.get("message_type")),
             source_attachment_id=_text_or_none(merged.get("source_attachment_id")),
             sender_identity_id=_text_or_none(merged.get("sender_identity_id")),
             sender_platform=_text_or_none(merged.get("sender_platform")),
@@ -369,6 +371,9 @@ class Chunk:
                 "source_platform": context.source_platform,
                 "external_conversation_id": context.external_conversation_id,
                 "source_message_id": context.source_message_id,
+                "message_type": context.message_type,
+                "file_extension": _file_extension(context.file_name),
+                "mime_type": context.mime_type,
                 "sent_at": context.sent_at,
             },
             source_locator=dict(source_locator or {}),
@@ -396,6 +401,9 @@ class Chunk:
             "knowledge_base_id": self.knowledge_base_id,
             "document_id": self.document_id,
             "message_id": self.message_id,
+            "message_type": self.context_header.get("message_type"),
+            "file_extension": self.context_header.get("file_extension"),
+            "mime_type": self.context_header.get("mime_type"),
             "source_conversation_id": self.source_conversation_id,
             "external_conversation_id": self.context_header.get("external_conversation_id"),
             "scope_type": self.scope_type,
@@ -453,6 +461,15 @@ class SearchRequest:
     qa_mode: str = "quick"
     conversation_id: str | None = None
     source_conversation_id: str | None = None
+    sender_ids: tuple[str, ...] = ()
+    sender_names: tuple[str, ...] = ()
+    conversation_ids: tuple[str, ...] = ()
+    conversation_names: tuple[str, ...] = ()
+    resource_ids: tuple[str, ...] = ()
+    resource_types: tuple[str, ...] = ()
+    file_extensions: tuple[str, ...] = ()
+    message_types: tuple[str, ...] = ()
+    group_by_source: bool = False
     branch_keys: tuple[str, ...] = ()
 
     @property
@@ -571,6 +588,14 @@ def _text_or_none(value: Any) -> str | None:
     if value is None or not str(value).strip():
         return None
     return str(value).strip()
+
+
+def _file_extension(value: str | None) -> str | None:
+    name = str(value or "").strip().lower()
+    if "." not in name:
+        return None
+    extension = name.rsplit(".", 1)[-1].strip()
+    return extension or None
 
 
 def _attachment_source(

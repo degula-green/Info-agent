@@ -7,6 +7,10 @@ from typing import Any
 from uuid import uuid4
 
 from app.kernel.errors import classify_error
+from app.kernel.execution_context import (
+    ExecutionContext,
+    bind_execution_context,
+)
 from app.kernel.models import (
     CapabilityCallRecord,
     Observation,
@@ -110,7 +114,14 @@ class CapabilityExecutor:
 
         try:
             arguments = capability.validate(step.arguments)
-            output = capability.execute(arguments)
+            execution_context = ExecutionContext.from_task(
+                task,
+                plan,
+                step,
+                request_id=call.request_id,
+            )
+            with bind_execution_context(execution_context):
+                output = capability.execute(arguments)
         except Exception as exc:  # noqa: BLE001 - normalized into a classified error
             classification = classify_error(exc)
             call.status = "unknown" if classification == "unknown_external_result" else "failed"

@@ -40,6 +40,7 @@ Service2/Knowledge -> Redis Stream -> RAG Dispatcher
 | `sender_identity_id` | `uuid/null` | 消息和聊天附件必填 | 发送人身份 ID |
 | `sender_display_name` | `string/null` | 消息和聊天附件必填 | 发送人显示名称 |
 | `sender_platform` | `string/null` | 消息和聊天附件必填 | 发送平台 |
+| `message_type` | `string/null` | 消息和聊天附件必填 | `text`、`file`、`image` 等 |
 | `sent_at` | `string/null` | 消息和聊天附件必填 | 消息发送时间，RFC3339 |
 | `source_audience_policy` | `string` | 是 | 来源受众策略 |
 | `content_version` | `integer` | 是 | 内容版本 |

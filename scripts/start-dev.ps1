@@ -299,6 +299,17 @@ if (-not $env:RAG_MINIO_SECURE) { $env:RAG_MINIO_SECURE = if ($env:KNOWLEDGE_MIN
 if (-not $env:RAG_REDIS_URL) { $env:RAG_REDIS_URL = $env:KNOWLEDGE_REDIS_URL }
 if (-not $env:RAG_REDIS_DATABASE) { $env:RAG_REDIS_DATABASE = '1' }
 if (-not $env:RAG_REDIS_INBOUND_STREAM) { $env:RAG_REDIS_INBOUND_STREAM = $env:KNOWLEDGE_REDIS_OUTBOUND_STREAM }
+if (-not $env:RAG_AGENT_SERVICE_TOKEN) { $env:RAG_AGENT_SERVICE_TOKEN = 'local-development-only' }
+if (-not $env:AGENT_CORE_BASE_URL) { $env:AGENT_CORE_BASE_URL = 'http://127.0.0.1:8080' }
+if (-not $env:AGENT_RAG_BASE_URL) { $env:AGENT_RAG_BASE_URL = 'http://127.0.0.1:8000' }
+if (-not $env:AGENT_RAG_SERVICE_TOKEN) { $env:AGENT_RAG_SERVICE_TOKEN = $env:RAG_AGENT_SERVICE_TOKEN }
+if (-not $env:RAG_AGENT_METADATA_TOOLS_ENABLED) { $env:RAG_AGENT_METADATA_TOOLS_ENABLED = 'false' }
+if (-not $env:AGENT_RAG_AGENT_TOOLS_ENABLED) { $env:AGENT_RAG_AGENT_TOOLS_ENABLED = $env:RAG_AGENT_METADATA_TOOLS_ENABLED }
+if (-not $env:AGENT_DATABASE_URL) { $env:AGENT_DATABASE_URL = $env:KNOWLEDGE_DATABASE_URL }
+if (-not $env:AGENT_REDIS_URL) { $env:AGENT_REDIS_URL = $env:KNOWLEDGE_REDIS_URL }
+if (-not $env:AGENT_REDIS_DATABASE) { $env:AGENT_REDIS_DATABASE = '1' }
+if (-not $env:AGENT_KNOWLEDGE_BASE_URL) { $env:AGENT_KNOWLEDGE_BASE_URL = 'http://127.0.0.1:8090' }
+if (-not $env:AGENT_KNOWLEDGE_SERVICE_TOKEN) { $env:AGENT_KNOWLEDGE_SERVICE_TOKEN = $env:KNOWLEDGE_INTERNAL_SERVICE_TOKEN }
 
 # Restart the complete local stack.  The previous script only stopped the
 # WeChat collector, leaving stale Core/Knowledge/RAG/Web/Nginx processes on

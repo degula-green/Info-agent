@@ -25,6 +25,7 @@ class AuthenticationError(RuntimeError):
 class AuthenticatedUser:
     user_id: str
     session_id: str
+    access_token: str = ""
 
 
 class CoreTokenAuthentication:
@@ -91,7 +92,11 @@ class CoreTokenAuthentication:
             raise AuthenticationError("invalid token subject") from exc
         if not session_id:
             raise AuthenticationError("invalid token session")
-        return AuthenticatedUser(user_id=user_id, session_id=session_id)
+        return AuthenticatedUser(
+            user_id=user_id,
+            session_id=session_id,
+            access_token=parts[1],
+        )
 
 
 def install_authentication_error_handler(application: FastAPI) -> None:

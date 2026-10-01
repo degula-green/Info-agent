@@ -39,6 +39,9 @@
       "message_id": {
         "type": "keyword"
       },
+      "message_type": {
+        "type": "keyword"
+      },
       "source_conversation_id": {
         "type": "keyword"
       },
@@ -140,6 +143,12 @@
           }
         }
       },
+      "file_extension": {
+        "type": "keyword"
+      },
+      "mime_type": {
+        "type": "keyword"
+      },
       "heading_path": {
         "type": "text",
         "analyzer": "ik_max_word",
@@ -222,6 +231,15 @@
             "type": "keyword"
           },
           "source_message_id": {
+            "type": "keyword"
+          },
+          "message_type": {
+            "type": "keyword"
+          },
+          "file_extension": {
+            "type": "keyword"
+          },
+          "mime_type": {
             "type": "keyword"
           },
           "sent_at": {
