@@ -255,7 +255,7 @@ func TestMemoryMessageAttachmentIdempotenceAndCursorMonotonicity(t *testing.T) {
 	if _, err := repo.SaveConnector(ctx, domain.ConnectorAccount{ID: "a1", OwnerUserID: "u1", Platform: domain.PlatformWechat, ExternalAccountID: "wxid", Status: domain.ConnectorActive}); err != nil {
 		t.Fatal(err)
 	}
-	conversation, err := repo.AttachConversation(ctx, AttachInput{UserID: "u1", Platform: domain.PlatformWechat, ExternalConversationID: "chat", ConversationType: "private", RequestedStartAt: &now})
+	conversation, err := repo.AttachConversation(ctx, AttachInput{UserID: "u1", Platform: domain.PlatformWechat, ExternalConversationID: "chat", ConversationType: "private", Name: "Private Chat", RequestedStartAt: &now})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -309,6 +309,38 @@ func TestMemoryMessageAttachmentIdempotenceAndCursorMonotonicity(t *testing.T) {
 		t.Fatal(err)
 	}
 	completeMemoryPrivateReady(t, repo, ctx, first.Message.ID, first.Attachments[0].ID)
+	var messageReady, attachmentReady *domain.OutboxEvent
+	for index := range repo.outbox {
+		event := repo.outbox[index]
+		if event.EventType != "knowledge.ready" {
+			continue
+		}
+		if event.Payload["resource_type"] == "message" && event.Payload["resource_id"] == first.Message.ID {
+			copy := event
+			messageReady = &copy
+		}
+		if event.Payload["resource_type"] == "attachment" && event.Payload["resource_id"] == first.Attachments[0].ID {
+			copy := event
+			attachmentReady = &copy
+		}
+	}
+	for label, event := range map[string]*domain.OutboxEvent{"message": messageReady, "attachment": attachmentReady} {
+		if event == nil {
+			t.Fatalf("%s ready event was not created", label)
+		}
+		if event.Payload["sender_identity_id"] == nil ||
+			event.Payload["sender_display_name"] != "Correct sender" ||
+			event.Payload["sender_platform"] != domain.PlatformWechat ||
+			event.Payload["source_conversation_name"] != "Private Chat" ||
+			event.Payload["source_platform"] != domain.PlatformWechat ||
+			event.Payload["external_conversation_id"] != "chat" ||
+			event.Payload["sent_at"] == nil {
+			t.Fatalf("%s ready event is missing source metadata: %+v", label, event.Payload)
+		}
+	}
+	if messageReady.Payload["source_message_id"] != first.Message.ID || attachmentReady.Payload["source_message_id"] != first.Message.ID {
+		t.Fatalf("ready events have wrong source message ids: message=%+v attachment=%+v", messageReady.Payload, attachmentReady.Payload)
+	}
 	input.ExternalMessageID = "m2"
 	input.Cursor = "90"
 	input.Attachments = nil

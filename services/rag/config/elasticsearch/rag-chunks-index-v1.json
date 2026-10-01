@@ -57,6 +57,20 @@
       "source_conversation_type": {
         "type": "keyword"
       },
+      "source_conversation_name": {
+        "type": "text",
+        "analyzer": "ik_max_word",
+        "search_analyzer": "ik_smart",
+        "fields": {
+          "keyword": {
+            "type": "keyword",
+            "ignore_above": 512
+          }
+        }
+      },
+      "source_platform": {
+        "type": "keyword"
+      },
       "source_audience_policy": {
         "type": "keyword"
       },
@@ -178,6 +192,40 @@
           },
           "source_kind": {
             "type": "keyword"
+          },
+          "sender_identity_id": {
+            "type": "keyword"
+          },
+          "sender_display_name": {
+            "type": "text",
+            "analyzer": "ik_max_word",
+            "search_analyzer": "ik_smart"
+          },
+          "sender_platform": {
+            "type": "keyword"
+          },
+          "source_conversation_id": {
+            "type": "keyword"
+          },
+          "source_conversation_name": {
+            "type": "text",
+            "analyzer": "ik_max_word",
+            "search_analyzer": "ik_smart"
+          },
+          "source_conversation_type": {
+            "type": "keyword"
+          },
+          "source_platform": {
+            "type": "keyword"
+          },
+          "external_conversation_id": {
+            "type": "keyword"
+          },
+          "source_message_id": {
+            "type": "keyword"
+          },
+          "sent_at": {
+            "type": "date"
           }
         }
       },

@@ -2775,6 +2775,40 @@ func (s *PostgresStore) TryMarkKnowledgeReady(ctx context.Context, id, traceID s
 	if !item.ContentSaved || !item.OwnershipReady || !item.SecurityReady || !item.PermissionReady || item.ACLSyncStatus != "synced" {
 		return false, nil
 	}
+	var sourceMessageID string
+	var senderIdentityID string
+	var senderDisplayName string
+	var sourcePlatform string
+	var sentAt *time.Time
+	var sourceConversationName string
+	var externalConversationID string
+	err = tx.QueryRow(ctx, `
+		SELECT
+			COALESCE(ki.source_message_id::text, a.message_id::text, ''),
+			COALESCE(m.sender_identity_id::text, ''),
+			COALESCE(NULLIF(m.sender_display_name, ''), NULLIF(ei.display_name, ''), ''),
+			COALESCE(ci.platform, ''),
+			m.sent_at,
+			COALESCE(ci.name, ''),
+			COALESCE(ci.external_conversation_id, '')
+		FROM knowledge.knowledge_items ki
+		LEFT JOIN knowledge.attachments a ON a.id = ki.source_attachment_id
+		LEFT JOIN knowledge.messages m ON m.id = COALESCE(ki.source_message_id, a.message_id)
+		LEFT JOIN knowledge.external_identities ei ON ei.id = m.sender_identity_id
+		LEFT JOIN knowledge.conversation_ingestions ci ON ci.id = ki.conversation_ingestion_id
+		WHERE ki.id = $1
+	`, id).Scan(
+		&sourceMessageID,
+		&senderIdentityID,
+		&senderDisplayName,
+		&sourcePlatform,
+		&sentAt,
+		&sourceConversationName,
+		&externalConversationID,
+	)
+	if err != nil {
+		return false, dbError(err)
+	}
 	resourceType, resourceID := item.ProcessingResource()
 	scopeType, scopeID := "user", item.OwnerUserID
 	if item.KnowledgeScope == "organization" || item.OrganizationID != "" {
@@ -2792,8 +2826,16 @@ func (s *PostgresStore) TryMarkKnowledgeReady(ctx context.Context, id, traceID s
 		"source_conversation_type": nilString(item.SourceConversationType),
 		"source_audience_policy":   item.SourceAudiencePolicy(),
 		"content_version":          item.ContentVersion, "acl_version": item.ACLVersion,
-		"content_hash":            item.ContentHash,
-		"content_access_required": item.ContentAccessRequired,
+		"content_hash":             item.ContentHash,
+		"content_access_required":  item.ContentAccessRequired,
+		"source_message_id":        nilString(sourceMessageID),
+		"sender_identity_id":       nilString(senderIdentityID),
+		"sender_display_name":      nilString(senderDisplayName),
+		"sender_platform":          nilString(sourcePlatform),
+		"sent_at":                  sentAt,
+		"source_conversation_name": nilString(sourceConversationName),
+		"source_platform":          nilString(sourcePlatform),
+		"external_conversation_id": nilString(externalConversationID),
 	})
 	if _, err = tx.Exec(ctx, `UPDATE knowledge.knowledge_items SET processing_status='ready',lifecycle_status=CASE WHEN source_type='local_upload' THEN 'ready' ELSE lifecycle_status END,last_error=NULL,updated_at=now() WHERE id=$1`, id); err != nil {
 		return false, dbError(err)
@@ -3523,6 +3565,4 @@ func (s *PostgresStore) ListAgentConversationMembers(ctx context.Context, conver
 	return items, dbError(rows.Err())
 }
 
-
 // -- end Agent support -----------------------------------------------------
-

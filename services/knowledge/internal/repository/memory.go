@@ -2400,6 +2400,26 @@ func (s *MemoryStore) TryMarkKnowledgeReady(ctx context.Context, id, traceID str
 	if item.KnowledgeScope == "organization" || item.OrganizationID != "" {
 		scopeType, scopeID = "organization", item.OrganizationID
 	}
+	messageID := item.SourceMessageID
+	if item.SourceAttachmentID != "" {
+		if attachment, ok := s.attachmentByIDLocked(item.SourceAttachmentID); ok {
+			messageID = attachment.MessageID
+		}
+	}
+	var message domain.Message
+	if messageID != "" {
+		message, _ = s.messageByIDLocked(messageID)
+	}
+	senderDisplayName := message.SenderDisplayName
+	if senderDisplayName == "" && message.SenderIdentityID != "" {
+		senderDisplayName = s.identityByIDLocked(message.SenderIdentityID).DisplayName
+	}
+	conversation := s.conversations[item.ConversationID]
+	var sentAt *time.Time
+	if !message.SentAt.IsZero() {
+		value := message.SentAt
+		sentAt = &value
+	}
 	event := domain.OutboxEvent{
 		ID: uuid.NewString(), EventType: "knowledge.ready", SchemaVersion: 1,
 		OccurredAt: time.Now().UTC(), TraceID: traceID, OrganizationID: item.OrganizationID,
@@ -2417,6 +2437,14 @@ func (s *MemoryStore) TryMarkKnowledgeReady(ctx context.Context, id, traceID str
 			"source_audience_policy":   item.SourceAudiencePolicy(),
 			"content_version":          item.ContentVersion, "acl_version": item.ACLVersion,
 			"content_hash": item.ContentHash, "content_access_required": item.ContentAccessRequired,
+			"source_message_id":        nilString(messageID),
+			"sender_identity_id":       nilString(message.SenderIdentityID),
+			"sender_display_name":      nilString(senderDisplayName),
+			"sender_platform":          nilString(conversation.Platform),
+			"sent_at":                  sentAt,
+			"source_conversation_name": nilString(conversation.Name),
+			"source_platform":          nilString(conversation.Platform),
+			"external_conversation_id": nilString(conversation.ExternalConversationID),
 		},
 	}
 	s.outbox[event.ID] = event
@@ -3740,7 +3768,6 @@ func (s *MemoryStore) ListAgentConversationMembers(_ context.Context, conversati
 	sort.Slice(out, func(i, j int) bool { return out[i].ExternalUserID < out[j].ExternalUserID })
 	return out, nil
 }
-
 
 func (s *MemoryStore) addEventLocked(ctx context.Context, eventType string, c domain.ConversationIngestion, payload map[string]any) {
 	traceID := trace.TraceID(ctx)

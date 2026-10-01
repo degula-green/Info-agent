@@ -118,7 +118,7 @@ func newPipelineFixture(t *testing.T, platformName string) pipelineFixture {
 		t.Fatal(err)
 	}
 	now := time.Now().UTC()
-	conversation, err := repo.AttachConversation(ctx, repository.AttachInput{UserID: "owner", Platform: platformName, WorkspaceKey: "workspace", ExternalConversationID: platformName + "-chat", ConversationType: "group", OrganizationID: "org-1", RequestedStartAt: &now, PrimaryConnectorID: account.ID})
+	conversation, err := repo.AttachConversation(ctx, repository.AttachInput{UserID: "owner", Platform: platformName, WorkspaceKey: "workspace", ExternalConversationID: platformName + "-chat", ConversationType: "group", Name: platformName + "-chat-name", OrganizationID: "org-1", RequestedStartAt: &now, PrimaryConnectorID: account.ID})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -327,6 +327,17 @@ func TestPrivacyPermissionAndReadyOutboxContract(t *testing.T) {
 	}
 	if events[0].Payload["resource_type"] != "message" || events[0].Payload["knowledge_item_id"] != item.ID || events[0].Payload["acl_version"] != int64(3) {
 		t.Fatalf("unexpected ready payload: %+v", events[0].Payload)
+	}
+	if events[0].Payload["source_message_id"] != result.Message.ID ||
+		events[0].Payload["sender_identity_id"] == nil ||
+		events[0].Payload["sender_display_name"] != "Sender" ||
+		events[0].Payload["sender_platform"] != domain.PlatformWechat ||
+		events[0].Payload["source_conversation_id"] != f.conversation.ID ||
+		events[0].Payload["source_conversation_name"] != domain.PlatformWechat+"-chat-name" ||
+		events[0].Payload["source_platform"] != domain.PlatformWechat ||
+		events[0].Payload["external_conversation_id"] != domain.PlatformWechat+"-chat" ||
+		events[0].Payload["sent_at"] == nil {
+		t.Fatalf("ready payload is missing source metadata: %+v", events[0].Payload)
 	}
 	if err := f.service.PublishOutbox(context.Background()); err != nil {
 		t.Fatal(err)
