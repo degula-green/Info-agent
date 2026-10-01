@@ -15,87 +15,42 @@
               <span>{{ message.statusText || statusLabel(message.status) }}</span>
             </div>
 
-            <ol v-if="message.steps.length" class="agent-steps" aria-label="执行步骤">
-              <li v-for="step in message.steps" :key="step.id" :class="`agent-step--${step.status}`">
-                <span>{{ step.label }}</span>
-              </li>
-            </ol>
-
-            <div v-if="message.blocks.length" class="agent-result-blocks">
-              <template v-for="(block, blockIndex) in message.blocks" :key="`${message.id}-block-${blockIndex}`">
-                <section v-if="block.type === 'source_list'" class="agent-source-list">
-                  <div class="agent-result-heading">
-                    <t-icon name="file-search" />
-                    <span>{{ block.summary || `找到 ${block.items.length} 个来源` }}</span>
-                  </div>
-                  <p v-if="!block.items.length" class="agent-empty-result">没有找到满足条件的内容。</p>
-                  <article v-for="source in block.items" :key="sourceKey(source)" class="agent-source-card">
-                    <div class="agent-source-card__body">
-                      <strong>{{ sourceLabel(source) }}</strong>
-                      <span>{{ sourceMeta(source) }}</span>
-                      <p v-if="source.preview">{{ source.preview }}</p>
-                    </div>
-                    <div class="agent-source-card__actions">
-                      <button v-if="source.resource_type === 'attachment'" type="button" @click="openSource(source)">预览</button>
-                      <button v-if="source.conversation_id" type="button" @click="openSourceConversation(source)">来源会话</button>
-                    </div>
-                  </article>
-                  <p v-if="block.metadata_coverage === 'partial'" class="agent-coverage-note">部分历史数据尚未完成元数据补齐，本次结果仅覆盖已索引内容。</p>
-                </section>
-
-                <section v-else-if="block.type === 'content_results'" class="agent-content-results">
-                  <div class="agent-result-heading">
-                    <t-icon name="search" />
-                    <span>相关片段</span>
-                  </div>
-                  <p v-if="!block.results.length" class="agent-empty-result">没有找到满足条件的内容。</p>
-                  <article v-for="result in block.results" :key="`${result.resource_type}:${result.resource_id}`" class="agent-content-card">
-                    <div class="agent-content-card__title">
-                      <strong>{{ result.title || result.resource_id }}</strong>
-                      <span>{{ resultMeta(result) }}</span>
-                    </div>
-                    <blockquote v-for="chunk in result.chunks.slice(0, 3)" :key="chunk.chunk_id">{{ chunk.text }}</blockquote>
-                    <div class="agent-source-card__actions">
-                      <button v-if="result.resource_type === 'attachment'" type="button" @click="openContentResult(result)">预览</button>
-                    </div>
-                  </article>
-                  <p v-if="block.metadata_coverage === 'partial'" class="agent-coverage-note">部分历史数据尚未完成元数据补齐，本次结果仅覆盖已索引内容。</p>
-                </section>
-
-                <section v-else-if="block.type === 'answer'" class="agent-answer-block">
-                  <div class="agent-answer__content" v-html="renderChatMarkdown(block.text)" />
-                  <div v-if="block.citations.length" class="agent-citations" aria-label="回答来源">
-                    <div v-for="citation in block.citations" :key="citationKey(citation)" class="agent-citation">
-                      <t-icon :name="citation.url ? 'link' : 'file'" />
-                      <div>
-                        <strong>{{ citation.title || citation.source || citation.evidence_id }}</strong>
-                        <p v-if="citation.quote">{{ citation.quote }}</p>
-                        <small v-if="citationMeta(citation)">{{ citationMeta(citation) }}</small>
-                        <div v-if="citation.conversation_id || citation.resource_type === 'attachment' || citation.url" class="agent-citation__actions">
-                          <button v-if="citation.resource_type === 'attachment'" type="button" @click="openCitation(citation)">预览</button>
-                          <button v-if="citation.conversation_id" type="button" @click="openCitation(citation)">查看来源会话</button>
-                          <a v-if="citation.url" :href="citation.url" target="_blank" rel="noreferrer">打开链接</a>
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                </section>
-              </template>
+            <div v-if="primaryAnswer(message)" class="agent-answer__content" v-html="renderChatMarkdown(primaryAnswer(message))" />
+            <div v-else-if="showsEmptyKnowledgeResult(message)" class="agent-empty-result">
+              <strong>没有找到满足条件的内容。</strong>
+              <span v-if="metadataCoverage(message) === 'partial'">部分历史元数据尚未补齐，结果可能不完整。</span>
             </div>
 
-            <template v-else>
-              <div v-if="message.answer" class="agent-answer__content" v-html="renderChatMarkdown(message.answer)" />
-              <div v-if="message.citations.length" class="agent-citations" aria-label="回答来源">
-                <div v-for="citation in message.citations" :key="citationKey(citation)" class="agent-citation">
-                  <t-icon :name="citation.url ? 'link' : 'file'" />
-                  <div>
-                    <strong>{{ citation.title || citation.source || citation.evidence_id }}</strong>
-                    <p v-if="citation.quote">{{ citation.quote }}</p>
-                    <a v-if="citation.url" :href="citation.url" target="_blank" rel="noreferrer">{{ citation.url }}</a>
-                  </div>
-                </div>
+            <section v-if="visibleSourceItems(message).length" class="agent-sources" aria-label="回答来源">
+              <div class="agent-sources__header">
+                <span>来源 {{ visibleSourceItems(message).length }}</span>
+                <span v-if="metadataCoverage(message) === 'partial'" class="agent-coverage-tag">部分历史元数据缺失</span>
               </div>
-            </template>
+              <article v-for="source in visibleSourceItems(message)" :key="source.key" class="agent-source-card" @click="openSourceItem(source)">
+                <div class="agent-source-card__body">
+                  <strong>{{ source.title }}</strong>
+                  <span>{{ source.meta }}</span>
+                  <p v-if="source.preview">{{ source.preview }}</p>
+                </div>
+                <div class="agent-source-card__actions">
+                  <span v-if="source.kind === 'attachment'">预览</span>
+                  <span v-else-if="source.conversation_id">来源会话</span>
+                </div>
+              </article>
+            </section>
+
+            <div v-if="message.steps.length" class="agent-trace">
+              <button type="button" class="agent-trace__toggle" @click="toggleTrace(message)">
+                <t-icon name="chevron-right" :class="{ 'agent-trace__chevron--open': isTraceOpen(message) }" />
+                查看执行过程
+              </button>
+              <ol v-if="isTraceOpen(message)" class="agent-trace__steps" aria-label="执行步骤">
+                <li v-for="step in message.steps" :key="step.id" :class="`agent-step--${step.status}`">
+                  <span>{{ displayStepLabel(step.label) }}</span>
+                  <small>{{ stepStatusLabel(step.status) }}</small>
+                </li>
+              </ol>
+            </div>
 
             <div v-if="message.todo" class="agent-todo">
               <div class="agent-todo__title"><t-icon name="task-checked" />待办已创建</div>
@@ -293,6 +248,17 @@ type AnswerBlock = {
   citations: Citation[]
 }
 type AgentResultBlock = SourceListBlock | ContentResultsBlock | AnswerBlock
+type SourceItem = {
+  key: string
+  title: string
+  meta: string
+  preview?: string
+  kind: 'attachment' | 'message' | 'source'
+  resource_id?: string
+  conversation_id?: string | number | null
+  message_id?: string | number | null
+  platform?: string
+}
 type AgentMessage = {
   id: string
   role: 'user' | 'agent'
@@ -321,6 +287,7 @@ const textareaRef = ref<{ focus?: () => void } | null>(null)
 const activeTaskID = ref('')
 const approvalEditors = reactive<Record<string, { title: string; dueDate: string }>>({})
 const inputValues = reactive<Record<string, string>>({})
+const expandedTraces = reactive<Record<string, boolean>>({})
 let activeController: AbortController | null = null
 const router = useRouter()
 const route = useRoute()
@@ -430,10 +397,10 @@ function handleTaskEvent(message: AgentMessage, event: AgentTaskEvent): boolean 
       addOrUpdateStep(message, event)
       message.status = event.event_type === 'step.failed' ? 'executing' : 'executing'
       message.statusText = event.event_type === 'step.started'
-        ? `正在执行 ${payload.capability || '能力'}`
+        ? stepStartText(String(payload.capability || ''))
         : event.event_type === 'step.succeeded'
-          ? previewSummary(payload.result_preview) || `已完成 ${payload.capability || '步骤'}`
-          : `步骤失败：${payload.capability || '能力'}`
+          ? previewSummary(payload.result_preview) || stepSucceededText(String(payload.capability || ''))
+          : `步骤失败：${displayStepLabel(String(payload.capability || '能力'))}`
       break
     case 'task.waiting_approval':
       void prepareApproval(message, event)
@@ -501,6 +468,146 @@ function previewSummary(value: unknown): string {
   if (!value || typeof value !== 'object') return ''
   const summary = (value as Record<string, unknown>).summary
   return typeof summary === 'string' ? summary.trim() : ''
+}
+
+function primaryAnswer(message: AgentMessage): string {
+  const block = message.blocks.find((item) => item.type === 'answer')
+  const text = (message.answer || (block?.type === 'answer' ? block.text : '') || '').trim()
+  if (!text || text === '没有找到满足条件的内容。') return ''
+  return text
+}
+
+function showsEmptyKnowledgeResult(message: AgentMessage): boolean {
+  if (message.status !== 'succeeded') return false
+  if (primaryAnswer(message) || message.todo || message.approval || message.inputRequest) return false
+  return !visibleSourceItems(message).length
+}
+
+function metadataCoverage(message: AgentMessage): 'complete' | 'partial' {
+  const block = message.blocks.find((item) => item.type === 'source_list' || item.type === 'content_results')
+  return block && 'metadata_coverage' in block && block.metadata_coverage === 'partial' ? 'partial' : 'complete'
+}
+
+function visibleSourceItems(message: AgentMessage): SourceItem[] {
+  const items = new Map<string, SourceItem>()
+  if (message.citations.length) {
+    for (const citation of message.citations) {
+      const item = sourceItemFromCitation(citation)
+      if (item) items.set(item.key, item)
+    }
+    return [...items.values()]
+  }
+  for (const block of message.blocks) {
+    if (block.type !== 'source_list' || !block.items.length) continue
+    for (const source of block.items) {
+      const item = sourceItemFromSource(source)
+      items.set(item.key, item)
+    }
+  }
+  return [...items.values()]
+}
+
+function sourceItemFromCitation(citation: Citation): SourceItem | null {
+  const key = citationKey(citation)
+  const kind: SourceItem['kind'] = citation.resource_type === 'attachment' ? 'attachment' : citation.conversation_id ? 'message' : 'source'
+  return {
+    key,
+    kind,
+    title: displayTitleForCitation(citation),
+    meta: [citation.sender_name, citation.conversation_name, formatAgentMoment(citation.sent_at)].filter(Boolean).join(' · '),
+    preview: truncateText(citation.quote, 120),
+    resource_id: citation.resource_id || (citation.attachment_id != null ? String(citation.attachment_id) : undefined),
+    conversation_id: citation.conversation_id,
+    message_id: citation.message_id,
+    platform: citation.platform,
+  }
+}
+
+function sourceItemFromSource(source: SourceInfo): SourceItem {
+  const kind: SourceItem['kind'] = source.resource_type === 'attachment' ? 'attachment' : 'message'
+  return {
+    key: sourceKey(source),
+    kind,
+    title: displayTitleForSource(source),
+    meta: sourceMeta(source),
+    preview: truncateText(source.preview, 120),
+    resource_id: source.resource_id,
+    conversation_id: source.conversation_id,
+    platform: source.conversation_platform || undefined,
+  }
+}
+
+function displayTitleForCitation(citation: Citation): string {
+  if (citation.resource_type === 'attachment') return citation.title || citation.source || '附件'
+  if (citation.title && !looksLikeInternalID(citation.title)) return citation.title
+  if (citation.quote) return truncateText(citation.quote, 42) || '知识库消息'
+  return citation.conversation_name ? `${citation.conversation_name}消息` : '知识库消息'
+}
+
+function displayTitleForSource(source: SourceInfo): string {
+  if (source.resource_type === 'attachment') return source.file_name || source.title || source.preview || '附件'
+  if (source.title && !looksLikeInternalID(source.title)) return source.title
+  if (source.preview) return truncateText(source.preview, 42) || '知识库消息'
+  return source.conversation_name ? `${source.conversation_name}消息` : '知识库消息'
+}
+
+function looksLikeInternalID(value: string): boolean {
+  const text = value.trim()
+  return /^[0-9a-f]{8}-[0-9a-f-]{27,}$/i.test(text) || /^[0-9a-f]{20,}$/i.test(text)
+}
+
+function truncateText(value?: string | null, limit = 80): string | undefined {
+  const text = String(value || '').replace(/\s+/g, ' ').trim()
+  if (!text) return undefined
+  return text.length > limit ? `${text.slice(0, limit - 1)}…` : text
+}
+
+function isTraceOpen(message: AgentMessage): boolean {
+  return expandedTraces[message.id] === true
+}
+
+function toggleTrace(message: AgentMessage): void {
+  expandedTraces[message.id] = !isTraceOpen(message)
+}
+
+function displayStepLabel(label: string): string {
+  return ({
+    'knowledge.search_sources': '检索本地知识',
+    'knowledge.search_content': '查找相关内容',
+    'knowledge.answer': '整理回答',
+    'web.fetch': '读取网页',
+    'web.extract': '提取网页内容',
+    'answer.compose': '整理回答',
+    'todo.create': '创建待办',
+  } as Record<string, string>)[label] || label
+}
+
+function stepStartText(capability: string): string {
+  return ({
+    'knowledge.search_sources': '正在检索本地知识',
+    'knowledge.search_content': '正在查找相关内容',
+    'knowledge.answer': '正在整理回答',
+    'web.fetch': '正在读取网页',
+    'web.extract': '正在提取网页内容',
+    'answer.compose': '正在整理回答',
+    'todo.create': '正在创建待办',
+  } as Record<string, string>)[capability] || `正在执行 ${displayStepLabel(capability || '能力')}`
+}
+
+function stepSucceededText(capability: string): string {
+  return ({
+    'knowledge.search_sources': '本地知识检索完成',
+    'knowledge.search_content': '相关内容查找完成',
+    'knowledge.answer': '回答已生成',
+    'web.fetch': '网页读取完成',
+    'web.extract': '网页内容提取完成',
+    'answer.compose': '回答已生成',
+    'todo.create': '待办已创建',
+  } as Record<string, string>)[capability] || `${displayStepLabel(capability || '步骤')}完成`
+}
+
+function stepStatusLabel(status: string): string {
+  return ({ running: '进行中', succeeded: '已完成', failed: '失败' } as Record<string, string>)[status] || status
 }
 
 function citationKey(citation: Citation): string {
@@ -607,6 +714,32 @@ function todoFromObservations(observations: AgentObservation[]): TodoResult | un
     }
   }
   return undefined
+}
+
+async function openSourceItem(source: SourceItem): Promise<void> {
+  if (source.kind === 'attachment' && source.resource_id) {
+    await openSource({
+      resource_id: source.resource_id,
+      resource_type: 'attachment',
+      title: source.title,
+      file_name: source.title,
+      conversation_id: source.conversation_id ? String(source.conversation_id) : null,
+    })
+    return
+  }
+  if (!source.conversation_id) {
+    MessagePlugin.info('该来源暂无可打开的详情')
+    return
+  }
+  try {
+    await navigateToKnowledgeSource(router, route, {
+      platform: source.platform,
+      conversationId: source.conversation_id,
+      messageId: source.message_id,
+    })
+  } catch {
+    MessagePlugin.error('无法定位来源会话，请稍后重试')
+  }
 }
 
 async function openSource(source: SourceInfo): Promise<void> {
@@ -916,17 +1049,33 @@ onBeforeUnmount(() => activeController?.abort())
 .agent-steps li::before { content: ''; width: 6px; height: 6px; border-radius: 50%; background: var(--td-brand-color-disabled); }
 .agent-step--succeeded::before { background: var(--td-success-color) !important; }
 .agent-step--failed::before { background: var(--td-error-color) !important; }
+.agent-empty-result { display: grid; gap: 5px; margin-top: 4px; padding: 12px 13px; border: 1px dashed var(--td-component-stroke); border-radius: 8px; color: var(--td-text-color-secondary); font-size: 13px; line-height: 1.6; }
+.agent-empty-result strong { color: var(--td-text-color-primary); font-size: 13px; font-weight: 500; }
+.agent-empty-result span { color: var(--td-text-color-secondary); font-size: 12px; }
+.agent-sources { display: grid; gap: 8px; margin-top: 16px; }
+.agent-sources__header { display: flex; align-items: center; gap: 8px; color: var(--td-text-color-secondary); font-size: 12px; }
+.agent-coverage-tag { padding: 1px 7px; border-radius: 999px; color: var(--td-warning-color); background: var(--td-warning-color-1); font-size: 11px; }
+.agent-trace { margin-top: 14px; }
+.agent-trace__toggle { display: inline-flex; align-items: center; gap: 6px; padding: 0; border: 0; color: var(--td-text-color-secondary); background: transparent; font-size: 12px; cursor: pointer; }
+.agent-trace__toggle svg { transition: transform .15s ease; }
+.agent-trace__chevron--open { transform: rotate(90deg); }
+.agent-trace__steps { display: grid; gap: 6px; margin: 9px 0 0; padding: 0; list-style: none; color: var(--td-text-color-secondary); font-size: 12px; }
+.agent-trace__steps li { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 7px 9px; border-radius: 6px; background: var(--td-bg-color-secondarycontainer); }
+.agent-trace__steps small { color: var(--td-text-color-placeholder); }
 .agent-result-blocks { display: grid; gap: 14px; }
 .agent-result-heading { display: flex; align-items: center; gap: 7px; margin-bottom: 9px; color: var(--td-text-color-primary); font-size: 13px; font-weight: 600; }
 .agent-result-heading svg { color: var(--td-brand-color); }
 .agent-empty-result { margin: 0; padding: 12px; border: 1px dashed var(--td-component-stroke); border-radius: 8px; color: var(--td-text-color-secondary); font-size: 13px; }
 .agent-source-list, .agent-content-results { display: grid; gap: 8px; }
 .agent-source-card, .agent-content-card { display: flex; justify-content: space-between; gap: 12px; padding: 12px; border: 1px solid var(--td-component-stroke); border-radius: 8px; background: var(--td-bg-color-container); }
+.agent-source-card { cursor: pointer; transition: border-color .15s, background .15s; }
+.agent-source-card:hover { border-color: var(--td-brand-color-focus); background: var(--td-bg-color-container-hover); }
 .agent-source-card__body, .agent-content-card__title { min-width: 0; }
 .agent-source-card strong, .agent-content-card strong { display: block; overflow: hidden; color: var(--td-text-color-primary); font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
 .agent-source-card span, .agent-content-card span { display: block; margin-top: 4px; color: var(--td-text-color-secondary); font-size: 12px; }
 .agent-source-card p { display: -webkit-box; overflow: hidden; margin: 7px 0 0; color: var(--td-text-color-secondary); font-size: 12px; line-height: 1.5; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
 .agent-source-card__actions, .agent-citation__actions { display: flex; flex: 0 0 auto; flex-wrap: wrap; align-items: flex-start; gap: 6px; }
+.agent-source-card__actions span { display: inline-block; min-height: 24px; margin: 0; padding: 0 8px; border: 1px solid var(--td-component-stroke); border-radius: 6px; color: var(--td-brand-color); background: var(--td-bg-color-container); font-size: 12px; line-height: 22px; }
 .agent-source-card__actions button, .agent-citation__actions button, .agent-citation__actions a { min-height: 28px; padding: 0 9px; border: 1px solid var(--td-component-stroke); border-radius: 6px; color: var(--td-brand-color); background: var(--td-bg-color-container); font-size: 12px; line-height: 26px; text-decoration: none; cursor: pointer; }
 .agent-content-card { display: block; }
 .agent-content-card blockquote { margin: 9px 0 0; padding: 9px 10px; border-left: 3px solid var(--td-brand-color-focus); border-radius: 0 6px 6px 0; color: var(--td-text-color-secondary); background: var(--td-bg-color-secondarycontainer); font-size: 12px; line-height: 1.6; }
