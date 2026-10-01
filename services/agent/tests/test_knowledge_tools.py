@@ -329,6 +329,34 @@ def test_content_question_routes_to_search_content_and_answer() -> None:
     }
 
 
+@pytest.mark.parametrize(
+    "text",
+    [
+        "帮我找一下青云官网当前在哪个阶段了，现在什么情况了",
+        "青云官网部署到哪了",
+        "谁部署的青云官网，在哪台服务器",
+        "官网现在什么情况",
+    ],
+)
+def test_internal_project_status_routes_to_knowledge_content(text: str) -> None:
+    route = classify_knowledge_question(text)
+
+    assert route is not None
+    assert route.mode == "content"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "帮我查一下青云官网官网上的最新公开公告",
+        "打开 https://www.qingcloud.com",
+        "帮我上网搜一下青云官网公开信息",
+    ],
+)
+def test_explicit_public_web_intent_does_not_route_to_knowledge(text: str) -> None:
+    assert classify_knowledge_question(text) is None
+
+
 def test_content_with_sources_question_builds_three_step_plan() -> None:
     route = classify_knowledge_question("张三发的采购合同写了什么？")
     assert route is not None

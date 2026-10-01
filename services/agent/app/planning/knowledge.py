@@ -106,6 +106,70 @@ _FILE_MARKERS = (
 )
 _MESSAGE_MARKERS = ("消息", "聊天记录", "群聊", "群里", "私聊")
 _ACTION_MARKERS = ("提醒我", "创建待办", "新建待办", "日程", "预约", "安排会议", "加个提醒")
+_INTERNAL_OBJECT_MARKERS = (
+    "官网",
+    "项目",
+    "系统",
+    "平台",
+    "服务器",
+    "部署",
+    "上线",
+    "任务",
+    "需求",
+    "功能",
+    "模块",
+    "接口",
+    "环境",
+    "测试",
+    "开发",
+    "进度",
+    "阶段",
+)
+_STATUS_MARKERS = (
+    "哪个阶段",
+    "什么阶段",
+    "现阶段",
+    "当前阶段",
+    "当前在",
+    "现在在",
+    "什么情况",
+    "现在怎么样",
+    "进展",
+    "进度",
+    "状态",
+    "到哪了",
+    "到哪一步",
+    "完成了吗",
+    "上线了吗",
+    "部署了吗",
+    "什么时候上线",
+    "何时上线",
+    "卡在哪",
+    "还差什么",
+    "负责人",
+    "谁负责",
+    "谁部署",
+    "谁做",
+    "在哪台服务器",
+    "部署到哪",
+)
+_WEB_MARKERS = (
+    "网上",
+    "公网",
+    "互联网",
+    "百度",
+    "搜索引擎",
+    "公开信息",
+    "官网公告",
+    "官网上的",
+    "最新公告",
+    "新闻",
+    "链接",
+    "网址",
+    "url",
+    "http://",
+    "https://",
+)
 _CHITCHAT = {"你好", "您好", "hello", "hi", "谢谢", "多谢", "再见", "在吗"}
 
 _SENDER_PATTERNS = (
@@ -147,10 +211,22 @@ def classify_knowledge_question(
     has_file = _contains_any(normalized, _FILE_MARKERS)
     has_message = _contains_any(normalized, _MESSAGE_MARKERS)
     has_action = _contains_any(normalized, _ACTION_MARKERS)
+    has_internal_object = _contains_any(normalized, _INTERNAL_OBJECT_MARKERS)
+    has_status = _contains_any(normalized, _STATUS_MARKERS)
+    has_explicit_web = _contains_any(normalized, _WEB_MARKERS)
+    has_internal_status = has_internal_object and has_status
+
+    if has_explicit_web:
+        return None
 
     if has_action and not (has_source or has_content):
         return None
-    if not (has_source or has_content or (has_search and (has_file or has_message))):
+    if not (
+        has_source
+        or has_content
+        or has_internal_status
+        or (has_search and (has_file or has_message))
+    ):
         return None
 
     sender_names = _sender_names(question)
@@ -173,8 +249,17 @@ def classify_knowledge_question(
     }
     content_arguments: dict[str, Any] = {"query": question}
 
-    if has_source and has_content:
-        mode: KnowledgeMode = "content_with_sources"
+    mode: KnowledgeMode
+    if has_internal_status:
+        route_to_sources = bool(
+            sender_names
+            or conversation_names
+            or has_file
+            or has_message
+        )
+        mode = "content_with_sources" if route_to_sources else "content"
+    elif has_source and has_content:
+        mode = "content_with_sources"
     elif has_source or (has_search and (has_file or has_message) and not has_content):
         mode = "sources"
     else:

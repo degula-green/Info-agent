@@ -436,6 +436,8 @@ def test_prompt_renders_the_configured_threshold() -> None:
     assert "0.85" in system
     assert "{min_confidence}" not in system
     assert "以下情况不是任务" in system
+    assert "官网部署到哪了" in system
+    assert "优先归为 knowledge.answer" in system
 
 
 def test_collected_messages_use_the_higher_threshold() -> None:
