@@ -251,6 +251,15 @@ Import-EnvFile (Join-Path $corePath '.env')
 Import-EnvFile (Join-Path $knowledgePath '.env')
 Import-EnvFile (Join-Path $ragPath '.env')
 Import-EnvFile (Join-Path $agentPath '.env')
+if (-not $env:AGENT_JWT_PUBLIC_KEY_FILE -and $env:CORE_JWT_PUBLIC_KEY_FILE) {
+    $corePublicKey = $env:CORE_JWT_PUBLIC_KEY_FILE
+    if (-not [IO.Path]::IsPathRooted($corePublicKey)) {
+        $corePublicKey = Join-Path $corePath $corePublicKey
+    }
+    $env:AGENT_JWT_PUBLIC_KEY_FILE = [IO.Path]::GetFullPath($corePublicKey)
+}
+if (-not $env:AGENT_JWT_ISSUER) { $env:AGENT_JWT_ISSUER = $env:CORE_JWT_ISSUER }
+if (-not $env:AGENT_JWT_AUDIENCE) { $env:AGENT_JWT_AUDIENCE = $env:CORE_JWT_AUDIENCE }
 if ($intentEnabled) {
     Import-EnvFile (Join-Path $intentPath '.env')
 }

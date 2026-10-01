@@ -7,7 +7,8 @@ from fastapi.testclient import TestClient
 from app.kernel.models import CapabilityDescriptor
 from tests.support import build_test_container, make_app
 
-USER = {"X-Agent-User-Id": "user-1"}
+USER = {"Authorization": "Bearer user-1-token"}
+OTHER_USER = {"Authorization": "Bearer user-2-token"}
 
 
 def test_create_task_returns_accepted_with_events_url() -> None:
@@ -50,7 +51,7 @@ def test_list_tasks_returns_only_the_callers_tasks() -> None:
     client = TestClient(make_app(container))
 
     mine = client.post("/api/agent/v1/tasks", json={"text": "mine"}, headers=USER).json()["task_id"]
-    client.post("/api/agent/v1/tasks", json={"text": "theirs"}, headers={"X-Agent-User-Id": "user-2"})
+    client.post("/api/agent/v1/tasks", json={"text": "theirs"}, headers=OTHER_USER)
     client.post(f"/api/agent/v1/tasks/{mine}/run", headers=USER)
 
     listed = client.get("/api/agent/v1/tasks", headers=USER).json()["items"]
@@ -62,7 +63,7 @@ def test_list_tasks_returns_only_the_callers_tasks() -> None:
     waiting = client.get("/api/agent/v1/tasks?status=succeeded,waiting_input", headers=USER).json()["items"]
     assert [item["task_id"] for item in waiting] == [mine]
 
-    others = client.get("/api/agent/v1/tasks", headers={"X-Agent-User-Id": "user-2"}).json()["items"]
+    others = client.get("/api/agent/v1/tasks", headers=OTHER_USER).json()["items"]
     assert [item["owner_user_id"] for item in others] == ["user-2"]
 
 
@@ -72,8 +73,42 @@ def test_task_is_scoped_to_owner() -> None:
     task_id = client.post("/api/agent/v1/tasks", json={"text": "hi"}, headers=USER).json()["task_id"]
 
     assert client.get(f"/api/agent/v1/tasks/{task_id}", headers=USER).status_code == 200
-    assert client.get(f"/api/agent/v1/tasks/{task_id}", headers={"X-Agent-User-Id": "other"}).status_code == 403
+    assert client.get(f"/api/agent/v1/tasks/{task_id}", headers=OTHER_USER).status_code == 403
+    spoofed = {"Authorization": "Bearer user-2-token", "X-Agent-User-Id": "user-1"}
+    assert client.get(f"/api/agent/v1/tasks/{task_id}", headers=spoofed).status_code == 403
     assert client.get("/api/agent/v1/tasks/missing", headers=USER).status_code == 404
+
+
+def test_agent_api_requires_a_valid_bearer_token() -> None:
+    container, _store, _publisher, _registry = build_test_container()
+    client = TestClient(make_app(container))
+
+    assert client.get("/api/agent/v1/tasks").status_code == 401
+    assert client.get(
+        "/api/agent/v1/tasks",
+        headers={"Authorization": "Bearer invalid-token"},
+    ).status_code == 401
+    assert client.get(
+        "/api/agent/v1/tasks",
+        headers={"X-Agent-User-Id": "user-1"},
+    ).status_code == 401
+
+
+def test_todo_api_uses_jwt_owner_and_ignores_identity_header() -> None:
+    container, _store, _publisher, _registry = build_test_container()
+    client = TestClient(make_app(container))
+
+    created = client.post(
+        "/api/agent/v1/todos",
+        json={"title": "提交周报", "client_message_id": "todo-1"},
+        headers=USER,
+    )
+    assert created.status_code == 201
+    todo_id = created.json()["todo_id"]
+
+    spoofed = {"Authorization": "Bearer user-2-token", "X-Agent-User-Id": "user-1"}
+    assert client.get(f"/api/agent/v1/todos/{todo_id}", headers=spoofed).status_code == 404
+    assert client.get("/api/agent/v1/todos").status_code == 401
 
 
 def test_read_task_flow_exposes_plan_and_observations() -> None:

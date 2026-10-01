@@ -5,6 +5,7 @@ description = "Info Agent execution kernel"
 requires-python = ">=3.11,<3.13"
 dependencies = [
     "fastapi==0.115.6",
+    "PyJWT[crypto]>=2.10,<3",
     "pydantic>=2.7,<3",
     "psycopg[binary,pool]>=3.2,<4",
     "python-dotenv>=1,<2",

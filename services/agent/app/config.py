@@ -64,6 +64,23 @@ class Settings:
 
     http_host: str = _text("0.0.0.0", "AGENT_HTTP_HOST", "agent_HTTP_HOST")
     http_port: int = _int(8080, "AGENT_HTTP_PORT", "agent_HTTP_PORT")
+    jwt_public_key_file: str = _text(
+        "",
+        "AGENT_JWT_PUBLIC_KEY_FILE",
+        "agent_JWT_PUBLIC_KEY_FILE",
+    )
+    jwt_issuer: str = _text(
+        "info-agent-core",
+        "AGENT_JWT_ISSUER",
+        "agent_JWT_ISSUER",
+        "CORE_JWT_ISSUER",
+    )
+    jwt_audience: str = _text(
+        "info-agent-api",
+        "AGENT_JWT_AUDIENCE",
+        "agent_JWT_AUDIENCE",
+        "CORE_JWT_AUDIENCE",
+    )
 
     # PostgreSQL owns the authoritative Agent runtime state.
     database_url: str = _text("", "AGENT_DATABASE_URL", "agent_DATABASE_URL")
