@@ -15,3 +15,6 @@ __pycache__/
 .deps311/
 .runtime/
 .runtime.zip
+# A mistyped absolute path once created a root directory named "D<private-use
+# char>" holding a nested clone; never track that shape again.
+/D?/
