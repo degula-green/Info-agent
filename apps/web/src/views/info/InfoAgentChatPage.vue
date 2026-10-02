@@ -98,7 +98,10 @@
                   </p>
                   <div class="agent-form__fields">
                     <label v-for="(field, index) in formEditor(message)" :key="`${field.name}-${index}`">
-                      <span>{{ field.name }}</span>
+                      <span>
+                        {{ field.name }}
+                        <small class="agent-form__source">{{ formSourceLabel(field.source) }}</small>
+                      </span>
                       <input v-model="field.value" :disabled="message.submitting" />
                     </label>
                   </div>
@@ -396,7 +399,7 @@ const approvalEditors = reactive<Record<string, { title: string; dueDate: string
  * owner's edits are what the confirm call sends back, so the values written
  * are the ones on screen, not the ones the Agent proposed.
  */
-const formEditors = reactive<Record<string, Array<{ name: string; value: string }>>>({})
+const formEditors = reactive<Record<string, Array<{ name: string; value: string; source: string }>>>({})
 const inputValues = reactive<Record<string, string>>({})
 const expandedTraces = reactive<Record<string, boolean>>({})
 let activeController: AbortController | null = null
@@ -1101,15 +1104,32 @@ function approvalEditor(message: AgentMessage) {
   return approvalEditors[message.id] || { title: '', dueDate: '' }
 }
 
-function formFieldsFrom(draft: unknown): Array<{ name: string; value: string }> {
+function formFieldsFrom(draft: unknown): Array<{ name: string; value: string; source: string }> {
   const raw =
     draft && typeof draft === 'object' && Array.isArray((draft as Record<string, unknown>).fields)
       ? ((draft as Record<string, unknown>).fields as unknown[])
       : []
   return raw.map((item) => {
     const field = item && typeof item === 'object' ? (item as Record<string, unknown>) : {}
-    return { name: String(field.name ?? ''), value: String(field.value ?? '') }
+    return {
+      name: String(field.name ?? ''),
+      value: String(field.value ?? ''),
+      source: String(field.source ?? 'empty'),
+    }
   })
+}
+
+/** Where a draft value came from, in the owner's words. */
+function formSourceLabel(source: string): string {
+  return (
+    {
+      instruction: '来自指令',
+      knowledge: '来自知识库',
+      user: '你填写的',
+      page: '页面已有',
+      empty: '待补充',
+    } as Record<string, string>
+  )[source] || '待补充'
 }
 
 function formEditor(message: AgentMessage) {
@@ -1236,11 +1256,14 @@ async function confirmApproval(message: AgentMessage): Promise<void> {
       const fields = formEditor(message).map((field, index) => {
         const before: Record<string, any> = originalFields[index] || {}
         const value = field.value.trim()
+        const untouched = field.value === String(before.value ?? '')
         return {
           ...before,
           name: field.name || String(before.name ?? ''),
           value: field.value,
-          source: value ? (before.source && before.source !== 'empty' ? before.source : 'user') : 'empty',
+          // Keep the Agent's provenance while the owner has not touched it;
+          // an edited value is theirs, and a cleared one is missing again.
+          source: value ? (untouched ? field.source || 'instruction' : 'user') : 'empty',
           confidence: value ? 1 : 0,
         }
       })
@@ -1417,6 +1440,7 @@ onBeforeUnmount(() => {
 .agent-form__warning { margin: 0; color: var(--td-warning-color-6, #e37318); font-size: 12px; }
 .agent-form__fields { display: grid; gap: 8px; max-height: 260px; overflow: auto; }
 .agent-form__fields label { display: grid; gap: 4px; color: var(--td-text-color-secondary); font-size: 12px; }
+.agent-form__source { margin-left: 6px; padding: 0 6px; border-radius: 8px; color: var(--td-text-color-placeholder); background: var(--td-bg-color-component); font-size: 11px; }
 .agent-form__fields input { width: 100%; min-height: 32px; padding: 6px 9px; border: 1px solid var(--td-component-stroke); border-radius: 6px; color: var(--td-text-color-primary); background: var(--td-bg-color-container); }
 .agent-takeover { display: grid; gap: 10px; margin-top: 14px; padding: 14px; border: 1px solid var(--td-warning-color-3); border-radius: 9px; background: var(--td-warning-color-1); }
 .agent-takeover__hint { margin: 0; color: var(--td-text-color-secondary); font-size: 12px; line-height: 1.6; }
