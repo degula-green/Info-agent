@@ -166,8 +166,14 @@ class GridDriver:
         span = format_range(1, 1, len(padded), width)
         return headers, rows, span
 
-    async def write(self, start_cell: str, values: list[list[str]]) -> tuple[str, list[list[str]]]:
-        """Paste a block at ``start_cell`` and return the observed values."""
+    async def write(
+        self, start_cell: str, values: list[list[str]]
+    ) -> tuple[str, list[list[str]], list[list[str]]]:
+        """Paste a block, then return (span, observed, previous).
+
+        ``previous`` is read before the paste so the caller can undo the write
+        by restoring it — the only safety net a live document has.
+        """
 
         if not values or not values[0]:
             raise GridError("nothing to write")
@@ -176,12 +182,13 @@ class GridDriver:
         padded = [list(row) + [""] * (columns - len(row)) for row in values]
         span = block_range(start_cell, rows, columns)
 
+        previous = await self.read(span)
         await self.select(start_cell)
         await self._set_clipboard(to_tsv(padded))
         await self.page.keyboard.press("Control+v")
         await self._settle(0.5)
         observed = await self.read(span)
-        return span, observed
+        return span, observed, previous
 
     async def clear(self, span: str) -> None:
         top, left, bottom, right = parse_range(span)

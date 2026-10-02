@@ -78,6 +78,9 @@ class GridWriteResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     written_range: str
+    # What those cells held before the paste. Snapshotting here is what makes
+    # an undo possible without the Agent having to keep session state around.
+    previous: list[list[str]] = Field(default_factory=list)
     requested: list[list[str]]
     observed: list[list[str]]
     verified: bool

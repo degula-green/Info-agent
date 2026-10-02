@@ -220,12 +220,13 @@ async def write_grid(session_id: str, body: GridWriteRequest) -> GridWriteResult
     if not await grid.detect():
         raise HTTPException(status_code=409, detail="the open page has no spreadsheet grid")
     try:
-        span, observed = await grid.write(body.start_cell, body.values)
+        span, observed, previous = await grid.write(body.start_cell, body.values)
     except GridError as exc:
         return _error(503 if isinstance(exc, GridUnavailable) else 409, exc.code, str(exc), exc.classification)
     verified = await grid.matches(span, body.values)
     return GridWriteResult(
         written_range=span,
+        previous=previous,
         requested=body.values,
         observed=observed,
         verified=verified,

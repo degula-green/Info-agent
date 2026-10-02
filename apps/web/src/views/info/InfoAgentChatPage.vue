@@ -65,6 +65,14 @@
               </div>
               <strong>{{ message.formResult.range }}</strong>
               <span v-if="!message.formResult.verified">结果无法自动确认，请自行核对</span>
+              <span v-if="formUndone[message.id]" class="agent-form-result__undone">已撤销，已恢复写入前的内容</span>
+              <button
+                v-if="formUndo[message.id] && !formUndone[message.id]"
+                type="button"
+                class="agent-button agent-form-result__undo"
+                :disabled="undoBusy[message.id]"
+                @click="undoForm(message)"
+              >撤销</button>
             </div>
 
             <div v-if="message.approval" class="agent-approval">
@@ -272,11 +280,13 @@ import {
   createAgentTask,
   dayOfISO,
   fetchTakeoverFrame,
+  getFormUndo,
   getAgentTask,
   isTerminalAgentTaskStatus,
   listAgentObservations,
   rejectAgentApproval,
   sendAgentTakeoverInput,
+  undoFormWrite,
   streamAgentTaskEvents,
   submitAgentTaskInput,
   uploadAgentAttachment,
@@ -523,6 +533,7 @@ function handleTaskEvent(message: AgentMessage, event: AgentTaskEvent): boolean 
             range: writtenRange,
             verified: Boolean(preview?.verified),
           }
+          void refreshFormUndo(message)
         }
       }
       message.status = event.event_type === 'step.failed' ? 'executing' : 'executing'
@@ -1154,6 +1165,36 @@ const takeoverText = reactive<Record<string, string>>({})
 const takeoverBusy = reactive<Record<string, boolean>>({})
 const takeoverTimers = new Map<string, number>()
 
+/** Undo availability for the write receipt, and whether it was taken. */
+const formUndo = reactive<Record<string, boolean>>({})
+const formUndone = reactive<Record<string, boolean>>({})
+const undoBusy = reactive<Record<string, boolean>>({})
+
+async function refreshFormUndo(message: AgentMessage): Promise<void> {
+  if (!message.taskId) return
+  try {
+    const state = await getFormUndo(message.taskId)
+    formUndo[message.id] = Boolean(state.available)
+  } catch {
+    formUndo[message.id] = false
+  }
+}
+
+async function undoForm(message: AgentMessage): Promise<void> {
+  if (!message.taskId || undoBusy[message.id]) return
+  undoBusy[message.id] = true
+  try {
+    await undoFormWrite(message.taskId)
+    formUndo[message.id] = false
+    formUndone[message.id] = true
+  } catch (error) {
+    message.error = error instanceof Error ? error.message : '撤销失败'
+    MessagePlugin.error(message.error)
+  } finally {
+    undoBusy[message.id] = false
+  }
+}
+
 function isTakeover(message: AgentMessage): boolean {
   return Boolean(message.taskId) && Boolean(message.inputRequest?.missing?.includes('form_login'))
 }
@@ -1427,6 +1468,7 @@ onBeforeUnmount(() => {
 .agent-form-result { display: grid; gap: 4px; margin-top: 14px; padding: 12px 14px; border: 1px solid var(--td-success-color-3); border-radius: 9px; background: var(--td-success-color-1); }
 .agent-form-result__title { display: inline-flex; align-items: center; gap: 6px; font-weight: 600; }
 .agent-form-result span { color: var(--td-text-color-secondary); font-size: 12px; }
+.agent-form-result__undo { justify-self: start; min-height: 30px; padding: 0 12px; }
 .agent-approval, .agent-input-request { display: grid; gap: 11px; margin-top: 14px; padding: 14px; border: 1px solid var(--td-warning-color-3); border-radius: 9px; background: var(--td-warning-color-1); }
 .agent-approval__header, .agent-approval__actions { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 .agent-approval__header span { display: inline-flex; align-items: center; gap: 6px; font-weight: 600; }

@@ -503,6 +503,32 @@ export async function sendAgentTakeoverInput(taskID: string, input: TakeoverInpu
 }
 
 /**
+ * Whether the last write on this Task can be taken back.
+ *
+ * The browser service snapshots the cells just before it pastes, so an undo
+ * restores exactly what the write replaced.
+ */
+export async function getFormUndo(taskID: string): Promise<{
+  available: boolean
+  written_range?: string
+  target?: string
+  restores_to?: string[][]
+}> {
+  return agentRequest(`/tasks/${encodeURIComponent(taskID)}/form/undo`)
+}
+
+export async function undoFormWrite(taskID: string): Promise<{
+  reverted: boolean
+  target: string
+  verified: boolean
+}> {
+  return agentRequest(`/tasks/${encodeURIComponent(taskID)}/form/undo`, {
+    method: 'POST',
+    body: JSON.stringify({}),
+  })
+}
+
+/**
  * Cancels a Task whose schedule has not been created yet. The Task becomes
  * terminal and leaves the waiting lists, so the card disappears for good.
  */

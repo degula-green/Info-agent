@@ -136,6 +136,10 @@ class FormApplyResult(BaseModel):
     status: str
     action: str
     written_range: str
+    # Where the write landed, and what was there before it, so the receipt can
+    # offer an undo without the Agent holding browser state.
+    target: str = ""
+    previous: list[list[str]] = Field(default_factory=list)
     final_url: str = ""
     observed: list[list[str]] = Field(default_factory=list)
     verified: bool = False
@@ -522,6 +526,8 @@ class FormApplyCapability:
             status="written" if written.get("verified") else "unverified",
             action=action,
             written_range=str(written.get("written_range") or ""),
+            target=draft.target_cell,
+            previous=[list(row) for row in (written.get("previous") or [])],
             observed=[list(row) for row in (written.get("observed") or [])],
             verified=bool(written.get("verified")),
         ).model_dump()

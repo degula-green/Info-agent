@@ -499,3 +499,73 @@ def test_knowledge_retriever_flattens_chunks_and_swallows_failure() -> None:
             raise RuntimeError("rag is down")
 
     assert KnowledgeFormRetriever(Down()).search("姓名") == ""
+
+
+def test_apply_result_carries_the_snapshot_for_undo() -> None:
+    class SnapshotClient(FakeClient):
+        def __init__(self) -> None:
+            super().__init__(
+                written={
+                    "written_range": "A4:I4",
+                    "previous": [["", "", ""]],
+                    "observed": [["1000023", "测试甲", "男"]],
+                    "verified": True,
+                }
+            )
+
+    client = SnapshotClient()
+    client.grid = {"headers": ["学号", "姓名", "性别"], "rows": []}
+    capability = FormPreviewCapability(client)
+    request = f"填写 {URL} 学号：1000023 姓名：测试甲 性别：男"
+    draft = capability.execute(capability.validate({"request": request, "url": URL}))["form"]
+    apply_cap = FormApplyCapability(client)
+    result = apply_cap.execute(
+        apply_cap.validate(
+            {"request": f"填写 {URL}", "draft": draft, "action": "write_cells", "idempotency_key": "k"}
+        )
+    )
+    assert result["target"] == "A2"
+    assert result["written_range"] == "A4:I4"
+    assert result["previous"] == [["", "", ""]]
+
+
+def test_latest_write_is_found_for_undo() -> None:
+    from datetime import datetime, timezone
+    from types import SimpleNamespace
+
+    from app.kernel.models import Observation
+    from app.routers.tasks import _latest_write
+
+    def observation(capability: str, output: dict) -> Observation:
+        return Observation(
+            observation_id="o",
+            task_id="t",
+            plan_id="p",
+            step_id="s",
+            capability=capability,
+            status="succeeded",
+            output=output,
+            created_at=datetime.now(timezone.utc),
+        )
+
+    container = SimpleNamespace(
+        task_service=SimpleNamespace(
+            list_observations=lambda task_id: [
+                observation("form.preview", {"form": {}}),
+                observation("form.apply", {"written_range": "", "verified": False}),
+                observation(
+                    "form.apply",
+                    {"written_range": "A4:I4", "target": "A4", "previous": [[""]]},
+                ),
+            ]
+        )
+    )
+    _, output = _latest_write(container, "t")
+    assert output["target"] == "A4"
+
+    empty = SimpleNamespace(
+        task_service=SimpleNamespace(
+            list_observations=lambda task_id: [observation("form.preview", {"form": {}})]
+        )
+    )
+    assert _latest_write(empty, "t") == (None, None)

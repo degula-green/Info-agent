@@ -431,3 +431,94 @@ def takeover_input(
         )
     except AgentContractError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+def _latest_write(container: AgentContainer, task_id: str):
+    """The most recent form.apply that actually wrote something."""
+
+    for observation in reversed(container.task_service.list_observations(task_id)):
+        output = observation.output or {}
+        if observation.capability == "form.apply" and output.get("written_range"):
+            return observation, output
+    return None, None
+
+
+@router.get("/tasks/{task_id}/form/undo")
+def form_undo_state(
+    task_id: str,
+    owner_user_id: str = Depends(current_user_id),
+) -> dict[str, Any]:
+    """Whether the last write can be taken back, and where it landed."""
+
+    container = get_container()
+    container.task_service.get_task(task_id, owner_user_id=owner_user_id)
+    _, output = _latest_write(container, task_id)
+    if not output:
+        return {"available": False}
+    previous = output.get("previous") or []
+    return {
+        "available": bool(output.get("target")),
+        "written_range": str(output.get("written_range") or ""),
+        "target": str(output.get("target") or ""),
+        "restores_to": previous,
+    }
+
+
+@router.post("/tasks/{task_id}/form/undo")
+def form_undo(
+    task_id: str,
+    owner_user_id: str = Depends(current_user_id),
+) -> dict[str, Any]:
+    """Put the cells back the way they were before the write.
+
+    The owner is clicking undo on a receipt for a write they just authorised,
+    so this restores exactly the snapshot taken before that write. It is not a
+    new approval: gating a revert behind a second approval would strand a
+    mistake the owner is looking straight at.
+    """
+
+    container = get_container()
+    container.task_service.get_task(task_id, owner_user_id=owner_user_id)
+    if container.form_browser is None:
+        raise HTTPException(status_code=503, detail="form browser is not configured")
+    observation, output = _latest_write(container, task_id)
+    if not output:
+        raise HTTPException(status_code=409, detail="this task wrote nothing to undo")
+
+    target = str(output.get("target") or "")
+    written_range = str(output.get("written_range") or "")
+    previous = [
+        [str(cell) for cell in row]
+        for row in (output.get("previous") or [])
+        if isinstance(row, list)
+    ]
+    if not target or not written_range:
+        raise HTTPException(status_code=409, detail="the write did not record where it landed")
+
+    step = container.store.get_step(observation.step_id)
+    draft = ((step.arguments or {}).get("draft") if step is not None else None) or {}
+    url = str(draft.get("form_url") or "")
+    if not url:
+        raise HTTPException(status_code=409, detail="the write did not record its page")
+
+    session_id = container.form_browser.create_session()
+    try:
+        container.form_browser.open(session_id, url)
+        blank = not any(str(cell).strip() for row in previous for cell in row)
+        if blank:
+            # Nothing was there before, so undoing means clearing the block.
+            container.form_browser.clear_range(session_id, written_range)
+            return {"reverted": True, "target": target, "observed": [], "verified": True}
+        width = max((len(row) for row in previous), default=1) or 1
+        rows = [list(row) + [""] * (width - len(row)) for row in previous]
+        written = container.form_browser.write_grid(session_id, target, rows)
+    except AgentContractError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    finally:
+        container.form_browser.close_session(session_id)
+    return {
+        "reverted": True,
+        "target": target,
+        "observed": written.get("observed") or [],
+        "verified": bool(written.get("verified")),
+    }
