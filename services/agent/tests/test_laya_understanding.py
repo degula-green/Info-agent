@@ -16,7 +16,7 @@ from app.ingress.chat import ChatIngress
 from app.kernel.models import TaskUnderstanding, UnderstandingIntent
 from app.understanding.hybrid import HybridUnderstandingProvider
 from app.understanding.laya import JevUnderstandingProvider, LayaUnderstandingProvider
-from app.understanding.schema import available_intents
+from app.understanding.schema import INTENT_OPTION_ORDER
 from tests.support import make_settings
 
 
@@ -196,6 +196,64 @@ def test_laya_non_task_and_other_task_are_accepted() -> None:
     assert other_result.intent_candidates == []
 
 
+def test_laya_form_complete_is_a_single_action_intent() -> None:
+    provider = LayaUnderstandingProvider(
+        StubLayaClient(
+            _response("form.complete", {"form.complete": 0.94, "other_task": 0.02})
+        )
+    )
+
+    result = provider.understand(
+        ChatIngress().create_task(
+            "user-1",
+            {"text": "根据这些资料把申请表填好，填完让我预览确认"},
+        )
+    )
+
+    assert result.is_task is True
+    assert result.task_kind == "action"
+    assert [item.name for item in result.intent_candidates] == ["form.complete"]
+
+
+def test_laya_keeps_submission_out_of_form_complete() -> None:
+    provider = LayaUnderstandingProvider(
+        StubLayaClient(
+            _response("other_task", {"other_task": 0.91, "form.complete": 0.03})
+        )
+    )
+
+    result = provider.understand(
+        ChatIngress().create_task("user-1", {"text": "把填好的申请表提交到平台"})
+    )
+
+    assert result.is_task is True
+    assert result.intent_candidates == []
+
+
+@pytest.mark.parametrize("legacy", ["form.prepare", "form.submit", "document.compare"])
+def test_laya_rejects_retired_labels(legacy: str) -> None:
+    provider = LayaUnderstandingProvider(
+        StubLayaClient(_response(legacy, {legacy: 0.99}))
+    )
+
+    with pytest.raises(LayaError):
+        provider.understand(ChatIngress().create_task("user-1", {"text": "填表"}))
+
+
+def test_laya_rejects_probabilities_for_unknown_intents() -> None:
+    provider = LayaUnderstandingProvider(
+        StubLayaClient(
+            _response(
+                "form.complete",
+                {"form.complete": 0.90, "form.submit": 0.05},
+            )
+        )
+    )
+
+    with pytest.raises(LayaError):
+        provider.understand(ChatIngress().create_task("user-1", {"text": "填表"}))
+
+
 @pytest.mark.parametrize(
     ("response", "reason"),
     [
@@ -360,32 +418,18 @@ def test_jev_uses_cloud_confidence_field_and_reports_model() -> None:
     assert provider.last_model == "typesafe/jev-1.13-20260917"
 
 
-def test_jev_offers_only_executable_intents() -> None:
+def test_jev_offers_the_full_contract_option_set() -> None:
     client = StubLayaClient(
         _jev_response("todo.create", {"todo.create": 0.95, "non_task": 0.05})
     )
-    provider = JevUnderstandingProvider(
-        client,
-        available_intents=available_intents({"todo.create"}),
-    )
+    provider = JevUnderstandingProvider(client)
 
     provider.understand(ChatIngress().create_task("user-1", {"text": "明天开会"}))
 
     criteria = client.questions[0]["intent"]["criteria"]
-    assert set(criteria) == {"todo.create", "non_task", "other_task"}
-
-
-def test_jev_rejects_an_intent_that_was_not_offered() -> None:
-    client = StubLayaClient(
-        _jev_response("web.research", {"web.research": 0.99, "non_task": 0.01})
-    )
-    provider = JevUnderstandingProvider(
-        client,
-        available_intents=available_intents({"todo.create"}),
-    )
-
-    with pytest.raises(LayaError):
-        provider.understand(ChatIngress().create_task("user-1", {"text": "青云官网"}))
+    # The option set and its order are the model's label space: a fine-tuned
+    # Laya head indexes into it positionally, so it is never filtered.
+    assert list(criteria) == list(INTENT_OPTION_ORDER)
 
 
 def test_response_without_any_confidence_field_is_rejected() -> None:
@@ -525,25 +569,6 @@ def test_container_hybrid_can_use_jev_primary() -> None:
     assert provider.name == "hybrid"
     assert provider.primary_name == "jev"
     assert provider.model == "jev:jev-1.13+stub"
-
-
-def test_container_offers_only_executable_intents() -> None:
-    settings = make_settings(
-        understanding_provider="llm",
-        llm_base_url="http://127.0.0.1:9000/v1",
-        llm_model="stub",
-    )
-
-    provider = build_understanding_provider(
-        settings,
-        available_capabilities=["todo.create", "knowledge.search_content"],
-    )
-
-    names = {item.name for item in provider.intents}
-    assert "todo.create" in names
-    assert "knowledge.answer" in names
-    assert "web.research" not in names
-    assert "form.submit" not in names
 
 
 @pytest.mark.parametrize(

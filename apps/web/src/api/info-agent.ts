@@ -44,6 +44,48 @@ async function agentRequest<T>(path: string, init: RequestInit = {}): Promise<T>
   return body as T
 }
 
+export interface AgentAttachmentUpload {
+  attachment_id: string
+  file_name: string
+  mime_type: string
+  size_bytes: number
+}
+
+async function agentMultipartRequest<T>(path: string, form: FormData): Promise<T> {
+  // Never set Content-Type by hand here: the browser has to pick the multipart
+  // boundary. The JSON helper above is therefore not reusable for uploads.
+  // authenticatedFetch only adds the bearer token, so the boundary survives.
+  const response = await authenticatedFetch(`${baseURL}${path}`, {
+    method: 'POST',
+    body: form,
+    headers: new Headers({ Accept: 'application/json' }),
+  })
+  const raw = await response.text()
+  let body: any = null
+  if (raw) {
+    try {
+      body = JSON.parse(raw)
+    } catch {
+      body = raw
+    }
+  }
+  if (!response.ok) {
+    throw new AgentApiError(
+      body?.message || body?.detail || `Agent upload failed (${response.status})`,
+      body?.code || 'upload_failed',
+      response.status,
+      Boolean(body?.retryable),
+    )
+  }
+  return body as T
+}
+
+export async function uploadAgentAttachment(file: File): Promise<AgentAttachmentUpload> {
+  const data = new FormData()
+  data.append('file', file)
+  return agentMultipartRequest<AgentAttachmentUpload>('/attachments', data)
+}
+
 function uniqueClientMessageID(): string {
   return globalThis.crypto?.randomUUID?.() || `agent-${Date.now()}-${Math.random().toString(16).slice(2)}`
 }
@@ -95,6 +137,7 @@ export interface AgentTaskEventStreamOptions {
 
 export async function createAgentTask(input: {
   text: string
+  attachmentIds?: string[]
   clientMessageId?: string
   sourceRef?: Record<string, unknown>
   constraints?: Record<string, unknown>
@@ -103,6 +146,7 @@ export async function createAgentTask(input: {
     method: 'POST',
     body: JSON.stringify({
       text: input.text,
+      attachment_ids: input.attachmentIds || [],
       source_type: 'chat',
       client_message_id: input.clientMessageId || uniqueClientMessageID(),
       source_ref: input.sourceRef || {},

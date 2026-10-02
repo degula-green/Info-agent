@@ -7,26 +7,34 @@ which keeps local development and tests runnable.
 
 from __future__ import annotations
 
-from collections.abc import Iterable
 from dataclasses import dataclass
 
 from app.application.execution_service import ExecutionService
 from app.application.knowledge_events import KnowledgeEventService
 from app.application.task_service import TaskService
 from app.capabilities.answer import AnswerComposeCapability
+from app.capabilities.chat_reply import ChatReplyCapability
 from app.capabilities.knowledge import (
     KnowledgeAnswerCapability,
     KnowledgeSearchContentCapability,
     KnowledgeSearchSourcesCapability,
 )
 from app.capabilities.todo import TodoCreateCapability
-from app.capabilities.web import WebExtractCapability, WebFetchCapability
+from app.capabilities.web_research import WebResearchCapability
 from app.config import Settings, settings as default_settings
-from app.infrastructure.knowledge.client import HttpKnowledgeClient, KnowledgeClient
 from app.infrastructure.core.client import CoreClient, HttpCoreClient, NullCoreClient
 from app.infrastructure.rag.client import HttpRAGClient, RAGClient
+from app.infrastructure.search.searxng import SearxngSearchProvider
+from app.infrastructure.search.tavily import TavilySearchProvider
+from app.infrastructure.web.content_reader import ContentReader
+from app.infrastructure.web.crawl4ai_client import Crawl4AIClient
+from app.infrastructure.web.evidence import EvidenceBuilder
+from app.infrastructure.web.tavily_extractor import TavilyRenderer
+from app.infrastructure.web.url_tools import load_aliases
+from app.infrastructure.knowledge.client import HttpKnowledgeClient, KnowledgeClient
 from app.infrastructure.llm.client import OpenAIChatClient
 from app.providers.answer import LlmAnswerProvider
+from app.providers.chat import LlmChatReplyProvider
 from app.providers.page_fetcher import HttpPageFetcher
 from app.ingress.knowledge_events import KnowledgeEventIngress
 from app.kernel.models import OutboxEvent
@@ -91,14 +99,86 @@ def build_core_client(settings: Settings) -> CoreClient:
     )
 
 
+def build_rag_client(settings: Settings) -> RAGClient:
+    return HttpRAGClient(
+        base_url=settings.rag_base_url,
+        service_token=settings.rag_service_token,
+        timeout_seconds=settings.rag_timeout_seconds,
+    )
+
+
+def knowledge_tools_enabled(settings: Settings) -> bool:
+    """Internal knowledge tools are opt-in, but ``routing`` implies them."""
+
+    return (
+        settings.rag_agent_tools_enabled
+        or settings.planner_provider.strip().lower() == "routing"
+    )
+
+
 def _timeout_seconds(value: float) -> int:
     """Descriptor timeouts are whole seconds; a sub-second setting still means 1."""
 
     return max(1, int(round(float(value))))
 
 
-def knowledge_tools_enabled(settings: Settings) -> bool:
-    return settings.rag_agent_tools_enabled or settings.planner_provider.strip().lower() == "routing"
+def build_search_provider(settings: Settings):
+    """The discovery implementation named by configuration.
+
+    ``searxng`` needs a reachable self-hosted instance; ``tavily`` sends queries
+    to the vendor. An unset sidecar URL is not an error: research degrades to
+    reading the links the user supplied.
+    """
+
+    choice = (settings.web_search_provider or "searxng").strip().lower()
+    if choice == "none":
+        return None
+    if choice == "tavily":
+        return TavilySearchProvider(
+            settings.tavily_base_url,
+            api_key=settings.tavily_api_key,
+            search_depth=settings.tavily_search_depth,
+            include_raw_content=settings.tavily_include_raw_content,
+            timeout_seconds=settings.tavily_timeout_seconds,
+        )
+    if choice != "searxng":
+        raise RuntimeError(f"unsupported AGENT_WEB_SEARCH_PROVIDER: {choice}")
+    if not settings.searxng_base_url.strip():
+        return None
+    return SearxngSearchProvider(
+        settings.searxng_base_url,
+        timeout_seconds=settings.searxng_timeout_seconds,
+    )
+
+
+def build_renderer(settings: Settings):
+    """The rendering fallback named by configuration, or nothing.
+
+    Both implementations answer the same ``render(url)`` question, so the reader
+    above them does not know which one it is talking to -- only the Evidence
+    ``fetch_method`` records it.
+    """
+
+    choice = (settings.web_renderer or "").strip().lower()
+    if choice == "none":
+        return None
+    if choice == "tavily":
+        return TavilyRenderer(
+            settings.tavily_base_url,
+            api_key=settings.tavily_api_key,
+            extract_depth=settings.tavily_extract_depth,
+            timeout_seconds=settings.tavily_timeout_seconds,
+            allow_private_addresses=settings.web_allow_private_addresses,
+        )
+    if choice not in ("", "crawl4ai"):
+        raise RuntimeError(f"unsupported AGENT_WEB_RENDERER: {choice}")
+    if not settings.crawl4ai_base_url.strip():
+        return None
+    return Crawl4AIClient(
+        settings.crawl4ai_base_url,
+        api_token=settings.crawl4ai_api_token,
+        timeout_seconds=settings.crawl4ai_timeout_seconds,
+    )
 
 
 def build_registry(
@@ -110,11 +190,23 @@ def build_registry(
 
     The capability and the provider it calls are given the same timeout, so the
     descriptor the Runtime checks against and the socket the provider opens
-    cannot drift apart. todo.create stays the only writer: the three Step-4
-    capabilities are read-only and never ask for approval.
+    cannot drift apart. todo.create stays the only writer; the web capability
+    is read-only and never asks for approval.
+
+    The Planner sees one public-web capability. Fetching, rendering, search and
+    extraction stay behind ``web.research``: exposing them separately is what
+    let a model plan a fetch of a URL it had invented, or an extract step with
+    nothing to extract.
     """
 
-    web_timeout = _timeout_seconds(settings.web_timeout_seconds)
+    fetcher = HttpPageFetcher(
+        timeout_seconds=settings.web_timeout_seconds,
+        max_bytes=settings.web_max_bytes,
+        max_redirects=settings.web_max_redirects,
+        allow_private_addresses=settings.web_allow_private_addresses,
+    )
+    renderer = build_renderer(settings)
+    search_provider = build_search_provider(settings)
     answer_provider = LlmAnswerProvider(
         OpenAIChatClient(
             base_url=settings.llm_base_url,
@@ -130,22 +222,51 @@ def build_registry(
             todo_store,
             default_timezone=settings.default_timezone,
         ),
-        WebFetchCapability(
-            HttpPageFetcher(
-                timeout_seconds=settings.web_timeout_seconds,
-                max_bytes=settings.web_max_bytes,
-                max_redirects=settings.web_max_redirects,
-                allow_private_addresses=settings.web_allow_private_addresses,
+        WebResearchCapability(
+            ContentReader(
+                fetcher,
+                renderer=renderer,
+                min_text_chars=settings.web_research_min_text_chars,
             ),
-            timeout_seconds=web_timeout,
+            search_provider=search_provider,
+            evidence_builder=EvidenceBuilder(
+                page_chars=settings.web_research_page_chars
+            ),
+            aliases=load_aliases(settings.web_research_alias_path or None),
+            language=settings.searxng_language,
+            max_results=settings.web_research_max_results,
+            max_pages=settings.web_research_max_pages,
+            max_queries=settings.web_research_max_queries,
+            max_evidence_chars=settings.web_research_max_evidence_chars,
+            timeout_seconds=_timeout_seconds(settings.web_research_timeout_seconds),
         ),
-        WebExtractCapability(timeout_seconds=web_timeout),
         AnswerComposeCapability(
             answer_provider,
             timeout_seconds=_timeout_seconds(settings.answer_timeout_seconds),
         ),
     ]
+    if settings.chat_reply_enabled:
+        # Non-task messages get a short reply instead of silence. Leaving the
+        # capability out of the registry is the off switch: the deterministic
+        # planner only plans steps for capabilities it can actually see.
+        capabilities.append(
+            ChatReplyCapability(
+                LlmChatReplyProvider(
+                    OpenAIChatClient(
+                        base_url=settings.llm_base_url,
+                        api_key=settings.llm_api_key,
+                        model=settings.llm_model,
+                        timeout_seconds=settings.chat_reply_timeout_seconds,
+                        max_output_tokens=settings.chat_reply_max_output_tokens,
+                        response_format=settings.llm_response_format,
+                    )
+                ),
+                timeout_seconds=_timeout_seconds(settings.chat_reply_timeout_seconds),
+            )
+        )
     if knowledge_tools_enabled(settings) and rag_client is not None:
+        # Internal knowledge is answered from collected company data. These
+        # capabilities are read-only and never ask for approval.
         capabilities.extend(
             [
                 KnowledgeSearchSourcesCapability(rag_client),
@@ -159,61 +280,59 @@ def build_registry(
     return CapabilityRegistry(capabilities)
 
 
-def build_rag_client(settings: Settings) -> RAGClient:
-    return HttpRAGClient(
-        base_url=settings.rag_base_url,
-        service_token=settings.rag_service_token,
-        timeout_seconds=settings.rag_timeout_seconds,
-    )
-
-
 def build_planner(settings: Settings):
     provider = (settings.planner_provider or "deterministic").strip().lower()
     if provider == "deterministic":
-        planner = DeterministicPlanner(
-            default_timezone=settings.default_timezone,
-            min_confidence=settings.understanding_min_confidence,
-        )
-        if knowledge_tools_enabled(settings):
-            return KnowledgeRoutingPlanner(
-                planner,
-                default_timezone=settings.default_timezone,
-            )
-        return planner
-    if provider in {"llm", "routing"}:
-        from app.infrastructure.llm.client import OpenAIChatClient
-        from app.planning.llm import OpenAICompatiblePlanner
+        planner = _build_deterministic_planner(settings)
+    elif provider == "llm":
+        planner = _build_llm_planner(settings)
+    elif provider == "routing":
+        from app.planning.routing import RoutingPlanner
 
-        if provider == "routing" and (
-            not settings.llm_base_url or not settings.llm_model
-        ):
-            planner = DeterministicPlanner(
-                default_timezone=settings.default_timezone,
-                min_confidence=settings.understanding_min_confidence,
-            )
-        else:
-            planner = OpenAICompatiblePlanner(
-                OpenAIChatClient(
-                    base_url=settings.llm_base_url,
-                    api_key=settings.llm_api_key,
-                    model=settings.llm_model,
-                    timeout_seconds=settings.llm_timeout_seconds,
-                    max_output_tokens=settings.llm_max_output_tokens,
-                    # The Planner is the one caller that passes a real JSON Schema
-                    # per request; the client is told it may ask for strict
-                    # decoding here, and to fall back when the provider refuses.
-                    response_format=settings.llm_planner_response_format,
-                    json_schema_fallback=settings.llm_json_schema_fallback,
-                )
-            )
+        # Collected text keeps its fixed pipeline; only chat turns whose intent
+        # needs composition reach the model.
+        planner = RoutingPlanner(
+            deterministic=_build_deterministic_planner(settings),
+            llm=_build_llm_planner(settings),
+        )
     else:
         raise RuntimeError(f"unsupported AGENT_PLANNER_PROVIDER: {provider}")
     if knowledge_tools_enabled(settings):
+        # Internal-knowledge questions are answered from collected company data,
+        # so they are intercepted before the intent router can send them to the
+        # public-web planner.
         return KnowledgeRoutingPlanner(
             planner,
             default_timezone=settings.default_timezone,
         )
     return planner
+
+
+def _build_deterministic_planner(settings: Settings) -> DeterministicPlanner:
+    return DeterministicPlanner(
+        default_timezone=settings.default_timezone,
+        min_confidence=settings.understanding_min_confidence,
+    )
+
+
+def _build_llm_planner(settings: Settings):
+    from app.infrastructure.llm.client import OpenAIChatClient
+    from app.planning.llm import OpenAICompatiblePlanner
+
+    return OpenAICompatiblePlanner(
+        OpenAIChatClient(
+            base_url=settings.llm_base_url,
+            api_key=settings.llm_api_key,
+            model=settings.llm_model,
+            timeout_seconds=settings.llm_timeout_seconds,
+            max_output_tokens=settings.llm_max_output_tokens,
+            # The Planner is the one caller that passes a real JSON Schema per
+            # request; the client is told it may ask for strict decoding here,
+            # and to fall back when the provider refuses.
+            response_format=settings.llm_planner_response_format,
+            json_schema_fallback=settings.llm_json_schema_fallback,
+        )
+    )
 
 
 def understanding_min_confidence(settings: Settings, *, source_type: str = "chat") -> float:
@@ -224,53 +343,31 @@ def understanding_min_confidence(settings: Settings, *, source_type: str = "chat
     return float(settings.understanding_min_confidence)
 
 
-def _resolve_intents(available_capabilities: Iterable[str] | None):
-    from app.understanding.schema import INTENT_CATALOG, available_intents
+def _build_laya_understanding_provider(settings: Settings):
+    from app.infrastructure.laya.client import HttpLayaClient
+    from app.understanding.laya import (
+        LayaUnderstandingProvider,
+        verify_model_contract,
+    )
 
-    if available_capabilities is None:
-        return INTENT_CATALOG
-    return available_intents(available_capabilities)
-
-
-def _build_laya_understanding_provider(settings: Settings, intents):
-    from app.infrastructure.laya.client import HttpSystemOneClient
-    from app.understanding.laya import LayaUnderstandingProvider
+    if settings.laya_model_path:
+        # Fail at start-up rather than on the first request when the served
+        # checkpoint belongs to another intent contract.
+        verify_model_contract(settings.laya_model_path)
 
     return LayaUnderstandingProvider(
-        HttpSystemOneClient(
+        HttpLayaClient(
             base_url=settings.laya_base_url,
             api_key=settings.laya_api_key,
             model=settings.laya_model,
             timeout_seconds=settings.laya_timeout_seconds,
-            # The sidecar is local; a retry would only add latency to a failure
-            # that the hybrid fallback already handles.
-            max_retries=0,
         ),
         min_confidence=settings.laya_min_confidence,
         min_margin=settings.laya_min_margin,
-        available_intents=intents,
     )
 
 
-def _build_jev_understanding_provider(settings: Settings, intents):
-    from app.infrastructure.laya.client import HttpSystemOneClient
-    from app.understanding.laya import JevUnderstandingProvider
-
-    return JevUnderstandingProvider(
-        HttpSystemOneClient(
-            base_url=settings.jev_base_url,
-            api_key=settings.jev_api_key,
-            model=settings.jev_model,
-            timeout_seconds=settings.jev_timeout_seconds,
-            max_retries=settings.jev_max_retries,
-        ),
-        min_confidence=settings.jev_min_confidence,
-        min_margin=settings.jev_min_margin,
-        available_intents=intents,
-    )
-
-
-def _build_llm_understanding_provider(settings: Settings, intents):
+def _build_llm_understanding_provider(settings: Settings):
     from app.infrastructure.llm.client import OpenAIChatClient
     from app.understanding.provider import OpenAICompatibleUnderstandingProvider
 
@@ -284,23 +381,27 @@ def _build_llm_understanding_provider(settings: Settings, intents):
             response_format=settings.llm_response_format,
         ),
         min_confidence=settings.understanding_min_confidence,
-        available_intents=intents,
     )
 
 
-def build_understanding_provider(
-    settings: Settings,
-    *,
-    available_capabilities: Iterable[str] | None = None,
-):
-    """Build the configured provider, offering only executable intents.
+def _build_jev_understanding_provider(settings: Settings):
+    from app.infrastructure.laya.client import HttpSystemOneClient
+    from app.understanding.laya import JevUnderstandingProvider
 
-    ``available_capabilities=None`` keeps the historical behaviour (the whole
-    catalog) so eval scripts and test doubles are unaffected; the container
-    always passes the registered capability names.
-    """
+    return JevUnderstandingProvider(
+        HttpSystemOneClient(
+            base_url=settings.jev_base_url,
+            api_key=settings.jev_api_key,
+            model=settings.jev_model,
+            timeout_seconds=settings.jev_timeout_seconds,
+            max_retries=settings.jev_max_retries,
+        ),
+        min_confidence=settings.jev_min_confidence,
+        min_margin=settings.jev_min_margin,
+    )
 
-    intents = _resolve_intents(available_capabilities)
+
+def build_understanding_provider(settings: Settings):
     provider = (settings.understanding_provider or "rules").strip().lower()
     if provider == "fake":
         from app.understanding.provider import FakeUnderstandingProvider
@@ -309,28 +410,28 @@ def build_understanding_provider(
     if provider == "rules":
         from app.understanding.provider import RuleBasedUnderstandingProvider
 
-        return RuleBasedUnderstandingProvider(available_intents=intents)
+        return RuleBasedUnderstandingProvider()
     if provider == "llm":
-        return _build_llm_understanding_provider(settings, intents)
+        return _build_llm_understanding_provider(settings)
     if provider == "laya":
-        return _build_laya_understanding_provider(settings, intents)
+        return _build_laya_understanding_provider(settings)
     if provider == "jev":
-        return _build_jev_understanding_provider(settings, intents)
+        return _build_jev_understanding_provider(settings)
     if provider == "hybrid":
         from app.understanding.hybrid import HybridUnderstandingProvider
 
         primary_name = (settings.understanding_primary or "laya").strip().lower()
         if primary_name == "laya":
-            primary = _build_laya_understanding_provider(settings, intents)
+            primary = _build_laya_understanding_provider(settings)
         elif primary_name == "jev":
-            primary = _build_jev_understanding_provider(settings, intents)
+            primary = _build_jev_understanding_provider(settings)
         else:
             raise RuntimeError(
                 f"unsupported AGENT_UNDERSTANDING_PRIMARY: {primary_name}"
             )
         return HybridUnderstandingProvider(
             primary=primary,
-            fallback=_build_llm_understanding_provider(settings, intents),
+            fallback=_build_llm_understanding_provider(settings),
         )
     raise RuntimeError(f"unsupported AGENT_UNDERSTANDING_PROVIDER: {provider}")
 
@@ -409,12 +510,7 @@ def build_container(
     resolved_publisher = publisher or build_publisher(resolved)
     resolved_understanding = understanding_provider
     if resolved_understanding is None and resolved.understanding_mode.strip().lower() != "off":
-        resolved_understanding = build_understanding_provider(
-            resolved,
-            available_capabilities=[
-                descriptor.name for descriptor in registry.list_descriptors()
-            ],
-        )
+        resolved_understanding = build_understanding_provider(resolved)
     resolved_ingress = ingress or KnowledgeEventIngress(
         platforms=resolved.knowledge_platform_allowlist
     )

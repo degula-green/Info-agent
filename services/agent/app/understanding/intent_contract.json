@@ -1,0 +1,93 @@
+{
+  "schema_version": "intent-v6",
+  "instruction": "Choose the workflow that best matches the user's primary intent.",
+  "options": [
+    {
+      "name": "todo.create",
+      "kind": "business",
+      "task_kind": "action",
+      "description": "为用户自己创建或记录待办、日程、提醒、未来行动；只是记下来以后去做，不是让系统立刻执行某个操作",
+      "examples": [
+        "明天洗衣服",
+        "完成登录模块代码",
+        "明天下午三点跟张三开评审会",
+        "提醒我给妈妈打电话"
+      ],
+      "laya_criteria": "The user wants to record a to-do, meeting, invitation, reminder, or future action for themselves, such as a statement like I will do something tomorrow. The user is not asking the system to perform an operation right now.",
+      "generation_prompt": "生成{count}条中文用户消息，用户想为自己创建或记录一条待办、会议、邀约、提醒或未来行动计划（记下来以后去做）。不要生成要求系统立刻执行某个操作（下单、订票、发邮件、转账、提交）的请求。必须多样，不要求带时间。"
+    },
+    {
+      "name": "knowledge.answer",
+      "kind": "business",
+      "task_kind": "answer",
+      "description": "根据采集到的内部信息回答问题",
+      "examples": [
+        "公司的办公地址是什么",
+        "解释一下这份材料"
+      ],
+      "laya_criteria": "Answer a question using existing company or internal knowledge. This includes questions about internal documents, reports, weekly reports, policies, plans, handbooks and systems, and requests to explain, read out or summarise internal material. A concrete information question is never chit-chat.",
+      "generation_prompt": "生成{count}条中文用户消息，用户直接提出问题，想依据公司内部资料或已有知识获得答案。要包含“是什么”“怎么规定”“有哪些”“谁负责”等直接提问句式，不要写成闲聊或感叹。"
+    },
+    {
+      "name": "web.research",
+      "kind": "business",
+      "task_kind": "action",
+      "description": "读取指定网址，或搜索公开网页并回答问题",
+      "examples": [
+        "查一下这个政策的最新版本",
+        "搜索行业公开数据"
+      ],
+      "laya_criteria": "Search the public internet or external sources for information, or read a specific web page. The message asks for outside information, not for an action.",
+      "generation_prompt": "生成{count}条中文用户消息，用户想上网搜索公开信息、查外部最新资料，或读取某个网址。要包含“查一下”“搜一下”“网上有没有”“看看这个链接”等表达，不要写成公司内部资料查询。"
+    },
+    {
+      "name": "compliance.assess",
+      "kind": "business",
+      "task_kind": "answer",
+      "description": "根据公司材料与规则、协议判断是否符合",
+      "examples": [
+        "我们公司是否符合这个协议",
+        "这份材料满足申请条件吗"
+      ],
+      "laya_criteria": "Assess whether a person, document, or action complies with a rule, policy, condition, or agreement. The message asks for a compliance judgement.",
+      "generation_prompt": "生成{count}条中文用户消息，用户想判断主体、材料或行为是否符合规则、协议、条件或要求。要包含“符合吗”“是否合规”“满足条件吗”“有没有违反”等表达。"
+    },
+    {
+      "name": "form.complete",
+      "kind": "business",
+      "task_kind": "action",
+      "description": "根据用户提供或授权获取的资料填写表单字段，生成预览，并在用户确认后将填写结果写入表单；不向外部平台提交表单或申请",
+      "examples": [
+        "请帮我填写这个表单",
+        "给我填写这个链接里的表单",
+        "根据资料把申请表填好，填完让我预览确认"
+      ],
+      "laya_criteria": "Fill in or complete the fields of a form using information provided or authorized by the user, then prepare a preview for confirmation. The action is writing values into the form. Requests to submit, send or file an already filled form or application to an external system are not this intent, and neither are other file or document operations such as adding a password, converting data to a table, or printing a list.",
+      "generation_prompt": "生成{count}条中文用户消息，用户要求填写或补全表单字段，或填写后进入预览确认；不要生成只要求提交或发送已填写表单的请求。"
+    },
+    {
+      "name": "non_task",
+      "kind": "boundary",
+      "task_kind": null,
+      "description": "不是任务，例如闲聊、评价、假设、已完成动作",
+      "examples": [
+        "晚上好",
+        "今天这个会开得挺久的"
+      ],
+      "laya_criteria": "Chit-chat, greetings, thanks, opinions, complaints, examples, hypotheses, statements about completed past actions, or messages with no clear goal. A question with a concrete information goal is not this intent, and neither is any request for the system to do something.",
+      "generation_prompt": "生成{count}条中文用户消息，属于闲聊、问候、吐槽、评价、举例、假设、转述、已完成动作，或没有明确目标。不能是待办或知识问题。"
+    },
+    {
+      "name": "other_task",
+      "kind": "boundary",
+      "task_kind": "action",
+      "description": "是明确任务，但不属于当前 5 个业务意图，例如要求系统立刻执行订票、下单、发送邮件、转账、上传打印、重启服务，或提交、发送、向外部平台递交已经填写好的表单或申请",
+      "examples": [
+        "帮我订一张高铁票",
+        "把已经填好的申请表提交到平台"
+      ],
+      "laya_criteria": "A clear task that does not fit any category above. The user asks the system to carry out an operation it has no dedicated intent for, such as booking a train ticket, placing an order, sending an email or a message, transferring money, submitting, sending or filing an already filled form or application to an external system, adding a password to a file, converting data into a table, uploading, printing or renaming files, or restarting a service. The user is asking for the operation to be carried out, not recording a to-do for themselves and not filling in a form.",
+      "generation_prompt": "生成{count}条中文用户消息，用户要求系统立刻替自己执行一个具体操作，但不属于待办记录、知识问答、网页检索、合规评估或填写表单。例如订票、下单、发邮件或消息、转账、上传或打印文件、重启服务，以及把已填写好的表单或申请提交到外部平台。不要生成只是记录自己要去做某事的语句。"
+    }
+  ]
+}

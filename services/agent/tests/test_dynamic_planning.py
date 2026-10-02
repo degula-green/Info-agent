@@ -288,7 +288,7 @@ def test_unsupported_write_requires_confirmation_before_partial_execution() -> N
     planner = DecisionPlanner(
         PlannerDecision(
             action="unsupported",
-            unsupported_intents=["form.submit"],
+            unsupported_intents=["form.complete"],
             requires_user_confirmation=True,
             reason="only a partial write can be performed",
         )

@@ -12,7 +12,7 @@ from fastapi import FastAPI
 
 from app.application.bootstrap import build_container
 from app.config import settings
-from app.routers import admin, api, contact_profile, health, search
+from app.routers import admin, api, contact_profile, health, search, internal_parse
 
 settings.validate_mvp()
 
@@ -33,3 +33,4 @@ app.include_router(search.router)
 app.include_router(api.router)
 app.include_router(contact_profile.router)
 app.include_router(admin.router)
+app.include_router(internal_parse.router)

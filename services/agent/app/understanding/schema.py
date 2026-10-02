@@ -1,131 +1,125 @@
 """Wire schema and intent catalog for the task understanding provider.
 
-Two vocabularies live here. An *intent* is what the user wants (a stable product
-concept); a *capability* is what this deployment can actually execute. They are
-deliberately not the same list, so the catalog never has to be renamed when an
-implementation changes. What they do share is availability: an intent whose
-``requires`` capabilities are not registered must not be offered to any
-classifier, or the runtime ends up planning work no tool can do.
+The single source of truth for the intent taxonomy is ``intent_contract.json``
+next to this module. The Agent, the Laya provider, the training script and the
+dataset generator all read that file (or validate against it), so option names
+and their order cannot drift apart.
 """
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+import json
 from dataclasses import dataclass
-from typing import Literal
+from pathlib import Path
+from typing import Any, Iterable, Literal, Mapping
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.kernel.models import TaskUnderstanding, UnderstandingIntent
 
+CONTRACT_PATH = Path(__file__).with_name("intent_contract.json")
+
+TaskKind = Literal["answer", "action", "mixed"]
+VALID_TASK_KINDS = frozenset({"answer", "action", "mixed"})
+VALID_OPTION_KINDS = frozenset({"business", "boundary"})
+
 
 @dataclass(frozen=True)
 class IntentDefinition:
     name: str
-    # Chinese description rendered into the LLM understanding prompt.
     description: str
-    # English rubric rendered into the Laya / Jev choice question. Those
-    # checkpoints follow English option descriptions far more reliably than
-    # Chinese ones, so the two languages are kept side by side on purpose.
-    criteria: str
     examples: tuple[str, ...]
-    # Capabilities that must all be registered for this intent to be offered.
-    # ``None`` means no capability implements this intent yet, so it is never
-    # offered; an empty frozenset means it is always available.
-    requires: frozenset[str] | None = None
+    task_kind: TaskKind | None
+    laya_criteria: str
+    generation_prompt: str
+    kind: str
 
 
-INTENT_CATALOG: tuple[IntentDefinition, ...] = (
+def _load_contract(path: Path = CONTRACT_PATH) -> dict[str, Any]:
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError as exc:  # pragma: no cover - packaging error
+        raise RuntimeError(f"intent contract not found: {path}") from exc
+    if not isinstance(raw, dict):
+        raise RuntimeError("intent contract must be a JSON object")
+
+    version = raw.get("schema_version")
+    if not isinstance(version, str) or not version.strip():
+        raise RuntimeError("intent contract has no schema_version")
+
+    options = raw.get("options")
+    if not isinstance(options, list) or not options:
+        raise RuntimeError("intent contract has no options")
+
+    seen: set[str] = set()
+    for option in options:
+        if not isinstance(option, dict):
+            raise RuntimeError("intent contract option must be an object")
+        name = option.get("name")
+        if not isinstance(name, str) or not name.strip():
+            raise RuntimeError("intent contract option has no name")
+        if name in seen:
+            raise RuntimeError(f"intent contract has a duplicate option: {name}")
+        seen.add(name)
+        if option.get("kind") not in VALID_OPTION_KINDS:
+            raise RuntimeError(f"intent contract option {name} has an invalid kind")
+        task_kind = option.get("task_kind")
+        if task_kind is not None and task_kind not in VALID_TASK_KINDS:
+            raise RuntimeError(f"intent contract option {name} has an invalid task_kind")
+        for field_name in ("description", "laya_criteria", "generation_prompt"):
+            value = option.get(field_name)
+            if not isinstance(value, str) or not value.strip():
+                raise RuntimeError(
+                    f"intent contract option {name} has no {field_name}"
+                )
+    return raw
+
+
+CONTRACT: Mapping[str, Any] = _load_contract()
+INTENT_SCHEMA_VERSION: str = str(CONTRACT["schema_version"])
+
+INTENT_OPTION_ORDER: tuple[str, ...] = tuple(
+    option["name"] for option in CONTRACT["options"]
+)
+
+INTENT_DEFINITIONS: tuple[IntentDefinition, ...] = tuple(
     IntentDefinition(
-        name="todo.create",
-        description="创建一条我要去做的事：会议、邀约、提醒、待办都算；不要求时间",
-        criteria=(
-            "Create a personal to-do, meeting, invitation, reminder, or future "
-            "action item. Statements like I will do something tomorrow count. "
-            "Work items and everyday errands count too: writing a report, "
-            "buying something, picking up a package, moving house."
-        ),
-        examples=(
-            "明天洗衣服",
-            "完成登录模块代码",
-            "明天下午三点跟张三开评审会",
-            "提醒我给妈妈打电话",
-        ),
-        requires=frozenset({"todo.create"}),
-    ),
-    IntentDefinition(
-        name="knowledge.answer",
-        description=(
-            "基于已有知识回答问题；公司内部的项目、系统、服务器、部署、任务、"
-            "进度、负责人和自家官网都归这里"
-        ),
-        criteria=(
-            "Answer a question from existing company or internal knowledge. "
-            "Questions about internal projects, systems, servers, deployments, "
-            "tasks, progress, owners, or the company's own official website "
-            "belong here."
-        ),
-        examples=("公司的办公地址是什么", "解释一下这份材料"),
-        requires=frozenset({"knowledge.search_content"}),
-    ),
-    IntentDefinition(
-        name="web.research",
-        description=(
-            "从公开网页或外部来源检索信息；只有明确提到公开、互联网、新闻或链接时才用，"
-            "公司内部实体本身不算"
-        ),
-        criteria=(
-            "Search the public internet or external sources for information. "
-            "Use this only when the user explicitly asks for public internet "
-            "sources, public news, public announcements, external links, or "
-            "gives a URL. A bare internal entity name such as the company's own "
-            "official website is knowledge.answer, not web.research."
-        ),
-        examples=("查一下这个政策的最新版本", "搜索行业公开数据"),
-        requires=frozenset({"web.search"}),
-    ),
-    IntentDefinition(
-        name="document.compare",
-        description="比较两份或多份材料并输出差异或结论",
-        criteria="Compare two or more documents and report their differences.",
-        examples=("把协议要求和公司简介对比", "比较两个版本有哪些变化"),
-    ),
-    IntentDefinition(
-        name="compliance.assess",
-        description="判断主体、材料或行为是否符合规则协议",
-        criteria=(
-            "Assess whether a person, document, or action complies with a rule "
-            "or agreement."
-        ),
-        examples=("我们公司是否符合这个协议", "这份材料满足申请条件吗"),
-    ),
-    IntentDefinition(
-        name="form.prepare",
-        description="读取表单并生成填写草稿或预览",
-        criteria="Read a form and prepare a draft or preview before submission.",
-        examples=("根据资料填写这张申请表", "准备一份表单草稿"),
-    ),
-    IntentDefinition(
-        name="form.submit",
-        description="提交已经准备和确认的表单",
-        criteria="Submit an already prepared and confirmed form.",
-        examples=("确认无误后提交申请表", "帮我提交这份表单"),
-    ),
+        name=option["name"],
+        description=option["description"],
+        examples=tuple(option.get("examples") or ()),
+        task_kind=option.get("task_kind"),
+        laya_criteria=option["laya_criteria"],
+        generation_prompt=option["generation_prompt"],
+        kind=option["kind"],
+    )
+    for option in CONTRACT["options"]
+)
+
+# The LLM prompt only offers the five business intents; the two boundary labels
+# are described separately as hard constraints.
+INTENT_CATALOG: tuple[IntentDefinition, ...] = tuple(
+    item for item in INTENT_DEFINITIONS if item.kind == "business"
 )
 
 INTENT_NAMES = frozenset(item.name for item in INTENT_CATALOG)
 
-# Boundary labels are not intents: they describe why no intent applies. They are
-# always offered to a choice classifier and never appear in the LLM catalog.
-BOUNDARY_CRITERIA: dict[str, str] = {
-    "non_task": (
-        "Chit-chat, greetings, opinions, complaints, examples, hypotheses, "
-        "completed past actions, or no clear goal."
-    ),
-    "other_task": (
-        "A clear task that does not fit any category above, such as booking a "
-        "train ticket."
-    ),
+BOUNDARY_INTENTS = frozenset(
+    item.name for item in INTENT_DEFINITIONS if item.kind == "boundary"
+)
+
+ALL_INTENT_LABELS = frozenset(INTENT_OPTION_ORDER)
+
+# Availability overlay: which registered capability can actually execute each
+# business intent. This is deliberately NOT part of intent_contract.json. The
+# contract is the model's frozen label space; the capability registry changes
+# per deployment. ``None`` means no capability implements the intent yet, so a
+# classifier may still name it but the planner must report it as unsupported.
+INTENT_REQUIRES: dict[str, frozenset[str] | None] = {
+    "todo.create": frozenset({"todo.create"}),
+    "knowledge.answer": frozenset({"knowledge.search_content"}),
+    "web.research": frozenset({"web.research"}),
+    "compliance.assess": None,
+    "form.complete": None,
 }
 
 
@@ -138,7 +132,8 @@ def _partition_intents(
     offered: list[IntentDefinition] = []
     withheld: list[IntentDefinition] = []
     for item in INTENT_CATALOG:
-        if item.requires is not None and item.requires <= available:
+        requires = INTENT_REQUIRES.get(item.name)
+        if requires is not None and requires <= available:
             offered.append(item)
         else:
             withheld.append(item)
@@ -148,7 +143,7 @@ def _partition_intents(
 def available_intents(
     capability_names: Iterable[str],
 ) -> tuple[IntentDefinition, ...]:
-    """Intents whose required capabilities are all registered right now."""
+    """Business intents some registered capability can execute right now."""
 
     return _partition_intents(capability_names)[0]
 
@@ -156,32 +151,28 @@ def available_intents(
 def unavailable_intents(
     capability_names: Iterable[str],
 ) -> tuple[IntentDefinition, ...]:
-    """Intents this deployment cannot execute, kept for logs and diagnostics."""
+    """Intents the classifier may name but no registered capability can run."""
 
     return _partition_intents(capability_names)[1]
 
-
-def choice_criteria(
-    intents: Iterable[IntentDefinition] | None = None,
-) -> dict[str, str]:
-    """The option map for a Laya / Jev ``choice`` question."""
-
-    selected = INTENT_CATALOG if intents is None else tuple(intents)
-    criteria = {item.name: item.criteria for item in selected}
-    criteria.update(BOUNDARY_CRITERIA)
-    return criteria
-
-INTENT_TASK_KINDS: dict[str, Literal["answer", "action", "mixed"]] = {
-    "todo.create": "action",
-    "knowledge.answer": "answer",
-    "web.research": "action",
-    "document.compare": "action",
-    "compliance.assess": "answer",
-    "form.prepare": "action",
-    "form.submit": "action",
+INTENT_TASK_KINDS: dict[str, TaskKind] = {
+    item.name: item.task_kind  # type: ignore[misc]
+    for item in INTENT_DEFINITIONS
+    if item.task_kind is not None
 }
 
-BOUNDARY_INTENTS = frozenset({"non_task", "other_task"})
+LAYAYA_CRITERIA: dict[str, str] = {
+    item.name: item.laya_criteria for item in INTENT_DEFINITIONS
+}
+
+LAYAYA_INSTRUCTION: str = str(CONTRACT["instruction"])
+
+
+def generation_prompt(name: str) -> str:
+    for item in INTENT_DEFINITIONS:
+        if item.name == name:
+            return item.generation_prompt
+    raise KeyError(f"unknown intent: {name}")
 
 
 class UnderstandingIntentDraft(BaseModel):
@@ -250,7 +241,15 @@ class TaskUnderstandingDraft(BaseModel):
         )
 
 
-def intent_catalog_text(intents: Iterable[IntentDefinition] | None = None) -> str:
+def intent_catalog_text(
+    intents: Iterable[IntentDefinition] | None = None,
+) -> str:
+    """Render the catalog for the LLM prompt.
+
+    The optional subset lets a caller show only the intents this deployment can
+    execute. Laya / Jev ignore it: their option set is frozen by the contract.
+    """
+
     selected = INTENT_CATALOG if intents is None else tuple(intents)
     if not selected:
         return "- 当前部署没有可执行的意图；所有任务都应返回 intent_candidates=[]"
@@ -260,7 +259,5 @@ def intent_catalog_text(intents: Iterable[IntentDefinition] | None = None) -> st
     )
 
 
-def intent_task_kind(
-    name: str,
-) -> Literal["answer", "action", "mixed"]:
+def intent_task_kind(name: str) -> TaskKind:
     return INTENT_TASK_KINDS.get(name, "action")

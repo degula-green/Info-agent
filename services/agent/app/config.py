@@ -221,6 +221,9 @@ class Settings:
     laya_model: str = _text(
         "multilingual", "AGENT_LAYAYA_MODEL", "agent_LAYAYA_MODEL"
     )
+    laya_model_path: str = _text(
+        "", "AGENT_LAYAYA_MODEL_PATH", "agent_LAYAYA_MODEL_PATH"
+    )
     laya_timeout_seconds: float = _float(
         5.0, "AGENT_LAYAYA_TIMEOUT_SECONDS", "agent_LAYAYA_TIMEOUT_SECONDS"
     )
@@ -305,11 +308,113 @@ class Settings:
         "AGENT_WEB_ALLOW_PRIVATE_ADDRESSES",
         "agent_WEB_ALLOW_PRIVATE_ADDRESSES",
     )
+    # Step 5 web research: one Planner-visible capability with two sidecars
+    # behind it. Empty base URLs mean "that sidecar is not deployed here", which
+    # degrades to link reading (search) or static-only reading (render).
+    searxng_base_url: str = _text(
+        "", "AGENT_SEARXNG_BASE_URL", "agent_SEARXNG_BASE_URL"
+    )
+    searxng_timeout_seconds: float = _float(
+        10.0, "AGENT_SEARXNG_TIMEOUT_SECONDS", "agent_SEARXNG_TIMEOUT_SECONDS"
+    )
+    searxng_language: str = _text(
+        "zh-CN", "AGENT_SEARXNG_LANGUAGE", "agent_SEARXNG_LANGUAGE"
+    )
+    crawl4ai_base_url: str = _text(
+        "", "AGENT_CRAWL4AI_BASE_URL", "agent_CRAWL4AI_BASE_URL"
+    )
+    # The official Crawl4AI image requires this on every endpoint; without it
+    # the sidecar answers only inside its own container.
+    crawl4ai_api_token: str = _text(
+        "", "AGENT_CRAWL4AI_API_TOKEN", "agent_CRAWL4AI_API_TOKEN"
+    )
+    crawl4ai_timeout_seconds: float = _float(
+        30.0, "AGENT_CRAWL4AI_TIMEOUT_SECONDS", "agent_CRAWL4AI_TIMEOUT_SECONDS"
+    )
+    web_research_timeout_seconds: float = _float(
+        90.0,
+        "AGENT_WEB_RESEARCH_TIMEOUT_SECONDS",
+        "agent_WEB_RESEARCH_TIMEOUT_SECONDS",
+    )
+    # Below this many characters a static body is treated as a stub and the
+    # renderer gets a turn: JavaScript shells and anti-bot interstitials look
+    # exactly like short pages to a plain GET.
+    web_research_min_text_chars: int = _int(
+        500,
+        "AGENT_WEB_RESEARCH_MIN_TEXT_CHARS",
+        "agent_WEB_RESEARCH_MIN_TEXT_CHARS",
+    )
+    web_research_max_results: int = _int(
+        5, "AGENT_WEB_RESEARCH_MAX_RESULTS", "agent_WEB_RESEARCH_MAX_RESULTS"
+    )
+    web_research_max_pages: int = _int(
+        3, "AGENT_WEB_RESEARCH_MAX_PAGES", "agent_WEB_RESEARCH_MAX_PAGES"
+    )
+    web_research_max_queries: int = _int(
+        3, "AGENT_WEB_RESEARCH_MAX_QUERIES", "agent_WEB_RESEARCH_MAX_QUERIES"
+    )
+    # Per page and overall body budgets handed to answer.compose.
+    web_research_page_chars: int = _int(
+        8000, "AGENT_WEB_RESEARCH_PAGE_CHARS", "agent_WEB_RESEARCH_PAGE_CHARS"
+    )
+    web_research_max_evidence_chars: int = _int(
+        60_000,
+        "AGENT_WEB_RESEARCH_MAX_EVIDENCE_CHARS",
+        "agent_WEB_RESEARCH_MAX_EVIDENCE_CHARS",
+    )
+    web_research_alias_path: str = _text(
+        "",
+        "AGENT_WEB_RESEARCH_ALIAS_PATH",
+        "agent_WEB_RESEARCH_ALIAS_PATH",
+    )
+    # Which search provider and which rendering fallback are in use. Both layers
+    # have a self-hosted and a hosted implementation, so switching vendors is a
+    # setting rather than a code change.
+    web_search_provider: str = _text(
+        "searxng", "AGENT_WEB_SEARCH_PROVIDER", "agent_WEB_SEARCH_PROVIDER"
+    )
+    # Empty means "auto": use Crawl4AI when its base URL is set, else nothing.
+    web_renderer: str = _text(
+        "", "AGENT_WEB_RENDERER", "agent_WEB_RENDERER"
+    )
+    tavily_api_key: str = _text(
+        "", "AGENT_TAVILY_API_KEY", "agent_TAVILY_API_KEY"
+    )
+    tavily_base_url: str = _text(
+        "https://api.tavily.com", "AGENT_TAVILY_BASE_URL", "agent_TAVILY_BASE_URL"
+    )
+    tavily_search_depth: str = _text(
+        "basic", "AGENT_TAVILY_SEARCH_DEPTH", "agent_TAVILY_SEARCH_DEPTH"
+    )
+    tavily_extract_depth: str = _text(
+        "basic", "AGENT_TAVILY_EXTRACT_DEPTH", "agent_TAVILY_EXTRACT_DEPTH"
+    )
+    tavily_include_raw_content: bool = _bool(
+        False,
+        "AGENT_TAVILY_INCLUDE_RAW_CONTENT",
+        "agent_TAVILY_INCLUDE_RAW_CONTENT",
+    )
+    tavily_timeout_seconds: float = _float(
+        30.0, "AGENT_TAVILY_TIMEOUT_SECONDS", "agent_TAVILY_TIMEOUT_SECONDS"
+    )
     answer_timeout_seconds: float = _float(
         60.0, "AGENT_ANSWER_TIMEOUT_SECONDS", "agent_ANSWER_TIMEOUT_SECONDS"
     )
     answer_max_output_tokens: int = _int(
         1200, "AGENT_ANSWER_MAX_OUTPUT_TOKENS", "agent_ANSWER_MAX_OUTPUT_TOKENS"
+    )
+    # Chat replies cost one model call per non-task message. The switch exists
+    # so an operator can stop paying for greetings without a code change; when
+    # it is off the capability is not registered and the planner simply has
+    # nothing to call, which is the pre-reply behaviour.
+    chat_reply_enabled: bool = _bool(
+        True, "AGENT_CHAT_REPLY_ENABLED", "agent_CHAT_REPLY_ENABLED"
+    )
+    chat_reply_timeout_seconds: float = _float(
+        30.0, "AGENT_CHAT_REPLY_TIMEOUT_SECONDS", "agent_CHAT_REPLY_TIMEOUT_SECONDS"
+    )
+    chat_reply_max_output_tokens: int = _int(
+        300, "AGENT_CHAT_REPLY_MAX_OUTPUT_TOKENS", "agent_CHAT_REPLY_MAX_OUTPUT_TOKENS"
     )
     approval_expires_seconds: float = _float(
         3600.0, "AGENT_APPROVAL_EXPIRES_SECONDS", "agent_APPROVAL_EXPIRES_SECONDS"
@@ -323,6 +428,52 @@ class Settings:
     )
     outbox_batch_size: int = _int(
         50, "AGENT_OUTBOX_BATCH_SIZE", "agent_OUTBOX_BATCH_SIZE"
+    )
+
+    # Multimodal attachment support (temporary storage)
+    attachment_minio_bucket: str = _text(
+        "agent-temp",
+        "AGENT_ATTACHMENT_MINIO_BUCKET",
+        "agent_ATTACHMENT_MINIO_BUCKET"
+    )
+    attachment_ttl_hours: int = _int(
+        24,
+        "AGENT_ATTACHMENT_TTL_HOURS",
+        "agent_ATTACHMENT_TTL_HOURS"
+    )
+    attachment_max_size_bytes: int = _int(
+        20_971_520,  # 20MB
+        "AGENT_ATTACHMENT_MAX_SIZE_BYTES",
+        "agent_ATTACHMENT_MAX_SIZE_BYTES"
+    )
+
+    # MinIO configuration
+    minio_endpoint: str = _text(
+        "minio:9000",
+        "AGENT_MINIO_ENDPOINT",
+        "agent_MINIO_ENDPOINT"
+    )
+    minio_access_key: str = _text(
+        "minioadmin",
+        "AGENT_MINIO_ACCESS_KEY",
+        "agent_MINIO_ACCESS_KEY"
+    )
+    minio_secret_key: str = _text(
+        "minioadmin",
+        "AGENT_MINIO_SECRET_KEY",
+        "agent_MINIO_SECRET_KEY"
+    )
+
+    # RAG service configuration (for internal attachment parsing)
+    rag_service_url: str = _text(
+        "http://rag-service:8000",
+        "AGENT_RAG_SERVICE_URL",
+        "agent_RAG_SERVICE_URL"
+    )
+    rag_internal_token: str = _text(
+        "local-development-only",
+        "AGENT_RAG_INTERNAL_TOKEN",
+        "agent_RAG_INTERNAL_TOKEN"
     )
 
     @property

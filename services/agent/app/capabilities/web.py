@@ -1,22 +1,21 @@
-"""web.fetch and web.extract: read-only access to public pages.
+"""web.fetch and web.extract: internal read-only building blocks.
 
-Two capabilities rather than one, because they answer two different
-questions: fetch gets the bytes, extract makes sense of them. Splitting them
-also gives the Plan a real reference to carry - the extract step reads the
-fetch step output through $steps.<step_id>.output.content - which is what the
-dynamic planner has to compose.
+These two used to be Planner-visible. ``web.research`` now owns public-web
+reading end to end, so the Planner sees one capability instead of a fetch step
+and an extract step it has to wire together; both classes stay because the
+kernel tests and the research pipeline compose them, and because the fetch
+step is still the single place the SSRF guard is applied.
 """
 
 from __future__ import annotations
 
 import hashlib
 from datetime import timezone
-from html.parser import HTMLParser
 from typing import Any
-from urllib.parse import urljoin
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.infrastructure.web.extractor import extract_document, normalize_text
 from app.kernel.models import (
     CapabilityDescriptor,
     CapabilityInputBinding,
@@ -28,32 +27,6 @@ CAPABILITY_EXTRACT = "web.extract"
 DEFAULT_TIMEOUT_SECONDS = 10
 EVIDENCE_VERSION = 1
 _SNIPPET_CHARS = 280
-
-# Tags whose text is markup rather than content.
-_SKIP_TAGS = frozenset({"script", "style", "noscript", "template", "svg", "iframe"})
-# Tags that end a line of prose; without them the whole page becomes one line.
-_BREAK_TAGS = frozenset(
-    {
-        "p",
-        "div",
-        "br",
-        "li",
-        "tr",
-        "section",
-        "article",
-        "header",
-        "footer",
-        "blockquote",
-        "pre",
-        "table",
-        "h1",
-        "h2",
-        "h3",
-        "h4",
-        "h5",
-        "h6",
-    }
-)
 
 
 class WebFetchInput(BaseModel):
@@ -106,61 +79,6 @@ class WebExtractResult(BaseModel):
     text: str
     links: list[str]
     evidence: list[dict[str, Any]]
-
-
-class _ReadableTextExtractor(HTMLParser):
-    """Conservative text extraction: no layout, no guessing, no scripts."""
-
-    def __init__(self, base_url: str | None = None) -> None:
-        super().__init__(convert_charrefs=True)
-        self.base_url = base_url
-        self.title_parts: list[str] = []
-        self.text_parts: list[str] = []
-        self.links: list[str] = []
-        self._skip_depth = 0
-        self._in_title = False
-
-    def handle_starttag(self, tag: str, attrs) -> None:
-        if tag in _SKIP_TAGS:
-            self._skip_depth += 1
-            return
-        if tag == "title":
-            self._in_title = True
-        if tag == "a":
-            href = dict(attrs).get("href")
-            if href and not href.lower().startswith(("javascript:", "mailto:")):
-                resolved = urljoin(self.base_url, href) if self.base_url else href
-                if resolved not in self.links:
-                    self.links.append(resolved)
-        if tag in _BREAK_TAGS:
-            self.text_parts.append("\n")
-
-    def handle_endtag(self, tag: str) -> None:
-        if tag in _SKIP_TAGS:
-            if self._skip_depth:
-                self._skip_depth -= 1
-            return
-        if tag == "title":
-            self._in_title = False
-        if tag in _BREAK_TAGS:
-            self.text_parts.append("\n")
-
-    def handle_data(self, data: str) -> None:
-        if self._skip_depth:
-            return
-        text = " ".join(data.split())
-        if not text:
-            return
-        if self._in_title:
-            self.title_parts.append(text)
-        self.text_parts.append(text)
-
-
-def normalize_text(value: str) -> str:
-    """Collapse whitespace while keeping paragraph breaks readable."""
-
-    lines = [" ".join(line.split()) for line in str(value or "").splitlines()]
-    return "\n".join(line for line in lines if line)
 
 
 def build_evidence(
@@ -267,17 +185,11 @@ class WebExtractCapability:
         return WebExtractInput.model_validate(arguments)
 
     def execute(self, arguments: WebExtractInput) -> dict[str, Any]:
-        extractor = _ReadableTextExtractor(base_url=arguments.url)
-        extractor.feed(arguments.document)
-        extractor.close()
-        title = normalize_text(" ".join(extractor.title_parts))
-        text = normalize_text(" ".join(extractor.text_parts))
-        if text and title and text.startswith(title):
-            text = text[len(title):].lstrip()
+        title, text, links = extract_document(arguments.document, url=arguments.url)
         evidence = build_evidence(url=arguments.url, title=title, text=text)
         return WebExtractResult(
             title=title,
             text=text,
-            links=list(extractor.links),
+            links=links,
             evidence=[evidence],
         ).model_dump()

@@ -81,12 +81,16 @@ class HttpClient:
         except urllib.error.HTTPError as exc:
             retryable = exc.code == 429 or exc.code >= 500
             # Never surface remote bodies: they may carry credentials or content.
-            # Only the short machine-readable code is carried forward.
+            # Only the short machine-readable code is carried forward -- and it
+            # belongs in the message too: "(400 Arrearage)" tells an operator to
+            # top up an account, while a bare "(400)" tells them nothing.
+            code = _error_code(exc)
+            detail = f" ({exc.code} {code})" if code else f" ({exc.code})"
             raise IntegrationError(
-                f"remote HTTP request failed ({exc.code})",
+                f"remote HTTP request failed{detail}",
                 status=exc.code,
                 retryable=retryable,
-                error_code=_error_code(exc),
+                error_code=code,
                 retry_after=_retry_after(exc),
             ) from exc
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
@@ -120,6 +124,11 @@ def _error_code(exc: urllib.error.HTTPError) -> str | None:
     if not isinstance(payload, dict):
         return None
     value = payload.get("error") or payload.get("code")
+    if isinstance(value, dict):
+        # OpenAI-compatible providers nest the code inside the error object
+        # (DashScope: {"error": {"code": "Arrearage", "message": "..."}}). The
+        # code is the actionable part; the message may carry content.
+        value = value.get("code") or value.get("type")
     if not value:
         return None
     code = "".join(character for character in str(value)[:64] if character.isprintable())

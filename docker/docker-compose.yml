@@ -112,6 +112,9 @@ services:
       RAG_MINIO_ENDPOINT: ${RAG_MINIO_ENDPOINT:-minio:9000}
       RAG_MINIO_ACCESS_KEY: ${RAG_MINIO_ACCESS_KEY:-minioadmin}
       RAG_MINIO_SECRET_KEY: ${RAG_MINIO_SECRET_KEY:-minioadmin}
+      MINERU_TASK_MAX_WAIT_SECONDS: ${MINERU_TASK_MAX_WAIT_SECONDS:-90}
+      MINERU_RESULT_DOWNLOAD_TIMEOUT_SECONDS: ${MINERU_RESULT_DOWNLOAD_TIMEOUT_SECONDS:-300}
+      RAG_INTERNAL_TOKEN: ${RAG_INTERNAL_TOKEN:-local-development-only}
     expose:
       - "8000"
     depends_on:
@@ -278,6 +281,38 @@ services:
     command: run
     ports:
       - "8081:8080"
+
+  # Search discovery for web.research. Internal only: the Agent reaches it at
+  # http://searxng:8080 and the JSON format is enabled in the mounted settings,
+  # because the default HTML endpoint is not machine-readable.
+  searxng:
+    image: searxng/searxng:latest
+    environment:
+      SEARXNG_BASE_URL: ${SEARXNG_BASE_URL:-http://localhost:18080/}
+      SEARXNG_SECRET: ${SEARXNG_SECRET:-local-development-only}
+    volumes:
+      - ./searxng:/etc/searxng:rw
+    # Bound to loopback only. The host port is 18080 because 8080 is commonly
+    # taken; the Agent reaches it at 127.0.0.1:18080, while a container-side
+    # caller would use http://searxng:8080. Keep AGENT_SEARXNG_BASE_URL in step
+    # with this mapping. Never publish it to the public network.
+    ports:
+      - "127.0.0.1:18080:8080"
+
+  # Rendering fallback for pages a plain GET cannot read. Chromium stays out of
+  # the Agent process: a renderer outage should degrade research, not stop the
+  # service.
+  crawl4ai:
+    image: unclecode/crawl4ai:latest
+    environment:
+      # Every endpoint of the official image is behind this token, so it must
+      # match AGENT_CRAWL4AI_API_TOKEN on the Agent side.
+      CRAWL4AI_API_TOKEN: ${CRAWL4AI_API_TOKEN:-local-development-only}
+      CRAWL4AI_MAX_CONCURRENCY: ${CRAWL4AI_MAX_CONCURRENCY:-2}
+    # Chromium needs more than Docker's default 64MB shared memory.
+    shm_size: 1g
+    ports:
+      - "127.0.0.1:11235:11235"
 
 volumes:
   elasticsearch-data:

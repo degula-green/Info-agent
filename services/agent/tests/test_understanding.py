@@ -17,7 +17,6 @@ from app.understanding.provider import (
 from app.understanding.schema import (
     TaskUnderstandingDraft,
     available_intents,
-    choice_criteria,
     intent_catalog_text,
 )
 from app.planning.deterministic import DEFAULT_CAPABILITY_NAME
@@ -544,15 +543,16 @@ def test_planner_ignores_a_candidate_below_its_threshold() -> None:
 
 def test_catalog_filters_by_registered_capabilities() -> None:
     offered = available_intents(
-        {"todo.create", "knowledge.search_content", "web.fetch", "web.extract"}
+        {"todo.create", "knowledge.search_content", "web.research"}
     )
     names = {item.name for item in offered}
 
     assert "todo.create" in names
     assert "knowledge.answer" in names
-    # No web.search capability exists, so the web intent must not be offered.
-    assert "web.research" not in names
-    assert "form.submit" not in names
+    assert "web.research" in names
+    # No capability implements these intents yet, so they stay unavailable.
+    assert "compliance.assess" not in names
+    assert "form.complete" not in names
 
 
 def test_catalog_text_only_mentions_offered_intents() -> None:
@@ -561,12 +561,6 @@ def test_catalog_text_only_mentions_offered_intents() -> None:
     assert "todo.create" in text
     assert "web.research" not in text
     assert "knowledge.answer" not in text
-
-
-def test_choice_criteria_always_keeps_boundary_labels() -> None:
-    criteria = choice_criteria(available_intents({"todo.create"}))
-
-    assert set(criteria) == {"todo.create", "non_task", "other_task"}
 
 
 def test_unavailable_intent_is_dropped_by_the_llm_provider() -> None:

@@ -14,6 +14,7 @@ import {
   rejectAgentApproval,
   streamAgentTaskEvents,
   submitAgentTaskInput,
+  uploadAgentAttachment,
   type AgentApproval,
   type AgentObservation,
   type AgentTask,
@@ -699,11 +700,69 @@ test('creating a chat task posts the Agent task contract', async () => {
   assert.equal(calls[0].method, 'POST')
   assert.deepEqual(calls[0].body, {
     text: '明天晚上八点开评审会',
+    attachment_ids: [],
     source_type: 'chat',
     client_message_id: 'client-1',
     source_ref: {},
     constraints: {},
   })
+})
+
+test('creating a task with an attachment sends attachment_ids', async () => {
+  installStorage()
+  const calls: Array<{ url: string; method: string; body: any }> = []
+  globalThis.fetch = async (input, init = {}) => {
+    const url = String(input)
+    if (url.endsWith('/auth/me')) return json({ id: USER_ID, email: 'user@example.com', nickname: 'user', status: 'active' })
+    calls.push({ url, method: String(init.method || 'GET'), body: init.body ? JSON.parse(String(init.body)) : null })
+    return json({ task_id: 'task-1', status: 'received', events_url: '/api/agent/v1/tasks/task-1/events' }, 202)
+  }
+
+  await createAgentTask({ text: '根据这个附件创建日程', attachmentIds: ['attachment-1'], clientMessageId: 'client-2' })
+
+  assert.equal(calls.length, 1)
+  assert.deepEqual(calls[0].body, {
+    text: '根据这个附件创建日程',
+    attachment_ids: ['attachment-1'],
+    source_type: 'chat',
+    client_message_id: 'client-2',
+    source_ref: {},
+    constraints: {},
+  })
+})
+
+test('uploading an attachment posts multipart without a JSON content type', async () => {
+  installStorage()
+  const calls: Array<{ url: string; method: string; headers: Headers; body: any }> = []
+  globalThis.fetch = async (input, init = {}) => {
+    const url = String(input)
+    if (url.endsWith('/auth/me')) return json({ id: USER_ID, email: 'user@example.com', nickname: 'user', status: 'active' })
+    calls.push({ url, method: String(init.method || 'GET'), headers: new Headers(init.headers), body: init.body })
+    return json({
+      attachment_id: 'attachment-1',
+      file_name: 'meeting.docx',
+      mime_type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      size_bytes: 3,
+    })
+  }
+
+  const file = new File([new Uint8Array([1, 2, 3])], 'meeting.docx', {
+    type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  })
+  const uploaded = await uploadAgentAttachment(file)
+
+  assert.equal(uploaded.attachment_id, 'attachment-1')
+  assert.equal(calls.length, 1)
+  assert.ok(calls[0].url.endsWith('/api/agent/v1/attachments'))
+  assert.equal(calls[0].method, 'POST')
+  // The browser must own the multipart boundary: setting application/json here
+  // would make the upload unparsable on the server.
+  assert.equal(calls[0].headers.get('Content-Type'), null)
+  // Uploads go through the shared authenticated fetch: bearer token only.
+  assert.equal(calls[0].headers.get('X-Agent-User-Id'), null)
+  assert.equal(calls[0].headers.get('Authorization'), 'Bearer access-token')
+  assert.ok(calls[0].body instanceof FormData)
+  assert.ok((calls[0].body as FormData).get('file') instanceof File)
 })
 
 test('Agent SSE parsing resumes after the last sequence', async () => {

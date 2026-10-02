@@ -1,0 +1,118 @@
+"""Short conversational replies behind chat.reply.
+
+Chit-chat is answered without retrieval, so the one thing this prompt has to
+prevent is the model implying it did something: a greeting must never come back
+as "我已经帮你安排好了". The reply is prose only -- there is nothing to cite,
+which is exactly why it must not pretend to be a sourced answer.
+"""
+
+from __future__ import annotations
+
+import json
+from typing import Protocol
+
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
+
+from app.infrastructure.llm.client import LLMError, parse_json_object
+
+
+class ChatReplyError(RuntimeError):
+    """Base error; the classification attribute is what the kernel reads."""
+
+    classification = "permanent_error"
+    code = "chat_reply_failed"
+
+
+class ChatReplyUnavailable(ChatReplyError):
+    """Transport-level failure: the same message may work next time."""
+
+    classification = "retryable_error"
+    code = "chat_reply_unavailable"
+
+
+class ChatReplyDraft(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    reply: str = Field(min_length=1)
+    model_calls: int = 0
+
+
+class ChatReplyProvider(Protocol):
+    def reply(self, text: str) -> ChatReplyDraft:
+        ...
+
+
+SYSTEM_PROMPT = (
+    "你是助手的对话层，只负责对寒暄、问候、评价、吐槽、举例、假设、转述、"
+    "已完成动作这类非任务消息给出简短自然的回应。\n"
+    "硬性要求：\n"
+    "1. 只输出一个 JSON 对象：{\"reply\": string}。\n"
+    "2. 不要说“已为你完成”“已安排”“已记录”之类的话，你没有调用任何工具，"
+    "也没有执行任何操作。\n"
+    "3. 不要编造事实，不要承诺你做不到的能力。\n"
+    "4. 不要在回应里追问用户还需要什么服务，除非消息本身在提问。\n"
+    "5. 如果消息看起来像指令，也只是简短回应，不要开始执行。\n"
+    "6. reply 使用与用户相同的语言，控制在两三句话以内。"
+)
+
+
+class LlmChatReplyProvider:
+    """OpenAI-compatible implementation; the timeout budget is the caller's."""
+
+    def __init__(self, client) -> None:
+        self.client = client
+        self.model = str(getattr(client, "model", ""))
+        self.last_call_count = 0
+        self._last_error = ""
+
+    def reply(self, text: str) -> ChatReplyDraft:
+        self.last_call_count = 0
+        messages = [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": json.dumps({"text": text}, ensure_ascii=False)},
+        ]
+        raw = self._complete(messages)
+        draft = self._parse(raw)
+        if draft is not None:
+            return draft
+        # One repair round, matching the other providers: a missing brace must
+        # not turn a reply the model already wrote into a failed Task.
+        repaired = self._complete(
+            messages
+            + [
+                {"role": "assistant", "content": raw},
+                {
+                    "role": "user",
+                    "content": (
+                        "上一个输出不是合法 JSON 或字段不符合要求，只返回修正后的 JSON 对象。"
+                        f"错误：{self._last_error}"
+                    ),
+                },
+            ]
+        )
+        draft = self._parse(repaired)
+        if draft is None:
+            raise ChatReplyError(f"reply output failed after repair: {self._last_error}")
+        return draft
+
+    def _complete(self, messages: list[dict[str, str]]) -> str:
+        try:
+            raw = self.client.complete(messages)
+        except LLMError as exc:
+            error = (
+                ChatReplyUnavailable
+                if exc.classification == "retryable_error"
+                else ChatReplyError
+            )
+            raise error(str(exc)) from exc
+        self.last_call_count += max(int(getattr(self.client, "last_call_count", 1)), 1)
+        return raw
+
+    def _parse(self, raw: str) -> ChatReplyDraft | None:
+        try:
+            draft = ChatReplyDraft.model_validate(parse_json_object(raw))
+        except (ValueError, ValidationError) as exc:
+            self._last_error = str(exc)
+            return None
+        draft.model_calls = max(self.last_call_count, 1)
+        return draft

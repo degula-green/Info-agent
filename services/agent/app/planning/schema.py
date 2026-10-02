@@ -75,6 +75,12 @@ def planner_arguments_schema(descriptor: CapabilityDescriptor) -> dict[str, Any]
         required.discard(binding.runtime_argument)
         properties[binding.planner_argument] = StepOutputRef.model_json_schema()
         required.add(binding.planner_argument)
+    if descriptor.task_text_argument:
+        # The model is not asked for it, so it cannot get it wrong: a capability
+        # that validates against the user's own words needs a value the model
+        # never touched.
+        properties.pop(descriptor.task_text_argument, None)
+        required.discard(descriptor.task_text_argument)
     base["required"] = sorted(required)
     return _strictify(base)
 
@@ -140,6 +146,9 @@ def decision_draft_schema(capabilities: list[CapabilityDescriptor]) -> dict[str,
                         {"type": "null"},
                     ]
                 },
+                # Same instinct, different shape: the model restates the prose
+                # answer in the decision. Accepted and ignored.
+                "answer": {"anyOf": [{"type": "string"}, {"type": "null"}]},
                 "required_input": {"type": "array", "items": {"type": "string"}},
                 "unsupported_intents": {"type": "array", "items": {"type": "string"}},
                 "warnings": {"type": "array", "items": {"type": "string"}},
