@@ -1198,6 +1198,45 @@ func (s *MemoryStore) GetConversation(_ context.Context, id string) (*domain.Con
 	return cloneConversationPtr(c), nil
 }
 
+func (s *MemoryStore) UpdateConversationStart(
+	_ context.Context,
+	userID, conversationID string,
+	start time.Time,
+) (*domain.ConversationIngestion, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	conversation, ok := s.conversations[conversationID]
+	if !ok {
+		return nil, apperror.New("conversation_not_found", "conversation not found", 404, false)
+	}
+	if conversation.OwnerUserID != userID {
+		return nil, apperror.Clone(apperror.ErrForbidden)
+	}
+	value := start.UTC()
+	conversation.RequestedStartAt = &value
+	conversation.EffectiveStartAt = &value
+	conversation.Status = domain.ConversationActive
+	conversation.PauseReason = ""
+	conversation.UpdatedAt = time.Now().UTC()
+	s.conversations[conversationID] = conversation
+	for id, collector := range s.collectors {
+		if collector.ConversationID != conversationID {
+			continue
+		}
+		collector.LastCursor = ""
+		collector.LastSuccessAt = nil
+		collector.LastAttemptAt = nil
+		collector.NextPollAt = nil
+		collector.ConsecutiveFailures = 0
+		collector.LastError = ""
+		s.collectors[id] = collector
+	}
+	conversation.Collectors = s.collectorsForLocked(conversationID)
+	conversation.Memberships = s.membershipsForLocked(conversationID)
+	conversation.MessageCount, conversation.AttachmentCount = s.conversationCountsLocked(conversationID)
+	return cloneConversationPtr(conversation), nil
+}
+
 func (s *MemoryStore) FindConversationByExternal(_ context.Context, platform, workspaceKey, externalConversationID string) (*domain.ConversationIngestion, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()

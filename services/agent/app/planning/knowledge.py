@@ -20,6 +20,8 @@ from app.capabilities.knowledge import (
     SEARCH_CONTENT_NAME,
     SEARCH_SOURCES_NAME,
 )
+from app.capabilities.answer import CAPABILITY_NAME as ANSWER_COMPOSE_NAME
+from app.capabilities.web_research import CAPABILITY_NAME as WEB_RESEARCH_NAME
 from app.kernel.models import (
     CapabilityDescriptor,
     Observation,
@@ -183,6 +185,18 @@ _WEB_MARKERS = (
     "https://",
 )
 _CHITCHAT = {"你好", "您好", "hello", "hi", "谢谢", "多谢", "再见", "在吗"}
+_PERSONAL_CONTEXT_MARKERS = (
+    "我的",
+    "我们的",
+    "我们公司",
+    "本公司",
+    "我司",
+    "公司简介",
+    "已采集",
+    "知识库",
+    "内部资料",
+)
+_URL_PATTERN = re.compile(r"https?://[^\s，。；、]+", re.IGNORECASE)
 
 _SENDER_PATTERNS = (
     re.compile(
@@ -507,6 +521,11 @@ class KnowledgeRoutingPlanner:
             constraints,
             understanding,
         )
+        built = augment_personal_knowledge_sources(
+            built,
+            task,
+            capabilities,
+        )
         self._last_call_count = max(
             int(getattr(self.base, "last_call_count", 0) or 0),
             0,
@@ -536,6 +555,92 @@ class KnowledgeRoutingPlanner:
             0,
         )
         return decision
+
+
+def augment_personal_knowledge_sources(
+    plan: Plan,
+    task: TaskEnvelope,
+    capabilities: list[CapabilityDescriptor],
+) -> Plan:
+    """Add the user's own knowledge as a source for personal comparisons.
+
+    The LLM planner is free to choose any plan. This post-pass only enforces a
+    generic data-boundary rule: when the instruction explicitly refers to the
+    user's own/company/internal data and also asks the Agent to read public web
+    content before a final answer, the plan must include a private-knowledge
+    retrieval step. It is not tied to any domain intent.
+    """
+
+    text = str(task.input.get("text") or "").strip()
+    normalized = text.lower()
+    if not _contains_any(normalized, _PERSONAL_CONTEXT_MARKERS):
+        return plan
+    if not _URL_PATTERN.search(text):
+        return plan
+
+    registered = {descriptor.name for descriptor in capabilities}
+    if SEARCH_CONTENT_NAME not in registered:
+        return plan
+    if any(step.capability == SEARCH_CONTENT_NAME for step in plan.steps):
+        return plan
+
+    web_step = next(
+        (step for step in plan.steps if step.capability == WEB_RESEARCH_NAME),
+        None,
+    )
+    answer_step = next(
+        (step for step in plan.steps if step.capability == ANSWER_COMPOSE_NAME),
+        None,
+    )
+    if web_step is None or answer_step is None:
+        return plan
+
+    original = [step.model_copy(deep=True) for step in sorted(plan.steps, key=lambda item: item.order)]
+    knowledge_step = PlanStep(
+        step_id=f"{plan.plan_id}-step-1",
+        plan_id=plan.plan_id,
+        order=1,
+        capability=SEARCH_CONTENT_NAME,
+        arguments={
+            "query": _personal_context_query(text),
+            "include_personal": True,
+        },
+    )
+    shifted: list[PlanStep] = [knowledge_step]
+    for step in original:
+        step.order += 1
+        step.step_id = f"{plan.plan_id}-step-{step.order}"
+        step.arguments = _shift_reference_steps(step.arguments)
+        shifted.append(step)
+
+    shifted_answer = next(
+        (step for step in shifted if step.capability == ANSWER_COMPOSE_NAME),
+        None,
+    )
+    if shifted_answer is not None:
+        shifted_answer.arguments["knowledge_evidence_refs"] = [
+            {"step": 1, "output": "evidence"}
+        ]
+    plan.steps = shifted
+    return plan
+
+
+def _personal_context_query(text: str) -> str:
+    query = _URL_PATTERN.sub(" ", text)
+    query = " ".join(query.split()).strip()
+    if _contains_any(query.lower(), ("公司", "企业", "估值", "融资", "上市")):
+        return f"{query} 公司简介 成立时间 估值 融资 上市状态"[:500]
+    return f"{query} 个人知识库 相关事实 数据"[:500]
+
+
+def _shift_reference_steps(value: Any) -> Any:
+    if isinstance(value, list):
+        return [_shift_reference_steps(item) for item in value]
+    if isinstance(value, dict):
+        if set(value) == {"step", "output"} and isinstance(value.get("step"), int):
+            return {**value, "step": value["step"] + 1}
+        return {key: _shift_reference_steps(item) for key, item in value.items()}
+    return value
 
 
 def _decide_knowledge_plan(

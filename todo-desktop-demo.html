@@ -1,0 +1,1017 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="dark" />
+    <title>待办悬浮面板演示</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --page: #0a0a0a;
+        --panel: #141414;
+        --panel-border: #2a2a2a;
+        --card: #1c1c1c;
+        --card-hover: #222;
+        --card-border: #2c2c2c;
+        --card-border-strong: #555;
+        --text: #f4f4f4;
+        --text-soft: #b8b8b8;
+        --text-muted: #777;
+        --pill: #252525;
+        --avatar: #292929;
+        --focus: #d8d8d8;
+        --ease: cubic-bezier(0.22, 1, 0.36, 1);
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html,
+      body {
+        width: 100%;
+        min-width: 320px;
+        height: 100%;
+        margin: 0;
+        overflow: hidden;
+        background: var(--page);
+      }
+
+      body {
+        color: var(--text);
+        font-family:
+          ui-sans-serif,
+          -apple-system,
+          BlinkMacSystemFont,
+          "Segoe UI",
+          "Microsoft YaHei",
+          sans-serif;
+        -webkit-font-smoothing: antialiased;
+        text-rendering: optimizeLegibility;
+      }
+
+      button {
+        font: inherit;
+      }
+
+      button:focus-visible {
+        outline: 2px solid var(--focus);
+        outline-offset: 2px;
+      }
+
+      .demo-stage {
+        position: fixed;
+        inset: 0;
+        overflow: hidden;
+      }
+
+      .todo-panel {
+        position: fixed;
+        z-index: 10;
+        top: 24px;
+        right: 24px;
+        width: 56px;
+        height: 56px;
+        overflow: hidden;
+        border: 1px solid var(--panel-border);
+        border-radius: 16px;
+        background: var(--panel);
+        box-shadow:
+          0 22px 54px rgba(0, 0, 0, 0.48),
+          0 2px 8px rgba(0, 0, 0, 0.42);
+        transition:
+          width 240ms var(--ease),
+          height 240ms var(--ease),
+          border-radius 240ms var(--ease),
+          box-shadow 180ms ease;
+        will-change: left, top, width, height;
+      }
+
+      .todo-panel.is-expanded {
+        width: min(320px, calc(100vw - 24px));
+        border-radius: 16px;
+      }
+
+      .todo-panel.is-dragging {
+        transition:
+          border-radius 160ms ease,
+          box-shadow 160ms ease;
+        box-shadow:
+          0 28px 68px rgba(0, 0, 0, 0.56),
+          0 3px 10px rgba(0, 0, 0, 0.46);
+        user-select: none;
+      }
+
+      .todo-panel__expanded {
+        width: min(320px, calc(100vw - 24px));
+        min-height: 56px;
+        opacity: 0;
+        visibility: hidden;
+        pointer-events: none;
+        transition:
+          opacity 140ms ease,
+          visibility 0ms linear 240ms;
+      }
+
+      .todo-panel.is-expanded .todo-panel__expanded {
+        opacity: 1;
+        visibility: visible;
+        pointer-events: auto;
+        transition:
+          opacity 180ms ease 60ms,
+          visibility 0ms linear 0ms;
+      }
+
+      .todo-panel__header {
+        display: flex;
+        align-items: center;
+        min-height: 54px;
+        padding: 8px 8px 8px 14px;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+        cursor: grab;
+        touch-action: none;
+      }
+
+      .todo-panel.is-dragging .todo-panel__header {
+        cursor: grabbing;
+      }
+
+      .todo-panel__switch {
+        display: flex;
+        align-items: center;
+        min-width: 0;
+        min-height: 38px;
+        flex: 1 1 auto;
+        gap: 7px;
+        padding: 0;
+        border: 0;
+        border-radius: 8px;
+        background: transparent;
+        color: inherit;
+        text-align: left;
+        cursor: inherit;
+      }
+
+      .todo-panel__switch:hover .todo-panel__scope {
+        color: var(--text-soft);
+      }
+
+      .todo-panel__title {
+        flex: 0 0 auto;
+        color: var(--text);
+        font-size: 18px;
+        font-weight: 650;
+        letter-spacing: -0.02em;
+      }
+
+      .todo-panel__scope {
+        overflow: hidden;
+        flex: 0 1 auto;
+        color: var(--text-muted);
+        font-size: 12px;
+        font-weight: 500;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        transition: color 150ms ease;
+      }
+
+      .todo-panel__count {
+        display: inline-grid;
+        min-width: 22px;
+        height: 20px;
+        flex: 0 0 auto;
+        place-items: center;
+        padding: 0 6px;
+        border-radius: 10px;
+        background: #242424;
+        color: #aaa;
+        font-size: 12px;
+        font-variant-numeric: tabular-nums;
+        line-height: 20px;
+      }
+
+      .todo-panel__collapse {
+        display: inline-grid;
+        width: 32px;
+        height: 32px;
+        flex: 0 0 32px;
+        place-items: center;
+        padding: 0;
+        border: 0;
+        border-radius: 8px;
+        background: transparent;
+        color: #8d8d8d;
+        cursor: pointer;
+        transition:
+          color 150ms ease,
+          background 150ms ease;
+      }
+
+      .todo-panel__collapse:hover {
+        color: #e8e8e8;
+        background: #242424;
+      }
+
+      .todo-panel__collapse svg {
+        width: 17px;
+        height: 17px;
+        fill: none;
+        stroke: currentColor;
+        stroke-width: 1.7;
+        stroke-linecap: round;
+      }
+
+      .todo-panel__body {
+        max-height: min(575px, calc(100vh - 138px));
+        padding: 10px;
+        overflow-x: hidden;
+        overflow-y: auto;
+        overscroll-behavior: contain;
+        scrollbar-color: #454545 transparent;
+        scrollbar-width: thin;
+      }
+
+      .todo-list {
+        display: grid;
+        gap: 10px;
+        margin: 0;
+        padding: 0;
+        list-style: none;
+      }
+
+      .todo-card {
+        position: relative;
+        display: grid;
+        grid-template-columns: 28px minmax(0, 1fr);
+        gap: 10px;
+        min-height: 112px;
+        padding: 13px 13px 12px 12px;
+        border: 1px solid var(--card-border);
+        border-radius: 12px;
+        background: var(--card);
+        transition:
+          border-color 160ms ease,
+          background 160ms ease,
+          transform 180ms var(--ease),
+          opacity 180ms ease;
+      }
+
+      .todo-card:hover {
+        border-color: #454545;
+        background: var(--card-hover);
+      }
+
+      .todo-card.is-completing,
+      .todo-card.is-restoring {
+        border-color: var(--card-border-strong);
+      }
+
+      .todo-card__check {
+        display: inline-grid;
+        width: 20px;
+        height: 20px;
+        place-items: center;
+        align-self: start;
+        margin-top: 1px;
+        padding: 0;
+        border: 1.5px solid #5c5c5c;
+        border-radius: 50%;
+        background: transparent;
+        color: #d8d8d8;
+        cursor: pointer;
+        transition:
+          border-color 150ms ease,
+          background 150ms ease,
+          transform 120ms ease;
+      }
+
+      .todo-card__check:hover {
+        border-color: #adadad;
+        background: rgba(255, 255, 255, 0.07);
+      }
+
+      .todo-card__check:active {
+        transform: scale(0.9);
+      }
+
+      .todo-card__check:disabled {
+        cursor: wait;
+        opacity: 0.72;
+      }
+
+      .todo-card__check svg {
+        width: 11px;
+        height: 11px;
+        fill: none;
+        stroke: currentColor;
+        stroke-width: 2.2;
+        stroke-linecap: round;
+        stroke-linejoin: round;
+        opacity: 0;
+        transform: scale(0.65);
+        transition:
+          opacity 140ms ease,
+          transform 160ms var(--ease);
+      }
+
+      .todo-card.is-done .todo-card__check {
+        border-color: #777;
+        background: #303030;
+      }
+
+      .todo-card.is-done .todo-card__check svg {
+        opacity: 1;
+        transform: scale(1);
+      }
+
+      .todo-card__content {
+        min-width: 0;
+      }
+
+      .todo-card__source {
+        display: flex;
+        align-items: center;
+        min-width: 0;
+        gap: 6px;
+        margin-bottom: 7px;
+        color: #888;
+        font-size: 12px;
+        line-height: 1.25;
+      }
+
+      .todo-card__source-dot {
+        width: 5px;
+        height: 5px;
+        flex: 0 0 5px;
+        border-radius: 50%;
+        background: #6b6b6b;
+      }
+
+      .todo-card__source-name {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .todo-card__title {
+        display: -webkit-box;
+        min-height: 42px;
+        margin: 0;
+        overflow: hidden;
+        color: #f0f0f0;
+        font-size: 15px;
+        font-weight: 560;
+        line-height: 1.42;
+        text-decoration-color: transparent;
+        text-decoration-line: line-through;
+        text-decoration-thickness: 1.5px;
+        text-overflow: ellipsis;
+        transition:
+          color 200ms ease,
+          text-decoration-color 220ms ease,
+          opacity 200ms ease;
+        -webkit-box-orient: vertical;
+        -webkit-line-clamp: 2;
+      }
+
+      .todo-card.is-completing .todo-card__title,
+      .todo-card.is-done .todo-card__title {
+        color: #8d8d8d;
+        text-decoration-color: #8d8d8d;
+      }
+
+      .todo-card.is-restoring .todo-card__title {
+        color: #c4c4c4;
+        text-decoration-color: transparent;
+      }
+
+      .todo-card__footer {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+        margin-top: 12px;
+      }
+
+      .todo-card__time {
+        display: inline-flex;
+        align-items: center;
+        min-height: 24px;
+        max-width: calc(100% - 40px);
+        padding: 3px 9px;
+        overflow: hidden;
+        border-radius: 12px;
+        background: var(--pill);
+        color: #a8a8a8;
+        font-size: 12px;
+        font-variant-numeric: tabular-nums;
+        line-height: 18px;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .todo-card__avatar {
+        display: inline-grid;
+        width: 28px;
+        height: 28px;
+        flex: 0 0 28px;
+        place-items: center;
+        border-radius: 50%;
+        background: var(--avatar);
+        color: #a3a3a3;
+        font-size: 12px;
+        font-weight: 650;
+      }
+
+      .todo-empty {
+        display: grid;
+        min-height: 228px;
+        place-items: center;
+        padding: 36px 24px;
+        text-align: center;
+      }
+
+      .todo-empty[hidden] {
+        display: none;
+      }
+
+      .todo-empty__inner {
+        display: grid;
+        justify-items: center;
+        gap: 12px;
+      }
+
+      .todo-empty__icon {
+        display: grid;
+        width: 42px;
+        height: 42px;
+        place-items: center;
+        border: 1px solid #303030;
+        border-radius: 12px;
+        color: #666;
+      }
+
+      .todo-empty__icon svg {
+        width: 20px;
+        height: 20px;
+        fill: none;
+        stroke: currentColor;
+        stroke-width: 1.5;
+        stroke-linecap: round;
+        stroke-linejoin: round;
+      }
+
+      .todo-empty p {
+        margin: 0;
+        color: #777;
+        font-size: 12px;
+        line-height: 1.5;
+      }
+
+      .todo-panel__collapsed-trigger {
+        position: absolute;
+        inset: 0;
+        display: grid;
+        place-items: center;
+        padding: 0;
+        border: 0;
+        border-radius: inherit;
+        background: transparent;
+        color: #d0d0d0;
+        cursor: pointer;
+        opacity: 0;
+        pointer-events: none;
+        transition: opacity 150ms ease 60ms;
+      }
+
+      .todo-panel.is-collapsed .todo-panel__collapsed-trigger {
+        opacity: 1;
+        pointer-events: auto;
+      }
+
+      .todo-panel__collapsed-trigger:hover {
+        background: #1c1c1c;
+      }
+
+      .todo-panel__collapsed-trigger svg {
+        width: 21px;
+        height: 21px;
+        fill: none;
+        stroke: currentColor;
+        stroke-width: 1.7;
+        stroke-linecap: round;
+        stroke-linejoin: round;
+      }
+
+      .todo-panel__badge {
+        position: absolute;
+        top: 3px;
+        right: 3px;
+        display: inline-grid;
+        min-width: 17px;
+        height: 17px;
+        place-items: center;
+        padding: 0 4px;
+        border: 2px solid var(--panel);
+        border-radius: 9px;
+        background: #e7e7e7;
+        color: #111;
+        font-size: 9px;
+        font-weight: 700;
+        font-variant-numeric: tabular-nums;
+        line-height: 13px;
+      }
+
+      .todo-panel__badge[hidden] {
+        display: none;
+      }
+
+      .sr-only {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        padding: 0;
+        margin: -1px;
+        overflow: hidden;
+        clip: rect(0, 0, 0, 0);
+        white-space: nowrap;
+        border: 0;
+      }
+
+      @media (max-width: 420px) {
+        .todo-panel {
+          max-width: calc(100vw - 24px);
+        }
+
+        .todo-panel.is-expanded {
+          width: calc(100vw - 24px);
+        }
+
+        .todo-panel__expanded {
+          width: calc(100vw - 24px);
+        }
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        *,
+        *::before,
+        *::after {
+          scroll-behavior: auto !important;
+          transition-duration: 0.01ms !important;
+          animation-duration: 0.01ms !important;
+          animation-iteration-count: 1 !important;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <!--
+      THESIS: A quiet desktop to-do ledger that keeps state changes legible while the panel itself stays out of the way; it refuses a dashboard shell or ornamental productivity styling.
+      OWN-WORLD: Charcoal surfaces, hairline borders, one restrained light accent, compact pills, and a single circular completion control.
+      STORY: The user can scan unfinished work, switch to completed work, and complete or restore an item without losing context.
+      FIRST VIEWPORT: One floating 320px panel sits at the upper right on a near-black page; the draggable header owns the category switch and collapse control.
+      FORM: Authored from the pinned dark panel brief; no generated direction roll was used because the document fixes the visual world.
+      FINISH: unreviewed and undocumented is unfinished; this build ends with the finish review, the verdict, and DESIGN.md.
+    -->
+    <main class="demo-stage" aria-label="待办悬浮面板演示">
+      <article id="todoPanel" class="todo-panel is-expanded" aria-label="待办">
+        <button
+          id="collapsedTrigger"
+          class="todo-panel__collapsed-trigger"
+          type="button"
+          aria-label="展开待办"
+          title="展开待办"
+        >
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M7.5 4.75h9a2.75 2.75 0 0 1 2.75 2.75v9a2.75 2.75 0 0 1-2.75 2.75h-9A2.75 2.75 0 0 1 4.75 16.5v-9A2.75 2.75 0 0 1 7.5 4.75Z" />
+            <path d="m8.5 12.1 2.2 2.2 4.8-5" />
+          </svg>
+          <span id="collapsedBadge" class="todo-panel__badge" aria-hidden="true"></span>
+        </button>
+
+        <section id="expandedPanel" class="todo-panel__expanded" aria-label="待办列表">
+          <header id="dragHandle" class="todo-panel__header">
+            <button
+              id="tabSwitch"
+              class="todo-panel__switch"
+              type="button"
+              aria-label="切换待办分类"
+              aria-live="polite"
+            >
+              <span class="todo-panel__title">待办</span>
+              <span id="scopeLabel" class="todo-panel__scope">未完成</span>
+              <span id="countLabel" class="todo-panel__count">0</span>
+            </button>
+            <button
+              class="todo-panel__collapse"
+              type="button"
+              data-no-drag
+              aria-label="收起待办"
+              title="收起待办"
+            >
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M6 12h12" />
+                <path d="m9 9-3 3 3 3" />
+              </svg>
+            </button>
+          </header>
+
+          <div class="todo-panel__body">
+            <ul id="todoList" class="todo-list"></ul>
+            <div id="emptyState" class="todo-empty" hidden>
+              <div class="todo-empty__inner">
+                <span class="todo-empty__icon" aria-hidden="true">
+                  <svg viewBox="0 0 24 24">
+                    <path d="M7.5 4.75h9a2.75 2.75 0 0 1 2.75 2.75v9a2.75 2.75 0 0 1-2.75 2.75h-9A2.75 2.75 0 0 1 4.75 16.5v-9A2.75 2.75 0 0 1 7.5 4.75Z" />
+                    <path d="m8.5 12.1 2.2 2.2 4.8-5" />
+                  </svg>
+                </span>
+                <p id="emptyText"></p>
+              </div>
+            </div>
+          </div>
+        </section>
+      </article>
+    </main>
+
+    <script>
+      (() => {
+        const DAY_MS = 24 * 60 * 60 * 1000;
+        const PANEL_GAP = 12;
+        const DEFAULT_GAP = 24;
+        const transitionDelay = window.matchMedia("(prefers-reduced-motion: reduce)").matches ? 0 : 240;
+
+        const panel = document.querySelector("#todoPanel");
+        const expandedPanel = document.querySelector("#expandedPanel");
+        const dragHandle = document.querySelector("#dragHandle");
+        const tabSwitch = document.querySelector("#tabSwitch");
+        const collapseButton = document.querySelector(".todo-panel__collapse");
+        const collapsedTrigger = document.querySelector("#collapsedTrigger");
+        const collapsedBadge = document.querySelector("#collapsedBadge");
+        const scopeLabel = document.querySelector("#scopeLabel");
+        const countLabel = document.querySelector("#countLabel");
+        const todoList = document.querySelector("#todoList");
+        const emptyState = document.querySelector("#emptyState");
+        const emptyText = document.querySelector("#emptyText");
+
+        const at = (dayOffset, hour, minute) => {
+          const date = new Date();
+          date.setHours(hour, minute, 0, 0);
+          date.setDate(date.getDate() + dayOffset);
+          return date.toISOString();
+        };
+
+        const created = (hoursAgo) => new Date(Date.now() - hoursAgo * 60 * 60 * 1000).toISOString();
+
+        const items = [
+          {
+            id: "todo-weekly-report",
+            title: "提交项目周报并同步下周排期",
+            dueAt: at(0, 18, 0),
+            sourceName: "项目群",
+            sourceInitial: "项",
+            completed: false,
+            createdAt: created(2),
+          },
+          {
+            id: "todo-review",
+            title: "确认产品评审材料与演示流程",
+            dueAt: at(1, 10, 30),
+            sourceName: "产品组",
+            sourceInitial: "产",
+            completed: false,
+            createdAt: created(5),
+          },
+          {
+            id: "todo-interview",
+            title: "整理用户访谈纪要，标记需要跟进的问题",
+            dueAt: at(3, 16, 0),
+            sourceName: "访谈资料",
+            sourceInitial: "访",
+            completed: false,
+            createdAt: created(18),
+          },
+          {
+            id: "todo-docs",
+            title: "更新接口文档里的待确认字段说明",
+            dueAt: null,
+            sourceName: "研发协作",
+            sourceInitial: "研",
+            completed: false,
+            createdAt: created(1),
+          },
+          {
+            id: "todo-health",
+            title: "预约年度体检时间",
+            dueAt: null,
+            sourceName: "个人待办",
+            sourceInitial: "个",
+            completed: true,
+            createdAt: created(26),
+          },
+          {
+            id: "todo-expense",
+            title: "处理上月差旅报销单",
+            dueAt: at(12, 17, 0),
+            sourceName: "财务提醒",
+            sourceInitial: "财",
+            completed: true,
+            createdAt: created(50),
+          },
+        ];
+
+        let activeTab = "open";
+        let collapsed = false;
+        let position = { x: 0, y: DEFAULT_GAP };
+        let positionReady = false;
+        const busyIDs = new Set();
+        const completingIDs = new Set();
+        const restoringIDs = new Set();
+
+        function dayDifference(date) {
+          const today = new Date();
+          today.setHours(0, 0, 0, 0);
+          const target = new Date(date);
+          target.setHours(0, 0, 0, 0);
+          return Math.round((target.getTime() - today.getTime()) / DAY_MS);
+        }
+
+        function shortTimeLabel(dueAt) {
+          if (!dueAt) return "无时间";
+          const moment = new Date(dueAt);
+          if (Number.isNaN(moment.getTime())) return "无时间";
+          const diff = dayDifference(moment);
+          if (diff === 0) return "今天";
+          if (diff === 1) return "明天";
+          const weekday = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"];
+          const today = new Date();
+          const endOfWeek = new Date(today);
+          const daysUntilSunday = (7 - today.getDay()) % 7;
+          endOfWeek.setDate(today.getDate() + daysUntilSunday);
+          endOfWeek.setHours(23, 59, 59, 999);
+          if (moment <= endOfWeek && diff > 1) return weekday[moment.getDay()];
+          const month = String(moment.getMonth() + 1).padStart(2, "0");
+          const day = String(moment.getDate()).padStart(2, "0");
+          return `${month}-${day}`;
+        }
+
+        function sortItems() {
+          return [...items].sort((left, right) => {
+            if (left.completed !== right.completed) return left.completed ? 1 : -1;
+            if (!left.completed) {
+              const leftDue = left.dueAt ? new Date(left.dueAt).getTime() : Number.POSITIVE_INFINITY;
+              const rightDue = right.dueAt ? new Date(right.dueAt).getTime() : Number.POSITIVE_INFINITY;
+              if (leftDue !== rightDue) return leftDue - rightDue;
+            }
+            return new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime();
+          });
+        }
+
+        function visibleItems() {
+          return sortItems().filter((item) => item.completed === (activeTab === "done"));
+        }
+
+        function cardMarkup(item) {
+          const pendingClass = completingIDs.has(item.id)
+            ? " is-completing"
+            : restoringIDs.has(item.id)
+              ? " is-restoring"
+              : "";
+          const doneClass = item.completed ? " is-done" : "";
+          const actionLabel = item.completed ? `恢复待办：${item.title}` : `完成待办：${item.title}`;
+          const busy = busyIDs.has(item.id);
+
+          return `
+            <li class="todo-card${doneClass}${pendingClass}" data-id="${item.id}">
+              <button
+                class="todo-card__check"
+                type="button"
+                data-action="toggle"
+                aria-label="${escapeAttribute(actionLabel)}"
+                aria-pressed="${item.completed ? "true" : "false"}"
+                ${busy ? "disabled" : ""}
+              >
+                <svg viewBox="0 0 16 16" aria-hidden="true">
+                  <path d="m3.2 8.3 3 3 6.6-7" />
+                </svg>
+              </button>
+              <div class="todo-card__content">
+                <div class="todo-card__source">
+                  <span class="todo-card__source-dot" aria-hidden="true"></span>
+                  <span class="todo-card__source-name">${escapeHtml(item.sourceName)}</span>
+                </div>
+                <p class="todo-card__title">${escapeHtml(item.title)}</p>
+                <div class="todo-card__footer">
+                  <span class="todo-card__time">${escapeHtml(shortTimeLabel(item.dueAt))}</span>
+                  <span class="todo-card__avatar" aria-label="来源：${escapeAttribute(item.sourceName)}">${escapeHtml(item.sourceInitial)}</span>
+                </div>
+              </div>
+            </li>
+          `;
+        }
+
+        function escapeHtml(value) {
+          return String(value)
+            .replaceAll("&", "&amp;")
+            .replaceAll("<", "&lt;")
+            .replaceAll(">", "&gt;")
+            .replaceAll('"', "&quot;")
+            .replaceAll("'", "&#039;");
+        }
+
+        function escapeAttribute(value) {
+          return escapeHtml(value).replaceAll("`", "&#096;");
+        }
+
+        function render() {
+          const visible = visibleItems();
+          const openCount = items.filter((item) => !item.completed).length;
+
+          scopeLabel.textContent = activeTab === "open" ? "未完成" : "已完成";
+          countLabel.textContent = String(visible.length);
+          tabSwitch.setAttribute(
+            "aria-label",
+            activeTab === "open" ? "待办，当前显示未完成，点击查看已完成" : "待办，当前显示已完成，点击查看未完成",
+          );
+          collapsedBadge.textContent = openCount > 9 ? "9+" : String(openCount);
+          collapsedBadge.hidden = openCount === 0;
+          collapsedTrigger.setAttribute("aria-label", `展开待办，${openCount} 条未完成`);
+
+          todoList.innerHTML = visible.map(cardMarkup).join("");
+          emptyState.hidden = visible.length > 0;
+          emptyText.textContent = activeTab === "open" ? "暂无未完成待办" : "暂无已完成待办";
+
+          requestAnimationFrame(syncPanelSize);
+        }
+
+        function toggleItem(id) {
+          if (busyIDs.has(id)) return;
+          const item = items.find((candidate) => candidate.id === id);
+          if (!item) return;
+          busyIDs.add(id);
+
+          if (item.completed) {
+            restoringIDs.add(id);
+            render();
+            window.setTimeout(() => {
+              item.completed = false;
+              restoringIDs.delete(id);
+              busyIDs.delete(id);
+              render();
+            }, transitionDelay);
+            return;
+          }
+
+          completingIDs.add(id);
+          render();
+          window.setTimeout(() => {
+            item.completed = true;
+            completingIDs.delete(id);
+            busyIDs.delete(id);
+            render();
+          }, transitionDelay);
+        }
+
+        function switchTab() {
+          if (suppressTabClick) {
+            suppressTabClick = false;
+            return;
+          }
+          activeTab = activeTab === "open" ? "done" : "open";
+          render();
+        }
+
+        function collapsePanel() {
+          collapsed = true;
+          panel.classList.remove("is-expanded");
+          panel.classList.add("is-collapsed");
+          expandedPanel.setAttribute("aria-hidden", "true");
+          requestAnimationFrame(() => {
+            syncPanelSize();
+            clampPosition();
+          });
+        }
+
+        function expandPanel() {
+          collapsed = false;
+          panel.classList.remove("is-collapsed");
+          panel.classList.add("is-expanded");
+          expandedPanel.setAttribute("aria-hidden", "false");
+          requestAnimationFrame(() => {
+            syncPanelSize();
+            clampPosition();
+          });
+        }
+
+        function syncPanelSize() {
+          if (collapsed) {
+            panel.style.height = "56px";
+            return;
+          }
+          const maxHeight = Math.max(180, window.innerHeight - DEFAULT_GAP * 2);
+          const naturalHeight = expandedPanel.offsetHeight;
+          panel.style.height = `${Math.min(naturalHeight, maxHeight)}px`;
+        }
+
+        function clampPosition() {
+          const width = panel.offsetWidth || 56;
+          const height = panel.offsetHeight || 56;
+          const maxX = Math.max(PANEL_GAP, window.innerWidth - width - PANEL_GAP);
+          const maxY = Math.max(PANEL_GAP, window.innerHeight - height - PANEL_GAP);
+          position.x = Math.min(Math.max(PANEL_GAP, position.x), maxX);
+          position.y = Math.min(Math.max(PANEL_GAP, position.y), maxY);
+          applyPosition();
+        }
+
+        function applyPosition() {
+          if (!positionReady) return;
+          panel.style.left = `${position.x}px`;
+          panel.style.top = `${position.y}px`;
+          panel.style.right = "auto";
+        }
+
+        let dragState = null;
+        let suppressTabClick = false;
+
+        dragHandle.addEventListener("pointerdown", (event) => {
+          if (collapsed || event.button !== 0 || event.target.closest("[data-no-drag]")) return;
+          dragState = {
+            pointerId: event.pointerId,
+            startX: event.clientX,
+            startY: event.clientY,
+            originX: position.x,
+            originY: position.y,
+            moved: false,
+          };
+          panel.classList.add("is-dragging");
+        });
+
+        window.addEventListener("pointermove", (event) => {
+          if (!dragState || event.pointerId !== dragState.pointerId) return;
+          const nextX = dragState.originX + event.clientX - dragState.startX;
+          const nextY = dragState.originY + event.clientY - dragState.startY;
+          if (!dragState.moved && Math.hypot(nextX - dragState.originX, nextY - dragState.originY) > 4) {
+            dragState.moved = true;
+            dragHandle.setPointerCapture(event.pointerId);
+            event.preventDefault();
+          }
+          if (!dragState.moved) return;
+          position.x = nextX;
+          position.y = nextY;
+          applyPosition();
+        });
+
+        function endDrag(event) {
+          if (!dragState || event.pointerId !== dragState.pointerId) return;
+          if (dragState.moved && dragHandle.hasPointerCapture(event.pointerId)) {
+            dragHandle.releasePointerCapture(event.pointerId);
+          }
+          if (dragState.moved) {
+            suppressTabClick = true;
+            window.setTimeout(() => {
+              suppressTabClick = false;
+            }, 0);
+          }
+          dragState = null;
+          panel.classList.remove("is-dragging");
+          clampPosition();
+        }
+
+        window.addEventListener("pointerup", endDrag);
+        window.addEventListener("pointercancel", endDrag);
+        tabSwitch.addEventListener("click", switchTab);
+        collapseButton.addEventListener("click", collapsePanel);
+        collapsedTrigger.addEventListener("click", expandPanel);
+
+        todoList.addEventListener("click", (event) => {
+          const button = event.target.closest("[data-action='toggle']");
+          if (!button) return;
+          const card = button.closest("[data-id]");
+          if (card) toggleItem(card.dataset.id);
+        });
+
+        window.addEventListener("resize", () => {
+          position.x = Math.min(position.x, window.innerWidth - 56 - PANEL_GAP);
+          position.y = Math.min(position.y, window.innerHeight - 56 - PANEL_GAP);
+          clampPosition();
+          requestAnimationFrame(() => {
+            syncPanelSize();
+            clampPosition();
+          });
+        });
+
+        render();
+        requestAnimationFrame(() => {
+          const initialWidth = panel.offsetWidth || 320;
+          position.x = Math.max(PANEL_GAP, window.innerWidth - initialWidth - DEFAULT_GAP);
+          position.y = DEFAULT_GAP;
+          positionReady = true;
+          applyPosition();
+          clampPosition();
+          syncPanelSize();
+        });
+      })();
+    </script>
+  </body>
+</html>

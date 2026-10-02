@@ -12,8 +12,11 @@ from datetime import datetime, timezone
 
 import pytest
 
+from app.capabilities.answer import AnswerComposeCapability
+from app.capabilities.knowledge import KnowledgeSearchContentCapability
 from app.capabilities.todo import TodoCreateCapability
 from app.capabilities.web import WebExtractCapability, WebFetchCapability
+from app.capabilities.web_research import WebResearchCapability
 from app.kernel.models import (
     CapabilityDescriptor,
     Plan,
@@ -517,3 +520,60 @@ def test_the_planner_prompt_does_not_carry_the_whole_evidence_body() -> None:
     assert len(prompt) < 4000
     # The identifying half survives, so the Planner can still reason about it.
     assert "ev-1" in prompt and "https://a.example.com/1" in prompt
+
+
+def test_planner_can_combine_personal_knowledge_and_web_evidence() -> None:
+    plan_json = json.dumps(
+        {
+            "objective": "结合公司资料和公开标准进行判断",
+            "steps": [
+                {
+                    "capability": "knowledge.search_content",
+                    "arguments": {
+                        "query": "公司简介 成立时间 估值 融资 上市",
+                        "include_personal": True,
+                    },
+                },
+                {
+                    "capability": "web.research",
+                    "arguments": {"urls": ["https://example.com/standard"]},
+                },
+                {
+                    "capability": "answer.compose",
+                    "arguments": {
+                        "question": "根据标准判断我的公司",
+                        "evidence_ref": None,
+                        "knowledge_evidence_refs": [
+                            {"step": 1, "output": "evidence"}
+                        ],
+                        "evidence_refs": [{"step": 2, "output": "evidence"}],
+                    },
+                },
+            ],
+        },
+        ensure_ascii=False,
+    )
+    planner = OpenAICompatiblePlanner(StubPlannerClient([plan_json]))
+
+    plan = planner.create_plan(
+        envelope("根据这个网址判断我的公司是不是独角兽"),
+        [
+            KnowledgeSearchContentCapability.descriptor,
+            WebResearchCapability.descriptor,
+            AnswerComposeCapability.descriptor,
+        ],
+        [],
+        PlanningConstraints(),
+    )
+
+    assert [item.capability for item in plan.steps] == [
+        "knowledge.search_content",
+        "web.research",
+        "answer.compose",
+    ]
+    assert plan.steps[2].arguments["knowledge_evidence"] == {
+        "$concat": [f"$steps.{plan.plan_id}-step-1.output.evidence"]
+    }
+    assert plan.steps[2].arguments["evidence"] == {
+        "$concat": [f"$steps.{plan.plan_id}-step-2.output.evidence"]
+    }

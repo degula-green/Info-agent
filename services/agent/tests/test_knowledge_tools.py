@@ -7,6 +7,7 @@ from typing import Any
 import pytest
 from pydantic import ValidationError
 
+from app.capabilities.answer import AnswerComposeCapability
 from app.capabilities.knowledge import (
     KnowledgeAnswerCapability,
     KnowledgeAnswerInput,
@@ -16,7 +17,9 @@ from app.capabilities.knowledge import (
     SearchContentInput,
     SearchSourcesInput,
 )
+from app.capabilities.web_research import WebResearchCapability
 from app.container import build_container, build_planner, build_registry
+from app.kernel.models import Plan, PlanningConstraints, PlanStep, TaskEnvelope
 from app.kernel.registry import CapabilityRegistry
 from app.planning.knowledge import (
     KnowledgeRoutingPlanner,
@@ -554,6 +557,78 @@ def test_knowledge_routing_planner_intercepts_only_knowledge_questions() -> None
         "knowledge.search_sources",
         "knowledge.answer",
     ]
+
+
+def test_personal_comparison_plan_gains_knowledge_source_without_attachment() -> None:
+    class BasePlanner:
+        name = "stub"
+        last_call_count = 0
+
+        def create_plan(
+            self,
+            task: TaskEnvelope,
+            capabilities,
+            observations,
+            constraints,
+            understanding=None,
+        ) -> Plan:
+            return Plan(
+                plan_id="plan-personal",
+                task_id=task.task_id,
+                objective="比较",
+                steps=[
+                    PlanStep(
+                        step_id="plan-personal-step-1",
+                        plan_id="plan-personal",
+                        order=1,
+                        capability="web.research",
+                        arguments={"urls": ["https://example.com/standard"]},
+                    ),
+                    PlanStep(
+                        step_id="plan-personal-step-2",
+                        plan_id="plan-personal",
+                        order=2,
+                        capability="answer.compose",
+                        arguments={
+                            "question": "判断我的公司",
+                            "evidence_ref": {"step": 1, "output": "evidence"},
+                        },
+                    ),
+                ],
+            )
+
+    task = TaskEnvelope(
+        task_id="task-personal",
+        source_type="chat",
+        owner_user_id="user-1",
+        input={
+            "text": "https://example.com/standard 根据这个网址判断我的公司是否符合标准"
+        },
+        created_at=datetime.now(timezone.utc),
+    )
+    planner = KnowledgeRoutingPlanner(BasePlanner())
+
+    plan = planner.create_plan(
+        task,
+        [
+            KnowledgeSearchContentCapability.descriptor,
+            WebResearchCapability.descriptor,
+            AnswerComposeCapability.descriptor,
+        ],
+        [],
+        PlanningConstraints(),
+    )
+
+    assert [step.capability for step in plan.steps] == [
+        "knowledge.search_content",
+        "web.research",
+        "answer.compose",
+    ]
+    assert plan.steps[0].arguments["include_personal"] is True
+    assert plan.steps[2].arguments["knowledge_evidence_refs"] == [
+        {"step": 1, "output": "evidence"}
+    ]
+    assert plan.steps[2].arguments["evidence_ref"] == {"step": 2, "output": "evidence"}
 
 
 def test_routing_planner_executes_content_pipeline_end_to_end() -> None:

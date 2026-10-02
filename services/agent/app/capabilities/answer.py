@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.kernel.models import (
     CapabilityDescriptor,
@@ -19,6 +19,8 @@ from app.kernel.models import (
 )
 
 CAPABILITY_NAME = "answer.compose"
+KNOWLEDGE_SEARCH_CAPABILITY = "knowledge.search_content"
+WEB_RESEARCH_CAPABILITY = "web.research"
 DEFAULT_TIMEOUT_SECONDS = 60
 MAX_EVIDENCE_ITEMS = 50
 QUOTE_CHARS = 500
@@ -30,6 +32,9 @@ class AnswerComposeInput(BaseModel):
     question: str = Field(min_length=1, max_length=2000)
     # Passed as a reference in the Plan: evidence="$steps.<id>.output.evidence".
     evidence: list[dict[str, Any]] = Field(
+        default_factory=list, max_length=MAX_EVIDENCE_ITEMS
+    )
+    knowledge_evidence: list[dict[str, Any]] = Field(
         default_factory=list, max_length=MAX_EVIDENCE_ITEMS
     )
 
@@ -46,9 +51,24 @@ class AnswerComposePlanInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     question: str = Field(min_length=1, max_length=2000)
-    evidence_ref: StepOutputRef = Field(
-        description="引用更早 web.research 步骤输出的 evidence"
+    evidence_ref: StepOutputRef | None = Field(
+        default=None,
+        description="引用更早 web.research 步骤输出的 evidence（兼容旧计划）",
     )
+    evidence_refs: list[StepOutputRef] = Field(
+        default_factory=list,
+        description="引用一个或多个更早 web.research 步骤输出的 evidence",
+    )
+    knowledge_evidence_refs: list[StepOutputRef] = Field(
+        default_factory=list,
+        description="引用一个或多个更早 knowledge.search_content 步骤输出的 evidence",
+    )
+
+    @model_validator(mode="after")
+    def _evidence_required(self) -> "AnswerComposePlanInput":
+        if not self.evidence_ref and not self.evidence_refs and not self.knowledge_evidence_refs:
+            raise ValueError("at least one evidence reference is required")
+        return self
 
 
 class AnswerComposeResult(BaseModel):
@@ -98,7 +118,8 @@ class AnswerComposeCapability:
         name=CAPABILITY_NAME,
         description=(
             "依据已检索到的 evidence 组织一段带来源的回答（只读）。"
-            "证据用 evidence_ref 指向更早 web.research 步骤输出的 evidence。"
+            "证据通过 evidence_refs / knowledge_evidence_refs 指向更早步骤输出的 evidence，"
+            "支持网页和知识库等多来源证据合并。"
             "不需要自然语言回答的任务可以不调用本能力。"
         ),
         input_schema=AnswerComposeInput.model_json_schema(),
@@ -107,9 +128,26 @@ class AnswerComposeCapability:
             CapabilityInputBinding(
                 planner_argument="evidence_ref",
                 runtime_argument="evidence",
-                source_capability="web.research",
+                source_capability=WEB_RESEARCH_CAPABILITY,
                 source_output="evidence",
-            )
+                required=False,
+            ),
+            CapabilityInputBinding(
+                planner_argument="evidence_refs",
+                runtime_argument="evidence",
+                source_capability=WEB_RESEARCH_CAPABILITY,
+                source_output="evidence",
+                aggregate=True,
+                required=False,
+            ),
+            CapabilityInputBinding(
+                planner_argument="knowledge_evidence_refs",
+                runtime_argument="knowledge_evidence",
+                source_capability=KNOWLEDGE_SEARCH_CAPABILITY,
+                source_output="evidence",
+                aggregate=True,
+                required=False,
+            ),
         ],
         output_schema=AnswerComposeResult.model_json_schema(),
         risk_level="read_only",
@@ -130,11 +168,36 @@ class AnswerComposeCapability:
         return AnswerComposeInput.model_validate(arguments)
 
     def execute(self, arguments: AnswerComposeInput) -> dict[str, Any]:
-        draft = self.provider.compose(arguments.question, arguments.evidence)
+        evidence = _merge_evidence(arguments.knowledge_evidence, arguments.evidence)
+        draft = self.provider.compose(arguments.question, evidence)
         return AnswerComposeResult(
             answer=draft.answer,
-            citations=keep_known_citations(draft.citations, arguments.evidence),
+            citations=keep_known_citations(draft.citations, evidence),
             # Reported so the Runtime can charge the Task budget: a capability
             # that spends model calls must not be able to spend them for free.
             model_calls=max(int(getattr(draft, "model_calls", 0) or 0), 0),
         ).model_dump()
+
+
+def _merge_evidence(
+    knowledge_evidence: list[dict[str, Any]],
+    web_evidence: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    merged: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in [*knowledge_evidence, *web_evidence]:
+        if not isinstance(item, dict):
+            continue
+        identity = str(
+            item.get("evidence_id")
+            or item.get("content_hash")
+            or item.get("url")
+            or len(merged)
+        )
+        if identity in seen:
+            continue
+        seen.add(identity)
+        merged.append(item)
+        if len(merged) >= MAX_EVIDENCE_ITEMS:
+            break
+    return merged

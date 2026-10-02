@@ -322,6 +322,34 @@ export interface AgentObservation {
   created_at?: string
 }
 
+export type AgentTodoStatus = 'open' | 'done' | 'cancelled'
+
+export interface AgentTodo {
+  todo_id: string
+  owner_user_id: string
+  title: string
+  due_at: string | null
+  due_expression: string | null
+  timezone: string | null
+  notes: string | null
+  status: AgentTodoStatus
+  source?: Record<string, any>
+  plan_id?: string | null
+  step_id?: string | null
+  created_at?: string
+  updated_at?: string
+  completed_at?: string | null
+}
+
+export interface AgentTodoUpdate {
+  title?: string
+  due_at?: string | null
+  due_expression?: string | null
+  timezone?: string | null
+  notes?: string | null
+  status?: AgentTodoStatus
+}
+
 // Drafts that still need the user. Everything else is not shown in the sidebar.
 export const SCHEDULE_DRAFT_STATUSES = 'waiting_approval,waiting_input'
 
@@ -351,6 +379,40 @@ export async function listAgentObservations(taskID: string): Promise<AgentObserv
     `/tasks/${encodeURIComponent(taskID)}/observations`,
   )
   return Array.isArray(body?.items) ? body.items : []
+}
+
+/**
+ * Reads the durable to-do ledger. The sidebar asks for open and done together
+ * so the two tabs stay consistent on each poll; cancelled rows are never shown.
+ */
+export async function listAgentTodos(statuses: AgentTodoStatus[] = ['open']): Promise<AgentTodo[]> {
+  const statusQuery = statuses.length
+    ? `?status=${encodeURIComponent(statuses.join(','))}`
+    : ''
+  const body = await agentRequest<{ items?: AgentTodo[] }>(`/todos${statusQuery}`)
+  return Array.isArray(body?.items) ? body.items : []
+}
+
+export function updateAgentTodo(
+  todoID: string,
+  changes: AgentTodoUpdate,
+): Promise<AgentTodo> {
+  return agentRequest<AgentTodo>(`/todos/${encodeURIComponent(todoID)}`, {
+    method: 'PATCH',
+    body: JSON.stringify(changes),
+  })
+}
+
+/** Soft completion: the row and its completion timestamp survive. */
+export function completeAgentTodo(todoID: string): Promise<AgentTodo> {
+  return updateAgentTodo(todoID, { status: 'done' })
+}
+
+/** Reserved for an explicit discard; completion must use completeAgentTodo. */
+export async function deleteAgentTodo(todoID: string): Promise<void> {
+  await agentRequest<null>(`/todos/${encodeURIComponent(todoID)}`, {
+    method: 'DELETE',
+  })
 }
 
 /**
@@ -490,6 +552,99 @@ function formatMoment(value: unknown, timezone?: string): string {
   } catch {
     return moment.toLocaleString('zh-CN')
   }
+}
+
+const TODO_WEEKDAYS = ['周日', '周一', '周二', '周三', '周四', '周五', '周六']
+const TODO_WEEKDAY_INDEX: Record<string, number> = {
+  Sun: 0,
+  Mon: 1,
+  Tue: 2,
+  Wed: 3,
+  Thu: 4,
+  Fri: 5,
+  Sat: 6,
+}
+
+interface CalendarDate {
+  year: number
+  month: number
+  day: number
+  weekday: number
+}
+
+function calendarDate(value: Date, timezone: string): CalendarDate | null {
+  try {
+    const parts = new Intl.DateTimeFormat('en-US', {
+      timeZone: timezone || 'Asia/Shanghai',
+      weekday: 'short',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    }).formatToParts(value)
+    const read = (type: Intl.DateTimeFormatPartTypes) =>
+      parts.find((part) => part.type === type)?.value || ''
+    const year = Number(read('year'))
+    const month = Number(read('month'))
+    const day = Number(read('day'))
+    const weekday = TODO_WEEKDAY_INDEX[read('weekday')]
+    if (!year || !month || !day || weekday === undefined) return null
+    return { year, month, day, weekday }
+  } catch {
+    return null
+  }
+}
+
+function calendarDayNumber(parts: CalendarDate): number {
+  return Date.UTC(parts.year, parts.month - 1, parts.day) / 86_400_000
+}
+
+/** Compact deadline label for a real to-do row. */
+export function agentTodoTimeLabel(todo: AgentTodo, now = new Date()): string {
+  const raw = text(todo.due_at)
+  if (!raw) return text(todo.due_expression) || '无时间'
+  const due = new Date(raw)
+  if (Number.isNaN(due.getTime())) return text(todo.due_expression) || '无时间'
+  const zone = text(todo.timezone) || 'Asia/Shanghai'
+  const dueDate = calendarDate(due, zone)
+  const today = calendarDate(now, zone)
+  if (!dueDate || !today) return formatMoment(raw, zone) || '无时间'
+  const difference = calendarDayNumber(dueDate) - calendarDayNumber(today)
+  if (difference === 0) return '今天'
+  if (difference === 1) return '明天'
+  const daysUntilSunday = (7 - today.weekday) % 7
+  if (difference > 1 && difference <= daysUntilSunday) return TODO_WEEKDAYS[dueDate.weekday]
+  const month = String(dueDate.month).padStart(2, '0')
+  const day = String(dueDate.day).padStart(2, '0')
+  return `${month}-${day}`
+}
+
+/** Human-readable provenance the ledger actually carries today. */
+export function agentTodoSourceLabel(todo: AgentTodo): string {
+  const source = todo.source || {}
+  const sender = text(source.sender_display_name)
+  if (sender) return sender
+  const conversationType = text(source.conversation_type).toLowerCase()
+  if (conversationType === 'group') return '群聊'
+  if (conversationType === 'private') return '私聊'
+  return '待办'
+}
+
+export function agentTodoSourceInitial(todo: AgentTodo): string {
+  return Array.from(agentTodoSourceLabel(todo))[0] || '待'
+}
+
+/** Open items follow due time first; completed items follow creation time. */
+export function sortAgentTodos(items: AgentTodo[], status: AgentTodoStatus): AgentTodo[] {
+  return items
+    .filter((item) => item.status === status)
+    .sort((left, right) => {
+      if (status === 'open') {
+        const leftDue = left.due_at ? new Date(left.due_at).getTime() : Number.POSITIVE_INFINITY
+        const rightDue = right.due_at ? new Date(right.due_at).getTime() : Number.POSITIVE_INFINITY
+        if (leftDue !== rightDue) return leftDue - rightDue
+      }
+      return new Date(right.created_at || 0).getTime() - new Date(left.created_at || 0).getTime()
+    })
 }
 
 function sourceLabels(task: AgentTask): { label: string; conversation: string } {

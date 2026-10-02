@@ -15,6 +15,7 @@ from __future__ import annotations
 import pytest
 
 from app.capabilities.answer import AnswerComposeCapability
+from app.capabilities.knowledge import KnowledgeSearchContentCapability
 from app.capabilities.web import WebExtractCapability, WebFetchCapability
 from app.capabilities.web_research import WebResearchCapability
 from app.kernel.bindings import bind_plan_references
@@ -38,6 +39,7 @@ def descriptors() -> list[CapabilityDescriptor]:
         WebFetchCapability(FakePageFetcher()).descriptor,
         WebExtractCapability().descriptor,
         WebResearchCapability(_UnusedReader(), search_provider=None, aliases={}).descriptor,
+        KnowledgeSearchContentCapability.descriptor,
         AnswerComposeCapability(FakeAnswerProvider()).descriptor,
     ]
 
@@ -72,8 +74,12 @@ def test_the_answer_schema_asks_for_the_evidence_reference() -> None:
     schema = planner_arguments_schema(AnswerComposeCapability(FakeAnswerProvider()).descriptor)
 
     assert "evidence_ref" in schema["properties"]
-    assert "evidence_ref" in schema["required"]
+    assert "evidence_refs" in schema["properties"]
+    assert "knowledge_evidence_refs" in schema["properties"]
+    assert "array" in schema["properties"]["evidence_refs"]["type"]
+    assert "array" in schema["properties"]["knowledge_evidence_refs"]["type"]
     assert "evidence" not in schema["properties"]
+    assert "knowledge_evidence" not in schema["properties"]
 
 
 def test_the_task_text_argument_is_hidden_from_the_model() -> None:
@@ -128,6 +134,40 @@ def test_the_binder_turns_planner_references_into_runtime_references() -> None:
     }
     # The Planner's own plan is left as it was; binding is not an in-place edit.
     assert plan.steps[1].arguments["document_ref"] == {"step": 1, "output": "content"}
+
+
+def test_the_binder_merges_knowledge_and_web_evidence_for_one_answer() -> None:
+    plan = plan_with(
+        [
+            step(
+                1,
+                "knowledge.search_content",
+                {"query": "公司简介 成立时间 估值 上市"},
+            ),
+            step(2, "web.research", {"request": "读取百科", "urls": [URL]}),
+            step(
+                3,
+                "answer.compose",
+                {
+                    "question": "根据百科判断我的公司是不是独角兽",
+                    "knowledge_evidence_refs": [{"step": 1, "output": "evidence"}],
+                    "evidence_refs": [{"step": 2, "output": "evidence"}],
+                },
+            ),
+        ]
+    )
+
+    bound = bind_plan_references(plan, descriptors())
+
+    assert bound.steps[2].arguments == {
+        "question": "根据百科判断我的公司是不是独角兽",
+        "knowledge_evidence": {
+            "$concat": ["$steps.p1-step-1.output.evidence"]
+        },
+        "evidence": {
+            "$concat": ["$steps.p1-step-2.output.evidence"]
+        },
+    }
 
 
 def test_a_plan_without_reference_arguments_is_unchanged() -> None:

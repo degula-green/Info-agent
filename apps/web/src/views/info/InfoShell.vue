@@ -20,6 +20,7 @@
       </header>
       <div class="info-shell__content"><RouterView /></div>
     </main>
+    <TodoFloatingPanel />
     <InfoCommandPalette :visible="paletteVisible" :query="paletteQuery" :results="paletteResults" :loading="paletteLoading" :empty-hint="paletteEmptyHint" :recent-searches="store.recentSearches" @update:visible="paletteVisible = $event" @search="runPaletteSearch" @select="selectPaletteResult" />
     <t-dialog
       v-model:visible="resultPreviewVisible"
@@ -98,6 +99,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { MessagePlugin } from 'tdesign-vue-next'
 import InfoSidebar from '@/components/InfoSidebar.vue'
+import TodoFloatingPanel from '@/components/TodoFloatingPanel.vue'
 import InfoCommandPalette from '@/components/InfoCommandPalette.vue'
 import InfoAttachmentPreview from '@/components/InfoAttachmentPreview.vue'
 import { type InfoFile, type SearchResult } from '@/mock'
