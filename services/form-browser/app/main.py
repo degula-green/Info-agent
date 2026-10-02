@@ -15,9 +15,15 @@ from fastapi.responses import JSONResponse
 
 from .cells import format_range, parse_range, to_ref
 from .config import Settings, load_settings
+from .forms import FormDriver, FormError
 from .grid import GridDriver, GridError, GridUnavailable
 from .models import (
     ActionAck,
+    FormFillRequest,
+    FormFillResult,
+    FormSnapshot,
+    FormSubmitRequest,
+    FormSubmitResult,
     GridClearRequest,
     GridSnapshot,
     GridWriteRequest,
@@ -97,13 +103,7 @@ async def _page_info(page: Any) -> PageInfo:
 
     # A form page is one that actually exposes editable fields and no grid.
     if not is_grid:
-        try:
-            fields = await page.locator(
-                "input:not([type=hidden]), textarea, select"
-            ).count()
-        except Exception:  # noqa: BLE001
-            fields = 0
-        if fields:
+        if await FormDriver(page, settle_ms=settings.settle_ms).detect():
             kind = "form"
             editor = "html-form"
 
@@ -320,3 +320,68 @@ async def send_input(session_id: str, body: InputRequest) -> ActionAck:
         raise HTTPException(status_code=502, detail=f"input failed: {exc}") from exc
     await page.wait_for_timeout(400)
     return ActionAck(detail=body.kind)
+
+
+@app.get(
+    "/sessions/{session_id}/form",
+    response_model=FormSnapshot,
+    dependencies=[Depends(require_token)],
+)
+async def read_form(session_id: str) -> FormSnapshot:
+    try:
+        session = await manager.get(session_id)
+    except SessionNotFound as exc:
+        raise HTTPException(status_code=404, detail="unknown session") from exc
+    driver = FormDriver(session.page, settle_ms=settings.settle_ms)
+    if not await driver.detect():
+        raise HTTPException(status_code=409, detail="the open page has no HTML form")
+    try:
+        return await driver.snapshot()
+    except FormError as exc:
+        return _error(503 if exc.classification == "retryable_error" else 409, exc.code, str(exc), exc.classification)
+
+
+@app.post(
+    "/sessions/{session_id}/form/fill",
+    response_model=FormFillResult,
+    dependencies=[Depends(require_token)],
+)
+async def fill_form(session_id: str, body: FormFillRequest) -> FormFillResult:
+    try:
+        session = await manager.get(session_id)
+    except SessionNotFound as exc:
+        raise HTTPException(status_code=404, detail="unknown session") from exc
+    if session.login_required:
+        return _error(
+            409,
+            "login_required",
+            "the page needs the owner to sign in before editing",
+            "permanent_error",
+        )
+    try:
+        return await FormDriver(session.page, settle_ms=settings.settle_ms).fill(body.values)
+    except FormError as exc:
+        return _error(503 if exc.classification == "retryable_error" else 409, exc.code, str(exc), exc.classification)
+
+
+@app.post(
+    "/sessions/{session_id}/form/submit",
+    response_model=FormSubmitResult,
+    dependencies=[Depends(require_token)],
+)
+async def submit_form(session_id: str, body: FormSubmitRequest) -> FormSubmitResult:
+    try:
+        session = await manager.get(session_id)
+    except SessionNotFound as exc:
+        raise HTTPException(status_code=404, detail="unknown session") from exc
+    if session.login_required:
+        return _error(
+            409,
+            "login_required",
+            "the page needs the owner to sign in before submitting",
+            "permanent_error",
+        )
+    try:
+        return await FormDriver(session.page, settle_ms=settings.settle_ms).submit(body.ref)
+    except FormError as exc:
+        return _error(503 if exc.classification == "retryable_error" else 409, exc.code, str(exc), exc.classification)

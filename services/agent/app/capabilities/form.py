@@ -48,6 +48,9 @@ class FormField(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     name: str
+    # For an HTML form this is the locator the write step uses; a spreadsheet
+    # addresses cells by row instead, so it stays empty there.
+    ref: str = ""
     value: str = ""
     source: str = "empty"
     confidence: float = Field(default=0.0, ge=0, le=1)
@@ -69,6 +72,9 @@ class FormDraft(BaseModel):
     page_fingerprint: str = ""
     headers: list[str] = Field(default_factory=list)
     target_cell: str = "A1"
+    # Only meaningful for ``submit_form`` pages.
+    submit_ref: str = ""
+    submit_label: str = ""
     existing_rows: int = 0
     fields: list[FormField] = Field(default_factory=list)
     missing: list[str] = Field(default_factory=list)
@@ -130,6 +136,7 @@ class FormApplyResult(BaseModel):
     status: str
     action: str
     written_range: str
+    final_url: str = ""
     observed: list[list[str]] = Field(default_factory=list)
     verified: bool = False
 
@@ -195,6 +202,22 @@ def _trusted(url: str, request: str) -> str:
     return allowed[0]
 
 
+_NO_SUBMIT = ("不要提交", "不用提交", "先不提交", "不提交", "别提交", "仅填写", "只填写")
+
+
+def wants_submit(request: str) -> bool:
+    """Whether the owner asked for the submit control to be pressed too.
+
+    Filling and submitting are different amounts of trust, so the default is
+    the smaller one: an explicit negation wins, and an explicit ask is needed.
+    """
+
+    text = str(request or "")
+    if any(marker in text for marker in _NO_SUBMIT):
+        return False
+    return "提交" in text or "submit" in text.lower()
+
+
 class FormPreviewCapability:
     """Reads the link and proposes a draft; it never writes."""
 
@@ -242,41 +265,91 @@ class FormPreviewCapability:
                         "url": page.get("final_url") or url,
                     },
                 }
-            if page.get("kind") != "spreadsheet":
+            kind = str(page.get("kind") or "unknown")
+            if kind == "spreadsheet":
+                grid = self.client.read_grid(session_id)
+            elif kind == "form":
+                snapshot = self.client.read_form(session_id)
+            else:
                 raise FormBrowserError(
-                    f"unsupported page kind: {page.get('kind')}",
-                    code="unsupported_page_kind",
+                    f"unsupported page kind: {kind}", code="unsupported_page_kind"
                 )
-            grid = self.client.read_grid(session_id)
         except Exception:
             self.client.close_session(session_id)
             raise
 
-        headers = [str(item) for item in (grid.get("headers") or [])]
-        rows = grid.get("rows") or []
-        values = extract_values(headers, arguments.request)
-        fields, missing = build_fields(headers, values)
-        # New data goes on the first row after the ones already present.
-        target_row = len(rows) + 2
         # The preview does not hand its session to the write step: the approval
         # may sit for minutes, and the write opens a fresh session anyway. Not
         # closing here would leak one Chromium context per preview.
         self.client.close_session(session_id)
-        draft = FormDraft(
-            draft_id=str(uuid4()),
-            form_url=page.get("final_url") or url,
-            title=str(page.get("title") or ""),
-            kind="spreadsheet",
-            write_model="live_document",
-            session_id="",
-            page_fingerprint=fingerprint_headers(headers),
-            headers=headers,
-            target_cell=f"A{target_row}" if target_row >= 1 else "A1",
-            existing_rows=len(rows),
-            fields=fields,
-            missing=missing,
-            action="write_cells",
-        )
+
+        if kind == "spreadsheet":
+            headers = [str(item) for item in (grid.get("headers") or [])]
+            rows = grid.get("rows") or []
+            values = extract_values(headers, arguments.request)
+            fields, missing = build_fields(headers, values)
+            # New data goes on the first row after the ones already present.
+            target_row = len(rows) + 2
+            draft = FormDraft(
+                draft_id=str(uuid4()),
+                form_url=page.get("final_url") or url,
+                title=str(page.get("title") or ""),
+                kind="spreadsheet",
+                write_model="live_document",
+                session_id="",
+                page_fingerprint=fingerprint_headers(headers),
+                headers=headers,
+                target_cell=f"A{target_row}" if target_row >= 1 else "A1",
+                existing_rows=len(rows),
+                fields=fields,
+                missing=missing,
+                action="write_cells",
+            )
+        else:
+            raw_fields = snapshot.get("fields") or []
+            names = [
+                str(item.get("label") or item.get("name") or item.get("ref") or "")
+                for item in raw_fields
+            ]
+            values = extract_values(names, arguments.request)
+            fields = []
+            missing = []
+            for item, name in zip(raw_fields, names):
+                value = values.get(name, "")
+                fields.append(
+                    FormField(
+                        name=name,
+                        ref=str(item.get("ref") or ""),
+                        value=value,
+                        source="instruction" if value else "empty",
+                        confidence=0.9 if value else 0.0,
+                    )
+                )
+                if not value:
+                    missing.append(name)
+            draft = FormDraft(
+                draft_id=str(uuid4()),
+                form_url=page.get("final_url") or url,
+                title=str(page.get("title") or ""),
+                kind="form",
+                write_model="submit_form",
+                session_id="",
+                # The layout identity is the set of controls, not their labels.
+                page_fingerprint=fingerprint_headers(
+                    [str(field.ref) for field in fields]
+                ),
+                headers=names,
+                target_cell="",
+                submit_ref=str(snapshot.get("submit_ref") or ""),
+                submit_label=str(snapshot.get("submit_label") or ""),
+                fields=fields,
+                missing=missing,
+                action=(
+                    "fill_and_submit"
+                    if wants_submit(arguments.request)
+                    else "fill_only"
+                ),
+            )
         warnings: list[str] = []
         if missing:
             warnings.append("缺少字段：" + "、".join(missing))
@@ -326,12 +399,6 @@ class FormApplyCapability:
 
     def execute(self, arguments: FormApplyInput) -> dict[str, Any]:
         draft = arguments.draft
-        values = arguments.values or [[field.value for field in draft.fields]]
-        # A live document has no submit control, so the write *is* the action.
-        # The draft knows the page kind; the planner's guess does not.
-        action: str = (
-            "write_cells" if draft.write_model == "live_document" else arguments.action
-        )
         url = _trusted(draft.form_url, arguments.request)
         # A fresh session: the approval may sit for minutes, and the stored
         # login state re-authenticates anyway. The fingerprint is what ties
@@ -347,14 +414,10 @@ class FormApplyCapability:
                     "reason": "目标文档需要登录后才能写入，请先完成登录",
                     "takeover": {"session_id": session_id, "url": url},
                 }
-            grid = self.client.read_grid(session_id)
-            headers = [str(item) for item in (grid.get("headers") or [])]
-            if fingerprint_headers(headers) != draft.page_fingerprint:
-                raise FormBrowserError(
-                    "the sheet layout changed since the preview; a new preview is required",
-                    code="page_changed",
-                )
-            written = self.client.write_grid(session_id, draft.target_cell, values)
+            if draft.kind == "form":
+                result = self._apply_form(session_id, draft, arguments)
+            else:
+                result = self._apply_cells(session_id, draft, arguments)
         except FormLoginRequired as exc:
             self.client.close_session(session_id)
             return {
@@ -367,6 +430,27 @@ class FormApplyCapability:
             self.client.close_session(session_id)
             raise
         self.client.close_session(session_id)
+        return result
+
+    def _apply_cells(
+        self, session_id: str, draft: FormDraft, arguments: FormApplyInput
+    ) -> dict[str, Any]:
+        """Write the confirmed row into a collaborative sheet."""
+
+        values = arguments.values or [[field.value for field in draft.fields]]
+        # A live document has no submit control, so the write *is* the action.
+        # The draft knows the page kind; the planner's guess does not.
+        action: str = (
+            "write_cells" if draft.write_model == "live_document" else arguments.action
+        )
+        grid = self.client.read_grid(session_id)
+        headers = [str(item) for item in (grid.get("headers") or [])]
+        if fingerprint_headers(headers) != draft.page_fingerprint:
+            raise FormBrowserError(
+                "the sheet layout changed since the preview; a new preview is required",
+                code="page_changed",
+            )
+        written = self.client.write_grid(session_id, draft.target_cell, values)
         return FormApplyResult(
             operation=APPLY_NAME,
             status="written" if written.get("verified") else "unverified",
@@ -374,4 +458,54 @@ class FormApplyCapability:
             written_range=str(written.get("written_range") or ""),
             observed=[list(row) for row in (written.get("observed") or [])],
             verified=bool(written.get("verified")),
+        ).model_dump()
+
+    def _apply_form(
+        self, session_id: str, draft: FormDraft, arguments: FormApplyInput
+    ) -> dict[str, Any]:
+        """Fill an ordinary form, and press submit only when that was asked."""
+
+        snapshot = self.client.read_form(session_id)
+        refs = [str(item.get("ref") or "") for item in (snapshot.get("fields") or [])]
+        if fingerprint_headers(refs) != draft.page_fingerprint:
+            raise FormBrowserError(
+                "the form changed since the preview; a new preview is required",
+                code="page_changed",
+            )
+
+        by_ref = {
+            str(field.ref): str(field.value)
+            for field in draft.fields
+            if field.ref
+        }
+        # An explicit ``values`` row wins; otherwise the draft is authoritative.
+        if arguments.values and arguments.values[0]:
+            for index, field in enumerate(draft.fields):
+                if field.ref and index < len(arguments.values[0]):
+                    by_ref[str(field.ref)] = str(arguments.values[0][index])
+        by_ref = {ref: value for ref, value in by_ref.items() if value != ""}
+
+        filled = self.client.fill_form(session_id, by_ref)
+        failed = filled.get("failed") or {}
+        if failed:
+            raise FormBrowserError(
+                "some fields could not be filled: " + "; ".join(sorted(failed)),
+                code="field_fill_failed",
+            )
+
+        # A form has no submit control, the draft says fill_and_submit, and the
+        # owner confirmed that button: only then is it pressed.
+        submitted = draft.write_model == "submit_form" and arguments.action == "fill_and_submit"
+        final_url = ""
+        if submitted:
+            outcome = self.client.submit_form(session_id, draft.submit_ref)
+            final_url = str(outcome.get("final_url") or "")
+        return FormApplyResult(
+            operation=APPLY_NAME,
+            status="submitted" if submitted else "filled",
+            action="fill_and_submit" if submitted else "fill_only",
+            written_range="",
+            final_url=final_url,
+            observed=[[str(item) for item in by_ref.values()]],
+            verified=True,
         ).model_dump()

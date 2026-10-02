@@ -155,6 +155,15 @@ class FormBrowserClient:
     def clear_range(self, session_id: str, span: str) -> None:
         self._request("POST", f"/sessions/{session_id}/grid/clear", {"range": span})
 
+    def read_form(self, session_id: str) -> dict[str, Any]:
+        return self._request("GET", f"/sessions/{session_id}/form")
+
+    def fill_form(self, session_id: str, values: dict[str, str]) -> dict[str, Any]:
+        return self._request("POST", f"/sessions/{session_id}/form/fill", {"values": values})
+
+    def submit_form(self, session_id: str, ref: str = "") -> dict[str, Any]:
+        return self._request("POST", f"/sessions/{session_id}/form/submit", {"ref": ref})
+
     def screenshot(self, session_id: str) -> bytes:
         return self._request("GET", f"/sessions/{session_id}/screenshot", raw=True)
 

@@ -317,3 +317,112 @@ def test_takeover_session_is_read_from_the_observation() -> None:
         task_service=SimpleNamespace(list_observations=lambda task_id: [observation({"form": {}})])
     )
     assert _takeover_session(empty, "t") is None
+
+
+FORM_URL = "https://httpbin.org/forms/post"
+
+
+class FakeFormClient(FakeClient):
+    """A page that is an ordinary HTML form rather than a canvas grid."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.page = {
+            "final_url": FORM_URL,
+            "title": "Pizza order",
+            "kind": "form",
+            "login_required": False,
+        }
+        self.form = {
+            "url": FORM_URL,
+            "title": "Pizza order",
+            "fields": [
+                {"ref": "name:custname#0", "name": "custname", "label": "Customer name:", "type": "text", "required": True, "options": [], "value": ""},
+                {"ref": "name:custtel#0", "name": "custtel", "label": "Telephone:", "type": "tel", "required": False, "options": [], "value": ""},
+            ],
+            "submit_ref": "submit:0",
+            "submit_label": "Submit order",
+        }
+        self.filled: list[dict] = []
+        self.submits = 0
+
+    def read_form(self, session_id: str) -> dict:
+        return self.form
+
+    def fill_form(self, session_id: str, values: dict) -> dict:
+        self.filled.append(dict(values))
+        return {"filled": dict(values), "failed": {}}
+
+    def submit_form(self, session_id: str, ref: str = "") -> dict:
+        self.submits += 1
+        return {
+            "submitted": True,
+            "final_url": "https://httpbin.org/post",
+            "title": "post",
+            "body_text_sample": "ok",
+        }
+
+
+def _form_draft(client: FakeFormClient, request: str) -> dict:
+    capability = FormPreviewCapability(client)
+    return capability.execute(capability.validate({"request": request, "url": FORM_URL}))["form"]
+
+
+def test_form_preview_defaults_to_fill_only() -> None:
+    client = FakeFormClient()
+    draft = _form_draft(client, f"帮我填写这个表单 {FORM_URL} Customer name: 测试 Telephone: 13800000000")
+    assert draft["kind"] == "form"
+    assert draft["write_model"] == "submit_form"
+    assert draft["action"] == "fill_only"
+    assert draft["submit_ref"] == "submit:0"
+    assert [field["ref"] for field in draft["fields"]] == ["name:custname#0", "name:custtel#0"]
+    assert draft["missing"] == []
+
+
+def test_form_preview_asks_for_submit_only_when_told() -> None:
+    client = FakeFormClient()
+    draft = _form_draft(client, f"帮我填写这个表单并提交 {FORM_URL} Customer name: 测试")
+    assert draft["action"] == "fill_and_submit"
+    assert draft["missing"] == ["Telephone:"]
+
+
+def test_form_apply_fills_without_submitting() -> None:
+    client = FakeFormClient()
+    draft = _form_draft(client, f"填写这个表单 {FORM_URL} Customer name: 测试 Telephone: 138")
+    capability = FormApplyCapability(client)
+    result = capability.execute(
+        capability.validate(
+            {"request": f"填写 {FORM_URL}", "draft": draft, "action": "fill_only", "idempotency_key": "k"}
+        )
+    )
+    assert result["status"] == "filled"
+    assert client.submits == 0
+    assert client.filled[0] == {"name:custname#0": "测试", "name:custtel#0": "138"}
+
+
+def test_form_apply_submits_when_confirmed() -> None:
+    client = FakeFormClient()
+    draft = _form_draft(client, f"填写并提交 {FORM_URL} Customer name: 测试 Telephone: 138")
+    capability = FormApplyCapability(client)
+    result = capability.execute(
+        capability.validate(
+            {"request": f"填写并提交 {FORM_URL}", "draft": draft, "action": "fill_and_submit", "idempotency_key": "k"}
+        )
+    )
+    assert result["status"] == "submitted"
+    assert result["final_url"] == "https://httpbin.org/post"
+    assert client.submits == 1
+
+
+def test_form_apply_refuses_when_the_form_changed() -> None:
+    client = FakeFormClient()
+    draft = _form_draft(client, f"填写 {FORM_URL} Customer name: 测试")
+    client.form = {**client.form, "fields": [{"ref": "name:other#0", "name": "other", "label": "Other", "type": "text"}]}
+    capability = FormApplyCapability(client)
+    with pytest.raises(FormBrowserError):
+        capability.execute(
+            capability.validate(
+                {"request": f"填写 {FORM_URL}", "draft": draft, "action": "fill_only", "idempotency_key": "k"}
+            )
+        )
+    assert client.filled == []

@@ -96,6 +96,64 @@ class ActionAck(BaseModel):
     detail: str = ""
 
 
+class FormFieldInfo(BaseModel):
+    """One fillable control on an ordinary HTML form.
+
+    ``ref`` is the locator the write step uses; it is derived from the id or
+    the name so it survives a re-render, rather than from a DOM path that
+    breaks the moment the page reorders.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    ref: str
+    name: str = ""
+    label: str = ""
+    type: str = "text"
+    required: bool = False
+    options: list[str] = Field(default_factory=list)
+    value: str = ""
+
+
+class FormSnapshot(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    url: str
+    title: str = ""
+    fields: list[FormFieldInfo] = Field(default_factory=list)
+    submit_ref: str = ""
+    submit_label: str = ""
+
+
+class FormFillRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    # ``ref`` -> value, exactly as the owner confirmed on the card.
+    values: dict[str, str] = Field(default_factory=dict)
+
+
+class FormFillResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    filled: dict[str, str] = Field(default_factory=dict)
+    failed: dict[str, str] = Field(default_factory=dict)
+
+
+class FormSubmitRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    ref: str = ""
+
+
+class FormSubmitResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    submitted: bool = False
+    final_url: str = ""
+    title: str = ""
+    body_text_sample: str = ""
+
+
 class TakeoverState(BaseModel):
     """Whether the service needs the owner to finish something by hand."""
 
