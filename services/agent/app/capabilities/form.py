@@ -27,7 +27,11 @@ from app.infrastructure.web.form_browser_client import (
     FormLoginRequired,
 )
 from app.infrastructure.web.url_tools import trusted_urls
-from app.kernel.models import CapabilityDescriptor
+from app.kernel.models import (
+    CapabilityDescriptor,
+    CapabilityInputBinding,
+    StepOutputRef,
+)
 
 PREVIEW_NAME = "form.preview"
 APPLY_NAME = "form.apply"
@@ -93,10 +97,30 @@ class FormApplyInput(BaseModel):
     request: str = Field(min_length=1, max_length=4000)
     draft: FormDraft
     action: FormAction = "write_cells"
-    # One row per entry, aligned with ``draft.headers``.
-    values: list[list[str]] = Field(min_length=1)
+    # One row per entry, aligned with ``draft.headers``. Empty means "take the
+    # values the owner confirmed on the draft"; the planner never invents them.
+    values: list[list[str]] = Field(default_factory=list)
     owner_user_id: str = ""
-    idempotency_key: str = Field(min_length=1)
+    # Derived from the draft when absent, so a retry of the same confirmed
+    # draft reuses one identity instead of needing the model to invent a key.
+    idempotency_key: str = ""
+
+
+class FormApplyPlanInput(BaseModel):
+    """The Planner-facing shape of form.apply.
+
+    The Planner points at the preview step instead of retyping the draft; the
+    binder resolves that pointer into the ``FormDraft`` the capability reads.
+    Values are deliberately absent: they come from the draft the owner
+    reviewed, not from the model.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    action: FormAction = Field(
+        default="write_cells",
+        description="fill_only / fill_and_submit 适用于有提交键的表单；write_cells 适用于协作表格",
+    )
 
 
 class FormApplyResult(BaseModel):
@@ -271,6 +295,15 @@ class FormApplyCapability:
             "页面变化时拒绝写入。"
         ),
         input_schema=FormApplyInput.model_json_schema(),
+        planner_input_schema=FormApplyPlanInput.model_json_schema(),
+        input_bindings=[
+            CapabilityInputBinding(
+                planner_argument="draft_ref",
+                runtime_argument="draft",
+                source_capability=PREVIEW_NAME,
+                source_output="form",
+            ),
+        ],
         output_schema=FormApplyResult.model_json_schema(),
         task_text_argument="request",
         risk_level="external_write",
@@ -293,6 +326,12 @@ class FormApplyCapability:
 
     def execute(self, arguments: FormApplyInput) -> dict[str, Any]:
         draft = arguments.draft
+        values = arguments.values or [[field.value for field in draft.fields]]
+        # A live document has no submit control, so the write *is* the action.
+        # The draft knows the page kind; the planner's guess does not.
+        action: str = (
+            "write_cells" if draft.write_model == "live_document" else arguments.action
+        )
         url = _trusted(draft.form_url, arguments.request)
         # A fresh session: the approval may sit for minutes, and the stored
         # login state re-authenticates anyway. The fingerprint is what ties
@@ -315,7 +354,7 @@ class FormApplyCapability:
                     "the sheet layout changed since the preview; a new preview is required",
                     code="page_changed",
                 )
-            written = self.client.write_grid(session_id, draft.target_cell, arguments.values)
+            written = self.client.write_grid(session_id, draft.target_cell, values)
         except FormLoginRequired as exc:
             self.client.close_session(session_id)
             return {
@@ -331,7 +370,7 @@ class FormApplyCapability:
         return FormApplyResult(
             operation=APPLY_NAME,
             status="written" if written.get("verified") else "unverified",
-            action=arguments.action,
+            action=action,
             written_range=str(written.get("written_range") or ""),
             observed=[list(row) for row in (written.get("observed") or [])],
             verified=bool(written.get("verified")),

@@ -193,3 +193,68 @@ def test_descriptors_declare_the_right_risk() -> None:
     assert preview.side_effect is False and preview.requires_approval is False
     assert apply_cap.name == APPLY_NAME
     assert apply_cap.side_effect is True and apply_cap.requires_approval is True
+
+
+def test_apply_binds_the_draft_to_the_preview_step() -> None:
+    """The planner points at the preview; it must not retype the draft."""
+
+    descriptor = FormApplyCapability(FakeClient()).descriptor
+    binding = descriptor.input_bindings[0]
+    assert binding.planner_argument == "draft_ref"
+    assert binding.runtime_argument == "draft"
+    assert binding.source_capability == PREVIEW_NAME
+    assert binding.source_output == "form"
+    # The runtime argument is replaced by the reference in what the model sees.
+    assert "draft" not in descriptor.planner_input_schema.get("properties", {})
+
+
+def test_prompt_arguments_only_expose_action() -> None:
+    from app.planning.schema import planner_arguments_schema
+
+    schema = planner_arguments_schema(FormApplyCapability(FakeClient()).descriptor)
+    assert set(schema["properties"]) == {"action", "draft_ref"}
+    assert "draft_ref" in schema["required"]
+    assert "request" not in schema["properties"]
+
+
+def test_apply_derives_values_from_the_confirmed_draft() -> None:
+    client = FakeClient()
+    preview = FormPreviewCapability(client)
+    request = f"填写 {URL} 学号：1000023 姓名：测试甲"
+    draft = preview.execute(preview.validate({"request": request, "url": URL}))["form"]
+    assert draft["missing"] == ["性别", "联系电话"]
+    # Fill the rest the way the owner would on the review card.
+    for field in draft["fields"]:
+        if not field["value"]:
+            field["value"] = "x"
+    capability = FormApplyCapability(client)
+    capability.execute(
+        capability.validate(
+            {
+                "request": f"填写 {URL}",
+                "draft": draft,
+                "action": "write_cells",
+                "idempotency_key": "task-1",
+            }
+        )
+    )
+    assert client.writes[0][2] == [["1000023", "测试甲", "x", "x"]]
+
+
+def test_live_document_overrides_a_planner_submit_action() -> None:
+    """A spreadsheet has no submit control, so the draft decides the action."""
+
+    client = FakeClient()
+    draft = _draft(client)
+    capability = FormApplyCapability(client)
+    result = capability.execute(
+        capability.validate(
+            {
+                "request": f"填写 {URL}",
+                "draft": draft,
+                "action": "fill_and_submit",
+                "idempotency_key": "task-1",
+            }
+        )
+    )
+    assert result["action"] == "write_cells"
