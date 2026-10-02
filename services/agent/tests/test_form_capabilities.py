@@ -280,3 +280,40 @@ def test_result_preview_summarizes_form_steps() -> None:
     assert applied["written_range"] == "A4:I4"
     assert applied["verified"] is True
     assert "A4:I4" in applied["summary"]
+
+
+def test_takeover_session_is_read_from_the_observation() -> None:
+    """The paused Task's leftover browser is what the owner's takeover drives."""
+
+    from datetime import datetime, timezone
+    from types import SimpleNamespace
+
+    from app.kernel.models import Observation
+    from app.routers.tasks import _takeover_session
+
+    def observation(output: dict) -> Observation:
+        return Observation(
+            observation_id="o",
+            task_id="t",
+            plan_id="p",
+            step_id="s",
+            capability="form.preview",
+            status="succeeded",
+            output=output,
+            created_at=datetime.now(timezone.utc),
+        )
+
+    container = SimpleNamespace(
+        task_service=SimpleNamespace(
+            list_observations=lambda task_id: [
+                observation({"takeover": {"session_id": "sess-1", "url": "u"}}),
+                observation({"form": {}}),
+            ]
+        )
+    )
+    assert _takeover_session(container, "t")["session_id"] == "sess-1"
+
+    empty = SimpleNamespace(
+        task_service=SimpleNamespace(list_observations=lambda task_id: [observation({"form": {}})])
+    )
+    assert _takeover_session(empty, "t") is None

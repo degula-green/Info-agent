@@ -459,6 +459,50 @@ export async function submitAgentTaskInput(
 }
 
 /**
+ * Whether the Task is waiting on the owner to sign in, and where.
+ *
+ * The browser itself never leaves the sidecar; the Agent proxies both the
+ * frame and the owner's clicks so the page stays off the public surface.
+ */
+export async function getAgentTakeover(taskID: string): Promise<{
+  required: boolean
+  url: string
+  session_id: string
+}> {
+  return agentRequest(`/tasks/${encodeURIComponent(taskID)}/takeover`)
+}
+
+/**
+ * One takeover frame, as an object URL.
+ *
+ * The endpoint needs the bearer token, so it is fetched and turned into a blob
+ * rather than pointed at with an `<img src>`. The caller must revoke the URL.
+ */
+export async function fetchTakeoverFrame(taskID: string): Promise<string> {
+  const response = await authenticatedFetch(
+    `${baseURL}/tasks/${encodeURIComponent(taskID)}/takeover/screenshot`,
+    { headers: agentHeaders() },
+  )
+  if (!response.ok) {
+    throw new AgentApiError(`Takeover frame failed (${response.status})`, 'takeover_failed', response.status, response.status >= 500)
+  }
+  return URL.createObjectURL(await response.blob())
+}
+
+export type TakeoverInput =
+  | { kind: 'click'; x: number; y: number }
+  | { kind: 'type'; text: string }
+  | { kind: 'key'; text: string }
+  | { kind: 'scroll'; delta_x: number; delta_y: number }
+
+export async function sendAgentTakeoverInput(taskID: string, input: TakeoverInput): Promise<void> {
+  await agentRequest(`/tasks/${encodeURIComponent(taskID)}/takeover/input`, {
+    method: 'POST',
+    body: JSON.stringify(input),
+  })
+}
+
+/**
  * Cancels a Task whose schedule has not been created yet. The Task becomes
  * terminal and leaves the waiting lists, so the card disappears for good.
  */

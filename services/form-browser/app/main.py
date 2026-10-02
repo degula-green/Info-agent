@@ -22,6 +22,7 @@ from .models import (
     GridSnapshot,
     GridWriteRequest,
     GridWriteResult,
+    InputRequest,
     OpenRequest,
     PageInfo,
     SessionCreated,
@@ -257,6 +258,13 @@ async def screenshot(session_id: str) -> Response:
         session = await manager.get(session_id)
     except SessionNotFound as exc:
         raise HTTPException(status_code=404, detail="unknown session") from exc
+    # A takeover click can be mid-navigation; capturing immediately would send
+    # the owner a blank frame and look like the browser died.
+    try:
+        await session.page.wait_for_load_state("domcontentloaded", timeout=5000)
+    except Exception:  # noqa: BLE001 - a slow page still gets a frame
+        pass
+    await session.page.wait_for_timeout(400)
     try:
         data = await session.page.screenshot()
     except Exception as exc:  # noqa: BLE001
@@ -280,3 +288,35 @@ async def takeover_state(session_id: str) -> TakeoverState:
         reason="登录后才能编辑该文档" if info.login_required else "",
         url=info.final_url,
     )
+
+
+@app.post(
+    "/sessions/{session_id}/input",
+    response_model=ActionAck,
+    dependencies=[Depends(require_token)],
+)
+async def send_input(session_id: str, body: InputRequest) -> ActionAck:
+    """Forward one owner action into the live page during a takeover.
+
+    Coordinates come from the screenshot the owner clicked on, so the page
+    must be at the same viewport size the stream was captured at.
+    """
+
+    try:
+        session = await manager.get(session_id)
+    except SessionNotFound as exc:
+        raise HTTPException(status_code=404, detail="unknown session") from exc
+    page = session.page
+    try:
+        if body.kind == "click":
+            await page.mouse.click(float(body.x or 0), float(body.y or 0))
+        elif body.kind == "type":
+            await page.keyboard.type(body.text)
+        elif body.kind == "key":
+            await page.keyboard.press(body.text or "Enter")
+        elif body.kind == "scroll":
+            await page.mouse.wheel(body.delta_x, body.delta_y)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=f"input failed: {exc}") from exc
+    await page.wait_for_timeout(400)
+    return ActionAck(detail=body.kind)

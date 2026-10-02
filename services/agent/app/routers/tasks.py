@@ -6,7 +6,7 @@ import asyncio
 import json
 from typing import Any, AsyncIterator
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
@@ -342,3 +342,92 @@ def run_task_now(
     except AgentContractError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     return {"task_id": task_id, "status": status}
+
+
+class TakeoverInputBody(BaseModel):
+    """One owner action forwarded into the takeover browser."""
+
+    model_config = {"extra": "forbid"}
+
+    kind: str = Field(pattern="^(click|type|key|scroll)$")
+    x: float | None = None
+    y: float | None = None
+    text: str = Field(default="", max_length=2000)
+    delta_x: float = 0
+    delta_y: float = 0
+
+
+def _takeover_session(container: AgentContainer, task_id: str) -> dict[str, Any] | None:
+    """The live browser a paused Task is waiting on, if any.
+
+    A capability that ran into a login wall records the session it was holding
+    on its Observation; that is what the owner's takeover drives.
+    """
+
+    for observation in reversed(container.task_service.list_observations(task_id)):
+        output = observation.output or {}
+        takeover = output.get("takeover")
+        if isinstance(takeover, dict) and takeover.get("session_id"):
+            return takeover
+    return None
+
+
+def _require_takeover(container: AgentContainer, task_id: str) -> dict[str, Any]:
+    takeover = _takeover_session(container, task_id)
+    if takeover is None:
+        raise HTTPException(status_code=409, detail="this task has no takeover session")
+    if container.form_browser is None:
+        raise HTTPException(status_code=503, detail="form browser is not configured")
+    return takeover
+
+
+@router.get("/tasks/{task_id}/takeover")
+def get_takeover(
+    task_id: str,
+    owner_user_id: str = Depends(current_user_id),
+) -> dict[str, Any]:
+    """Whether this Task is waiting on the owner to sign in, and where."""
+
+    container = get_container()
+    container.task_service.get_task(task_id, owner_user_id=owner_user_id)
+    takeover = _takeover_session(container, task_id)
+    if takeover is None:
+        return {"required": False, "url": "", "session_id": ""}
+    return {
+        "required": True,
+        "url": str(takeover.get("url") or ""),
+        "session_id": str(takeover.get("session_id") or ""),
+    }
+
+
+@router.get("/tasks/{task_id}/takeover/screenshot")
+def takeover_screenshot(
+    task_id: str,
+    owner_user_id: str = Depends(current_user_id),
+) -> Response:
+    container = get_container()
+    container.task_service.get_task(task_id, owner_user_id=owner_user_id)
+    takeover = _require_takeover(container, task_id)
+    try:
+        image = container.form_browser.screenshot(str(takeover["session_id"]))
+    except AgentContractError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return Response(content=image, media_type="image/png", headers={"Cache-Control": "no-store"})
+
+
+@router.post("/tasks/{task_id}/takeover/input")
+def takeover_input(
+    task_id: str,
+    body: TakeoverInputBody,
+    owner_user_id: str = Depends(current_user_id),
+) -> dict[str, Any]:
+    container = get_container()
+    container.task_service.get_task(task_id, owner_user_id=owner_user_id)
+    takeover = _require_takeover(container, task_id)
+    try:
+        return container.form_browser.send_input(
+            str(takeover["session_id"]),
+            body.model_dump(),
+        )
+    except AgentContractError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc

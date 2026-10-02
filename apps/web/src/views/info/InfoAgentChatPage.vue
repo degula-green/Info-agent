@@ -111,7 +111,47 @@
               </div>
             </div>
 
-            <form v-if="message.inputRequest" class="agent-input-request" @submit.prevent="submitInput(message)">
+            <div v-if="isTakeover(message)" class="agent-takeover">
+              <p class="agent-takeover__hint">
+                目标页面需要登录后才可编辑。下面是在真实浏览器里的画面，直接点击操作，完成后继续。
+              </p>
+              <img
+                v-if="takeoverFrames[message.id]"
+                class="agent-takeover__screen"
+                :src="takeoverFrames[message.id]"
+                alt="接管浏览器画面"
+                @click="takeoverClick(message, $event)"
+              />
+              <p v-else class="agent-takeover__hint">正在获取浏览器画面…</p>
+              <div class="agent-takeover__controls">
+                <input
+                  v-model="takeoverText[message.id]"
+                  :disabled="takeoverBusy[message.id]"
+                  placeholder="输入要键入的内容"
+                  @keydown.enter.prevent="takeoverSendText(message)"
+                />
+                <button
+                  type="button"
+                  class="agent-button"
+                  :disabled="takeoverBusy[message.id] || !(takeoverText[message.id] || '').trim()"
+                  @click="takeoverSendText(message)"
+                >键入</button>
+                <button
+                  type="button"
+                  class="agent-button"
+                  :disabled="takeoverBusy[message.id]"
+                  @click="takeoverPressEnter(message)"
+                >回车</button>
+              </div>
+              <button
+                type="button"
+                class="agent-button agent-button--primary"
+                :disabled="message.submitting"
+                @click="continueAfterTakeover(message)"
+              >我已完成登录，继续</button>
+            </div>
+
+            <form v-else-if="message.inputRequest" class="agent-input-request" @submit.prevent="submitInput(message)">
               <label>
                 <span>需要补充的信息</span>
                 <small v-if="message.inputRequest.missing.length">{{ message.inputRequest.missing.join('、') }}</small>
@@ -228,10 +268,12 @@ import {
   composeEditedArguments,
   createAgentTask,
   dayOfISO,
+  fetchTakeoverFrame,
   getAgentTask,
   isTerminalAgentTaskStatus,
   listAgentObservations,
   rejectAgentApproval,
+  sendAgentTakeoverInput,
   streamAgentTaskEvents,
   submitAgentTaskInput,
   uploadAgentAttachment,
@@ -398,6 +440,7 @@ function rememberEvent(message: AgentMessage, event: AgentTaskEvent): void {
 }
 
 async function prepareApproval(message: AgentMessage, event: AgentTaskEvent): Promise<void> {
+  stopTakeover(message)
   const args = approvalArguments(event)
   const timezone = String(args.timezone || 'Asia/Shanghai')
   const approval: AgentApproval = {
@@ -493,6 +536,7 @@ function handleTaskEvent(message: AgentMessage, event: AgentTaskEvent): boolean 
       message.status = 'waiting_input'
       message.statusText = '需要补充信息'
       message.inputRequest = { missing: Array.isArray(payload.missing_information) ? payload.missing_information.map(String) : [] }
+      startTakeover(message)
       return false
     case 'task.preview_confirmed':
       message.todo = {
@@ -508,6 +552,7 @@ function handleTaskEvent(message: AgentMessage, event: AgentTaskEvent): boolean 
       message.error = '审批已拒绝，任务不会执行'
       return false
     case 'task.completed':
+      stopTakeover(message)
       message.status = 'succeeded'
       message.statusText = '任务已完成'
       if (typeof payload.answer === 'string') message.answer = payload.answer
@@ -516,11 +561,13 @@ function handleTaskEvent(message: AgentMessage, event: AgentTaskEvent): boolean 
       void hydrateTerminal(message)
       return false
     case 'task.failed':
+      stopTakeover(message)
       message.status = payload.task_status === 'unknown' ? 'unknown' : 'failed'
       message.statusText = payload.task_status === 'unknown' ? '外部结果未知' : '任务失败'
       message.error = String(payload.error?.message || '任务执行失败')
       return false
     case 'task.cancelled':
+      stopTakeover(message)
       message.status = 'cancelled'
       message.statusText = '任务已取消'
       return false
@@ -1080,6 +1127,95 @@ function formSummary(message: AgentMessage) {
   return { total: fields.length, filled, empty: fields.length - filled }
 }
 
+/** The sidecar captures at this viewport, so clicks map back through it. */
+const TAKEOVER_VIEWPORT = { width: 1440, height: 900 }
+const takeoverFrames = reactive<Record<string, string>>({})
+const takeoverText = reactive<Record<string, string>>({})
+const takeoverBusy = reactive<Record<string, boolean>>({})
+const takeoverTimers = new Map<string, number>()
+
+function isTakeover(message: AgentMessage): boolean {
+  return Boolean(message.taskId) && Boolean(message.inputRequest?.missing?.includes('form_login'))
+}
+
+async function refreshTakeoverFrame(message: AgentMessage): Promise<void> {
+  if (!message.taskId) return
+  try {
+    const url = await fetchTakeoverFrame(message.taskId)
+    const previous = takeoverFrames[message.id]
+    takeoverFrames[message.id] = url
+    if (previous) URL.revokeObjectURL(previous)
+  } catch {
+    // A single missed frame is not fatal; the next tick retries.
+  }
+}
+
+function startTakeover(message: AgentMessage): void {
+  if (!isTakeover(message) || takeoverTimers.has(message.id)) return
+  void refreshTakeoverFrame(message)
+  takeoverTimers.set(
+    message.id,
+    window.setInterval(() => void refreshTakeoverFrame(message), 1500),
+  )
+}
+
+function stopTakeover(message: AgentMessage): void {
+  const timer = takeoverTimers.get(message.id)
+  if (timer !== undefined) {
+    window.clearInterval(timer)
+    takeoverTimers.delete(message.id)
+  }
+  const frame = takeoverFrames[message.id]
+  if (frame) {
+    URL.revokeObjectURL(frame)
+    takeoverFrames[message.id] = ''
+  }
+}
+
+async function sendTakeover(
+  message: AgentMessage,
+  input: Parameters<typeof sendAgentTakeoverInput>[1],
+): Promise<void> {
+  if (!message.taskId || takeoverBusy[message.id]) return
+  takeoverBusy[message.id] = true
+  try {
+    await sendAgentTakeoverInput(message.taskId, input)
+  } catch (error) {
+    message.error = error instanceof Error ? error.message : '接管操作失败'
+  } finally {
+    takeoverBusy[message.id] = false
+    await refreshTakeoverFrame(message)
+  }
+}
+
+async function takeoverClick(message: AgentMessage, event: MouseEvent): Promise<void> {
+  const image = event.currentTarget as HTMLImageElement
+  const rect = image.getBoundingClientRect()
+  if (!rect.width || !rect.height) return
+  await sendTakeover(message, {
+    kind: 'click',
+    x: ((event.clientX - rect.left) / rect.width) * TAKEOVER_VIEWPORT.width,
+    y: ((event.clientY - rect.top) / rect.height) * TAKEOVER_VIEWPORT.height,
+  })
+}
+
+async function takeoverSendText(message: AgentMessage): Promise<void> {
+  const text = (takeoverText[message.id] || '').trim()
+  if (!text) return
+  await sendTakeover(message, { kind: 'type', text })
+  takeoverText[message.id] = ''
+}
+
+async function takeoverPressEnter(message: AgentMessage): Promise<void> {
+  await sendTakeover(message, { kind: 'key', text: 'Enter' })
+}
+
+async function continueAfterTakeover(message: AgentMessage): Promise<void> {
+  stopTakeover(message)
+  inputValues[message.id] = '已完成登录，请继续'
+  await submitInput(message)
+}
+
 async function confirmApproval(message: AgentMessage): Promise<void> {
   if (!message.approval || message.submitting) return
   message.submitting = true
@@ -1190,7 +1326,10 @@ async function scrollToBottom(): Promise<void> {
   scrollRef.value?.scrollTo({ top: scrollRef.value.scrollHeight, behavior: 'smooth' })
 }
 
-onBeforeUnmount(() => activeController?.abort())
+onBeforeUnmount(() => {
+  messages.value.forEach((message) => stopTakeover(message))
+  activeController?.abort()
+})
 </script>
 
 <style lang="less" scoped>
@@ -1279,6 +1418,11 @@ onBeforeUnmount(() => activeController?.abort())
 .agent-form__fields { display: grid; gap: 8px; max-height: 260px; overflow: auto; }
 .agent-form__fields label { display: grid; gap: 4px; color: var(--td-text-color-secondary); font-size: 12px; }
 .agent-form__fields input { width: 100%; min-height: 32px; padding: 6px 9px; border: 1px solid var(--td-component-stroke); border-radius: 6px; color: var(--td-text-color-primary); background: var(--td-bg-color-container); }
+.agent-takeover { display: grid; gap: 10px; margin-top: 14px; padding: 14px; border: 1px solid var(--td-warning-color-3); border-radius: 9px; background: var(--td-warning-color-1); }
+.agent-takeover__hint { margin: 0; color: var(--td-text-color-secondary); font-size: 12px; line-height: 1.6; }
+.agent-takeover__screen { width: 100%; max-height: 420px; object-fit: contain; border: 1px solid var(--td-component-stroke); border-radius: 6px; background: #fff; cursor: crosshair; }
+.agent-takeover__controls { display: grid; grid-template-columns: 1fr auto auto; gap: 8px; }
+.agent-takeover__controls input { width: 100%; min-height: 34px; padding: 6px 9px; border: 1px solid var(--td-component-stroke); border-radius: 6px; color: var(--td-text-color-primary); background: var(--td-bg-color-container); }
 .agent-button { min-height: 34px; padding: 0 14px; border: 1px solid var(--td-component-stroke); border-radius: 7px; color: var(--td-text-color-primary); background: var(--td-bg-color-container); cursor: pointer; }
 .agent-button--primary { border-color: var(--td-brand-color); color: #fff; background: var(--td-brand-color); }
 .agent-button:disabled { cursor: not-allowed; opacity: .55; }

@@ -106,6 +106,25 @@ class TakeoverState(BaseModel):
     url: str = ""
 
 
+class InputRequest(BaseModel):
+    """One owner action forwarded into the live browser during a takeover.
+
+    The owner sees a screenshot stream and clicks on it; this carries that
+    click (or keystroke) back into the real page, so a login or captcha is
+    completed by the person, not by the Agent.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["click", "type", "key", "scroll"]
+    x: float | None = None
+    y: float | None = None
+    # Text for ``type``, a key name for ``key``.
+    text: str = ""
+    delta_x: float = 0
+    delta_y: float = 0
+
+
 class ErrorBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

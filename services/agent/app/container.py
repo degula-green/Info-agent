@@ -72,6 +72,9 @@ class AgentContainer:
     knowledge_client: KnowledgeClient
     knowledge_events: KnowledgeEventService
     core_client: CoreClient
+    # Present only when the form-browser sidecar is configured; the takeover
+    # endpoints proxy to it so the browser stays off the public surface.
+    form_browser: FormBrowserClient | None = None
 
     def close(self) -> None:
         # The two stores normally share one pool; closing it twice is a no-op
@@ -187,6 +190,7 @@ def build_registry(
     settings: Settings,
     todo_store: TodoStore,
     rag_client: RAGClient | None = None,
+    form_client: FormBrowserClient | None = None,
 ) -> CapabilityRegistry:
     """Every capability the Agent can actually execute.
 
@@ -247,14 +251,9 @@ def build_registry(
             timeout_seconds=_timeout_seconds(settings.answer_timeout_seconds),
         ),
     ]
-    if settings.form_browser_url.strip():
+    if form_client is not None:
         # Registered only when the browser sidecar is deployed: with no sidecar
         # the form intent must report as unsupported rather than fail at run time.
-        form_client = FormBrowserClient(
-            settings.form_browser_url,
-            api_token=settings.form_browser_token,
-            timeout_seconds=settings.form_browser_timeout_seconds,
-        )
         capabilities.append(
             FormPreviewCapability(
                 form_client,
@@ -526,10 +525,18 @@ def build_container(
     resolved_todo_store = todo_store or build_todo_store(resolved)
     resolved_knowledge = knowledge or build_knowledge_client(resolved)
     resolved_rag_client = rag_client or build_rag_client(resolved)
+    resolved_form_client: FormBrowserClient | None = None
+    if resolved.form_browser_url.strip():
+        resolved_form_client = FormBrowserClient(
+            resolved.form_browser_url,
+            api_token=resolved.form_browser_token,
+            timeout_seconds=resolved.form_browser_timeout_seconds,
+        )
     registry = registry or build_registry(
         resolved,
         resolved_todo_store,
         resolved_rag_client,
+        resolved_form_client,
     )
     resolved_planner = planner or build_planner(resolved)
     # The LLM planner re-asks the model when a step's arguments miss the
@@ -580,4 +587,5 @@ def build_container(
             task_service=task_service,
         ),
         core_client=core or build_core_client(resolved),
+        form_browser=resolved_form_client,
     )

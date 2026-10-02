@@ -157,3 +157,8 @@ class FormBrowserClient:
 
     def screenshot(self, session_id: str) -> bytes:
         return self._request("GET", f"/sessions/{session_id}/screenshot", raw=True)
+
+    def send_input(self, session_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        """Forward one owner action into the live page during a takeover."""
+
+        return self._request("POST", f"/sessions/{session_id}/input", payload)
