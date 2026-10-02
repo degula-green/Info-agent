@@ -7,6 +7,7 @@ which keeps local development and tests runnable.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 
 from app.application.execution_service import ExecutionService
@@ -223,23 +224,53 @@ def understanding_min_confidence(settings: Settings, *, source_type: str = "chat
     return float(settings.understanding_min_confidence)
 
 
-def _build_laya_understanding_provider(settings: Settings):
-    from app.infrastructure.laya.client import HttpLayaClient
+def _resolve_intents(available_capabilities: Iterable[str] | None):
+    from app.understanding.schema import INTENT_CATALOG, available_intents
+
+    if available_capabilities is None:
+        return INTENT_CATALOG
+    return available_intents(available_capabilities)
+
+
+def _build_laya_understanding_provider(settings: Settings, intents):
+    from app.infrastructure.laya.client import HttpSystemOneClient
     from app.understanding.laya import LayaUnderstandingProvider
 
     return LayaUnderstandingProvider(
-        HttpLayaClient(
+        HttpSystemOneClient(
             base_url=settings.laya_base_url,
             api_key=settings.laya_api_key,
             model=settings.laya_model,
             timeout_seconds=settings.laya_timeout_seconds,
+            # The sidecar is local; a retry would only add latency to a failure
+            # that the hybrid fallback already handles.
+            max_retries=0,
         ),
         min_confidence=settings.laya_min_confidence,
         min_margin=settings.laya_min_margin,
+        available_intents=intents,
     )
 
 
-def _build_llm_understanding_provider(settings: Settings):
+def _build_jev_understanding_provider(settings: Settings, intents):
+    from app.infrastructure.laya.client import HttpSystemOneClient
+    from app.understanding.laya import JevUnderstandingProvider
+
+    return JevUnderstandingProvider(
+        HttpSystemOneClient(
+            base_url=settings.jev_base_url,
+            api_key=settings.jev_api_key,
+            model=settings.jev_model,
+            timeout_seconds=settings.jev_timeout_seconds,
+            max_retries=settings.jev_max_retries,
+        ),
+        min_confidence=settings.jev_min_confidence,
+        min_margin=settings.jev_min_margin,
+        available_intents=intents,
+    )
+
+
+def _build_llm_understanding_provider(settings: Settings, intents):
     from app.infrastructure.llm.client import OpenAIChatClient
     from app.understanding.provider import OpenAICompatibleUnderstandingProvider
 
@@ -253,10 +284,23 @@ def _build_llm_understanding_provider(settings: Settings):
             response_format=settings.llm_response_format,
         ),
         min_confidence=settings.understanding_min_confidence,
+        available_intents=intents,
     )
 
 
-def build_understanding_provider(settings: Settings):
+def build_understanding_provider(
+    settings: Settings,
+    *,
+    available_capabilities: Iterable[str] | None = None,
+):
+    """Build the configured provider, offering only executable intents.
+
+    ``available_capabilities=None`` keeps the historical behaviour (the whole
+    catalog) so eval scripts and test doubles are unaffected; the container
+    always passes the registered capability names.
+    """
+
+    intents = _resolve_intents(available_capabilities)
     provider = (settings.understanding_provider or "rules").strip().lower()
     if provider == "fake":
         from app.understanding.provider import FakeUnderstandingProvider
@@ -265,17 +309,28 @@ def build_understanding_provider(settings: Settings):
     if provider == "rules":
         from app.understanding.provider import RuleBasedUnderstandingProvider
 
-        return RuleBasedUnderstandingProvider()
+        return RuleBasedUnderstandingProvider(available_intents=intents)
     if provider == "llm":
-        return _build_llm_understanding_provider(settings)
+        return _build_llm_understanding_provider(settings, intents)
     if provider == "laya":
-        return _build_laya_understanding_provider(settings)
+        return _build_laya_understanding_provider(settings, intents)
+    if provider == "jev":
+        return _build_jev_understanding_provider(settings, intents)
     if provider == "hybrid":
         from app.understanding.hybrid import HybridUnderstandingProvider
 
+        primary_name = (settings.understanding_primary or "laya").strip().lower()
+        if primary_name == "laya":
+            primary = _build_laya_understanding_provider(settings, intents)
+        elif primary_name == "jev":
+            primary = _build_jev_understanding_provider(settings, intents)
+        else:
+            raise RuntimeError(
+                f"unsupported AGENT_UNDERSTANDING_PRIMARY: {primary_name}"
+            )
         return HybridUnderstandingProvider(
-            laya=_build_laya_understanding_provider(settings),
-            fallback=_build_llm_understanding_provider(settings),
+            primary=primary,
+            fallback=_build_llm_understanding_provider(settings, intents),
         )
     raise RuntimeError(f"unsupported AGENT_UNDERSTANDING_PROVIDER: {provider}")
 
@@ -354,7 +409,12 @@ def build_container(
     resolved_publisher = publisher or build_publisher(resolved)
     resolved_understanding = understanding_provider
     if resolved_understanding is None and resolved.understanding_mode.strip().lower() != "off":
-        resolved_understanding = build_understanding_provider(resolved)
+        resolved_understanding = build_understanding_provider(
+            resolved,
+            available_capabilities=[
+                descriptor.name for descriptor in registry.list_descriptors()
+            ],
+        )
     resolved_ingress = ingress or KnowledgeEventIngress(
         platforms=resolved.knowledge_platform_allowlist
     )

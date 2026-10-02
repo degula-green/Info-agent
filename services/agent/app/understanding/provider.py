@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from typing import Protocol
 
 from pydantic import ValidationError
@@ -14,7 +15,12 @@ from app.understanding.prompt import (
     build_repair_messages,
     build_understanding_messages,
 )
-from app.understanding.schema import TaskUnderstandingDraft
+from app.understanding.schema import (
+    INTENT_CATALOG,
+    IntentDefinition,
+    TaskUnderstandingDraft,
+    intent_catalog_text,
+)
 
 
 class UnderstandingProviderError(RuntimeError):
@@ -63,8 +69,18 @@ class RuleBasedUnderstandingProvider:
     model_backed = False
     estimated_model_calls = 0
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        available_intents: Iterable[IntentDefinition] | None = None,
+    ) -> None:
         self.last_call_count = 0
+        self.intents = (
+            INTENT_CATALOG
+            if available_intents is None
+            else tuple(available_intents)
+        )
+        self.available_names = frozenset(item.name for item in self.intents)
 
     def understand(self, task: TaskEnvelope) -> TaskUnderstanding:
         self.last_call_count = 0
@@ -78,7 +94,7 @@ class RuleBasedUnderstandingProvider:
             )
         has_schedule_word = any(word in text for word in SCHEDULE_KEYWORDS)
         has_time = TIME_PHRASE_PATTERN.search(text) is not None
-        if has_schedule_word and has_time:
+        if has_schedule_word and has_time and "todo.create" in self.available_names:
             return TaskUnderstanding(
                 is_task=True,
                 goal=text,
@@ -112,12 +128,20 @@ class OpenAICompatibleUnderstandingProvider:
         client: LLMClient,
         *,
         min_confidence: float = DEFAULT_MIN_CONFIDENCE,
+        available_intents: Iterable[IntentDefinition] | None = None,
     ) -> None:
         self.client = client
         self.model = str(getattr(client, "model", ""))
         self.min_confidence = max(0.0, min(1.0, float(min_confidence)))
         self.last_call_count = 0
         self._last_error = ""
+        self.intents = (
+            INTENT_CATALOG
+            if available_intents is None
+            else tuple(available_intents)
+        )
+        self.available_names = frozenset(item.name for item in self.intents)
+        self.catalog_text = intent_catalog_text(self.intents)
 
     def understand(
         self,
@@ -131,7 +155,9 @@ class OpenAICompatibleUnderstandingProvider:
             if min_confidence is None
             else max(0.0, min(1.0, float(min_confidence)))
         )
-        messages = build_understanding_messages(task, threshold)
+        messages = build_understanding_messages(
+            task, threshold, catalog_text=self.catalog_text
+        )
         try:
             raw = self.client.complete(messages)
         except LLMError as exc:
@@ -180,5 +206,10 @@ class OpenAICompatibleUnderstandingProvider:
             item
             for item in draft.intent_candidates
             if item.confidence >= resolved
+            # A candidate the deployment cannot execute is dropped rather than
+            # handed to a planner that has no step for it. The model is already
+            # shown only the available catalog; this keeps a stale or creative
+            # answer from widening the plan anyway.
+            and item.name in self.available_names
         ]
         return draft

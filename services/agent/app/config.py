@@ -175,6 +175,10 @@ class Settings:
     understanding_provider: str = _text(
         "rules", "AGENT_UNDERSTANDING_PROVIDER", "agent_UNDERSTANDING_PROVIDER"
     )
+    # Which fast classifier hybrid runs before falling back to the LLM.
+    understanding_primary: str = _text(
+        "laya", "AGENT_UNDERSTANDING_PRIMARY", "agent_UNDERSTANDING_PRIMARY"
+    )
     planner_provider: str = _text(
         "deterministic", "AGENT_PLANNER_PROVIDER", "agent_PLANNER_PROVIDER"
     )
@@ -229,6 +233,24 @@ class Settings:
         0.15,
         "AGENT_LAYAYA_MIN_MARGIN",
         "agent_LAYAYA_MIN_MARGIN",
+    )
+    # Jev (TypeSafe System One) reached through AIHubMix. The gateway exposes
+    # the same /v1/systemone contract as the Laya sidecar, so both share one
+    # client; only the endpoint, model, thresholds and retry policy differ.
+    jev_base_url: str = _text("", "AGENT_JEV_BASE_URL", "agent_JEV_BASE_URL")
+    jev_api_key: str = _text("", "AGENT_JEV_API_KEY", "agent_JEV_API_KEY")
+    jev_model: str = _text("jev-1.13", "AGENT_JEV_MODEL", "agent_JEV_MODEL")
+    jev_timeout_seconds: float = _float(
+        10.0, "AGENT_JEV_TIMEOUT_SECONDS", "agent_JEV_TIMEOUT_SECONDS"
+    )
+    jev_max_retries: int = _int(
+        2, "AGENT_JEV_MAX_RETRIES", "agent_JEV_MAX_RETRIES"
+    )
+    jev_min_confidence: float = _float(
+        0.90, "AGENT_JEV_MIN_CONFIDENCE", "agent_JEV_MIN_CONFIDENCE"
+    )
+    jev_min_margin: float = _float(
+        0.15, "AGENT_JEV_MIN_MARGIN", "agent_JEV_MIN_MARGIN"
     )
     understanding_min_confidence: float = _float(
         0.70,

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 from pydantic import ValidationError
 
@@ -12,7 +14,12 @@ from app.understanding.provider import (
     RuleBasedUnderstandingProvider,
     UnderstandingProviderError,
 )
-from app.understanding.schema import TaskUnderstandingDraft
+from app.understanding.schema import (
+    TaskUnderstandingDraft,
+    available_intents,
+    choice_criteria,
+    intent_catalog_text,
+)
 from app.planning.deterministic import DEFAULT_CAPABILITY_NAME
 from tests.support import build_step2_container, event_types, knowledge_event, snapshot
 
@@ -530,3 +537,77 @@ def test_planner_ignores_a_candidate_below_its_threshold() -> None:
     plan = planner.create_plan(task, descriptors, [], None, weak)
 
     assert plan.steps == []
+
+
+# -- Capability-aware catalog ---------------------------------------------
+
+
+def test_catalog_filters_by_registered_capabilities() -> None:
+    offered = available_intents(
+        {"todo.create", "knowledge.search_content", "web.fetch", "web.extract"}
+    )
+    names = {item.name for item in offered}
+
+    assert "todo.create" in names
+    assert "knowledge.answer" in names
+    # No web.search capability exists, so the web intent must not be offered.
+    assert "web.research" not in names
+    assert "form.submit" not in names
+
+
+def test_catalog_text_only_mentions_offered_intents() -> None:
+    text = intent_catalog_text(available_intents({"todo.create"}))
+
+    assert "todo.create" in text
+    assert "web.research" not in text
+    assert "knowledge.answer" not in text
+
+
+def test_choice_criteria_always_keeps_boundary_labels() -> None:
+    criteria = choice_criteria(available_intents({"todo.create"}))
+
+    assert set(criteria) == {"todo.create", "non_task", "other_task"}
+
+
+def test_unavailable_intent_is_dropped_by_the_llm_provider() -> None:
+    client = StubClient(
+        [
+            json.dumps(
+                {
+                    "is_task": True,
+                    "goal": "查一下这个政策的最新版本",
+                    "task_kind": "action",
+                    "intent_candidates": [
+                        {
+                            "name": "web.research",
+                            "confidence": 0.95,
+                            "evidence": None,
+                        }
+                    ],
+                    "confidence": 0.95,
+                    "reason": "web lookup",
+                }
+            )
+        ]
+    )
+    provider = OpenAICompatibleUnderstandingProvider(
+        client, available_intents=available_intents({"todo.create"})
+    )
+    task = ChatIngress().create_task("user-1", {"text": "查一下这个政策的最新版本"})
+
+    result = provider.understand(task)
+
+    # The task itself stands; only the unexecutable candidate is removed.
+    assert result.is_task is True
+    assert result.intent_candidates == []
+
+
+def test_unavailable_intent_is_not_offered_to_the_rule_provider() -> None:
+    provider = RuleBasedUnderstandingProvider(
+        available_intents=available_intents({"knowledge.search_content"})
+    )
+    task = ChatIngress().create_task("user-1", {"text": "明天晚上八点开评审会"})
+
+    result = provider.understand(task)
+
+    assert result.intent_candidates == []

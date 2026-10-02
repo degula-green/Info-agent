@@ -221,10 +221,16 @@ def classify_knowledge_question(
 
     if has_action and not (has_source or has_content):
         return None
+    # An internal entity on its own ("青云官网", "帮我查一下青云官网") is a
+    # knowledge lookup, not a web lookup: the explicit-public wording that would
+    # make it web.research already returned None above. Without this the text
+    # falls through to the LLM planner, which has no search tool and improvises
+    # a web.fetch against a guessed URL.
     if not (
         has_source
         or has_content
         or has_internal_status
+        or has_internal_object
         or (has_search and (has_file or has_message))
     ):
         return None

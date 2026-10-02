@@ -357,6 +357,25 @@ def test_explicit_public_web_intent_does_not_route_to_knowledge(text: str) -> No
     assert classify_knowledge_question(text) is None
 
 
+@pytest.mark.parametrize(
+    "text",
+    [
+        "青云官网",
+        "帮我查一下青云官网",
+        "查一下青云官网",
+    ],
+)
+def test_internal_entity_without_public_wording_routes_to_knowledge(
+    text: str,
+) -> None:
+    route = classify_knowledge_question(text)
+
+    # An internal entity on its own is a knowledge lookup; only explicit public
+    # wording (checked above) may fall through to the LLM planner.
+    assert route is not None
+    assert route.mode == "content"
+
+
 def test_content_with_sources_question_builds_three_step_plan() -> None:
     route = classify_knowledge_question("张三发的采购合同写了什么？")
     assert route is not None

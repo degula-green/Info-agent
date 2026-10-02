@@ -481,21 +481,51 @@ class AgentRuntime:
                 },
             )
         self._reserve_model_calls(task.task_id, actual_calls)
+        offered = getattr(self.understanding_provider, "intents", None)
+        primary_confidence = getattr(
+            self.understanding_provider, "last_primary_confidence", None
+        )
+        if primary_confidence is None:
+            primary_confidence = getattr(
+                self.understanding_provider, "last_answer_confidence", None
+            )
+        primary_margin = getattr(
+            self.understanding_provider, "last_primary_margin", None
+        )
+        if primary_margin is None:
+            primary_margin = getattr(
+                self.understanding_provider, "last_margin", None
+            )
         payload = {
             "mode": self.understanding_mode,
             "provider": provider_name,
             "model": getattr(self.understanding_provider, "model", None),
+            # The versioned model id the backend reported, when it reports one.
+            "response_model": getattr(
+                self.understanding_provider, "last_model", None
+            ),
             "decision_source": getattr(
                 self.understanding_provider, "last_decision_source", None
             ),
             "fallback_reason": getattr(
                 self.understanding_provider, "last_fallback_reason", None
             ),
+            # Generic names; the laya_* pair below is kept for existing
+            # dashboards built before Jev could be the primary classifier.
+            "primary_confidence": primary_confidence,
+            "primary_margin": primary_margin,
             "laya_answer_confidence": getattr(
                 self.understanding_provider, "last_answer_confidence", None
             ),
             "laya_margin": getattr(
                 self.understanding_provider, "last_margin", None
+            ),
+            # Which intents this deployment was able to offer, so a missing
+            # option can be explained without reading the settings.
+            "available_intents": (
+                sorted(item.name for item in offered)
+                if offered is not None
+                else None
             ),
             "latency_ms": int((self._clock() - started).total_seconds() * 1000),
             "text": str(task.input.get("text") or ""),
