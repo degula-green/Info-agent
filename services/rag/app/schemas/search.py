@@ -15,6 +15,15 @@ class SearchBody(BaseModel):
     occurred_before: str | None = None
     conversation_id: str | None = None
     source_conversation_id: str | None = None
+    sender_ids: list[str] = Field(default_factory=list, max_length=20)
+    sender_names: list[str] = Field(default_factory=list, max_length=20)
+    conversation_ids: list[str] = Field(default_factory=list, max_length=20)
+    conversation_names: list[str] = Field(default_factory=list, max_length=20)
+    resource_ids: list[str] = Field(default_factory=list, max_length=100)
+    resource_types: list[str] = Field(default_factory=list, max_length=5)
+    file_extensions: list[str] = Field(default_factory=list, max_length=20)
+    message_types: list[str] = Field(default_factory=list, max_length=10)
+    group_by_source: bool = False
     # Controller-only legacy fields. They are normalized before domain/storage.
     organization_id: str | None = None
     user_id: str | None = None
@@ -28,6 +37,15 @@ class SearchBody(BaseModel):
         return tuple(self.knowledge_base_ids) or (
             (self.knowledge_base_id,) if self.knowledge_base_id else ()
         )
+
+
+class SourceSearchBody(SearchBody):
+    pass
+
+
+class ContentSearchBody(SearchBody):
+    query: str = Field(min_length=1, max_length=2000)
+    group_by_source: bool = True
 
 
 class AIDocumentBody(SearchBody):

@@ -12,7 +12,7 @@ from app.domain.rag import (
     SearchRequest,
     SearchResult,
 )
-from app.infrastructure.rag_elasticsearch import _filters
+from app.infrastructure.rag_elasticsearch import _bm25_query, _filters
 from app.infrastructure.persistence.mvp import InMemoryRagMVPRepository
 
 
@@ -118,6 +118,33 @@ class RetrievalTests(unittest.TestCase):
         protected = SearchResult("p", "protected", score=0.1, source={"logical_position_key": "x", "content_variant": "protected"})
         values = dedupe_logical_positions([display, protected])
         self.assertEqual([item.chunk_id for item in values], ["p"])
+
+    def test_metadata_filters_and_empty_query(self) -> None:
+        request = SearchRequest(
+            query="",
+            user_id="user-1",
+            scope_type="organization",
+            scope_id="org-1",
+            sender_ids=("sender-1",),
+            sender_names=("张三",),
+            conversation_ids=("conversation-1",),
+            conversation_names=("财务群",),
+            resource_ids=("resource-1",),
+            resource_types=("attachment",),
+            file_extensions=("xlsx",),
+            message_types=("file",),
+        )
+        filters = _filters(request)
+        as_text = str(filters)
+        self.assertIn("sender_identity_id", as_text)
+        self.assertIn("sender_display_name", as_text)
+        self.assertIn("source_conversation_id", as_text)
+        self.assertIn("source_conversation_name", as_text)
+        self.assertIn("resource_id", as_text)
+        self.assertIn("file_extension", as_text)
+        query = _bm25_query("", filters)
+        self.assertNotIn("must", query)
+        self.assertEqual(query["bool"]["filter"], filters)
 
     def test_qa_conversation_id_does_not_filter_source_conversation(self) -> None:
         qa_request = SearchRequest(

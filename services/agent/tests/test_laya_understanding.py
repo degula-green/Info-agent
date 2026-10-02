@@ -4,13 +4,19 @@ from __future__ import annotations
 
 import pytest
 
-from app.infrastructure.http import HttpResult
-from app.infrastructure.laya.client import HttpLayaClient, LayaError
+from app.infrastructure.http import HttpResult, IntegrationError
+from app.infrastructure.laya.client import (
+    HttpLayaClient,
+    HttpSystemOneClient,
+    LayaError,
+    systemone_url,
+)
 from app.container import build_understanding_provider
 from app.ingress.chat import ChatIngress
 from app.kernel.models import TaskUnderstanding, UnderstandingIntent
 from app.understanding.hybrid import HybridUnderstandingProvider
-from app.understanding.laya import LayaUnderstandingProvider
+from app.understanding.laya import JevUnderstandingProvider, LayaUnderstandingProvider
+from app.understanding.schema import INTENT_OPTION_ORDER
 from tests.support import make_settings
 
 
@@ -45,10 +51,12 @@ class StubLayaClient:
         self.error = error
         self.calls = 0
         self.states: list[object] = []
+        self.questions: list[dict] = []
 
     def predict(self, state, questions, *, max_len=None, head_max_len=None):
         self.calls += 1
         self.states.append(state)
+        self.questions.append(questions)
         if self.error is not None:
             raise self.error
         assert self.response is not None
@@ -362,3 +370,216 @@ def test_hybrid_falls_back_on_laya_error() -> None:
     assert provider.last_decision_source == "llm"
     assert provider.last_fallback_reason in {"laya_error", "laya_unavailable"}
     assert provider.last_call_count == 2
+
+
+# -- Jev / System One ------------------------------------------------------
+
+
+def _jev_response(
+    label: str,
+    probabilities: dict[str, float],
+    *,
+    confidence: float | None = None,
+) -> dict:
+    return {
+        "model": "typesafe/jev-1.13-20260917",
+        "answers": {
+            "intent": {
+                "type": "choice",
+                "choice": label,
+                "probabilities": probabilities,
+                "confidence": (
+                    probabilities[label] if confidence is None else confidence
+                ),
+            }
+        },
+        "usage": {"input_tokens": 539, "output_tokens": 95},
+        "provider": "TypeSafe",
+    }
+
+
+def test_jev_uses_cloud_confidence_field_and_reports_model() -> None:
+    client = StubLayaClient(
+        _jev_response(
+            "todo.create",
+            {"todo.create": 0.91, "non_task": 0.05},
+            confidence=0.83,
+        )
+    )
+    provider = JevUnderstandingProvider(client, min_confidence=0.80)
+    task = ChatIngress().create_task("user-1", {"text": "明天下午三点跟张三开评审会"})
+
+    result = provider.understand(task)
+
+    assert provider.name == "jev"
+    assert result.intent_candidates[0].name == "todo.create"
+    # Jev's confidence is a distribution statistic, not the top probability.
+    assert result.intent_candidates[0].confidence == pytest.approx(0.83)
+    assert provider.last_model == "typesafe/jev-1.13-20260917"
+
+
+def test_jev_offers_the_full_contract_option_set() -> None:
+    client = StubLayaClient(
+        _jev_response("todo.create", {"todo.create": 0.95, "non_task": 0.05})
+    )
+    provider = JevUnderstandingProvider(client)
+
+    provider.understand(ChatIngress().create_task("user-1", {"text": "明天开会"}))
+
+    criteria = client.questions[0]["intent"]["criteria"]
+    # The option set and its order are the model's label space: a fine-tuned
+    # Laya head indexes into it positionally, so it is never filtered.
+    assert list(criteria) == list(INTENT_OPTION_ORDER)
+
+
+def test_response_without_any_confidence_field_is_rejected() -> None:
+    response = _jev_response("todo.create", {"todo.create": 0.95, "non_task": 0.05})
+    del response["answers"]["intent"]["confidence"]
+    provider = JevUnderstandingProvider(StubLayaClient(response))
+
+    with pytest.raises(LayaError):
+        provider.understand(ChatIngress().create_task("user-1", {"text": "明天开会"}))
+
+
+class RetryStubHttp:
+    def __init__(self, outcomes: list[object]) -> None:
+        self.outcomes = list(outcomes)
+        self.calls: list[dict] = []
+
+    def request(self, method, url, **kwargs):
+        self.calls.append({"method": method, "url": url, **kwargs})
+        outcome = self.outcomes.pop(0)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+
+_SYSTEM_ONE_OK = HttpResult(
+    200,
+    {},
+    b'{"answers":{"intent":{"choice":"todo.create",'
+    b'"probabilities":{"todo.create":1.0},"answer_confidence":1.0}}}',
+)
+
+
+def test_system_one_client_retries_transient_failures() -> None:
+    http = RetryStubHttp(
+        [
+            IntegrationError("rate limited", status=429, retryable=True),
+            _SYSTEM_ONE_OK,
+        ]
+    )
+    sleeps: list[float] = []
+    client = HttpSystemOneClient(
+        base_url="https://api.example.test/v1",
+        http=http,
+        max_retries=1,
+        sleep=sleeps.append,
+    )
+
+    result = client.predict({"text": "明天开会"}, {"intent": {"type": "choice"}})
+
+    assert result["answers"]["intent"]["choice"] == "todo.create"
+    assert len(http.calls) == 2
+    assert sleeps == [0.5]
+
+
+def test_system_one_client_does_not_retry_payment_errors() -> None:
+    http = RetryStubHttp(
+        [IntegrationError("payment required", status=402, retryable=False)]
+    )
+    client = HttpSystemOneClient(
+        base_url="https://api.example.test/v1", http=http, max_retries=2
+    )
+
+    with pytest.raises(LayaError) as excinfo:
+        client.predict({"text": "明天开会"}, {"intent": {"type": "choice"}})
+
+    assert excinfo.value.classification == "permanent_error"
+    assert len(http.calls) == 1
+
+
+def test_system_one_client_honours_retry_after() -> None:
+    http = RetryStubHttp(
+        [
+            IntegrationError(
+                "rate limited", status=429, retryable=True, retry_after=2.0
+            ),
+            _SYSTEM_ONE_OK,
+        ]
+    )
+    sleeps: list[float] = []
+    client = HttpSystemOneClient(
+        base_url="https://api.example.test/v1",
+        http=http,
+        max_retries=1,
+        sleep=sleeps.append,
+    )
+
+    client.predict({"text": "明天开会"}, {"intent": {"type": "choice"}})
+
+    assert sleeps == [2.0]
+
+
+def test_hybrid_can_use_jev_as_primary() -> None:
+    fallback = StubFallback(_fallback_result())
+    primary = JevUnderstandingProvider(
+        StubLayaClient(
+            _jev_response("todo.create", {"todo.create": 0.95, "non_task": 0.05})
+        )
+    )
+    provider = HybridUnderstandingProvider(primary=primary, fallback=fallback)
+
+    result = provider.understand(
+        ChatIngress().create_task("user-1", {"text": "明天下午三点开会"})
+    )
+
+    assert result.intent_candidates[0].name == "todo.create"
+    assert provider.last_decision_source == "jev"
+    assert provider.last_primary_confidence == pytest.approx(0.95)
+    assert provider.laya is provider.primary
+    assert fallback.calls == 0
+
+
+def test_container_builds_jev_provider() -> None:
+    settings = make_settings(
+        understanding_provider="jev",
+        jev_base_url="https://api.inferera.com/v1",
+        jev_api_key="test-key",
+        jev_model="jev-1.13",
+    )
+
+    provider = build_understanding_provider(settings)
+
+    assert provider.name == "jev"
+    assert provider.model == "jev:jev-1.13"
+
+
+def test_container_hybrid_can_use_jev_primary() -> None:
+    settings = make_settings(
+        understanding_provider="hybrid",
+        understanding_primary="jev",
+        jev_base_url="https://api.inferera.com/v1",
+        llm_base_url="http://127.0.0.1:9000/v1",
+        llm_model="stub",
+    )
+
+    provider = build_understanding_provider(settings)
+
+    assert provider.name == "hybrid"
+    assert provider.primary_name == "jev"
+    assert provider.model == "jev:jev-1.13+stub"
+
+
+@pytest.mark.parametrize(
+    ("base_url", "expected"),
+    [
+        ("http://127.0.0.1:8110", "http://127.0.0.1:8110/v1/systemone"),
+        ("https://api.inferera.com/v1", "https://api.inferera.com/v1/systemone"),
+        ("https://api.inferera.com/v1/", "https://api.inferera.com/v1/systemone"),
+    ],
+)
+def test_system_one_url_accepts_both_base_conventions(
+    base_url: str, expected: str
+) -> None:
+    assert systemone_url(base_url) == expected

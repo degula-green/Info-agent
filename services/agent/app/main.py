@@ -15,6 +15,10 @@ load_dotenv(Path(__file__).resolve().parents[1] / ".env", override=False)
 
 from fastapi import FastAPI  # noqa: E402
 
+from app.auth import (  # noqa: E402
+    CoreTokenAuthentication,
+    install_authentication_error_handler,
+)
 from app.config import settings  # noqa: E402
 from app.container import build_container  # noqa: E402
 from app.routers import health, tasks, attachments  # noqa: E402
@@ -26,6 +30,7 @@ logger = logging.getLogger("agent.main")
 @asynccontextmanager
 async def lifespan(application: FastAPI):
     logging.basicConfig(level=getattr(logging, settings.log_level.upper(), logging.INFO))
+    application.state.agent_authentication = CoreTokenAuthentication.from_settings(settings)
     container = build_container(settings)
     tasks.set_container(container)
     todos.set_container(container)
@@ -37,6 +42,7 @@ async def lifespan(application: FastAPI):
 
 
 app = FastAPI(title="info-agent-agent", version="0.1.0", lifespan=lifespan)
+install_authentication_error_handler(app)
 
 app.include_router(health.router)
 app.include_router(tasks.router)

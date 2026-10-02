@@ -13,9 +13,10 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Header, HTTPException, Query, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from pydantic import BaseModel, Field, field_validator
 
+from app.auth import current_user_id
 from app.container import AgentContainer
 
 router = APIRouter(prefix="/api/agent/v1")
@@ -69,26 +70,18 @@ class TodoUpdateBody(BaseModel):
         return value
 
 
-def _current_user(x_agent_user_id: str | None) -> str:
-    container = get_container()
-    user = (x_agent_user_id or "").strip()
-    if user:
-        return user
-    return getattr(container.settings, "default_user_id", "") or "dev-user"
-
-
 @router.get("/todos")
 def list_todos(
     status: str = "",
     limit: int = Query(default=200, ge=1, le=500),
-    x_agent_user_id: str | None = Header(default=None, alias="X-Agent-User-Id"),
+    owner_user_id: str = Depends(current_user_id),
 ) -> dict[str, Any]:
     """Open items first; an overdue one is still open and still listed."""
 
     container = get_container()
     statuses = [item.strip() for item in status.split(",") if item.strip()]
     items = container.todo_store.list_todos(
-        _current_user(x_agent_user_id), statuses=statuses or None, limit=limit
+        owner_user_id, statuses=statuses or None, limit=limit
     )
     return {"items": [item.model_dump(mode="json") for item in items]}
 
@@ -96,7 +89,7 @@ def list_todos(
 @router.post("/todos", status_code=201)
 def create_todo(
     body: TodoCreateBody,
-    x_agent_user_id: str | None = Header(default=None, alias="X-Agent-User-Id"),
+    owner_user_id: str = Depends(current_user_id),
 ) -> dict[str, Any]:
     """Creates a to-do without a Task; the same row the capability writes."""
 
@@ -105,7 +98,7 @@ def create_todo(
     from app.capabilities.todo import TodoCreateCapability
 
     container = get_container()
-    owner = _current_user(x_agent_user_id)
+    owner = owner_user_id
     key = f"desktop:{owner}:{body.client_message_id or uuid.uuid4()}"
     capability = TodoCreateCapability(
         container.todo_store, default_timezone=container.settings.default_timezone
@@ -130,11 +123,11 @@ def create_todo(
 @router.get("/todos/{todo_id}")
 def get_todo(
     todo_id: str,
-    x_agent_user_id: str | None = Header(default=None, alias="X-Agent-User-Id"),
+    owner_user_id: str = Depends(current_user_id),
 ) -> dict[str, Any]:
     container = get_container()
     todo = container.todo_store.get_todo(todo_id)
-    if todo is None or todo.owner_user_id != _current_user(x_agent_user_id):
+    if todo is None or todo.owner_user_id != owner_user_id:
         raise HTTPException(status_code=404, detail="unknown todo")
     return todo.model_dump(mode="json")
 
@@ -143,14 +136,14 @@ def get_todo(
 def update_todo(
     todo_id: str,
     body: TodoUpdateBody,
-    x_agent_user_id: str | None = Header(default=None, alias="X-Agent-User-Id"),
+    owner_user_id: str = Depends(current_user_id),
 ) -> dict[str, Any]:
     """Partial update from the desktop (title, due time, status)."""
 
     container = get_container()
     changes = body.model_dump(exclude_unset=True, exclude_none=True)
     updated = container.todo_store.update_todo(
-        todo_id, owner_user_id=_current_user(x_agent_user_id), changes=changes
+        todo_id, owner_user_id=owner_user_id, changes=changes
     )
     if updated is None:
         raise HTTPException(status_code=404, detail="unknown todo")
@@ -160,13 +153,13 @@ def update_todo(
 @router.delete("/todos/{todo_id}", status_code=204, response_class=Response)
 def delete_todo(
     todo_id: str,
-    x_agent_user_id: str | None = Header(default=None, alias="X-Agent-User-Id"),
+    owner_user_id: str = Depends(current_user_id),
 ) -> Response:
     """The owner finished or dropped it; the row is removed for good."""
 
     container = get_container()
     deleted = container.todo_store.delete_todo(
-        todo_id, owner_user_id=_current_user(x_agent_user_id)
+        todo_id, owner_user_id=owner_user_id
     )
     if not deleted:
         raise HTTPException(status_code=404, detail="unknown todo")

@@ -15,23 +15,41 @@
               <span>{{ message.statusText || statusLabel(message.status) }}</span>
             </div>
 
-            <ol v-if="message.steps.length" class="agent-steps" aria-label="执行步骤">
-              <li v-for="step in message.steps" :key="step.id" :class="`agent-step--${step.status}`">
-                <span>{{ step.label }}</span>
-              </li>
-            </ol>
+            <div v-if="primaryAnswer(message)" class="agent-answer__content" v-html="renderChatMarkdown(primaryAnswer(message))" />
+            <div v-else-if="showsEmptyKnowledgeResult(message)" class="agent-empty-result">
+              <strong>没有找到满足条件的内容。</strong>
+              <span v-if="metadataCoverage(message) === 'partial'">部分历史元数据尚未补齐，结果可能不完整。</span>
+            </div>
 
-            <div v-if="message.answer" class="agent-answer__content" v-html="renderChatMarkdown(message.answer)" />
-
-            <div v-if="message.citations.length" class="agent-citations" aria-label="回答来源">
-              <div v-for="citation in message.citations" :key="citationKey(citation)" class="agent-citation">
-                <t-icon :name="citation.url ? 'link' : 'file'" />
-                <div>
-                  <strong>{{ citation.title || citation.source || citation.evidence_id }}</strong>
-                  <p v-if="citation.quote">{{ citation.quote }}</p>
-                  <a v-if="citation.url" :href="citation.url" target="_blank" rel="noreferrer">{{ citation.url }}</a>
-                </div>
+            <section v-if="visibleSourceItems(message).length" class="agent-sources" aria-label="回答来源">
+              <div class="agent-sources__header">
+                <span>来源 {{ visibleSourceItems(message).length }}</span>
+                <span v-if="metadataCoverage(message) === 'partial'" class="agent-coverage-tag">部分历史元数据缺失</span>
               </div>
+              <article v-for="source in visibleSourceItems(message)" :key="source.key" class="agent-source-card" @click="openSourceItem(source)">
+                <div class="agent-source-card__body">
+                  <strong>{{ source.title }}</strong>
+                  <span>{{ source.meta }}</span>
+                  <p v-if="source.preview">{{ source.preview }}</p>
+                </div>
+                <div class="agent-source-card__actions">
+                  <span v-if="source.kind === 'attachment'">预览</span>
+                  <span v-else-if="source.conversation_id">来源会话</span>
+                </div>
+              </article>
+            </section>
+
+            <div v-if="message.steps.length" class="agent-trace">
+              <button type="button" class="agent-trace__toggle" @click="toggleTrace(message)">
+                <t-icon name="chevron-right" :class="{ 'agent-trace__chevron--open': isTraceOpen(message) }" />
+                查看执行过程
+              </button>
+              <ol v-if="isTraceOpen(message)" class="agent-trace__steps" aria-label="执行步骤">
+                <li v-for="step in message.steps" :key="step.id" :class="`agent-step--${step.status}`">
+                  <span>{{ displayStepLabel(step.label) }}</span>
+                  <small>{{ stepStatusLabel(step.status) }}</small>
+                </li>
+              </ol>
             </div>
 
             <div v-if="message.todo" class="agent-todo">
@@ -142,12 +160,36 @@
       <p class="agent-disclaimer">内容由 Agent 执行结果生成，仅供参考</p>
     </div>
   </section>
+
+  <t-dialog
+    v-model:visible="sourcePreviewVisible"
+    attach="body"
+    width="min(92vw, 1720px)"
+    :footer="false"
+    destroy-on-close
+    header="文档预览"
+    dialog-class-name="agent-source-preview-dialog"
+    placement="center"
+  >
+    <article v-if="activeSourceFile" class="agent-source-preview">
+      <main><InfoAttachmentPreview :file="activeSourceFile" :active="sourcePreviewVisible" /></main>
+      <footer v-if="activeSourceTarget?.conversation_id">
+        <span>来自 Agent 检索结果</span>
+        <t-button variant="outline" @click="openActiveSourceConversation"><template #icon><t-icon name="chat" /></template>查看来源会话</t-button>
+      </footer>
+    </article>
+  </t-dialog>
 </template>
 
 <script setup lang="ts">
 import { nextTick, onBeforeUnmount, reactive, ref } from 'vue'
 import { MessagePlugin } from 'tdesign-vue-next'
+import { useRoute, useRouter } from 'vue-router'
 import { renderChatMarkdown } from '@/utils/chatMarkdownRenderer'
+import { listKnowledgeConversationAttachments } from '@/api/info-knowledge'
+import InfoAttachmentPreview from '@/components/InfoAttachmentPreview.vue'
+import type { InfoFile } from '@/mock'
+import { navigateToKnowledgeSource } from '@/utils/knowledge-source-navigation'
 import {
   approveAgentApproval,
   buildScheduleDraft,
@@ -168,9 +210,82 @@ import {
 } from '@/api/info-agent'
 
 type ChatStatus = string
-type Citation = { evidence_id: string; quote?: string; title?: string; url?: string; source?: string; type?: string }
+type Citation = {
+  evidence_id: string
+  quote?: string
+  title?: string
+  url?: string
+  source?: string
+  type?: string
+  resource_id?: string
+  resource_type?: string
+  conversation_id?: string | number | null
+  conversation_name?: string
+  message_id?: string | number | null
+  attachment_id?: string | number | null
+  platform?: string
+  sender_name?: string
+  sent_at?: string
+  position?: Record<string, any> | null
+}
 type TodoResult = { todo_id: string; title?: string; due_at?: string | null; due_expression?: string | null }
 type Step = { id: string; label: string; status: string }
+type SourceInfo = {
+  resource_id: string
+  resource_type: string
+  knowledge_item_id?: string | null
+  title?: string | null
+  file_name?: string | null
+  sender_id?: string | null
+  sender_name?: string | null
+  conversation_id?: string | null
+  conversation_name?: string | null
+  conversation_platform?: string | null
+  sent_at?: string | null
+  preview?: string | null
+  score?: number
+}
+type ContentChunk = { chunk_id: string; text: string; score?: number; position?: Record<string, any> | null }
+type ContentResult = {
+  resource_id: string
+  resource_type: string
+  title?: string | null
+  sender_name?: string | null
+  conversation_name?: string | null
+  conversation_id?: string | null
+  sent_at?: string | null
+  chunks: ContentChunk[]
+  best_score?: number
+}
+type SourceListBlock = {
+  type: 'source_list'
+  summary: string
+  items: SourceInfo[]
+  resource_ids: string[]
+  metadata_coverage: 'complete' | 'partial'
+}
+type ContentResultsBlock = {
+  type: 'content_results'
+  results: ContentResult[]
+  metadata_coverage: 'complete' | 'partial'
+}
+type AnswerBlock = {
+  type: 'answer'
+  text: string
+  citations: Citation[]
+}
+type AgentResultBlock = SourceListBlock | ContentResultsBlock | AnswerBlock
+type SourceItem = {
+  key: string
+  title: string
+  meta: string
+  preview?: string
+  kind: 'attachment' | 'message' | 'source'
+  resource_id?: string
+  conversation_id?: string | number | null
+  message_id?: string | number | null
+  platform?: string
+}
 type AgentMessage = {
   id: string
   role: 'user' | 'agent'
@@ -179,6 +294,7 @@ type AgentMessage = {
   status?: ChatStatus
   statusText?: string
   steps: Step[]
+  blocks: AgentResultBlock[]
   answer?: string
   citations: Citation[]
   error?: string
@@ -201,7 +317,13 @@ const textareaRef = ref<{ focus?: () => void } | null>(null)
 const activeTaskID = ref('')
 const approvalEditors = reactive<Record<string, { title: string; dueDate: string }>>({})
 const inputValues = reactive<Record<string, string>>({})
+const expandedTraces = reactive<Record<string, boolean>>({})
 let activeController: AbortController | null = null
+const router = useRouter()
+const route = useRoute()
+const sourcePreviewVisible = ref(false)
+const activeSourceFile = ref<InfoFile | null>(null)
+const activeSourceTarget = ref<SourceInfo | Citation | null>(null)
 
 function newMessageID(): string {
   return globalThis.crypto?.randomUUID?.() || `message-${Date.now()}-${Math.random().toString(16).slice(2)}`
@@ -305,10 +427,10 @@ function handleTaskEvent(message: AgentMessage, event: AgentTaskEvent): boolean 
       addOrUpdateStep(message, event)
       message.status = event.event_type === 'step.failed' ? 'executing' : 'executing'
       message.statusText = event.event_type === 'step.started'
-        ? `正在执行 ${payload.capability || '能力'}`
+        ? stepStartText(String(payload.capability || ''))
         : event.event_type === 'step.succeeded'
-          ? `已完成 ${payload.capability || '步骤'}`
-          : `步骤失败：${payload.capability || '能力'}`
+          ? previewSummary(payload.result_preview) || stepSucceededText(String(payload.capability || ''))
+          : `步骤失败：${displayStepLabel(String(payload.capability || '能力'))}`
       break
     case 'task.waiting_approval':
       void prepareApproval(message, event)
@@ -336,6 +458,7 @@ function handleTaskEvent(message: AgentMessage, event: AgentTaskEvent): boolean 
       message.statusText = '任务已完成'
       if (typeof payload.answer === 'string') message.answer = payload.answer
       if (Array.isArray(payload.citations)) message.citations = payload.citations.map(mapCitation)
+      message.blocks = blocksFromObservations([], message.answer, message.citations)
       void hydrateTerminal(message)
       return false
     case 'task.failed':
@@ -358,11 +481,240 @@ function mapCitation(value: any): Citation {
     url: typeof value?.url === 'string' ? value.url : undefined,
     source: typeof value?.source === 'string' ? value.source : undefined,
     type: typeof value?.type === 'string' ? value.type : undefined,
+    resource_id: value?.resource_id == null ? undefined : String(value.resource_id),
+    resource_type: typeof value?.resource_type === 'string' ? value.resource_type : undefined,
+    conversation_id: value?.conversation_id ?? value?.source_conversation_id ?? null,
+    conversation_name: typeof value?.conversation_name === 'string' ? value.conversation_name : undefined,
+    message_id: value?.message_id ?? value?.source_message_id ?? null,
+    attachment_id: value?.attachment_id ?? null,
+    platform: typeof value?.platform === 'string' ? value.platform : typeof value?.source_platform === 'string' ? value.source_platform : undefined,
+    sender_name: typeof value?.sender_name === 'string' ? value.sender_name : undefined,
+    sent_at: typeof value?.sent_at === 'string' ? value.sent_at : undefined,
+    position: value?.position && typeof value.position === 'object' ? value.position : null,
   }
+}
+
+function previewSummary(value: unknown): string {
+  if (!value || typeof value !== 'object') return ''
+  const summary = (value as Record<string, unknown>).summary
+  return typeof summary === 'string' ? summary.trim() : ''
+}
+
+function primaryAnswer(message: AgentMessage): string {
+  const block = message.blocks.find((item) => item.type === 'answer')
+  const text = (message.answer || (block?.type === 'answer' ? block.text : '') || '').trim()
+  if (!text || text === '没有找到满足条件的内容。') return ''
+  return text
+}
+
+function showsEmptyKnowledgeResult(message: AgentMessage): boolean {
+  if (message.status !== 'succeeded') return false
+  if (primaryAnswer(message) || message.todo || message.approval || message.inputRequest) return false
+  return !visibleSourceItems(message).length
+}
+
+function metadataCoverage(message: AgentMessage): 'complete' | 'partial' {
+  const block = message.blocks.find((item) => item.type === 'source_list' || item.type === 'content_results')
+  return block && 'metadata_coverage' in block && block.metadata_coverage === 'partial' ? 'partial' : 'complete'
+}
+
+function visibleSourceItems(message: AgentMessage): SourceItem[] {
+  const items = new Map<string, SourceItem>()
+  if (message.citations.length) {
+    for (const citation of message.citations) {
+      const item = sourceItemFromCitation(citation)
+      if (item) items.set(item.key, item)
+    }
+    return [...items.values()]
+  }
+  for (const block of message.blocks) {
+    if (block.type !== 'source_list' || !block.items.length) continue
+    for (const source of block.items) {
+      const item = sourceItemFromSource(source)
+      items.set(item.key, item)
+    }
+  }
+  return [...items.values()]
+}
+
+function sourceItemFromCitation(citation: Citation): SourceItem | null {
+  const key = citationKey(citation)
+  const kind: SourceItem['kind'] = citation.resource_type === 'attachment' ? 'attachment' : citation.conversation_id ? 'message' : 'source'
+  return {
+    key,
+    kind,
+    title: displayTitleForCitation(citation),
+    meta: [citation.sender_name, citation.conversation_name, formatAgentMoment(citation.sent_at)].filter(Boolean).join(' · '),
+    preview: truncateText(citation.quote, 120),
+    resource_id: citation.resource_id || (citation.attachment_id != null ? String(citation.attachment_id) : undefined),
+    conversation_id: citation.conversation_id,
+    message_id: citation.message_id,
+    platform: citation.platform,
+  }
+}
+
+function sourceItemFromSource(source: SourceInfo): SourceItem {
+  const kind: SourceItem['kind'] = source.resource_type === 'attachment' ? 'attachment' : 'message'
+  return {
+    key: sourceKey(source),
+    kind,
+    title: displayTitleForSource(source),
+    meta: sourceMeta(source),
+    preview: truncateText(source.preview, 120),
+    resource_id: source.resource_id,
+    conversation_id: source.conversation_id,
+    platform: source.conversation_platform || undefined,
+  }
+}
+
+function displayTitleForCitation(citation: Citation): string {
+  if (citation.resource_type === 'attachment') return citation.title || citation.source || '附件'
+  if (citation.title && !looksLikeInternalID(citation.title)) return citation.title
+  if (citation.quote) return truncateText(citation.quote, 42) || '知识库消息'
+  return citation.conversation_name ? `${citation.conversation_name}消息` : '知识库消息'
+}
+
+function displayTitleForSource(source: SourceInfo): string {
+  if (source.resource_type === 'attachment') return source.file_name || source.title || source.preview || '附件'
+  if (source.title && !looksLikeInternalID(source.title)) return source.title
+  if (source.preview) return truncateText(source.preview, 42) || '知识库消息'
+  return source.conversation_name ? `${source.conversation_name}消息` : '知识库消息'
+}
+
+function looksLikeInternalID(value: string): boolean {
+  const text = value.trim()
+  return /^[0-9a-f]{8}-[0-9a-f-]{27,}$/i.test(text) || /^[0-9a-f]{20,}$/i.test(text)
+}
+
+function truncateText(value?: string | null, limit = 80): string | undefined {
+  const text = String(value || '').replace(/\s+/g, ' ').trim()
+  if (!text) return undefined
+  return text.length > limit ? `${text.slice(0, limit - 1)}…` : text
+}
+
+function isTraceOpen(message: AgentMessage): boolean {
+  return expandedTraces[message.id] === true
+}
+
+function toggleTrace(message: AgentMessage): void {
+  expandedTraces[message.id] = !isTraceOpen(message)
+}
+
+function displayStepLabel(label: string): string {
+  return ({
+    'knowledge.search_sources': '检索本地知识',
+    'knowledge.search_content': '查找相关内容',
+    'knowledge.answer': '整理回答',
+    'web.fetch': '读取网页',
+    'web.extract': '提取网页内容',
+    'answer.compose': '整理回答',
+    'todo.create': '创建待办',
+  } as Record<string, string>)[label] || label
+}
+
+function stepStartText(capability: string): string {
+  return ({
+    'knowledge.search_sources': '正在检索本地知识',
+    'knowledge.search_content': '正在查找相关内容',
+    'knowledge.answer': '正在整理回答',
+    'web.fetch': '正在读取网页',
+    'web.extract': '正在提取网页内容',
+    'answer.compose': '正在整理回答',
+    'todo.create': '正在创建待办',
+  } as Record<string, string>)[capability] || `正在执行 ${displayStepLabel(capability || '能力')}`
+}
+
+function stepSucceededText(capability: string): string {
+  return ({
+    'knowledge.search_sources': '本地知识检索完成',
+    'knowledge.search_content': '相关内容查找完成',
+    'knowledge.answer': '回答已生成',
+    'web.fetch': '网页读取完成',
+    'web.extract': '网页内容提取完成',
+    'answer.compose': '回答已生成',
+    'todo.create': '待办已创建',
+  } as Record<string, string>)[capability] || `${displayStepLabel(capability || '步骤')}完成`
+}
+
+function stepStatusLabel(status: string): string {
+  return ({ running: '进行中', succeeded: '已完成', failed: '失败' } as Record<string, string>)[status] || status
 }
 
 function citationKey(citation: Citation): string {
   return citation.evidence_id || citation.url || citation.title || citation.quote || 'citation'
+}
+
+function sourceKey(source: SourceInfo): string {
+  return `${source.resource_type}:${source.resource_id}`
+}
+
+function sourceLabel(source: SourceInfo): string {
+  return source.title || source.file_name || source.preview || source.resource_id
+}
+
+function sourceMeta(source: SourceInfo): string {
+  return [source.sender_name, source.conversation_name, formatAgentMoment(source.sent_at)].filter(Boolean).join(' · ')
+}
+
+function resultMeta(result: ContentResult): string {
+  return [result.sender_name, result.conversation_name, formatAgentMoment(result.sent_at)].filter(Boolean).join(' · ')
+}
+
+function citationMeta(citation: Citation): string {
+  return [citation.sender_name, citation.conversation_name, formatAgentMoment(citation.sent_at)].filter(Boolean).join(' · ')
+}
+
+function formatAgentMoment(value?: string | null): string {
+  const raw = String(value || '').trim()
+  if (!raw) return ''
+  const moment = new Date(raw)
+  if (Number.isNaN(moment.getTime())) return raw
+  return new Intl.DateTimeFormat('zh-CN', {
+    dateStyle: 'medium',
+    timeStyle: 'short',
+    timeZone: 'Asia/Shanghai',
+  }).format(moment)
+}
+
+function blocksFromObservations(
+  observations: AgentObservation[],
+  fallbackAnswer?: string,
+  fallbackCitations?: Citation[],
+): AgentResultBlock[] {
+  const blocks: AgentResultBlock[] = []
+  for (const observation of observations) {
+    if (observation.status !== 'succeeded') continue
+    const output = observation.output || {}
+    if (observation.capability === 'knowledge.search_sources' && Array.isArray(output.sources)) {
+      blocks.push({
+        type: 'source_list',
+        summary: String(output.summary || ''),
+        items: output.sources as SourceInfo[],
+        resource_ids: Array.isArray(output.resource_ids) ? output.resource_ids.map(String) : [],
+        metadata_coverage: output.metadata_coverage === 'partial' ? 'partial' : 'complete',
+      })
+    } else if (observation.capability === 'knowledge.search_content' && Array.isArray(output.results)) {
+      blocks.push({
+        type: 'content_results',
+        results: output.results as ContentResult[],
+        metadata_coverage: output.metadata_coverage === 'partial' ? 'partial' : 'complete',
+      })
+    } else if (observation.capability === 'knowledge.answer' && typeof output.answer === 'string') {
+      blocks.push({
+        type: 'answer',
+        text: output.answer,
+        citations: Array.isArray(output.citations) ? output.citations.map(mapCitation) : [],
+      })
+    }
+  }
+  if (!blocks.some((block) => block.type === 'answer') && fallbackAnswer) {
+    blocks.push({
+      type: 'answer',
+      text: fallbackAnswer,
+      citations: fallbackCitations || [],
+    })
+  }
+  return blocks
 }
 
 function evidenceForObservations(observations: AgentObservation[]): Map<string, Citation> {
@@ -394,6 +746,140 @@ function todoFromObservations(observations: AgentObservation[]): TodoResult | un
   return undefined
 }
 
+async function openSourceItem(source: SourceItem): Promise<void> {
+  if (source.kind === 'attachment' && source.resource_id) {
+    await openSource({
+      resource_id: source.resource_id,
+      resource_type: 'attachment',
+      title: source.title,
+      file_name: source.title,
+      conversation_id: source.conversation_id ? String(source.conversation_id) : null,
+    })
+    return
+  }
+  if (!source.conversation_id) {
+    MessagePlugin.info('该来源暂无可打开的详情')
+    return
+  }
+  try {
+    await navigateToKnowledgeSource(router, route, {
+      platform: source.platform,
+      conversationId: source.conversation_id,
+      messageId: source.message_id,
+    })
+  } catch {
+    MessagePlugin.error('无法定位来源会话，请稍后重试')
+  }
+}
+
+async function openSource(source: SourceInfo): Promise<void> {
+  if (source.resource_type === 'attachment') {
+    let name = source.file_name || source.title || '附件'
+    let mimeType: string | undefined
+    let contentAccessRequired = false
+    let fileSizeBytes: number | null = null
+    if (source.conversation_id) {
+      try {
+        const response = await listKnowledgeConversationAttachments(String(source.conversation_id))
+        const metadata: any = (response.items || []).find((item: any) =>
+          String(item.id || item.attachment_id || '') === String(source.resource_id)
+          || String(item.external_attachment_id || '') === String(source.resource_id),
+        )
+        name = String(metadata?.file_name || metadata?.name || name)
+        mimeType = String(metadata?.mime_type || metadata?.mimeType || '') || undefined
+        contentAccessRequired = Boolean(metadata?.content_access_required)
+        fileSizeBytes = Number(metadata?.size_bytes || 0) || null
+      } catch {
+        // The content endpoint still provides the definitive error state.
+      }
+    }
+    activeSourceTarget.value = source
+    activeSourceFile.value = {
+      id: source.resource_id,
+      name,
+      type: name.includes('.') ? name.split('.').pop() || 'file' : 'file',
+      mimeType,
+      size: fileSizeBytes ? `${fileSizeBytes} bytes` : '-',
+      time: '',
+      uploadedAt: '',
+      uploader: '',
+      content: '',
+      contentAccessRequired,
+      fileSizeBytes,
+      documentStatus: 'completed',
+      parseStatus: 'completed',
+    }
+    sourcePreviewVisible.value = true
+    return
+  }
+  await openSourceConversation(source)
+}
+
+async function openContentResult(result: ContentResult): Promise<void> {
+  await openSource({
+    resource_id: result.resource_id,
+    resource_type: result.resource_type,
+    title: result.title,
+    file_name: result.title,
+    conversation_name: result.conversation_name,
+    sent_at: result.sent_at,
+    conversation_id: result.conversation_id || null,
+  })
+}
+
+async function openCitation(citation: Citation): Promise<void> {
+  if (citation.resource_type === 'attachment') {
+    await openContentResult({
+      resource_id: String(citation.resource_id || citation.attachment_id || ''),
+      resource_type: 'attachment',
+      title: citation.title || citation.source,
+      sender_name: citation.sender_name,
+      conversation_name: citation.conversation_name,
+      conversation_id: citation.conversation_id ? String(citation.conversation_id) : null,
+      sent_at: citation.sent_at,
+      chunks: [],
+    })
+    return
+  }
+  if (citation.conversation_id) {
+    try {
+      await navigateToKnowledgeSource(router, route, {
+        platform: citation.platform,
+        conversationId: citation.conversation_id,
+        messageId: citation.message_id,
+      })
+    } catch {
+      MessagePlugin.error('无法定位来源会话，请稍后重试')
+    }
+    return
+  }
+  MessagePlugin.info('该来源暂无可打开的详情')
+}
+
+async function openSourceConversation(source: SourceInfo | Citation): Promise<void> {
+  if (!source.conversation_id) return
+  try {
+    await navigateToKnowledgeSource(router, route, {
+      platform: platformForSource(source),
+      conversationId: source.conversation_id,
+      messageId: 'message_id' in source ? source.message_id : null,
+      attachmentId: source.resource_type === 'attachment' ? source.resource_id : null,
+    })
+  } catch {
+    MessagePlugin.error('无法定位来源会话，请稍后重试')
+  }
+}
+
+function platformForSource(source: SourceInfo | Citation): string | undefined {
+  return (source as SourceInfo).conversation_platform || (source as Citation).platform
+}
+
+async function openActiveSourceConversation(): Promise<void> {
+  if (!activeSourceTarget.value) return
+  await openSourceConversation(activeSourceTarget.value)
+  sourcePreviewVisible.value = false
+}
+
 async function hydrateTerminal(message: AgentMessage): Promise<void> {
   if (!message.taskId) return
   try {
@@ -408,6 +894,8 @@ async function hydrateTerminal(message: AgentMessage): Promise<void> {
       const citation = mapCitation(value)
       return evidence.get(citation.evidence_id) ? { ...citation, ...evidence.get(citation.evidence_id) } : citation
     })
+    const blocks = blocksFromObservations(observations, message.answer, message.citations)
+    if (blocks.length) message.blocks = blocks
     if (!message.todo) message.todo = todoFromObservations(observations)
     if (task.last_error?.message) message.error = String(task.last_error.message)
   } catch {
@@ -464,13 +952,14 @@ async function sendMessage(): Promise<void> {
     selectedFile.value = null
     if (fileInputRef.value) fileInputRef.value.value = ''
   }
-  const userMessage: AgentMessage = { id: newMessageID(), role: 'user', text, steps: [], citations: [], lastEventId: 0 }
+  const userMessage: AgentMessage = { id: newMessageID(), role: 'user', text, steps: [], blocks: [], citations: [], lastEventId: 0 }
   const agentMessage = reactive<AgentMessage>({
     id: newMessageID(),
     role: 'agent',
     status: 'received',
     statusText: '正在创建任务',
     steps: [],
+    blocks: [],
     citations: [],
     lastEventId: 0,
   })
@@ -620,6 +1109,39 @@ onBeforeUnmount(() => activeController?.abort())
 .agent-steps li::before { content: ''; width: 6px; height: 6px; border-radius: 50%; background: var(--td-brand-color-disabled); }
 .agent-step--succeeded::before { background: var(--td-success-color) !important; }
 .agent-step--failed::before { background: var(--td-error-color) !important; }
+.agent-empty-result { display: grid; gap: 5px; margin-top: 4px; padding: 12px 13px; border: 1px dashed var(--td-component-stroke); border-radius: 8px; color: var(--td-text-color-secondary); font-size: 13px; line-height: 1.6; }
+.agent-empty-result strong { color: var(--td-text-color-primary); font-size: 13px; font-weight: 500; }
+.agent-empty-result span { color: var(--td-text-color-secondary); font-size: 12px; }
+.agent-sources { display: grid; gap: 8px; margin-top: 16px; }
+.agent-sources__header { display: flex; align-items: center; gap: 8px; color: var(--td-text-color-secondary); font-size: 12px; }
+.agent-coverage-tag { padding: 1px 7px; border-radius: 999px; color: var(--td-warning-color); background: var(--td-warning-color-1); font-size: 11px; }
+.agent-trace { margin-top: 14px; }
+.agent-trace__toggle { display: inline-flex; align-items: center; gap: 6px; padding: 0; border: 0; color: var(--td-text-color-secondary); background: transparent; font-size: 12px; cursor: pointer; }
+.agent-trace__toggle svg { transition: transform .15s ease; }
+.agent-trace__chevron--open { transform: rotate(90deg); }
+.agent-trace__steps { display: grid; gap: 6px; margin: 9px 0 0; padding: 0; list-style: none; color: var(--td-text-color-secondary); font-size: 12px; }
+.agent-trace__steps li { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 7px 9px; border-radius: 6px; background: var(--td-bg-color-secondarycontainer); }
+.agent-trace__steps small { color: var(--td-text-color-placeholder); }
+.agent-result-blocks { display: grid; gap: 14px; }
+.agent-result-heading { display: flex; align-items: center; gap: 7px; margin-bottom: 9px; color: var(--td-text-color-primary); font-size: 13px; font-weight: 600; }
+.agent-result-heading svg { color: var(--td-brand-color); }
+.agent-empty-result { margin: 0; padding: 12px; border: 1px dashed var(--td-component-stroke); border-radius: 8px; color: var(--td-text-color-secondary); font-size: 13px; }
+.agent-source-list, .agent-content-results { display: grid; gap: 8px; }
+.agent-source-card, .agent-content-card { display: flex; justify-content: space-between; gap: 12px; padding: 12px; border: 1px solid var(--td-component-stroke); border-radius: 8px; background: var(--td-bg-color-container); }
+.agent-source-card { cursor: pointer; transition: border-color .15s, background .15s; }
+.agent-source-card:hover { border-color: var(--td-brand-color-focus); background: var(--td-bg-color-container-hover); }
+.agent-source-card__body, .agent-content-card__title { min-width: 0; }
+.agent-source-card strong, .agent-content-card strong { display: block; overflow: hidden; color: var(--td-text-color-primary); font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
+.agent-source-card span, .agent-content-card span { display: block; margin-top: 4px; color: var(--td-text-color-secondary); font-size: 12px; }
+.agent-source-card p { display: -webkit-box; overflow: hidden; margin: 7px 0 0; color: var(--td-text-color-secondary); font-size: 12px; line-height: 1.5; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+.agent-source-card__actions, .agent-citation__actions { display: flex; flex: 0 0 auto; flex-wrap: wrap; align-items: flex-start; gap: 6px; }
+.agent-source-card__actions span { display: inline-block; min-height: 24px; margin: 0; padding: 0 8px; border: 1px solid var(--td-component-stroke); border-radius: 6px; color: var(--td-brand-color); background: var(--td-bg-color-container); font-size: 12px; line-height: 22px; }
+.agent-source-card__actions button, .agent-citation__actions button, .agent-citation__actions a { min-height: 28px; padding: 0 9px; border: 1px solid var(--td-component-stroke); border-radius: 6px; color: var(--td-brand-color); background: var(--td-bg-color-container); font-size: 12px; line-height: 26px; text-decoration: none; cursor: pointer; }
+.agent-content-card { display: block; }
+.agent-content-card blockquote { margin: 9px 0 0; padding: 9px 10px; border-left: 3px solid var(--td-brand-color-focus); border-radius: 0 6px 6px 0; color: var(--td-text-color-secondary); background: var(--td-bg-color-secondarycontainer); font-size: 12px; line-height: 1.6; }
+.agent-content-card .agent-source-card__actions { margin-top: 9px; }
+.agent-coverage-note { margin: 2px 0 0; color: var(--td-warning-color); font-size: 12px; line-height: 1.5; }
+.agent-answer-block { display: grid; gap: 14px; }
 .agent-answer__content { color: var(--td-text-color-primary); font-size: 15px; line-height: 1.8; }
 .agent-answer__content :deep(p) { margin: 0 0 10px; }
 .agent-answer__content :deep(pre) { overflow-x: auto; padding: 10px 12px; border-radius: 6px; background: var(--td-bg-color-secondarycontainer); }
@@ -628,7 +1150,9 @@ onBeforeUnmount(() => activeController?.abort())
 .agent-citation > svg { flex: 0 0 auto; color: var(--td-brand-color); }
 .agent-citation strong { display: block; font-size: 13px; }
 .agent-citation p { margin: 4px 0 0; color: var(--td-text-color-secondary); font-size: 12px; line-height: 1.5; }
+.agent-citation small { display: block; margin-top: 4px; color: var(--td-text-color-placeholder); font-size: 11px; }
 .agent-citation a { display: block; overflow: hidden; margin-top: 4px; color: var(--td-brand-color); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.agent-citation__actions { margin-top: 7px; }
 .agent-todo { display: grid; gap: 5px; margin-top: 14px; padding: 13px; border: 1px solid var(--td-brand-color-focus); border-radius: 9px; background: var(--td-brand-color-1); }
 .agent-todo__title { display: flex; align-items: center; gap: 6px; color: var(--td-brand-color); font-size: 12px; }
 .agent-todo strong { font-size: 15px; }
@@ -667,5 +1191,9 @@ onBeforeUnmount(() => activeController?.abort())
 .agent-send.disabled { background: var(--td-brand-color-disabled); cursor: not-allowed; }
 .agent-send svg { width: 21px; height: 21px; }
 .agent-disclaimer { margin: 10px 0 0; color: var(--td-text-color-placeholder); font-size: 12px; }
-@media (max-width: 760px) { .agent-chat-page { min-height: 560px; } .agent-chat-scroll { padding: 24px 16px 185px; } .agent-welcome { padding-bottom: 80px; } .agent-welcome h1 { font-size: 28px; } .agent-user-bubble { max-width: 88%; font-size: 13px; } .agent-composer-area { padding: 0 12px 14px; } .agent-textarea :deep(.t-textarea__inner) { min-height: 100px; padding: 13px 14px 58px; font-size: 14px; } .agent-input-request { grid-template-columns: 1fr; } .agent-input-request button { grid-column: 1; } }
+.agent-source-preview { display: flex; height: min(76vh, 820px); min-height: 480px; flex-direction: column; gap: 10px; }
+.agent-source-preview main { min-height: 0; flex: 1; }
+.agent-source-preview footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding-top: 10px; border-top: 1px solid var(--td-component-stroke); color: var(--td-text-color-secondary); font-size: 12px; }
+.agent-source-preview-dialog .t-dialog__body { padding: 0; }
+@media (max-width: 760px) { .agent-chat-page { min-height: 560px; } .agent-chat-scroll { padding: 24px 16px 185px; } .agent-welcome { padding-bottom: 80px; } .agent-welcome h1 { font-size: 28px; } .agent-user-bubble { max-width: 88%; font-size: 13px; } .agent-source-card { display: grid; } .agent-source-card__actions { justify-content: flex-start; } .agent-composer-area { padding: 0 12px 14px; } .agent-textarea :deep(.t-textarea__inner) { min-height: 100px; padding: 13px 14px 58px; font-size: 14px; } .agent-input-request { grid-template-columns: 1fr; } .agent-input-request button { grid-column: 1; } }
 </style>

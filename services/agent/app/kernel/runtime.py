@@ -488,21 +488,51 @@ class AgentRuntime:
                 },
             )
         self._reserve_model_calls(task.task_id, actual_calls)
+        offered = getattr(self.understanding_provider, "intents", None)
+        primary_confidence = getattr(
+            self.understanding_provider, "last_primary_confidence", None
+        )
+        if primary_confidence is None:
+            primary_confidence = getattr(
+                self.understanding_provider, "last_answer_confidence", None
+            )
+        primary_margin = getattr(
+            self.understanding_provider, "last_primary_margin", None
+        )
+        if primary_margin is None:
+            primary_margin = getattr(
+                self.understanding_provider, "last_margin", None
+            )
         payload = {
             "mode": self.understanding_mode,
             "provider": provider_name,
             "model": getattr(self.understanding_provider, "model", None),
+            # The versioned model id the backend reported, when it reports one.
+            "response_model": getattr(
+                self.understanding_provider, "last_model", None
+            ),
             "decision_source": getattr(
                 self.understanding_provider, "last_decision_source", None
             ),
             "fallback_reason": getattr(
                 self.understanding_provider, "last_fallback_reason", None
             ),
+            # Generic names; the laya_* pair below is kept for existing
+            # dashboards built before Jev could be the primary classifier.
+            "primary_confidence": primary_confidence,
+            "primary_margin": primary_margin,
             "laya_answer_confidence": getattr(
                 self.understanding_provider, "last_answer_confidence", None
             ),
             "laya_margin": getattr(
                 self.understanding_provider, "last_margin", None
+            ),
+            # Which intents this deployment was able to offer, so a missing
+            # option can be explained without reading the settings.
+            "available_intents": (
+                sorted(item.name for item in offered)
+                if offered is not None
+                else None
             ),
             "latency_ms": int((self._clock() - started).total_seconds() * 1000),
             "text": str(task.input.get("text") or ""),
@@ -1299,6 +1329,7 @@ class AgentRuntime:
                             "capability": step.capability,
                             "observation_id": observation.observation_id,
                             "recovered": True,
+                            "result_preview": self._result_preview(observation),
                         },
                     )
                 ],
@@ -1479,6 +1510,7 @@ class AgentRuntime:
                         "capability": step.capability,
                         "observation_id": observation.observation_id,
                         "requires_user_input": bool(output.get("requires_user_input")),
+                        "result_preview": self._result_preview(observation),
                     },
                 )
             ]
@@ -1694,7 +1726,11 @@ class AgentRuntime:
         task = self.store.get_task(task.task_id)
         ensure_task_transition(task.status, "succeeded")
         task.status = "succeeded"
-        result: dict = {"warnings": list(warnings or [])}
+        presentation_mode = self._presentation_mode(task)
+        result: dict = {
+            "warnings": list(warnings or []),
+            "presentation_mode": presentation_mode,
+        }
         answer = self._answer_payload(task)
         if answer is not None:
             result["answer"] = answer["answer"]
@@ -1706,6 +1742,7 @@ class AgentRuntime:
             "plan_id": plan.plan_id,
             "executed_steps": executed,
             "warnings": list(warnings or []),
+            "presentation_mode": presentation_mode,
         }
         if answer is not None:
             payload["answer"] = answer["answer"]
@@ -1831,6 +1868,25 @@ class AgentRuntime:
             warnings=warnings,
         )
 
+    def _result_preview(self, observation) -> dict[str, Any] | None:
+        """A small, sanitized summary safe to put on the event stream."""
+
+        return _result_preview(observation.capability, observation.output or {})
+
+    def _presentation_mode(self, task: TaskRecord) -> str | None:
+        observations = self.store.list_observations(task.task_id)
+        for observation in reversed(observations):
+            output = observation.output or {}
+            if output.get("answer"):
+                return "answer_with_sources"
+            if output.get("results"):
+                return "source_list"
+            if output.get("sources"):
+                return "source_list"
+            if output.get("todo_id"):
+                return "action_result"
+        return None
+
     def _preprocess_attachments(self, task: TaskRecord) -> None:
         """附件预处理：在Understanding之前增强上下文"""
         from app.kernel.attachment_enricher import AttachmentContextEnricher
@@ -1890,3 +1946,49 @@ def _merge_warnings(*groups: list[str]) -> list[str]:
             if item and item not in merged:
                 merged.append(item)
     return merged
+
+
+def _result_preview(capability: str, output: dict[str, Any]) -> dict[str, Any] | None:
+    if capability == "knowledge.search_sources":
+        sources = output.get("sources")
+        items = sources if isinstance(sources, list) else []
+        return {
+            "block_type": "source_list",
+            "summary": str(output.get("summary") or f"找到 {len(items)} 个来源"),
+            "item_count": len(items),
+            "metadata_coverage": _coverage_value(output),
+        }
+    if capability == "knowledge.search_content":
+        results = output.get("results")
+        items = results if isinstance(results, list) else []
+        chunk_count = sum(
+            len(item.get("chunks") or [])
+            for item in items
+            if isinstance(item, dict)
+        )
+        return {
+            "block_type": "content_results",
+            "summary": str(output.get("summary") or f"找到 {len(items)} 个相关内容来源"),
+            "item_count": len(items),
+            "chunk_count": chunk_count,
+            "metadata_coverage": _coverage_value(output),
+        }
+    if capability == "knowledge.answer":
+        citations = output.get("citations")
+        return {
+            "block_type": "answer",
+            "summary": "回答已生成" if output.get("answer") else "没有找到满足条件的内容",
+            "citation_count": len(citations) if isinstance(citations, list) else 0,
+            "metadata_coverage": _coverage_value(output),
+        }
+    if capability == "todo.create" and output.get("todo_id"):
+        return {
+            "block_type": "todo",
+            "summary": "待办已创建",
+            "item_count": 1,
+        }
+    return None
+
+
+def _coverage_value(output: dict[str, Any]) -> str:
+    return "partial" if output.get("metadata_coverage") == "partial" else "complete"

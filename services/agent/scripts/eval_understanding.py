@@ -75,7 +75,7 @@ def evaluate(provider, settings: Settings, case: dict) -> dict:
     # intent leaked out, not what the verdict should be.
     expected_task = case["is_task"]
     if expected_task is not None and observed_task is not expected_task:
-        problems.append(f"is_task {observed_task} != {case["is_task"]}")
+        problems.append(f"is_task {observed_task} != {case['is_task']}")
     missing = [n for n in case["expect"] if n not in observed]
     if missing:
         problems.append(f"missing {missing}")
@@ -85,7 +85,7 @@ def evaluate(provider, settings: Settings, case: dict) -> dict:
     if case["source"] == "collected":
         gate_ok = KnowledgeEventIngress().task_candidate_hint(case["text"])
         if gate_ok is not (case["gate"] == "pass"):
-            problems.append(f"gate {gate_ok} != {case["gate"]}")
+            problems.append(f"gate {gate_ok} != {case['gate']}")
 
     return {
         "id": case["id"],
@@ -153,7 +153,7 @@ def main() -> int:
     parser.add_argument("--verbose", action="store_true", help="print every case")
     parser.add_argument(
         "--provider",
-        choices=["llm", "laya", "hybrid"],
+        choices=["llm", "laya", "jev", "hybrid"],
         default=None,
         help="override AGENT_UNDERSTANDING_PROVIDER for this evaluation",
     )
@@ -189,10 +189,10 @@ def main() -> int:
             print(f"raw results -> {args.json}")
         return 0 if agreements == len(results) else 1
 
-    if settings.understanding_provider not in {"llm", "laya", "hybrid"}:
+    if settings.understanding_provider not in {"llm", "laya", "jev", "hybrid"}:
         print(
             "AGENT_UNDERSTANDING_PROVIDER=%s; use --provider to select "
-            "llm, laya, or hybrid"
+            "llm, laya, jev, or hybrid"
             % settings.understanding_provider
         )
         return 2

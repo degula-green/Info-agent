@@ -8,11 +8,16 @@ from typing import Any
 from fastapi import FastAPI
 from pydantic import BaseModel, Field
 
+from app.auth import (
+    AuthenticationError,
+    AuthenticatedUser,
+    install_authentication_error_handler,
+)
 from app.config import Settings
 from app.container import build_container
 from app.kernel.models import CapabilityDescriptor
 from app.kernel.registry import CapabilityRegistry
-from app.routers import health, tasks
+from app.routers import health, tasks, todos
 from app.testing.fake_capabilities import (
     FakeAskInputCapability,
     FakeReadCapability,
@@ -121,10 +126,32 @@ def create_task(
 
 def make_app(container) -> FastAPI:
     tasks.set_container(container)
+    todos.set_container(container)
     application = FastAPI()
+    application.state.agent_authentication = TestAuthentication()
+    install_authentication_error_handler(application)
     application.include_router(health.router)
     application.include_router(tasks.router)
+    application.include_router(todos.router)
     return application
+
+
+class TestAuthentication:
+    """Maps test Bearer tokens directly to stable user UUIDs."""
+
+    def authenticate(self, authorization: str | None) -> AuthenticatedUser:
+        parts = (authorization or "").split()
+        if len(parts) != 2 or parts[0].lower() != "bearer" or not parts[1]:
+            raise AuthenticationError("authentication required")
+        token = parts[1]
+        user_ids = {
+            "user-1-token": "user-1",
+            "user-2-token": "user-2",
+        }
+        user_id = user_ids.get(token)
+        if not user_id:
+            raise AuthenticationError("invalid access token")
+        return AuthenticatedUser(user_id=user_id, session_id=f"session-{user_id}")
 
 
 def event_types(store, task_id: str) -> list[str]:

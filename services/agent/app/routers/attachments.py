@@ -1,9 +1,10 @@
-from fastapi import APIRouter, UploadFile, File, Header, HTTPException, Depends
+from fastapi import APIRouter, UploadFile, File, HTTPException, Depends
 from datetime import datetime, timedelta
 import uuid
 from io import BytesIO
 
 from app.config import settings
+from app.auth import AuthenticatedUser, current_user
 from app.infrastructure.attachment_store import RedisAttachmentStore, AttachmentMetadata
 from minio import Minio
 
@@ -39,7 +40,7 @@ def get_attachment_store() -> RedisAttachmentStore:
 @router.post("/attachments")
 async def upload_attachment(
     file: UploadFile = File(...),
-    x_agent_user_id: str | None = Header(default=None),
+    user: AuthenticatedUser = Depends(current_user),
     minio_client: Minio = Depends(get_minio_client),
     store: RedisAttachmentStore = Depends(get_attachment_store)
 ):
@@ -53,9 +54,7 @@ async def upload_attachment(
     4. 流式读取避免内存打爆
     """
 
-    if not x_agent_user_id:
-        raise HTTPException(401, "缺少用户标识")
-    owner_id = x_agent_user_id
+    owner_id = user.user_id
 
     # 流式读取并校验大小
     chunks = []

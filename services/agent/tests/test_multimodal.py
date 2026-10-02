@@ -325,7 +325,10 @@ def test_upload_attachment_api():
     from fastapi.testclient import TestClient
     from app.main import app
     from app.routers import attachments
+    from tests.support import TestAuthentication
 
+    # The upload endpoint is authenticated like every other Agent route.
+    app.state.agent_authentication = TestAuthentication()
     client = TestClient(app)
     test_file = BytesIO(b"test pdf content")
     mock_minio = Mock()
@@ -337,7 +340,7 @@ def test_upload_attachment_api():
         response = client.post(
             "/api/agent/v1/attachments",
             files={"file": ("test.pdf", test_file, "application/pdf")},
-            headers={"x-agent-user-id": "test-user"},
+            headers={"Authorization": "Bearer user-1-token"},
         )
     finally:
         app.dependency_overrides.clear()

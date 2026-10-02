@@ -1,4 +1,11 @@
-"""Laya multilingual intent classification."""
+"""System One intent classification for the Laya sidecar and the Jev cloud API.
+
+Both backends answer the same ``state`` + typed ``questions`` request, so they
+share one provider and one set of decision rules. The intent contract stays the
+single source of truth for the option set: a fine-tuned Laya checkpoint is
+positionally bound to it (see :func:`verify_model_contract`), so the criteria
+are never filtered per deployment.
+"""
 
 from __future__ import annotations
 
@@ -82,7 +89,7 @@ def score_text(
     max_len: int | None = None,
     head_max_len: int | None = None,
 ) -> tuple[str, float, dict[str, float]]:
-    """Raw option scores for one text, before any confidence gating."""
+    """Raw option scores for one text using the frozen contract question."""
 
     raw = client.predict(
         # Keep the state minimal. Adding metadata such as source_type moves the
@@ -92,14 +99,25 @@ def score_text(
         max_len=max_len,
         head_max_len=head_max_len,
     )
-    label, answer_confidence, probabilities = _parse_choice(raw)
+    return _interpret(raw, source="Laya")
+
+
+def _interpret(
+    raw: Mapping[str, Any],
+    *,
+    source: str = "System One",
+) -> tuple[str, float, dict[str, float]]:
+    """Validate one raw response against the frozen intent contract."""
+
+    label, answer_confidence, probabilities = _parse_choice(raw, source=source)
     unknown = sorted(name for name in probabilities if name not in ALL_INTENT_LABELS)
     if unknown:
         raise LayaError(
-            "Laya returned probabilities for unknown intents: " + ", ".join(unknown)
+            f"{source} returned probabilities for unknown intents: "
+            + ", ".join(unknown)
         )
     if label not in ALL_INTENT_LABELS:
-        raise LayaError(f"Laya returned unknown intent: {label}")
+        raise LayaError(f"{source} returned unknown intent: {label}")
     return label, answer_confidence, probabilities
 
 
@@ -115,10 +133,14 @@ class LayaEvaluation:
     schema_version: str = INTENT_SCHEMA_VERSION
 
 
-class LayaUnderstandingProvider:
-    """Classifies one TaskEnvelope into the Agent's fixed intent catalog."""
+class SystemOneUnderstandingProvider:
+    """Classifies one TaskEnvelope into the Agent's fixed intent catalog.
 
-    name = "laya"
+    ``name`` labels the backend in events (``laya`` / ``jev``). The protocol and
+    the decision rules are identical; only the endpoint, the thresholds and the
+    name of the confidence field differ between the two backends.
+    """
+
     model_backed = True
     estimated_model_calls = 1
     schema_version = INTENT_SCHEMA_VERSION
@@ -127,13 +149,15 @@ class LayaUnderstandingProvider:
         self,
         client: LayaClient,
         *,
+        name: str = "laya",
         min_confidence: float = DEFAULT_LAYAYA_MIN_CONFIDENCE,
         min_margin: float = DEFAULT_LAYAYA_MIN_MARGIN,
         max_len: int | None = None,
         head_max_len: int | None = None,
     ) -> None:
         self.client = client
-        self.model = f"laya:{getattr(client, 'model', 'unknown')}"
+        self.name = str(name)
+        self.model = f"{self.name}:{getattr(client, 'model', 'unknown')}"
         self.min_confidence = _clamp(min_confidence)
         self.min_margin = _clamp(min_margin)
         self.max_len = max_len
@@ -142,6 +166,8 @@ class LayaUnderstandingProvider:
         self.last_fallback_reason: str | None = None
         self.last_answer_confidence: float | None = None
         self.last_margin: float | None = None
+        # The versioned model id the backend reported, when it reports one.
+        self.last_model: str | None = None
 
     def understand(
         self,
@@ -161,6 +187,7 @@ class LayaUnderstandingProvider:
         self.last_fallback_reason = None
         self.last_answer_confidence = None
         self.last_margin = None
+        self.last_model = None
 
         text = str(task.input.get("text") or "").strip()
         if not text:
@@ -169,7 +196,7 @@ class LayaUnderstandingProvider:
                     is_task=False,
                     goal="",
                     confidence=1.0,
-                    reason="laya: empty input",
+                    reason=f"{self.name}: empty input",
                 ),
                 label="non_task",
                 answer_confidence=1.0,
@@ -187,12 +214,16 @@ class LayaUnderstandingProvider:
         # planner. Laya keeps its own stricter fast-path gate.
         threshold = max(self.min_confidence, runtime_threshold)
         self.last_call_count = 1
-        label, answer_confidence, probabilities = score_text(
-            self.client,
-            text,
+        raw = self.client.predict(
+            # Keep the state minimal. Adding metadata such as source_type moves
+            # the model's distribution substantially.
+            {"text": text},
+            build_question(),
             max_len=self.max_len,
             head_max_len=self.head_max_len,
         )
+        self.last_model = _response_model(raw)
+        label, answer_confidence, probabilities = _interpret(raw, source=self.name)
         ordered = sorted(probabilities.items(), key=lambda item: item[1], reverse=True)
         second_probability = ordered[1][1] if len(ordered) > 1 else 0.0
         margin = answer_confidence - second_probability
@@ -246,7 +277,7 @@ class LayaUnderstandingProvider:
                         )
                     ],
                     confidence=answer_confidence,
-                    reason=f"laya: {label}",
+                    reason=f"{self.name}: {label}",
                 ),
                 label=label,
                 answer_confidence=answer_confidence,
@@ -262,7 +293,7 @@ class LayaUnderstandingProvider:
                     task_kind="action",
                     intent_candidates=[],
                     confidence=answer_confidence,
-                    reason="laya: other_task",
+                    reason=f"{self.name}: other_task",
                 ),
                 label=label,
                 answer_confidence=answer_confidence,
@@ -277,7 +308,7 @@ class LayaUnderstandingProvider:
                 task_kind=None,
                 intent_candidates=[],
                 confidence=answer_confidence,
-                reason="laya: non_task",
+                reason=f"{self.name}: non_task",
             ),
             label=label,
             answer_confidence=answer_confidence,
@@ -304,7 +335,7 @@ class LayaUnderstandingProvider:
                 task_kind=None,
                 intent_candidates=[],
                 confidence=answer_confidence,
-                reason=f"laya uncertain: {reason}",
+                reason=f"{self.name} uncertain: {reason}",
             ),
             label=label,
             answer_confidence=answer_confidence,
@@ -315,40 +346,102 @@ class LayaUnderstandingProvider:
         )
 
 
-def _parse_choice(raw: Mapping[str, Any]) -> tuple[str, float, dict[str, float]]:
+class LayaUnderstandingProvider(SystemOneUnderstandingProvider):
+    """The Laya sidecar provider, kept as a named subclass for existing callers."""
+
+    def __init__(
+        self,
+        client: LayaClient,
+        *,
+        min_confidence: float = DEFAULT_LAYAYA_MIN_CONFIDENCE,
+        min_margin: float = DEFAULT_LAYAYA_MIN_MARGIN,
+        max_len: int | None = None,
+        head_max_len: int | None = None,
+    ) -> None:
+        super().__init__(
+            client,
+            name="laya",
+            min_confidence=min_confidence,
+            min_margin=min_margin,
+            max_len=max_len,
+            head_max_len=head_max_len,
+        )
+
+
+class JevUnderstandingProvider(SystemOneUnderstandingProvider):
+    """The Jev cloud provider reached through AIHubMix / TypeSafe."""
+
+    def __init__(
+        self,
+        client: LayaClient,
+        *,
+        min_confidence: float = DEFAULT_LAYAYA_MIN_CONFIDENCE,
+        min_margin: float = DEFAULT_LAYAYA_MIN_MARGIN,
+        max_len: int | None = None,
+        head_max_len: int | None = None,
+    ) -> None:
+        super().__init__(
+            client,
+            name="jev",
+            min_confidence=min_confidence,
+            min_margin=min_margin,
+            max_len=max_len,
+            head_max_len=head_max_len,
+        )
+
+
+def _response_model(raw: Mapping[str, Any]) -> str | None:
+    value = raw.get("model")
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return None
+
+
+def _parse_choice(
+    raw: Mapping[str, Any],
+    *,
+    source: str = "System One",
+) -> tuple[str, float, dict[str, float]]:
     answers = raw.get("answers")
     if not isinstance(answers, Mapping):
-        raise LayaError("Laya response has no answers object")
+        raise LayaError(f"{source} response has no answers object")
     answer = answers.get("intent")
     if not isinstance(answer, Mapping):
-        raise LayaError("Laya response has no intent answer")
+        raise LayaError(f"{source} response has no intent answer")
 
     label = answer.get("choice")
     if not isinstance(label, str) or not label.strip():
-        raise LayaError("Laya intent answer has no choice")
+        raise LayaError(f"{source} intent answer has no choice")
 
     raw_probabilities = answer.get("probabilities")
     if not isinstance(raw_probabilities, Mapping) or not raw_probabilities:
-        raise LayaError("Laya intent answer has no probabilities")
+        raise LayaError(f"{source} intent answer has no probabilities")
     probabilities: dict[str, float] = {}
     for name, value in raw_probabilities.items():
         if not isinstance(name, str) or not name:
-            raise LayaError("Laya intent probabilities contain an invalid name")
+            raise LayaError(f"{source} intent probabilities contain an invalid name")
         if isinstance(value, bool) or not isinstance(value, (int, float)):
-            raise LayaError("Laya intent probabilities contain a non-number")
+            raise LayaError(f"{source} intent probabilities contain a non-number")
         number = float(value)
         if not math.isfinite(number) or number < 0.0 or number > 1.0:
-            raise LayaError("Laya intent probability is outside [0, 1]")
+            raise LayaError(f"{source} intent probability is outside [0, 1]")
         probabilities[name] = number
     if label not in probabilities:
-        raise LayaError("Laya choice is missing from its probability distribution")
+        raise LayaError(
+            f"{source} choice is missing from its probability distribution"
+        )
 
-    raw_confidence = answer.get("answer_confidence", probabilities[label])
+    # Laya's local server calls it answer_confidence; Jev's cloud API calls it
+    # confidence and derives it from the distribution. Never fall back to the
+    # top probability: those two numbers are not the same quantity.
+    raw_confidence = answer.get("confidence")
+    if raw_confidence is None:
+        raw_confidence = answer.get("answer_confidence")
     if isinstance(raw_confidence, bool) or not isinstance(raw_confidence, (int, float)):
-        raise LayaError("Laya answer_confidence is not a number")
+        raise LayaError(f"{source} answer confidence is not a number")
     answer_confidence = float(raw_confidence)
     if not math.isfinite(answer_confidence) or not 0.0 <= answer_confidence <= 1.0:
-        raise LayaError("Laya answer_confidence is outside [0, 1]")
+        raise LayaError(f"{source} answer confidence is outside [0, 1]")
     return label.strip(), answer_confidence, probabilities
 
 

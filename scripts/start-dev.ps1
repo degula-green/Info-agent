@@ -210,7 +210,15 @@ if (-not (Test-Path (Join-Path $webPath 'node_modules'))) {
 # does not install Torch and the Laya model stack.
 Import-EnvFile (Join-Path $agentPath '.env')
 $configuredUnderstanding = [string]$env:AGENT_UNDERSTANDING_PROVIDER
-$intentEnabled = @('laya', 'hybrid') -contains $configuredUnderstanding.ToLowerInvariant()
+$configuredPrimary = [string]$env:AGENT_UNDERSTANDING_PRIMARY
+if (-not $configuredPrimary) { $configuredPrimary = 'laya' }
+# The Laya sidecar is only needed when Laya is the classifier that actually
+# runs; hybrid with PRIMARY=jev never builds it, so skip the torch install.
+$understandingProvider = $configuredUnderstanding.ToLowerInvariant()
+$understandingPrimary = $configuredPrimary.ToLowerInvariant()
+$intentEnabled =
+    $understandingProvider -eq 'laya' -or
+    ($understandingProvider -eq 'hybrid' -and $understandingPrimary -eq 'laya')
 
 if ($uv) {
     Write-Host 'Synchronizing RAG virtual environment...'
@@ -251,6 +259,15 @@ Import-EnvFile (Join-Path $corePath '.env')
 Import-EnvFile (Join-Path $knowledgePath '.env')
 Import-EnvFile (Join-Path $ragPath '.env')
 Import-EnvFile (Join-Path $agentPath '.env')
+if (-not $env:AGENT_JWT_PUBLIC_KEY_FILE -and $env:CORE_JWT_PUBLIC_KEY_FILE) {
+    $corePublicKey = $env:CORE_JWT_PUBLIC_KEY_FILE
+    if (-not [IO.Path]::IsPathRooted($corePublicKey)) {
+        $corePublicKey = Join-Path $corePath $corePublicKey
+    }
+    $env:AGENT_JWT_PUBLIC_KEY_FILE = [IO.Path]::GetFullPath($corePublicKey)
+}
+if (-not $env:AGENT_JWT_ISSUER) { $env:AGENT_JWT_ISSUER = $env:CORE_JWT_ISSUER }
+if (-not $env:AGENT_JWT_AUDIENCE) { $env:AGENT_JWT_AUDIENCE = $env:CORE_JWT_AUDIENCE }
 if ($intentEnabled) {
     Import-EnvFile (Join-Path $intentPath '.env')
 }
@@ -290,6 +307,18 @@ if (-not $env:RAG_MINIO_SECURE) { $env:RAG_MINIO_SECURE = if ($env:KNOWLEDGE_MIN
 if (-not $env:RAG_REDIS_URL) { $env:RAG_REDIS_URL = $env:KNOWLEDGE_REDIS_URL }
 if (-not $env:RAG_REDIS_DATABASE) { $env:RAG_REDIS_DATABASE = '1' }
 if (-not $env:RAG_REDIS_INBOUND_STREAM) { $env:RAG_REDIS_INBOUND_STREAM = $env:KNOWLEDGE_REDIS_OUTBOUND_STREAM }
+if (-not $env:RAG_AGENT_SERVICE_TOKEN) { $env:RAG_AGENT_SERVICE_TOKEN = 'local-development-only' }
+if (-not $env:AGENT_CORE_BASE_URL) { $env:AGENT_CORE_BASE_URL = 'http://127.0.0.1:8080' }
+if (-not $env:AGENT_RAG_BASE_URL) { $env:AGENT_RAG_BASE_URL = 'http://127.0.0.1:8000' }
+if (-not $env:AGENT_RAG_SERVICE_TOKEN) { $env:AGENT_RAG_SERVICE_TOKEN = $env:RAG_AGENT_SERVICE_TOKEN }
+if (-not $env:AGENT_PLANNER_PROVIDER) { $env:AGENT_PLANNER_PROVIDER = 'routing' }
+if (-not $env:RAG_AGENT_METADATA_TOOLS_ENABLED) { $env:RAG_AGENT_METADATA_TOOLS_ENABLED = if ($env:AGENT_PLANNER_PROVIDER -eq 'routing') { 'true' } else { 'false' } }
+if (-not $env:AGENT_RAG_AGENT_TOOLS_ENABLED) { $env:AGENT_RAG_AGENT_TOOLS_ENABLED = $env:RAG_AGENT_METADATA_TOOLS_ENABLED }
+if (-not $env:AGENT_DATABASE_URL) { $env:AGENT_DATABASE_URL = $env:KNOWLEDGE_DATABASE_URL }
+if (-not $env:AGENT_REDIS_URL) { $env:AGENT_REDIS_URL = $env:KNOWLEDGE_REDIS_URL }
+if (-not $env:AGENT_REDIS_DATABASE) { $env:AGENT_REDIS_DATABASE = '1' }
+if (-not $env:AGENT_KNOWLEDGE_BASE_URL) { $env:AGENT_KNOWLEDGE_BASE_URL = 'http://127.0.0.1:8090' }
+if (-not $env:AGENT_KNOWLEDGE_SERVICE_TOKEN) { $env:AGENT_KNOWLEDGE_SERVICE_TOKEN = $env:KNOWLEDGE_INTERNAL_SERVICE_TOKEN }
 
 # Restart the complete local stack.  The previous script only stopped the
 # WeChat collector, leaving stale Core/Knowledge/RAG/Web/Nginx processes on

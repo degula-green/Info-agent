@@ -60,7 +60,13 @@ PROJECTION_TRANSITIONS: dict[ProjectionStatus, frozenset[ProjectionStatus]] = {
         {ProjectionStatus.READY, ProjectionStatus.RETRY_WAIT, ProjectionStatus.FAILED}
     ),
     ProjectionStatus.RETRY_WAIT: frozenset(
-        {ProjectionStatus.INDEXING, ProjectionStatus.FAILED}
+        {
+            # A repeated failure refreshes retry_count/next_retry_at while the
+            # projection stays in the same retry_wait state.
+            ProjectionStatus.RETRY_WAIT,
+            ProjectionStatus.INDEXING,
+            ProjectionStatus.FAILED,
+        }
     ),
     ProjectionStatus.READY: frozenset(
         {ProjectionStatus.READY, ProjectionStatus.DELETED}

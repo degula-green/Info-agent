@@ -33,6 +33,15 @@ Service2/Knowledge -> Redis Stream -> RAG Dispatcher
 | `knowledge_item_id` | `uuid` | 是 | KnowledgeItem ID |
 | `source_conversation_id` | `uuid/null` | 平台会话必填 | Knowledge 内部会话 UUID |
 | `source_conversation_type` | `string/null` | 否 | `group` 或 `private` |
+| `source_conversation_name` | `string/null` | 平台会话必填 | 群聊或私聊名称 |
+| `source_platform` | `string/null` | 平台会话必填 | `feishu`、`wecom`、`wechat` |
+| `external_conversation_id` | `string/null` | 否 | 第三方平台会话 ID |
+| `source_message_id` | `uuid/null` | 消息和聊天附件必填 | 消息 ID；附件为父消息 ID |
+| `sender_identity_id` | `uuid/null` | 消息和聊天附件必填 | 发送人身份 ID |
+| `sender_display_name` | `string/null` | 消息和聊天附件必填 | 发送人显示名称 |
+| `sender_platform` | `string/null` | 消息和聊天附件必填 | 发送平台 |
+| `message_type` | `string/null` | 消息和聊天附件必填 | `text`、`file`、`image` 等 |
+| `sent_at` | `string/null` | 消息和聊天附件必填 | 消息发送时间，RFC3339 |
 | `source_audience_policy` | `string` | 是 | 来源受众策略 |
 | `content_version` | `integer` | 是 | 内容版本 |
 | `acl_version` | `integer` | 是 | ACL 版本 |
@@ -46,6 +55,8 @@ source_conversation_members
 organization_members
 owner_only
 ```
+
+本地上传文件不要求携带 conversation 和 sender 字段。聊天消息和聊天附件在处理完成后必须携带上述字段。
 
 ## 4. 幂等
 

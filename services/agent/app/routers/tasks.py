@@ -6,11 +6,12 @@ import asyncio
 import json
 from typing import Any, AsyncIterator
 
-from fastapi import APIRouter, Header, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from app.application.task_service import TaskNotFoundError, TaskPermissionError, TaskStateError
+from app.auth import AuthenticatedUser, current_user, current_user_id
 from app.container import AgentContainer
 from app.infrastructure.attachment_store import RedisAttachmentStore
 from app.kernel.approval import ApprovalError
@@ -53,15 +54,6 @@ class DecisionBody(BaseModel):
     arguments: dict[str, Any] | None = None
 
 
-def _current_user(x_agent_user_id: str | None) -> str:
-    container = get_container()
-    user = (x_agent_user_id or "").strip()
-    if user:
-        return user
-    fallback = getattr(container.settings, "default_user_id", "") or "dev-user"
-    return fallback
-
-
 def get_attachment_store() -> RedisAttachmentStore:
     """获取附件存储实例"""
     import redis
@@ -76,7 +68,7 @@ def get_attachment_store() -> RedisAttachmentStore:
 @router.post("/tasks", status_code=202)
 def create_task(
     body: CreateTaskBody,
-    x_agent_user_id: str | None = Header(default=None, alias="X-Agent-User-Id"),
+    user: AuthenticatedUser = Depends(current_user),
 ) -> dict[str, Any]:
     """Accepts a chat message or a collected message; the understanding layer decides.
 
@@ -94,7 +86,7 @@ def create_task(
 
     # 校验附件所有权
     if body.attachment_ids:
-        owner_id = _current_user(x_agent_user_id)
+        owner_id = user.user_id
         # Only attachment-bearing tasks need the attachment store. Building it
         # eagerly made every plain chat turn depend on Redis.
         store = get_attachment_store()
@@ -105,11 +97,16 @@ def create_task(
 
     if body.steps:
         payload["steps"] = body.steps
+    source_ref = dict(body.source_ref)
+    source_ref.pop("organization_id", None)
+    organization_id = container.core_client.current_organization(user.access_token)
+    if organization_id:
+        source_ref["organization_id"] = organization_id
     task = container.task_service.create_task(
-        owner_user_id=_current_user(x_agent_user_id),
+        owner_user_id=user.user_id,
         source_type=body.source_type,
         payload=payload,
-        source_ref=body.source_ref,
+        source_ref=source_ref,
         constraints=body.constraints,
         client_message_id=body.client_message_id,
     )
@@ -124,14 +121,14 @@ def create_task(
 def list_tasks(
     status: str = "",
     limit: int = 50,
-    x_agent_user_id: str | None = Header(default=None, alias="X-Agent-User-Id"),
+    owner_user_id: str = Depends(current_user_id),
 ) -> dict[str, Any]:
     """Lists the caller's Tasks so a client can discover fan-out and completed work."""
 
     container = get_container()
     statuses = [item.strip() for item in status.split(",") if item.strip()]
     items = container.task_service.list_tasks(
-        owner_user_id=_current_user(x_agent_user_id),
+        owner_user_id=owner_user_id,
         statuses=statuses or None,
         limit=min(max(limit, 1), 200),
     )
@@ -141,11 +138,11 @@ def list_tasks(
 @router.get("/tasks/{task_id}")
 def get_task(
     task_id: str,
-    x_agent_user_id: str | None = Header(default=None, alias="X-Agent-User-Id"),
+    owner_user_id: str = Depends(current_user_id),
 ) -> dict[str, Any]:
     container = get_container()
     try:
-        task = container.task_service.get_task(task_id, owner_user_id=_current_user(x_agent_user_id))
+        task = container.task_service.get_task(task_id, owner_user_id=owner_user_id)
     except TaskNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except TaskPermissionError as exc:
@@ -156,10 +153,10 @@ def get_task(
 @router.get("/tasks/{task_id}/plan")
 def get_plan(
     task_id: str,
-    x_agent_user_id: str | None = Header(default=None, alias="X-Agent-User-Id"),
+    owner_user_id: str = Depends(current_user_id),
 ) -> dict[str, Any]:
     container = get_container()
-    container.task_service.get_task(task_id, owner_user_id=_current_user(x_agent_user_id))
+    container.task_service.get_task(task_id, owner_user_id=owner_user_id)
     plan = container.task_service.get_active_plan(task_id)
     return {"plan": plan.model_dump(mode="json") if plan else None}
 
@@ -167,20 +164,20 @@ def get_plan(
 @router.get("/tasks/{task_id}/observations")
 def list_observations(
     task_id: str,
-    x_agent_user_id: str | None = Header(default=None, alias="X-Agent-User-Id"),
+    owner_user_id: str = Depends(current_user_id),
 ) -> dict[str, Any]:
     container = get_container()
-    container.task_service.get_task(task_id, owner_user_id=_current_user(x_agent_user_id))
+    container.task_service.get_task(task_id, owner_user_id=owner_user_id)
     observations = container.task_service.list_observations(task_id)
     return {"items": [item.model_dump(mode="json") for item in observations]}
 
 
 @router.get("/approvals")
 def list_approvals(
-    x_agent_user_id: str | None = Header(default=None, alias="X-Agent-User-Id"),
+    owner_user_id: str = Depends(current_user_id),
 ) -> dict[str, Any]:
     container = get_container()
-    items = container.store.list_approvals(owner_user_id=_current_user(x_agent_user_id))
+    items = container.store.list_approvals(owner_user_id=owner_user_id)
     payload: list[dict[str, Any]] = []
     for item in items:
         body = item.model_dump(mode="json")
@@ -200,13 +197,13 @@ def list_approvals(
 def approve(
     approval_id: str,
     body: DecisionBody,
-    x_agent_user_id: str | None = Header(default=None, alias="X-Agent-User-Id"),
+    owner_user_id: str = Depends(current_user_id),
 ) -> dict[str, Any]:
     container = get_container()
     try:
         approval = container.execution_service.approval_gateway.decide(
             approval_id,
-            owner_user_id=_current_user(x_agent_user_id),
+            owner_user_id=owner_user_id,
             approve=True,
             version=body.version,
             arguments=body.arguments,
@@ -220,13 +217,13 @@ def approve(
 def reject(
     approval_id: str,
     body: DecisionBody,
-    x_agent_user_id: str | None = Header(default=None, alias="X-Agent-User-Id"),
+    owner_user_id: str = Depends(current_user_id),
 ) -> dict[str, Any]:
     container = get_container()
     try:
         approval = container.execution_service.approval_gateway.decide(
             approval_id,
-            owner_user_id=_current_user(x_agent_user_id),
+            owner_user_id=owner_user_id,
             approve=False,
             version=body.version,
         )
@@ -239,14 +236,14 @@ def reject(
 def submit_input(
     task_id: str,
     body: InputBody,
-    x_agent_user_id: str | None = Header(default=None, alias="X-Agent-User-Id"),
+    owner_user_id: str = Depends(current_user_id),
 ) -> dict[str, Any]:
     container = get_container()
     payload: dict[str, Any] = {"text": body.text} if body.text else {}
     payload.update(body.fields)
     try:
         task = container.task_service.submit_input(
-            task_id, owner_user_id=_current_user(x_agent_user_id), payload=payload
+            task_id, owner_user_id=owner_user_id, payload=payload
         )
     except (TaskNotFoundError, TaskPermissionError, TaskStateError) as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -256,11 +253,11 @@ def submit_input(
 @router.post("/tasks/{task_id}/cancel")
 def cancel_task(
     task_id: str,
-    x_agent_user_id: str | None = Header(default=None, alias="X-Agent-User-Id"),
+    owner_user_id: str = Depends(current_user_id),
 ) -> dict[str, Any]:
     container = get_container()
     try:
-        task = container.task_service.cancel(task_id, owner_user_id=_current_user(x_agent_user_id))
+        task = container.task_service.cancel(task_id, owner_user_id=owner_user_id)
     except (TaskNotFoundError, TaskPermissionError, TaskStateError) as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     return task.model_dump(mode="json")
@@ -281,11 +278,11 @@ async def stream_task_events(
     request: Request,
     after: int = 0,
     timeout_seconds: float = 30.0,
-    x_agent_user_id: str | None = Header(default=None, alias="X-Agent-User-Id"),
+    owner_user_id: str = Depends(current_user_id),
 ) -> StreamingResponse:
     container = get_container()
     try:
-        container.task_service.get_task(task_id, owner_user_id=_current_user(x_agent_user_id))
+        container.task_service.get_task(task_id, owner_user_id=owner_user_id)
     except TaskNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except TaskPermissionError as exc:
@@ -329,13 +326,13 @@ async def stream_task_events(
 @router.post("/tasks/{task_id}/run")
 def run_task_now(
     task_id: str,
-    x_agent_user_id: str | None = Header(default=None, alias="X-Agent-User-Id"),
+    owner_user_id: str = Depends(current_user_id),
 ) -> dict[str, Any]:
     """Synchronous drive used by operators and tests; the worker is the normal path."""
 
     container = get_container()
     try:
-        container.task_service.get_task(task_id, owner_user_id=_current_user(x_agent_user_id))
+        container.task_service.get_task(task_id, owner_user_id=owner_user_id)
     except TaskNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except TaskPermissionError as exc:

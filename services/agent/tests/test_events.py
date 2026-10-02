@@ -9,7 +9,7 @@ from fastapi.testclient import TestClient
 from app.kernel.models import TaskEvent
 from tests.support import build_test_container, create_task, make_app
 
-USER = {"X-Agent-User-Id": "user-1"}
+USER = {"Authorization": "Bearer user-1-token"}
 
 
 def test_events_have_unique_sequences_and_support_replay() -> None:

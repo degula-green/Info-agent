@@ -23,11 +23,15 @@ class IntegrationError(RuntimeError):
         status: int | None = None,
         retryable: bool = False,
         error_code: str | None = None,
+        retry_after: float | None = None,
     ):
         super().__init__(message)
         self.status = status
         self.retryable = retryable
         self.error_code = error_code
+        # Seconds the server asked us to wait, when it said so. None means the
+        # caller should use its own backoff ladder.
+        self.retry_after = retry_after
 
 
 @dataclass(frozen=True)
@@ -87,6 +91,7 @@ class HttpClient:
                 status=exc.code,
                 retryable=retryable,
                 error_code=code,
+                retry_after=_retry_after(exc),
             ) from exc
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
             raise IntegrationError("remote HTTP request failed", retryable=True) from exc
@@ -128,6 +133,24 @@ def _error_code(exc: urllib.error.HTTPError) -> str | None:
         return None
     code = "".join(character for character in str(value)[:64] if character.isprintable())
     return code or None
+
+
+def _retry_after(exc: urllib.error.HTTPError) -> float | None:
+    """The numeric ``Retry-After`` the server sent, if it sent one."""
+
+    try:
+        raw = exc.headers.get("Retry-After") if exc.headers else None
+    except Exception:  # noqa: BLE001 - a missing header must not mask the error
+        return None
+    if raw is None:
+        return None
+    try:
+        seconds = float(str(raw).strip())
+    except (TypeError, ValueError):
+        return None
+    if seconds < 0:
+        return None
+    return seconds
 
 
 def with_query(url: str, **params: Any) -> str:

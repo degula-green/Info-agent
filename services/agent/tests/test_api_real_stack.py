@@ -10,8 +10,12 @@ from __future__ import annotations
 import importlib
 import os
 import time
+from datetime import datetime, timedelta, timezone
 
+import jwt
 import pytest
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
 from fastapi.testclient import TestClient
 
 TEST_DATABASE_URL = os.getenv("AGENT_TEST_DATABASE_URL", "")
@@ -23,11 +27,22 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-def test_api_startup_wires_the_real_agent_stack() -> None:
+def test_api_startup_wires_the_real_agent_stack(tmp_path) -> None:
     # ``app.config.settings`` is built at import time, so the test environment
     # must be in place before the application module is (re)loaded.
     os.environ["AGENT_DATABASE_URL"] = TEST_DATABASE_URL
     os.environ["AGENT_REDIS_URL"] = TEST_REDIS_URL
+    private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    public_key_path = tmp_path / "jwt-public.pem"
+    public_key_path.write_bytes(
+        private_key.public_key().public_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PublicFormat.SubjectPublicKeyInfo,
+        )
+    )
+    os.environ["AGENT_JWT_PUBLIC_KEY_FILE"] = str(public_key_path)
+    os.environ["AGENT_JWT_ISSUER"] = "info-agent-core"
+    os.environ["AGENT_JWT_AUDIENCE"] = "info-agent-api"
     importlib.reload(importlib.import_module("app.config"))
     main_module = importlib.reload(importlib.import_module("app.main"))
 
@@ -35,7 +50,23 @@ def test_api_startup_wires_the_real_agent_stack() -> None:
     from app.infrastructure.redis.streams import RedisTaskPublisher
     from app.routers import tasks
 
-    headers = {"X-Agent-User-Id": "user-1"}
+    now = datetime.now(timezone.utc)
+    token = jwt.encode(
+        {
+            "sub": "7d0779ab-9ea4-409e-a51c-842b5b9fb875",
+            "sid": "session-1",
+            "typ": "access",
+            "iss": "info-agent-core",
+            "aud": "info-agent-api",
+            "iat": now,
+            "nbf": now,
+            "exp": now + timedelta(minutes=15),
+        },
+        private_key,
+        algorithm="RS256",
+        headers={"kid": "v1"},
+    )
+    headers = {"Authorization": f"Bearer {token}"}
     with TestClient(main_module.app) as client:
         assert client.get("/health").json()["status"] == "ok"
         container = tasks.get_container()

@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal, Mapping
+from typing import Any, Iterable, Literal, Mapping
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -109,6 +109,52 @@ BOUNDARY_INTENTS = frozenset(
 
 ALL_INTENT_LABELS = frozenset(INTENT_OPTION_ORDER)
 
+# Availability overlay: which registered capability can actually execute each
+# business intent. This is deliberately NOT part of intent_contract.json. The
+# contract is the model's frozen label space; the capability registry changes
+# per deployment. ``None`` means no capability implements the intent yet, so a
+# classifier may still name it but the planner must report it as unsupported.
+INTENT_REQUIRES: dict[str, frozenset[str] | None] = {
+    "todo.create": frozenset({"todo.create"}),
+    "knowledge.answer": frozenset({"knowledge.search_content"}),
+    "web.research": frozenset({"web.research"}),
+    "compliance.assess": None,
+    "form.complete": None,
+}
+
+
+def _partition_intents(
+    capability_names: Iterable[str],
+) -> tuple[tuple[IntentDefinition, ...], tuple[IntentDefinition, ...]]:
+    available = frozenset(
+        str(name).strip() for name in capability_names if str(name).strip()
+    )
+    offered: list[IntentDefinition] = []
+    withheld: list[IntentDefinition] = []
+    for item in INTENT_CATALOG:
+        requires = INTENT_REQUIRES.get(item.name)
+        if requires is not None and requires <= available:
+            offered.append(item)
+        else:
+            withheld.append(item)
+    return tuple(offered), tuple(withheld)
+
+
+def available_intents(
+    capability_names: Iterable[str],
+) -> tuple[IntentDefinition, ...]:
+    """Business intents some registered capability can execute right now."""
+
+    return _partition_intents(capability_names)[0]
+
+
+def unavailable_intents(
+    capability_names: Iterable[str],
+) -> tuple[IntentDefinition, ...]:
+    """Intents the classifier may name but no registered capability can run."""
+
+    return _partition_intents(capability_names)[1]
+
 INTENT_TASK_KINDS: dict[str, TaskKind] = {
     item.name: item.task_kind  # type: ignore[misc]
     for item in INTENT_DEFINITIONS
@@ -195,10 +241,21 @@ class TaskUnderstandingDraft(BaseModel):
         )
 
 
-def intent_catalog_text() -> str:
+def intent_catalog_text(
+    intents: Iterable[IntentDefinition] | None = None,
+) -> str:
+    """Render the catalog for the LLM prompt.
+
+    The optional subset lets a caller show only the intents this deployment can
+    execute. Laya / Jev ignore it: their option set is frozen by the contract.
+    """
+
+    selected = INTENT_CATALOG if intents is None else tuple(intents)
+    if not selected:
+        return "- 当前部署没有可执行的意图；所有任务都应返回 intent_candidates=[]"
     return "\n".join(
         f"- {item.name}: {item.description}; examples: {'; '.join(item.examples)}"
-        for item in INTENT_CATALOG
+        for item in selected
     )
 
 

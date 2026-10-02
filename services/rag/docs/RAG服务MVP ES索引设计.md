@@ -121,6 +121,8 @@ sha256(
 | `scope_id` | `keyword` | 是 | Scope ID |
 | `scope_key` | `keyword` | 是 | Scope 精确隔离 |
 | `source_conversation_type` | `keyword` | 是 | `group/private` |
+| `source_conversation_name` | `text` + `keyword` 子字段 | 是 | 群聊或私聊名称检索 |
+| `source_platform` | `keyword` | 是 | 来源会话所属平台 |
 | `source_audience_policy` | `keyword` | 是 | 来源受众策略 |
 | `auth_partition_key` | `keyword` | 是 | 分支权限分区过滤 |
 | `auth_object_key` | `keyword` | 是 | protected 精确对象过滤 |
@@ -151,7 +153,10 @@ sha256(
 |---|---|---|---|
 | `title` | `text` + `keyword` 子字段 | 是 | 标题检索和展示 |
 | `file_name` | `text` + `keyword` 子字段 | 是 | 文件名检索和展示 |
+| `file_extension` | `keyword` | 是 | 规范化文件扩展名过滤 |
+| `mime_type` | `keyword` | 是 | MIME 类型过滤 |
 | `heading_path` | `text` + `keyword` 子字段 | 是 | 章节路径检索和展示 |
+| `message_type` | `keyword` | 是 | 消息类型过滤 |
 | `sender_identity_id` | `keyword` | 是 | 发送人外部身份记录 ID |
 | `sender_platform` | `keyword` | 是 | 发送人平台 |
 | `sender_display_name` | `text` + `keyword` 子字段 | 是 | 发送人检索 |
@@ -166,6 +171,19 @@ title
 file_name
 heading_path
 source_kind
+sender_identity_id
+sender_display_name
+sender_platform
+source_conversation_id
+source_conversation_name
+source_conversation_type
+source_platform
+external_conversation_id
+source_message_id
+message_type
+file_extension
+mime_type
+sent_at
 ```
 
 `source_locator` 建议字段：

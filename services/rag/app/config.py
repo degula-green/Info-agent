@@ -220,6 +220,7 @@ class Settings:
     knowledge_timeout_seconds: float = _float("RAG_KNOWLEDGE_TIMEOUT_SECONDS", 10.0)
     knowledge_callback_enabled: bool = _bool("RAG_KNOWLEDGE_CALLBACK_ENABLED", True)
     knowledge_callback_path: str = _text("RAG_KNOWLEDGE_CALLBACK_PATH", "/internal/knowledge/{knowledge_item_id}/rag-result")
+    agent_service_token: str = _text("RAG_AGENT_SERVICE_TOKEN")
 
     # Redis Streams.
     redis_url: str = _text("RAG_REDIS_URL")

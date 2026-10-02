@@ -64,6 +64,23 @@ class Settings:
 
     http_host: str = _text("0.0.0.0", "AGENT_HTTP_HOST", "agent_HTTP_HOST")
     http_port: int = _int(8080, "AGENT_HTTP_PORT", "agent_HTTP_PORT")
+    jwt_public_key_file: str = _text(
+        "",
+        "AGENT_JWT_PUBLIC_KEY_FILE",
+        "agent_JWT_PUBLIC_KEY_FILE",
+    )
+    jwt_issuer: str = _text(
+        "info-agent-core",
+        "AGENT_JWT_ISSUER",
+        "agent_JWT_ISSUER",
+        "CORE_JWT_ISSUER",
+    )
+    jwt_audience: str = _text(
+        "info-agent-api",
+        "AGENT_JWT_AUDIENCE",
+        "agent_JWT_AUDIENCE",
+        "CORE_JWT_AUDIENCE",
+    )
 
     # PostgreSQL owns the authoritative Agent runtime state.
     database_url: str = _text("", "AGENT_DATABASE_URL", "agent_DATABASE_URL")
@@ -129,6 +146,24 @@ class Settings:
     knowledge_consumer_group: str = _text(
         "agent-workers", "AGENT_KNOWLEDGE_CONSUMER_GROUP", "agent_KNOWLEDGE_CONSUMER_GROUP"
     )
+    core_base_url: str = _text("", "AGENT_CORE_BASE_URL", "agent_CORE_BASE_URL")
+    core_timeout_seconds: float = _float(
+        5.0, "AGENT_CORE_TIMEOUT_SECONDS", "agent_CORE_TIMEOUT_SECONDS"
+    )
+    rag_base_url: str = _text("", "AGENT_RAG_BASE_URL", "agent_RAG_BASE_URL")
+    rag_service_token: str = _text(
+        "", "AGENT_RAG_SERVICE_TOKEN", "agent_RAG_SERVICE_TOKEN"
+    )
+    rag_timeout_seconds: float = _float(
+        30.0, "AGENT_RAG_TIMEOUT_SECONDS", "agent_RAG_TIMEOUT_SECONDS"
+    )
+    rag_agent_tools_enabled: bool = _bool(
+        False,
+        "AGENT_RAG_AGENT_TOOLS_ENABLED",
+        "agent_RAG_AGENT_TOOLS_ENABLED",
+        "RAG_AGENT_METADATA_TOOLS_ENABLED",
+        "rag_AGENT_METADATA_TOOLS_ENABLED",
+    )
     default_timezone: str = _text(
         "Asia/Shanghai", "AGENT_DEFAULT_TIMEZONE", "agent_DEFAULT_TIMEZONE"
     )
@@ -139,6 +174,10 @@ class Settings:
     )
     understanding_provider: str = _text(
         "rules", "AGENT_UNDERSTANDING_PROVIDER", "agent_UNDERSTANDING_PROVIDER"
+    )
+    # Which fast classifier hybrid runs before falling back to the LLM.
+    understanding_primary: str = _text(
+        "laya", "AGENT_UNDERSTANDING_PRIMARY", "agent_UNDERSTANDING_PRIMARY"
     )
     planner_provider: str = _text(
         "deterministic", "AGENT_PLANNER_PROVIDER", "agent_PLANNER_PROVIDER"
@@ -197,6 +236,24 @@ class Settings:
         0.15,
         "AGENT_LAYAYA_MIN_MARGIN",
         "agent_LAYAYA_MIN_MARGIN",
+    )
+    # Jev (TypeSafe System One) reached through AIHubMix. The gateway exposes
+    # the same /v1/systemone contract as the Laya sidecar, so both share one
+    # client; only the endpoint, model, thresholds and retry policy differ.
+    jev_base_url: str = _text("", "AGENT_JEV_BASE_URL", "agent_JEV_BASE_URL")
+    jev_api_key: str = _text("", "AGENT_JEV_API_KEY", "agent_JEV_API_KEY")
+    jev_model: str = _text("jev-1.13", "AGENT_JEV_MODEL", "agent_JEV_MODEL")
+    jev_timeout_seconds: float = _float(
+        10.0, "AGENT_JEV_TIMEOUT_SECONDS", "agent_JEV_TIMEOUT_SECONDS"
+    )
+    jev_max_retries: int = _int(
+        2, "AGENT_JEV_MAX_RETRIES", "agent_JEV_MAX_RETRIES"
+    )
+    jev_min_confidence: float = _float(
+        0.90, "AGENT_JEV_MIN_CONFIDENCE", "agent_JEV_MIN_CONFIDENCE"
+    )
+    jev_min_margin: float = _float(
+        0.15, "AGENT_JEV_MIN_MARGIN", "agent_JEV_MIN_MARGIN"
     )
     understanding_min_confidence: float = _float(
         0.70,

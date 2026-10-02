@@ -21,7 +21,12 @@ from app.kernel.models import (
 )
 
 WEB_RESEARCH_INTENT = "web.research"
-DEFAULT_WEB_INTENTS = frozenset({WEB_RESEARCH_INTENT})
+KNOWLEDGE_ANSWER_INTENT = "knowledge.answer"
+# Intents whose plan has to be composed from several capabilities. The
+# container adds ``knowledge.answer`` when the internal knowledge tools are
+# registered; otherwise the deterministic planner is the only one that can
+# serve it (attachments only).
+DEFAULT_LLM_INTENTS = frozenset({WEB_RESEARCH_INTENT})
 # Entries whose text arrives from collection rather than from a person typing.
 DEFAULT_DETERMINISTIC_SOURCE_TYPES = frozenset({"knowledge_event"})
 
@@ -36,12 +41,12 @@ class RoutingPlanner:
         *,
         deterministic,
         llm,
-        web_intents: frozenset[str] = DEFAULT_WEB_INTENTS,
+        llm_intents: frozenset[str] = DEFAULT_LLM_INTENTS,
         deterministic_source_types: frozenset[str] = DEFAULT_DETERMINISTIC_SOURCE_TYPES,
     ) -> None:
         self.deterministic = deterministic
         self.llm = llm
-        self.web_intents = frozenset(web_intents)
+        self.llm_intents = frozenset(llm_intents)
         self.deterministic_source_types = frozenset(deterministic_source_types)
 
     def set_validators(self, validators: dict) -> None:
@@ -61,7 +66,7 @@ class RoutingPlanner:
         if understanding is None:
             return self.deterministic
         intents = {item.name for item in understanding.intent_candidates}
-        if intents & self.web_intents:
+        if intents & self.llm_intents:
             return self.llm
         return self.deterministic
 

@@ -79,12 +79,17 @@ class KnowledgeEventIngress:
                 "event_id": event.get("event_id"),
                 "knowledge_item_id": fields.get("knowledge_item_id") or message_id,
                 "source_message_id": message_id,
+                "organization_id": fields.get("organization_id"),
                 "platform": fields.get("platform"),
+                "source_platform": fields.get("source_platform"),
                 "conversation_ingestion_id": fields.get("conversation_ingestion_id"),
                 "conversation_type": fields.get("conversation_type"),
+                "source_conversation_name": fields.get("source_conversation_name"),
                 "content_version": fields.get("content_version"),
                 "acl_version": fields.get("acl_version"),
+                "sender_identity_id": fields.get("sender_identity_id"),
                 "sender_display_name": fields.get("sender_display_name"),
+                "message_type": fields.get("message_type"),
                 "sent_at": fields.get("sent_at"),
             }.items()
             if value is not None

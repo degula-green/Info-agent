@@ -12,6 +12,16 @@ def context() -> ResourceContext:
             "resource_id": "00000000-0000-0000-0000-000000000001",
             "knowledge_item_id": "00000000-0000-0000-0000-000000000002",
             "source_audience_policy": "organization_members",
+            "source_message_id": "00000000-0000-0000-0000-000000000001",
+            "sender_identity_id": "00000000-0000-0000-0000-000000000005",
+            "sender_display_name": "张三",
+            "sender_platform": "feishu",
+            "source_conversation_id": "00000000-0000-0000-0000-000000000006",
+            "source_conversation_name": "财务项目群",
+            "source_conversation_type": "group",
+            "source_platform": "feishu",
+            "external_conversation_id": "external-chat-1",
+            "sent_at": "2026-10-01T10:30:00+08:00",
             "content_version": 1,
             "acl_version": 2,
             "content_hash": "0" * 64,
@@ -61,6 +71,11 @@ class DomainTests(unittest.TestCase):
         self.assertEqual(first.chunk_id, second.chunk_id)
         self.assertNotEqual(first.chunk_id, protected.chunk_id)
         self.assertEqual(first.logical_position_key, protected.logical_position_key)
+        self.assertEqual(first.context_header["sender_display_name"], "张三")
+        self.assertEqual(first.context_header["source_conversation_name"], "财务项目群")
+        self.assertEqual(first.es_source()["sender_display_name"], "张三")
+        self.assertEqual(first.es_source()["source_conversation_name"], "财务项目群")
+        self.assertEqual(first.es_source()["source_platform"], "feishu")
 
     def test_normalization_and_time_bucket(self) -> None:
         self.assertEqual(normalized_text(" A－B  C "), "abc")

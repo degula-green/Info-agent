@@ -50,6 +50,17 @@ def _context() -> ResourceContext:
             "resource_id": "00000000-0000-0000-0000-000000000001",
             "knowledge_item_id": "00000000-0000-0000-0000-000000000002",
             "source_audience_policy": "organization_members",
+            "source_message_id": "00000000-0000-0000-0000-000000000001",
+            "message_type": "text",
+            "sender_identity_id": "00000000-0000-0000-0000-000000000005",
+            "sender_display_name": "张三",
+            "sender_platform": "feishu",
+            "source_conversation_id": "00000000-0000-0000-0000-000000000006",
+            "source_conversation_name": "财务项目群",
+            "source_conversation_type": "group",
+            "source_platform": "feishu",
+            "external_conversation_id": "external-chat-1",
+            "sent_at": "2026-10-01T10:30:00+08:00",
             "content_version": 1,
             "acl_version": 1,
             "content_hash": "a" * 64,
@@ -71,6 +82,18 @@ class ElasticsearchContractTests(unittest.TestCase):
         created = store.create_indices()
         self.assertIn("rag_chunks_display_v1", created)
         self.assertIn(settings.elasticsearch_display_read_index, client.aliases)
+        properties = client.mappings["rag_chunks_display_v1"]["properties"]
+        self.assertIn("sender_display_name", properties)
+        self.assertIn("source_conversation_name", properties)
+        self.assertIn("source_platform", properties)
+        self.assertIn("message_type", properties)
+        self.assertIn("file_extension", properties)
+        self.assertIn("mime_type", properties)
+        context_properties = properties["context_header"]["properties"]
+        self.assertIn("sender_display_name", context_properties)
+        self.assertIn("source_conversation_name", context_properties)
+        self.assertIn("source_message_id", context_properties)
+        self.assertIn("sent_at", context_properties)
         chunk = Chunk.create(
             context=_context(),
             snapshot_id="snapshot",
@@ -86,6 +109,11 @@ class ElasticsearchContractTests(unittest.TestCase):
         chunk.embedding_dimensions = settings.embedding_dims
         self.assertEqual(store.index_chunks([chunk]), 1)
         self.assertEqual(len(client.bulk_calls), 1)
+        document = client.bulk_calls[0][1]
+        self.assertEqual(document["sender_display_name"], "张三")
+        self.assertEqual(document["source_conversation_name"], "财务项目群")
+        self.assertEqual(document["source_platform"], "feishu")
+        self.assertEqual(document["message_type"], "text")
 
 
 if __name__ == "__main__":

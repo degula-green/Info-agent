@@ -34,10 +34,14 @@ class _Embedding:
     model = "test-model"
     dimensions = settings.embedding_dims
 
-    def __init__(self, *, fail: bool = False) -> None:
+    def __init__(self, *, fail: bool = False, failures: int = 0) -> None:
         self.fail = fail
+        self.failures = failures
 
     def embed(self, texts):
+        if self.failures > 0:
+            self.failures -= 1
+            raise RuntimeError("embedding failed")
         if self.fail:
             raise RuntimeError("embedding failed")
         return [[0.1] * settings.embedding_dims for _ in texts]
@@ -144,6 +148,38 @@ class ProjectionRetryTests(unittest.TestCase):
         )[0]
         self.assertEqual(projection["status"], "retry_wait")
         self.assertEqual(projection["failure_stage"], "embedding")
+
+    def test_embedding_retry_can_fail_more_than_once(self) -> None:
+        indexer = _Indexer()
+        service = MVPIndexService(
+            repository=self.repository,
+            indexer=indexer,
+            embedding=_Embedding(failures=2),
+        )
+
+        for expected_retry_count in (1, 2):
+            with self.assertRaises(IndexStageError):
+                service.process(_job(self.context))
+            projection = self.repository.list_projection_records(
+                knowledge_item_id=self.context.knowledge_item_id,
+                content_version=self.context.content_version,
+            )[0]
+            self.assertEqual(projection["status"], "retry_wait")
+            self.assertEqual(projection["retry_count"], expected_retry_count)
+            self.repository.projections[0]["next_retry_at"] = datetime.now(
+                timezone.utc
+            )
+
+        result = service.process(_job(self.context))
+
+        self.assertEqual(result["status"], "ready")
+        projection = self.repository.list_projection_records(
+            knowledge_item_id=self.context.knowledge_item_id,
+            content_version=self.context.content_version,
+        )[0]
+        self.assertEqual(projection["status"], "ready")
+        self.assertEqual(projection["retry_count"], 2)
+        self.assertEqual(indexer.calls, 1)
 
     def test_es_retry_exhaustion_fails_projection_and_job_stage(self) -> None:
         indexer = _Indexer(failures=settings.index_max_retries)
