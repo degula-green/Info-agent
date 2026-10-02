@@ -126,7 +126,10 @@ class ContentResult(BaseModel):
     resource_type: str
     title: str | None = None
     sender_name: str | None = None
+    conversation_id: str | None = None
     conversation_name: str | None = None
+    conversation_type: str | None = None
+    conversation_platform: str | None = None
     sent_at: str | None = None
     best_score: float
     score_type: str = "rrf"
@@ -494,8 +497,17 @@ def _merge_content(
                     "resource_type": resource_type,
                     "title": _text(raw.get("title")),
                     "sender_name": _text((raw.get("sender") or {}).get("name")),
+                    "conversation_id": _text(
+                        (raw.get("conversation") or {}).get("id")
+                    ),
                     "conversation_name": _text(
                         (raw.get("conversation") or {}).get("name")
+                    ),
+                    "conversation_type": _text(
+                        (raw.get("conversation") or {}).get("type")
+                    ),
+                    "conversation_platform": _text(
+                        (raw.get("conversation") or {}).get("platform")
                     ),
                     "sent_at": _text(raw.get("sent_at")),
                     "best_score": float(raw.get("best_score") or 0),
@@ -591,7 +603,10 @@ def _answer_evidence(
                     "resource_type": result.resource_type,
                     "title": result.title,
                     "sender_name": result.sender_name,
+                    "conversation_id": result.conversation_id,
                     "conversation_name": result.conversation_name,
+                    "conversation_type": result.conversation_type,
+                    "conversation_platform": result.conversation_platform,
                     "sent_at": result.sent_at,
                     "sent_at_local": _local_time(result.sent_at, timezone_name),
                     "position": chunk.position,
@@ -645,6 +660,7 @@ def _source_evidence(
                 "file_name": source.file_name,
                 "sender_name": source.sender_name,
                 "sender_platform": source.sender_platform,
+                "conversation_id": source.conversation_id,
                 "conversation_name": source.conversation_name,
                 "conversation_type": source.conversation_type,
                 "conversation_platform": source.conversation_platform,
@@ -704,7 +720,10 @@ def _known_knowledge_citations(
                 "resource_type": source.get("resource_type"),
                 "title": source.get("title"),
                 "sender_name": source.get("sender_name"),
+                "conversation_id": source.get("conversation_id"),
                 "conversation_name": source.get("conversation_name"),
+                "conversation_type": source.get("conversation_type"),
+                "conversation_platform": source.get("conversation_platform"),
                 "sent_at": source.get("sent_at"),
                 "position": source.get("position"),
             }
