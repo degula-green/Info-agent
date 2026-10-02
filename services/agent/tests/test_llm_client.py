@@ -74,6 +74,69 @@ def test_openai_client_builds_json_chat_request() -> None:
     assert http.calls[0]["body"]["response_format"] == {"type": "json_object"}
 
 
+def _http_error(status: int, body: dict[str, Any]) -> Exception:
+    import io
+    import urllib.error
+
+    return urllib.error.HTTPError(
+        "https://api.example/v1/chat/completions",
+        status,
+        "Bad Request",
+        {},
+        io.BytesIO(json.dumps(body).encode("utf-8")),
+    )
+
+
+def test_a_nested_provider_error_code_is_surfaced() -> None:
+    """DashScope reports arrears as {"error": {"code": "Arrearage"}}.
+
+    The body itself is never carried forward, but the code is: "(400 Arrearage)"
+    tells an operator to top up an account, a bare "(400)" does not.
+    """
+
+    from app.infrastructure.http import _error_code
+
+    exc = _http_error(
+        400,
+        {
+            "error": {
+                "message": "Access denied, please make sure your account is in good standing",
+                "type": "Arrearage",
+                "code": "Arrearage",
+            }
+        },
+    )
+
+    assert _error_code(exc) == "Arrearage"
+
+
+def test_the_provider_error_code_reaches_the_message_without_the_body(monkeypatch) -> None:
+    import urllib.request
+
+    from app.infrastructure.http import HttpClient
+
+    error = _http_error(
+        400,
+        {
+            "error": {
+                "message": "Access denied, please make sure your account is in good standing",
+                "code": "Arrearage",
+            }
+        },
+    )
+    monkeypatch.setattr(
+        urllib.request, "urlopen", lambda *args, **kwargs: (_ for _ in ()).throw(error)
+    )
+
+    with pytest.raises(IntegrationError) as excinfo:
+        HttpClient().request("POST", "https://api.example/v1/chat/completions", body={})
+
+    message = str(excinfo.value)
+    assert "400 Arrearage" in message
+    # The provider's prose (which may carry account detail) stays out of it.
+    assert "good standing" not in message
+
+
 def test_openai_client_rejects_an_empty_choice_list() -> None:
     client = OpenAIChatClient(
         base_url="http://model.local/v1",

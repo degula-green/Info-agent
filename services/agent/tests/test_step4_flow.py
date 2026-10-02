@@ -10,7 +10,9 @@ import pytest
 
 from app.capabilities.answer import AnswerComposeCapability
 from app.capabilities.web import WebExtractCapability, WebFetchCapability
+from app.capabilities.web_research import WebResearchCapability
 from app.container import build_container
+from app.infrastructure.web.content_reader import ContentReader
 from app.kernel.errors import PermanentCapabilityError
 from app.kernel.models import (
     CapabilityDescriptor,
@@ -172,17 +174,30 @@ def build_step4_container(
     answer_provider=None,
     planner=None,
     extra_capabilities=(),
+    research=False,
+    search_provider=None,
     **overrides,
 ):
     settings = make_settings(**overrides)
-    registry = CapabilityRegistry(
-        [
-            WebFetchCapability(fetcher or FakePageFetcher()),
-            WebExtractCapability(),
-            AnswerComposeCapability(answer_provider or FakeAnswerProvider()),
-            *extra_capabilities,
-        ]
-    )
+    page_fetcher = fetcher or FakePageFetcher()
+    capabilities = [
+        WebFetchCapability(page_fetcher),
+        WebExtractCapability(),
+        AnswerComposeCapability(answer_provider or FakeAnswerProvider()),
+        *extra_capabilities,
+    ]
+    if research:
+        # The kernel tests keep the fetch/extract pair so they can drive the
+        # Runtime step by step; the research capability is added where a test
+        # exercises the Planner-visible surface.
+        capabilities.append(
+            WebResearchCapability(
+                ContentReader(page_fetcher, renderer=None, min_text_chars=1),
+                search_provider=search_provider,
+                aliases={},
+            )
+        )
+    registry = CapabilityRegistry(capabilities)
     store = InMemoryAgentStore()
     container = build_container(
         settings=settings,
@@ -348,7 +363,7 @@ def test_the_prompt_names_the_step_ids_the_model_must_write(monkeypatch) -> None
 
     system = client.calls[0][0]["content"]
     assert "plan-fixed-step-" in system
-    assert "document_ref" in system
+    assert "evidence_ref" in system
     assert '"step"' in system and '"output"' in system
 
 
@@ -573,7 +588,7 @@ def test_three_consecutive_fetches_respect_the_configured_limit() -> None:
     assert "连续尝试" in message
 
 
-def test_the_container_registers_four_capabilities_with_matching_timeouts() -> None:
+def test_the_container_registers_the_planner_visible_capabilities() -> None:
     from app.container import build_registry
     from app.testing.in_memory_todo_store import InMemoryTodoStore
 
@@ -583,28 +598,36 @@ def test_the_container_registers_four_capabilities_with_matching_timeouts() -> N
     descriptors = registry.list_descriptors()
     assert sorted(item.name for item in descriptors) == [
         "answer.compose",
+        "chat.reply",
         "todo.create",
-        "web.extract",
-        "web.fetch",
+        "web.research",
     ]
     for descriptor in descriptors:
         assert descriptor.input_schema
         assert descriptor.output_schema
 
-    fetch = registry.get("web.fetch")
-    assert fetch.descriptor.timeout_seconds == 7
-    assert fetch.fetcher.timeout_seconds == 7
+    # The Planner sees one public-web capability; the fetcher's own budget is
+    # still wired to the same setting, so the descriptor the Runtime checks and
+    # the socket the provider opens cannot drift apart.
+    research = registry.get("web.research")
+    assert research.reader.fetcher.timeout_seconds == 7
     assert registry.get("answer.compose").descriptor.timeout_seconds == 42
+
+    # The reply capability is the only moving part of its own switch: with it
+    # off the planner simply has nothing to call, which is the old behaviour.
+    without_reply = build_registry(
+        make_settings(chat_reply_enabled=False), InMemoryTodoStore()
+    )
+    assert "chat.reply" not in {item.name for item in without_reply.list_descriptors()}
 
 
 STRICT_REFERENCE_PLAN = (
     '{"objective": "读网页并回答", "steps": ['
-    '{"capability": "web.fetch", "arguments": {"url": "' + URL + '"}}, '
-    '{"capability": "web.extract", "arguments": '
-    '{"document_ref": {"step": 1, "output": "content"}, "url": "' + URL + '"}}, '
+    '{"capability": "web.research", "arguments": '
+    '{"request": "Python json documentation", "urls": ["' + URL + '"]}}, '
     '{"capability": "answer.compose", "arguments": '
     '{"question": "这个页面讲了什么", '
-    '"evidence_ref": {"step": 2, "output": "evidence"}}}]}'
+    '"evidence_ref": {"step": 1, "output": "evidence"}}}]}'
 )
 
 
@@ -622,7 +645,6 @@ def test_a_plan_written_with_strict_references_runs_end_to_end() -> None:
         [
             STRICT_REFERENCE_PLAN,
             '{"action": "continue", "reason": "还有步骤", "steps": []}',
-            '{"action": "continue", "reason": "还有步骤", "steps": []}',
             '{"action": "complete", "reason": "已经回答"}',
         ]
     )
@@ -631,21 +653,22 @@ def test_a_plan_written_with_strict_references_runs_end_to_end() -> None:
         answer_provider=provider,
         planner=OpenAICompatiblePlanner(client),
         task_max_model_calls=24,
+        research=True,
     )
-    task = create_task(container, text="读一下这个网页并总结")
+    task = create_task(container, text=f"读一下 {URL} 并总结")
 
     assert container.execution_service.run_task(task.task_id) == "succeeded"
 
     stored = store.get_task(task.task_id)
     assert stored.result["answer"] == "页面介绍的是示例内容"
-    extract = [
+    research = [
         item
         for item in store.list_observations(task.task_id)
-        if item.capability == "web.extract"
+        if item.capability == "web.research"
     ][0]
-    assert extract.evidence[0]["url"] == URL
+    assert research.evidence[0]["url"] == URL
     # The answer step really received the fetched page's evidence.
-    assert provider.calls[0][1][0]["evidence_id"] == extract.evidence[0]["evidence_id"]
+    assert provider.calls[0][1][0]["evidence_id"] == research.evidence[0]["evidence_id"]
 
 
 def test_a_strict_reference_plan_is_bound_before_the_runtime_sees_it() -> None:
@@ -654,20 +677,205 @@ def test_a_strict_reference_plan_is_bound_before_the_runtime_sees_it() -> None:
     client = StubPlannerClient([STRICT_REFERENCE_PLAN])
     planner = OpenAICompatiblePlanner(client)
     descriptors = [
-        *reference_descriptors(),
+        WebResearchCapability(
+            ContentReader(FakePageFetcher(), renderer=None, min_text_chars=1),
+            search_provider=None,
+            aliases={},
+        ).descriptor,
         AnswerComposeCapability(FakeAnswerProvider()).descriptor,
     ]
 
-    plan = planner.create_plan(envelope(), descriptors, [], PlanningConstraints())
+    task = envelope()
+    plan = planner.create_plan(task, descriptors, [], PlanningConstraints())
 
     assert len(client.calls) == 1  # binding is not a model round trip
-    assert plan.steps[1].arguments["document"] == (
-        f"$steps.{plan.plan_id}-step-1.output.content"
-    )
-    assert plan.steps[2].arguments["evidence"] == (
-        f"$steps.{plan.plan_id}-step-2.output.evidence"
+    assert plan.steps[0].arguments == {
+        # The model paraphrased the request; the planner replaces it with the
+        # user's own words, because web.research trusts URLs found in there.
+        "request": "读一下这个网页",
+        "urls": [URL],
+    }
+    assert plan.steps[1].arguments["evidence"] == (
+        f"$steps.{plan.plan_id}-step-1.output.evidence"
     )
     assert all(
         "document_ref" not in step.arguments and "evidence_ref" not in step.arguments
         for step in plan.steps
     )
+
+
+class ContinueWithNothingLeftPlanner:
+    """Plans one read, then says "continue" with nothing left to run.
+
+    Observed from qwen-plus: after web.research succeeded it answered
+    ``continue`` even though the plan had no further steps. The Runtime used to
+    fail the Task there, throwing away work that had already finished.
+    """
+
+    name = "continue-nothing"
+    plan_id = "plan-continue"
+
+    def create_plan(
+        self, task, capabilities, observations, constraints=None, understanding=None
+    ) -> Plan:
+        return Plan(
+            plan_id=self.plan_id,
+            task_id=task.task_id,
+            objective="读一页",
+            steps=[
+                PlanStep(
+                    step_id=f"{self.plan_id}-step-1",
+                    plan_id=self.plan_id,
+                    order=1,
+                    capability="web.fetch",
+                    arguments={"url": URL},
+                )
+            ],
+        )
+
+    def decide_after_observation(
+        self, task, current_plan, observations, constraints, understanding=None
+    ) -> PlannerDecision:
+        return PlannerDecision(action="continue")
+
+
+def test_a_continue_with_nothing_left_completes_instead_of_failing() -> None:
+    container, store = build_step4_container(
+        fetcher=FakePageFetcher({URL: {"content": HTML}}),
+        planner=ContinueWithNothingLeftPlanner(),
+    )
+    task = create_task(container, text="读一页")
+
+    assert container.execution_service.run_task(task.task_id) == "succeeded"
+
+    record = store.get_task(task.task_id)
+    assert [item.status for item in store.list_observations(task.task_id)] == [
+        "succeeded"
+    ]
+    assert any("no pending step" in item for item in record.result["warnings"])
+
+
+class RetryablePlannerError(RuntimeError):
+    """A transport-level Planner failure; the kernel may retry it."""
+
+    classification = "retryable_error"
+
+
+class FlakyDecisionPlanner:
+    """Plans one read, then fails the closing decision a number of times."""
+
+    name = "flaky-decision"
+    plan_id = "plan-flaky"
+
+    def __init__(self, failures: int = 1) -> None:
+        self.failures = failures
+        self.decisions = 0
+
+    def create_plan(
+        self, task, capabilities, observations, constraints=None, understanding=None
+    ) -> Plan:
+        return Plan(
+            plan_id=self.plan_id,
+            task_id=task.task_id,
+            objective="读一页",
+            steps=[
+                PlanStep(
+                    step_id=f"{self.plan_id}-step-1",
+                    plan_id=self.plan_id,
+                    order=1,
+                    capability="web.fetch",
+                    arguments={"url": URL},
+                )
+            ],
+        )
+
+    def decide_after_observation(
+        self, task, current_plan, observations, constraints, understanding=None
+    ) -> PlannerDecision:
+        self.decisions += 1
+        if self.failures > 0:
+            self.failures -= 1
+            raise RetryablePlannerError("remote HTTP request failed")
+        return PlannerDecision(action="complete")
+
+
+def test_a_transient_planner_failure_is_retried() -> None:
+    """One dropped connection is not a reason to fail the whole Task."""
+
+    planner = FlakyDecisionPlanner(failures=1)
+    container, store = build_step4_container(
+        fetcher=FakePageFetcher({URL: {"content": HTML}}), planner=planner
+    )
+    task = create_task(container, text="读一页")
+
+    assert container.execution_service.run_task(task.task_id) == "succeeded"
+    assert planner.decisions == 2  # the first attempt failed, the retry answered
+
+
+def test_a_planner_that_stays_down_does_not_discard_finished_work() -> None:
+    """Observed in production: both steps succeeded, the closing decision call
+    hit "remote HTTP request failed", and the finished Task was reported failed."""
+
+    planner = FlakyDecisionPlanner(failures=99)
+    container, store = build_step4_container(
+        fetcher=FakePageFetcher({URL: {"content": HTML}}), planner=planner
+    )
+    task = create_task(container, text="读一页")
+
+    assert container.execution_service.run_task(task.task_id) == "succeeded"
+
+    record = store.get_task(task.task_id)
+    assert [item.status for item in store.list_observations(task.task_id)] == [
+        "succeeded"
+    ]
+    assert any("planner unavailable" in item for item in record.result["warnings"])
+
+
+class UnparseablePlannerError(RuntimeError):
+    """The model answered something the Planner could not read (truncated JSON)."""
+
+    classification = "permanent_error"
+
+
+class UnreadableDecisionPlanner(FlakyDecisionPlanner):
+    def decide_after_observation(
+        self, task, current_plan, observations, constraints, understanding=None
+    ) -> PlannerDecision:
+        self.decisions += 1
+        raise UnparseablePlannerError(
+            "planner output could not be parsed: invalid JSON: Unterminated string"
+        )
+
+
+def test_an_unreadable_closing_decision_still_delivers_the_work() -> None:
+    """Observed: the model truncated its JSON on the closing call, and a finished
+    Task was reported failed even though answer.compose had already succeeded."""
+
+    planner = UnreadableDecisionPlanner(failures=0)
+    container, store = build_step4_container(
+        fetcher=FakePageFetcher({URL: {"content": HTML}}), planner=planner
+    )
+    task = create_task(container, text="读一页")
+
+    assert container.execution_service.run_task(task.task_id) == "succeeded"
+
+    record = store.get_task(task.task_id)
+    assert [item.status for item in store.list_observations(task.task_id)] == [
+        "succeeded"
+    ]
+    assert any("planner unavailable" in item for item in record.result["warnings"])
+
+
+def test_a_failed_step_is_still_a_failure_when_the_planner_is_down() -> None:
+    """The salvage only applies to finished work, never to a broken step."""
+
+    planner = UnreadableDecisionPlanner(failures=0)
+    container, store = build_step4_container(
+        # No canned page for this URL: the fetch step fails permanently.
+        fetcher=FakePageFetcher(),
+        planner=planner,
+    )
+    task = create_task(container, text="读一页")
+
+    assert container.execution_service.run_task(task.task_id) == "failed"
+    assert store.get_task(task.task_id).last_error is not None

@@ -85,6 +85,11 @@ class CapabilityDescriptor(BaseModel):
     # runtime still receives the original argument after binding.
     planner_input_schema: dict[str, Any] = Field(default_factory=dict)
     input_bindings: list[CapabilityInputBinding] = Field(default_factory=list)
+    # The argument that must carry the user's own words. The Planner never sees
+    # it -- the planner code copies the Task text in -- because a value the
+    # model may paraphrase cannot be a trust anchor. web.research, for example,
+    # decides which URLs it may fetch by looking for them in this argument.
+    task_text_argument: str | None = None
     risk_level: str
     side_effect: bool
     requires_approval: bool

@@ -219,6 +219,49 @@ def test_extract_reads_markdown_as_text() -> None:
     assert result["evidence"][0]["url"] == PUBLIC_URL
 
 
+def test_a_gzipped_response_is_decoded_instead_of_read_as_noise() -> None:
+    """CDNs gzip even when identity is requested, and urllib does not decode."""
+
+    import gzip
+
+    html = "<html><head><title>压缩页</title></head><body><p>正文内容</p></body></html>"
+    response = _StubResponse(gzip.compress(html.encode("utf-8")))
+    response.headers["Content-Encoding"] = "gzip"
+
+    document = _StubFetcher(response).fetch(PUBLIC_URL)
+
+    assert document.content.startswith("<html>")
+    assert "正文内容" in document.content
+    assert document.truncated is False
+
+
+def test_the_fetcher_asks_for_an_uncompressed_body() -> None:
+    captured: dict = {}
+
+    class _RecordingFetcher(HttpPageFetcher):
+        def _open(self, request):
+            captured.update(dict(request.headers))
+            return _StubResponse(b"<p>ok</p>")
+
+    _RecordingFetcher().fetch(PUBLIC_URL)
+
+    assert captured.get("Accept-encoding") == "identity"
+
+
+def test_a_url_the_request_line_cannot_carry_is_a_clean_error() -> None:
+    """A raw UnicodeEncodeError used to escape as a capability failure."""
+
+    class _NonAsciiFetcher(HttpPageFetcher):
+        def _open(self, request):
+            raise UnicodeEncodeError("ascii", "GET /网址内容 HTTP/1.1", 5, 9, "nope")
+
+    with pytest.raises(PageFetchError) as excinfo:
+        _NonAsciiFetcher().fetch(PUBLIC_URL)
+
+    assert excinfo.value.code == "invalid_url"
+    assert type(excinfo.value) is PageFetchError
+
+
 @pytest.mark.parametrize(
     "status, expected",
     [

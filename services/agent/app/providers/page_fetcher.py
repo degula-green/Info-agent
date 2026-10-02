@@ -14,6 +14,7 @@ import socket
 import urllib.error
 import urllib.parse
 import urllib.request
+import zlib
 from datetime import datetime, timezone
 from typing import Protocol
 
@@ -142,6 +143,46 @@ def _read_limited(response, limit: int) -> tuple[bytes, bool]:
     return data, False
 
 
+def _decode_body(raw: bytes, content_encoding: str, limit: int) -> tuple[bytes, bool]:
+    """Undo the compression a server applied even when identity was requested.
+
+    CDNs gzip regardless of Accept-Encoding, and urllib does not decompress.
+    Feeding those bytes to a text decoder produces mojibake that reads like a
+    page of binary noise -- it fooled a real planner run into a pointless
+    re-plan -- so the body is decoded here rather than downstream.
+    """
+
+    encoding = str(content_encoding or "").split(",")[0].strip().lower()
+    if encoding in ("", "identity"):
+        return raw, False
+    if encoding in ("gzip", "x-gzip"):
+        try:
+            data = zlib.decompressobj(16 + zlib.MAX_WBITS).decompress(raw)
+        except zlib.error as exc:
+            raise PageFetchError(
+                f"cannot decode gzip response: {exc}", code="bad_content_encoding"
+            ) from exc
+    elif encoding == "deflate":
+        try:
+            data = zlib.decompressobj(zlib.MAX_WBITS).decompress(raw)
+        except zlib.error:
+            try:
+                data = zlib.decompressobj(-zlib.MAX_WBITS).decompress(raw)
+            except zlib.error as exc:
+                raise PageFetchError(
+                    f"cannot decode deflate response: {exc}",
+                    code="bad_content_encoding",
+                ) from exc
+    else:
+        raise PageFetchError(
+            f"unsupported content encoding: {encoding}",
+            code="unsupported_content_encoding",
+        )
+    if len(data) > limit:
+        return data[:limit], True
+    return data, False
+
+
 def _charset(content_type: str | None) -> str:
     for part in str(content_type or "").split(";"):
         name, _, value = part.strip().partition("=")
@@ -192,6 +233,9 @@ class HttpPageFetcher:
             target,
             headers={
                 "User-Agent": self.user_agent,
+                # Ask for an uncompressed body; servers that ignore this are
+                # handled by _decode_body.
+                "Accept-Encoding": "identity",
                 "Accept": (
                     "text/html,application/xhtml+xml,text/markdown,"
                     "text/plain;q=0.9,*/*;q=0.1"
@@ -213,18 +257,28 @@ class HttpPageFetcher:
                     final_url, allow_private_addresses=self.allow_private_addresses
                 )
                 raw, truncated = _read_limited(response, limit)
+                body, decoded_truncated = _decode_body(
+                    raw, response.headers.get("Content-Encoding") or "", limit
+                )
                 status = int(getattr(response, "status", 200) or 200)
                 return PageDocument(
                     url=target,
                     final_url=final_url,
                     status=status,
                     content_type=content_type or "text/plain",
-                    content=raw.decode(_charset(header), errors="replace"),
-                    truncated=truncated,
+                    content=body.decode(_charset(header), errors="replace"),
+                    truncated=truncated or decoded_truncated,
                     fetched_at=datetime.now(timezone.utc),
                 )
         except PageFetchError:
             raise
+        except UnicodeEncodeError as exc:
+            # The request line goes out ASCII-encoded, so a URL carrying raw
+            # non-ASCII characters cannot be sent at all. That is a bad URL, not
+            # a transient failure worth three retries.
+            raise PageFetchError(
+                f"URL cannot be sent as ASCII: {exc}", code="invalid_url"
+            ) from exc
         except urllib.error.HTTPError as exc:
             raise _http_error(exc) from exc
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
@@ -247,5 +301,12 @@ def _http_error(exc: urllib.error.HTTPError) -> PageFetchError:
 
     status = int(exc.code or 0)
     if status == 429 or status >= 500:
-        return PageFetchRetryable(f"page fetch failed ({status})", code="http_error")
-    return PageFetchError(f"page fetch rejected ({status})", code="http_error")
+        error: PageFetchError = PageFetchRetryable(
+            f"page fetch failed ({status})", code="http_error"
+        )
+    else:
+        error = PageFetchError(f"page fetch rejected ({status})", code="http_error")
+    # Carried on the error so the reader can tell "this page is gone" from
+    # "this page refused a plain GET": only the latter is worth rendering.
+    error.status = status
+    return error

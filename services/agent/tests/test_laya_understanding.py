@@ -188,6 +188,64 @@ def test_laya_non_task_and_other_task_are_accepted() -> None:
     assert other_result.intent_candidates == []
 
 
+def test_laya_form_complete_is_a_single_action_intent() -> None:
+    provider = LayaUnderstandingProvider(
+        StubLayaClient(
+            _response("form.complete", {"form.complete": 0.94, "other_task": 0.02})
+        )
+    )
+
+    result = provider.understand(
+        ChatIngress().create_task(
+            "user-1",
+            {"text": "根据这些资料把申请表填好，填完让我预览确认"},
+        )
+    )
+
+    assert result.is_task is True
+    assert result.task_kind == "action"
+    assert [item.name for item in result.intent_candidates] == ["form.complete"]
+
+
+def test_laya_keeps_submission_out_of_form_complete() -> None:
+    provider = LayaUnderstandingProvider(
+        StubLayaClient(
+            _response("other_task", {"other_task": 0.91, "form.complete": 0.03})
+        )
+    )
+
+    result = provider.understand(
+        ChatIngress().create_task("user-1", {"text": "把填好的申请表提交到平台"})
+    )
+
+    assert result.is_task is True
+    assert result.intent_candidates == []
+
+
+@pytest.mark.parametrize("legacy", ["form.prepare", "form.submit", "document.compare"])
+def test_laya_rejects_retired_labels(legacy: str) -> None:
+    provider = LayaUnderstandingProvider(
+        StubLayaClient(_response(legacy, {legacy: 0.99}))
+    )
+
+    with pytest.raises(LayaError):
+        provider.understand(ChatIngress().create_task("user-1", {"text": "填表"}))
+
+
+def test_laya_rejects_probabilities_for_unknown_intents() -> None:
+    provider = LayaUnderstandingProvider(
+        StubLayaClient(
+            _response(
+                "form.complete",
+                {"form.complete": 0.90, "form.submit": 0.05},
+            )
+        )
+    )
+
+    with pytest.raises(LayaError):
+        provider.understand(ChatIngress().create_task("user-1", {"text": "填表"}))
+
+
 @pytest.mark.parametrize(
     ("response", "reason"),
     [

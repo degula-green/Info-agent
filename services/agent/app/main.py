@@ -17,7 +17,7 @@ from fastapi import FastAPI  # noqa: E402
 
 from app.config import settings  # noqa: E402
 from app.container import build_container  # noqa: E402
-from app.routers import health, tasks  # noqa: E402
+from app.routers import health, tasks, attachments  # noqa: E402
 from app.routers import todos  # noqa: E402
 
 logger = logging.getLogger("agent.main")
@@ -41,3 +41,4 @@ app = FastAPI(title="info-agent-agent", version="0.1.0", lifespan=lifespan)
 app.include_router(health.router)
 app.include_router(tasks.router)
 app.include_router(todos.router)
+app.include_router(attachments.router)

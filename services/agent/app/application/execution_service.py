@@ -53,6 +53,7 @@ class ExecutionService:
             limits=limits,
             understanding_provider=understanding_provider,
             understanding_mode=settings.understanding_mode,
+            settings=settings,
         )
         self.dispatcher = OutboxDispatcher(
             store, publisher, batch_size=settings.outbox_batch_size

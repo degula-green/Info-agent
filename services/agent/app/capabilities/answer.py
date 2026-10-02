@@ -47,7 +47,7 @@ class AnswerComposePlanInput(BaseModel):
 
     question: str = Field(min_length=1, max_length=2000)
     evidence_ref: StepOutputRef = Field(
-        description="引用更早 web.extract 步骤输出的 evidence"
+        description="引用更早 web.research 步骤输出的 evidence"
     )
 
 
@@ -98,7 +98,8 @@ class AnswerComposeCapability:
         name=CAPABILITY_NAME,
         description=(
             "依据已检索到的 evidence 组织一段带来源的回答（只读）。"
-            "证据用 evidence_ref 指向更早 web.extract 步骤输出的 evidence。"
+            "证据用 evidence_ref 指向更早 web.research 步骤输出的 evidence。"
+            "不需要自然语言回答的任务可以不调用本能力。"
         ),
         input_schema=AnswerComposeInput.model_json_schema(),
         planner_input_schema=AnswerComposePlanInput.model_json_schema(),
@@ -106,7 +107,7 @@ class AnswerComposeCapability:
             CapabilityInputBinding(
                 planner_argument="evidence_ref",
                 runtime_argument="evidence",
-                source_capability="web.extract",
+                source_capability="web.research",
                 source_output="evidence",
             )
         ],

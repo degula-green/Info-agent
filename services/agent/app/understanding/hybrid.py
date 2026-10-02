@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from app.ingress.vocabulary import references_attachment
 from app.kernel.models import TaskEnvelope, TaskUnderstanding
 from app.understanding.laya import LayaUnderstandingProvider
 
@@ -40,6 +41,20 @@ class HybridUnderstandingProvider:
         self.last_fallback_reason = None
         self.last_answer_confidence = None
         self.last_margin = None
+
+        # The stock Laya head was trained on short instructions, not on
+        # attachment-driven ones ("根据这个附件创建日程" reads like a form
+        # request to it). When the user explicitly points at an attachment,
+        # let the LLM understanding follow the intent catalog instead.
+        text = str(task.input.get("text") or "")
+        if task.input.get("attachment_ids") and references_attachment(text):
+            result = _call_provider(self.fallback, task, min_confidence=min_confidence)
+            self.last_call_count = max(
+                int(getattr(self.fallback, "last_call_count", 0)), 0
+            )
+            self.last_decision_source = "llm"
+            self.last_fallback_reason = "attachment_reference"
+            return result
 
         evaluation = None
         try:
