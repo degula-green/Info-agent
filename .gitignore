@@ -18,3 +18,9 @@ __pycache__/
 # A mistyped absolute path once created a root directory named "D<private-use
 # char>" holding a nested clone; never track that shape again.
 /D?/
+# Runtime artifacts: service/build logs and the collector's local state. They
+# are rewritten on every run, so they stay on disk and out of git.
+data/*.log
+apps/web/*.log
+data/wechat-collector.json
+data/wechat-detail.json
