@@ -112,6 +112,7 @@ export interface AgentTaskCreated {
   task_id: string
   status: string
   events_url: string
+  conversation_id?: string | null
 }
 
 export interface AgentTaskEvent {
@@ -137,6 +138,7 @@ export interface AgentTaskEventStreamOptions {
 
 export async function createAgentTask(input: {
   text: string
+  conversationId?: string
   attachmentIds?: string[]
   clientMessageId?: string
   sourceRef?: Record<string, unknown>
@@ -149,6 +151,7 @@ export async function createAgentTask(input: {
       attachment_ids: input.attachmentIds || [],
       source_type: 'chat',
       client_message_id: input.clientMessageId || uniqueClientMessageID(),
+      ...(input.conversationId ? { conversation_id: input.conversationId } : {}),
       source_ref: input.sourceRef || {},
       constraints: input.constraints || {},
     }),
@@ -269,8 +272,96 @@ export interface AgentTask {
   objective?: string | null
   result?: { answer?: string; citations?: any[]; warnings?: string[] } | null
   last_error?: Record<string, any> | null
+  conversation_id?: string | null
+  request_message_id?: string | null
+  response_message_id?: string | null
   created_at?: string
   updated_at?: string
+}
+
+export interface AgentConversationSummary {
+  conversation_id: string
+  title: string
+  status: string
+  last_message_at?: string | null
+  message_count: number
+}
+
+export interface AgentConversationMessage {
+  message_id: string
+  conversation_id: string
+  role: 'user' | 'assistant' | 'system'
+  content: string
+  status: string
+  task_id?: string | null
+  citations?: any[]
+  client_message_id?: string | null
+  created_at: string
+  updated_at: string
+}
+
+export interface AgentConversationDetail {
+  conversation_id: string
+  owner_user_id: string
+  organization_id?: string | null
+  title: string
+  status: string
+  source: string
+  summary?: string | null
+  summary_cursor: number
+  last_message_at?: string | null
+  message_count: number
+  messages: AgentConversationMessage[]
+  created_at: string
+  updated_at: string
+}
+
+export interface AgentConversationPage {
+  items: AgentConversationSummary[]
+  page: number
+  page_size: number
+  total: number
+}
+
+export async function listAgentConversations(
+  page = 1,
+  pageSize = 20,
+): Promise<AgentConversationPage> {
+  return agentRequest<AgentConversationPage>(
+    `/conversations?page=${Math.max(1, page)}&page_size=${Math.max(1, pageSize)}`,
+  )
+}
+
+export function getAgentConversation(conversationID: string): Promise<AgentConversationDetail> {
+  return agentRequest<AgentConversationDetail>(
+    `/conversations/${encodeURIComponent(conversationID)}`,
+  )
+}
+
+export async function createAgentConversation(title = '新的对话'): Promise<AgentConversationSummary> {
+  return agentRequest<AgentConversationSummary>('/conversations', {
+    method: 'POST',
+    body: JSON.stringify({ title }),
+  })
+}
+
+export async function renameAgentConversation(
+  conversationID: string,
+  title: string,
+): Promise<AgentConversationSummary> {
+  return agentRequest<AgentConversationSummary>(
+    `/conversations/${encodeURIComponent(conversationID)}`,
+    {
+      method: 'PATCH',
+      body: JSON.stringify({ title }),
+    },
+  )
+}
+
+export async function deleteAgentConversation(conversationID: string): Promise<void> {
+  await agentRequest<void>(`/conversations/${encodeURIComponent(conversationID)}`, {
+    method: 'DELETE',
+  })
 }
 
 export interface AgentPlanStep {

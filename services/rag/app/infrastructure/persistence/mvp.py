@@ -137,6 +137,11 @@ class PostgresRagMVPRepository:
                     conninfo=settings.database_url,
                     min_size=max(1, settings.database_min_pool_size),
                     max_size=max(settings.database_min_pool_size, settings.database_max_pool_size),
+                    # The database is remote in local development, so TCP
+                    # connections can be dropped while idle. Validate a pooled
+                    # connection before handing it to a request instead of
+                    # surfacing a transient 503 to the Agent.
+                    check=ConnectionPool.check_connection,
                     kwargs={
                         "connect_timeout": max(1, int(settings.database_connect_timeout_seconds)),
                         "options": f"-c statement_timeout={max(1, int(settings.database_command_timeout_seconds * 1000))}",

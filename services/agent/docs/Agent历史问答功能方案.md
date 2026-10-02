@@ -2,13 +2,19 @@
 
 ## 文档状态
 
-- 版本：v0.2
-- 状态：待审核
+- 版本：v0.4
+- 状态：Phase 1、Phase 2 已实施
 - 目标：为 Agent 页面建立统一的会话、消息、Task 历史模型，并作为后续记忆机制的基础
 - 范围：Agent 服务、Agent 数据库 schema、Agent 页面、旧 AI 问答页面退役
 - 数据库归属：同一 PostgreSQL 集群下的 `agent` schema
 - 历史兼容策略：不兼容旧 AI 问答历史表
 - 修订记录：
+  - v0.4（2026-10-02）：Phase 2 落地 —— Agent 对话携带并恢复 `conversation_id`，
+    侧边栏按页面区分 Agent 会话与旧 QA 历史，支持历史加载、刷新恢复、重命名、删除和
+    非终态 Task 的审批/补充信息恢复。
+  - v0.3（2026-10-02）：Phase 1 落地 —— Conversation/Message 数据模型、Conversation API、
+    Task 与会话关联、终态 Task 到 assistant message 的投影、以及
+    `20261002_agent_conversation_history` 迁移。
   - v0.2（2026-10-02）：按合并后的代码校正 —— 对齐 `agent_tasks` 的 ID 类型与 Core JWT 鉴权链路；
     修正 `AgentTurnView` 的现状描述；补充 Task↔Message 状态映射、会话创建与幂等规则；
     明确本方案与知识问答（knowledge schema）的边界。
@@ -420,24 +426,24 @@ GET /conversations
 新对话 -> 清空当前会话
 ```
 
-第一阶段建议只做：
+Phase 2 已接入：
 
 - 读取历史
 - 打开历史
 - 新建会话
-
-暂不做：
-
 - 重命名
 - 删除
+
+仍暂不做：
+
 - 置顶
 - 搜索
 
 ### 8.3 消息渲染
 
-现状（v0.2 校正）：仓库里目前**没有** `AgentTurnView` 组件，回答 / 来源 / 执行过程是直接写在
-`InfoAgentChatPage.vue` 里的。Phase 2 需要先把这段渲染抽成组件（名称可沿用 `AgentTurnView`），
-让实时对话与历史加载共用同一套渲染。
+回答 / 来源 / 执行过程继续由 `InfoAgentChatPage.vue` 内的同一套轮次渲染函数承载；
+实时 SSE 与历史 `GET /conversations/{id}` 都恢复为同一份页面状态。后续如果需要独立组件，
+可以再抽 `AgentTurnView.vue`，不阻塞 Phase 2 的页面闭环。
 
 组件职责：
 
@@ -451,7 +457,7 @@ metadata 轻提示
 历史加载时：
 
 ```text
-messages -> AgentTurnView
+messages -> 页面轮次状态
 ```
 
 非终态 Task：
@@ -560,9 +566,9 @@ Planner / Answer 不应读取全部历史。
 
 ### Phase 2：Agent 页面历史
 
-- 从 `InfoAgentChatPage.vue` 抽出 `AgentTurnView`（回答 / 来源 / 执行过程 / metadata）
+- 在 `InfoAgentChatPage.vue` 内统一复用现有轮次渲染（回答 / 来源 / 执行过程 / metadata）
 - 侧边栏读取 `GET /conversations`
-- 点击历史加载消息（`GET /conversations/{id}` → `AgentTurnView`）
+- 点击历史加载消息（`GET /conversations/{id}` → 恢复为页面轮次）
 - 当前新 Task 完成后刷新历史列表
 
 ### Phase 3：旧入口退役
@@ -618,7 +624,7 @@ Planner / Answer 不应读取全部历史。
 
 1. 新表放在 `agent` schema，是否确认？
 2. 一个 Conversation 多 Task，是否确认？
-3. 第一阶段是否只做历史读取，不做重命名/删除？
+3. ~~第一阶段是否只做历史读取，不做重命名/删除？~~ 已决策：后端支持重命名/删除，前端在 Phase 2 接入。
 4. 旧 AI 问答页是否先隐藏，第二阶段再重定向？
 5. 长期记忆第一阶段是否只建表不启用？
 
@@ -633,4 +639,4 @@ agent_tasks 关联 conversation_id。
 ```
 
 v0.2 补充前提：新表的引用列沿用现有 `agent_tasks` 的 `TEXT` 类型；新接口全部走 Core JWT 并做
-owner 隔离；`AgentTurnView` 需要先抽取，不能按"已存在"来排期。
+owner 隔离。Phase 2 暂不强制抽取独立 `AgentTurnView` 组件。

@@ -58,7 +58,7 @@
         </button>
       </nav>
 
-      <section v-if="!collapsed" class="sidebar-history" aria-label="智能问答历史对话">
+      <section v-if="!collapsed" class="sidebar-history" aria-label="历史对话">
         <button
           class="sidebar-history__heading"
           type="button"
@@ -71,18 +71,19 @@
 
         <div v-if="!historyCollapsed" class="sidebar-history__list">
           <button
-            v-for="session in qaSessions"
-            :key="session.id"
+            v-for="item in historyItems"
+            :key="item.id"
             class="sidebar-history__item"
+            :class="{ 'sidebar-history__item--active': activeHistoryId === item.id }"
             type="button"
-            :title="session.question"
-            @click="emit('qa', session.id)"
+            :title="item.title"
+            @click="emit('history-select', item.id)"
           >
             <t-icon name="chat" />
-            <span>{{ session.question }}</span>
-            <span class="sidebar-history__actions"><button type="button" title="重命名" @click.stop="emit('qa-rename', session.id)"><t-icon name="edit-1" /></button><button type="button" title="删除" @click.stop="emit('qa-delete', session.id)"><t-icon name="delete" /></button></span>
+            <span>{{ item.title }}</span>
+            <span class="sidebar-history__actions"><button type="button" title="重命名" @click.stop="emit('history-rename', item.id)"><t-icon name="edit-1" /></button><button type="button" title="删除" @click.stop="emit('history-delete', item.id)"><t-icon name="delete" /></button></span>
           </button>
-          <p v-if="!qaSessions.length" class="sidebar-history__empty">暂无历史对话</p>
+          <p v-if="!historyItems.length" class="sidebar-history__empty">暂无历史对话</p>
         </div>
       </section>
     </div>
@@ -118,21 +119,27 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import InfoSidebarSchedules from './InfoSidebarSchedules.vue'
-import type { QASession } from '../mock'
+
+type SidebarHistoryItem = {
+  id: string
+  title: string
+  subtitle?: string
+}
 
 const props = defineProps<{
   active: string
   nickname: string
   avatar?: string
   avatarUrl?: string | null
-  qaSessions: QASession[]
+  historyItems: SidebarHistoryItem[]
+  activeHistoryId?: string
 }>()
 
 const emit = defineEmits<{
   (event: 'navigate', view: string): void
-  (event: 'qa', id: string): void
-  (event: 'qa-rename', id: string): void
-  (event: 'qa-delete', id: string): void
+  (event: 'history-select', id: string): void
+  (event: 'history-rename', id: string): void
+  (event: 'history-delete', id: string): void
   (event: 'collapsed-change', value: boolean): void
   (event: 'menu-action', key: 'profile' | 'terms' | 'privacy' | 'logout'): void
 }>()
@@ -409,6 +416,12 @@ const navItems = [
 .sidebar-history__item:hover {
   color: var(--td-text-color-primary);
   background: var(--td-bg-color-container-hover);
+}
+
+.sidebar-history__item--active {
+  color: var(--td-text-color-primary);
+  background: var(--td-bg-color-container-hover);
+  font-weight: 500;
 }
 
 .sidebar-history__item svg {

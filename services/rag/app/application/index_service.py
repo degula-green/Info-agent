@@ -65,7 +65,11 @@ class MVPIndexService:
             for chunk in retryable_chunks
             if chunk.rag_eligible
             and chunk.content.strip()
-            and chunk.embedding_status != "ready"
+            and (
+                chunk.embedding_status != "ready"
+                or chunk.embedding is None
+                or len(chunk.embedding) != settings.embedding_dims
+            )
         ]
         if embedding_chunks:
             try:

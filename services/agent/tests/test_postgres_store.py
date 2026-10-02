@@ -2,7 +2,8 @@
 
 Skipped unless AGENT_TEST_DATABASE_URL points at a disposable database that has
 already run db/migrations/20260925_agent_runtime_rebuild.sql and
-db/migrations/20260927_agent_dynamic_plan.sql.
+db/migrations/20260927_agent_dynamic_plan.sql through
+db/migrations/20261002_agent_conversation_history.up.sql.
 """
 
 from __future__ import annotations
@@ -13,7 +14,13 @@ from datetime import datetime, timezone
 
 import pytest
 
-from app.kernel.models import TaskEvent, TaskRecord
+from app.kernel.models import (
+    ConversationRecord,
+    MessageRecord,
+    TaskEvent,
+    TaskInput,
+    TaskRecord,
+)
 
 TEST_DATABASE_URL = os.getenv("AGENT_TEST_DATABASE_URL", "")
 
@@ -100,6 +107,78 @@ def test_idempotency_key_prevents_duplicate_tasks(store) -> None:
     store.created_task_ids.append(second.task_id)
     assert first.task_id == second.task_id
     assert store.find_task_by_idempotency_key("chat:user-1:msg-1").task_id == first.task_id
+
+
+def test_conversation_task_and_messages_commit_together(store) -> None:
+    moment = datetime.now(timezone.utc)
+    conversation_id = str(uuid.uuid4())
+    request_message_id = str(uuid.uuid4())
+    response_message_id = str(uuid.uuid4())
+    task = _record()
+    task.conversation_id = conversation_id
+    task.request_message_id = request_message_id
+    task.response_message_id = response_message_id
+    conversation = ConversationRecord(
+        conversation_id=conversation_id,
+        owner_user_id=task.owner_user_id,
+        title="history",
+        created_at=moment,
+        updated_at=moment,
+    )
+    messages = [
+        MessageRecord(
+            message_id=request_message_id,
+            conversation_id=conversation_id,
+            role="user",
+            content="hello",
+            status="completed",
+            task_id=task.task_id,
+            created_at=moment,
+            updated_at=moment,
+        ),
+        MessageRecord(
+            message_id=response_message_id,
+            conversation_id=conversation_id,
+            role="assistant",
+            content="",
+            status="pending",
+            task_id=task.task_id,
+            created_at=moment,
+            updated_at=moment,
+        ),
+    ]
+    input_item = TaskInput(
+        input_id=str(uuid.uuid4()),
+        task_id=task.task_id,
+        version=1,
+        payload={"text": "hello"},
+        created_at=moment,
+    )
+
+    stored = store.create_task(
+        task,
+        events=[],
+        outbox_events=[],
+        inputs=[input_item],
+        conversation=conversation,
+        messages=messages,
+    )
+    store.created_task_ids.append(task.task_id)
+
+    assert stored.conversation_id == conversation_id
+    assert store.get_conversation(conversation_id).title == "history"
+    assert [item.role for item in store.list_messages(conversation_id)] == [
+        "user",
+        "assistant",
+    ]
+    assert store.list_inputs(task.task_id)[0].payload == {"text": "hello"}
+
+    assert store.delete_conversation(
+        conversation_id,
+        owner_user_id=task.owner_user_id,
+    )
+    assert store.get_conversation(conversation_id) is None
+    assert store.list_messages(conversation_id) == []
 
 
 def test_task_payload_survives_a_round_trip(store) -> None:

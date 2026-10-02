@@ -37,8 +37,10 @@ class _Embedding:
     def __init__(self, *, fail: bool = False, failures: int = 0) -> None:
         self.fail = fail
         self.failures = failures
+        self.calls = 0
 
     def embed(self, texts):
+        self.calls += 1
         if self.failures > 0:
             self.failures -= 1
             raise RuntimeError("embedding failed")
@@ -115,10 +117,11 @@ class ProjectionRetryTests(unittest.TestCase):
 
     def test_es_failure_retries_then_succeeds(self) -> None:
         indexer = _Indexer(failures=1)
+        embedding = _Embedding()
         service = MVPIndexService(
             repository=self.repository,
             indexer=indexer,
-            embedding=_Embedding(),
+            embedding=embedding,
         )
         with self.assertRaises(IndexStageError):
             service.process(_job(self.context))
@@ -129,10 +132,15 @@ class ProjectionRetryTests(unittest.TestCase):
         self.assertEqual(projection["status"], "retry_wait")
         self.assertEqual(projection["failure_stage"], "indexing")
 
+        # PostgreSQL stores the embedding status but not the vector itself.
+        # A retry reloads the chunk without its in-memory embedding, so it must
+        # be regenerated instead of trusting embedding_status=ready.
+        self.chunk.embedding = None
         self.repository.projections[0]["next_retry_at"] = datetime.now(timezone.utc)
         result = service.process(_job(self.context))
         self.assertEqual(result["status"], "ready")
         self.assertEqual(indexer.calls, 2)
+        self.assertEqual(embedding.calls, 2)
 
     def test_embedding_failure_is_retryable_and_never_metadata_only(self) -> None:
         service = MVPIndexService(

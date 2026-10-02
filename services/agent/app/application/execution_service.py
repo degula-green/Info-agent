@@ -32,9 +32,11 @@ class ExecutionService:
         settings: Settings,
         understanding_provider=None,
         lease_owner: str | None = None,
+        message_sync=None,
     ) -> None:
         self.store = store
         self.settings = settings
+        self.message_sync = message_sync
         # The lease must identify this driver, not a fixed role name: two drivers
         # sharing "worker" would both pass the lease check and drive the same Task
         # concurrently (the API's /run racing the worker process).
@@ -61,6 +63,8 @@ class ExecutionService:
 
     def run_task(self, task_id: str) -> str:
         result = self.runtime.run_task(task_id, lease_owner=self.lease_owner)
+        if self.message_sync is not None:
+            self.message_sync(task_id)
         return result.status
 
     def handle_wakeup(self, task_id: str) -> None:

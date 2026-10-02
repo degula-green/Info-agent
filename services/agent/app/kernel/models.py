@@ -186,6 +186,12 @@ class TaskRecord(BaseModel):
     last_error: dict[str, Any] | None = None
     lease_owner: str | None = None
     lease_expires_at: datetime | None = None
+    # Conversation history: the Task is the execution unit, the Conversation is
+    # the history unit. All three are optional so Tasks created before the
+    # conversation tables existed (and knowledge_event fan-out) still load.
+    conversation_id: str | None = None
+    request_message_id: str | None = None
+    response_message_id: str | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -348,3 +354,42 @@ class TodoRecord(BaseModel):
     created_at: datetime
     updated_at: datetime
     completed_at: datetime | None = None
+
+
+class ConversationRecord(BaseModel):
+    """A user-visible conversation window.
+
+    One conversation holds many Tasks. ``summary`` / ``summary_cursor`` are
+    reserved for the memory phase and stay unused in Phase 1.
+    """
+
+    conversation_id: str
+    owner_user_id: str
+    organization_id: str | None = None
+    title: str = Field(default="新的对话", max_length=200)
+    status: str = "active"
+    source: str = "agent"
+    summary: str | None = None
+    summary_cursor: int = Field(default=0, ge=0)
+    last_message_at: datetime | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class MessageRecord(BaseModel):
+    """A user-visible message inside a conversation.
+
+    Only what the user sees lives here; plan steps and observations stay in
+    their own tables and are rendered as the execution trace.
+    """
+
+    message_id: str
+    conversation_id: str
+    role: Literal["user", "assistant", "system"]
+    content: str = ""
+    status: str = "pending"
+    task_id: str | None = None
+    citations: list[dict[str, Any]] = Field(default_factory=list)
+    client_message_id: str | None = None
+    created_at: datetime
+    updated_at: datetime
