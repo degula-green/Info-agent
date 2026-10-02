@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -148,15 +150,31 @@ class KnowledgeAnswerInput(BaseModel):
 
     query: str = Field(min_length=1, max_length=2000)
     results: list[ContentResult] = Field(default_factory=list, max_length=50)
+    # Metadata questions ("which platform is this group on") are answered from
+    # the source records, which carry fields the content endpoint does not.
+    sources: list[SourceInfo] = Field(default_factory=list, max_length=50)
     metadata_coverage: str = "complete"
+    # The window the retrieval already applied ("昨天" resolved by the router),
+    # so the answer does not have to recompute relative dates itself.
+    time_range: str | None = Field(default=None, max_length=200)
+    # The user's timezone, so evidence timestamps can be rendered locally
+    # instead of leaving the model to convert UTC in its head.
+    timezone: str | None = Field(default=None, max_length=64)
 
 
 class KnowledgeAnswerPlanInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     query: str = Field(min_length=1, max_length=2000)
-    results_ref: StepOutputRef = Field(
-        description="引用更早 knowledge.search_content 步骤输出的 results"
+    time_range: str | None = Field(default=None, max_length=200)
+    timezone: str | None = Field(default=None, max_length=64)
+    results_ref: StepOutputRef | None = Field(
+        default=None,
+        description="引用更早 knowledge.search_content 步骤输出的 results",
+    )
+    sources_ref: StepOutputRef | None = Field(
+        default=None,
+        description="引用更早 knowledge.search_sources 步骤输出的 sources",
     )
     metadata_coverage_ref: StepOutputRef | None = Field(
         default=None,
@@ -357,7 +375,9 @@ class KnowledgeAnswerCapability:
         return KnowledgeAnswerInput.model_validate(arguments)
 
     def execute(self, arguments: KnowledgeAnswerInput) -> dict[str, Any]:
-        evidence = _answer_evidence(arguments.results)
+        evidence = _answer_evidence(arguments.results, arguments.timezone)
+        if not evidence:
+            evidence = _source_evidence(arguments.sources, arguments.timezone)
         if not evidence:
             return KnowledgeAnswerOutput(
                 answer="没有找到满足条件的内容。",
@@ -366,7 +386,13 @@ class KnowledgeAnswerCapability:
                 model_calls=0,
             ).model_dump()
 
-        draft = self.provider.compose(arguments.query, evidence)
+        draft = (
+            self.provider.compose(
+                arguments.query, evidence, time_range=arguments.time_range
+            )
+            if arguments.time_range
+            else self.provider.compose(arguments.query, evidence)
+        )
         return KnowledgeAnswerOutput(
             answer=str(draft.answer),
             citations=_known_knowledge_citations(draft.citations, evidence),
@@ -546,7 +572,10 @@ def _content_summary(results: list[ContentResult], arguments: SearchContentInput
     return f"在{len(results)}个资源中找到与“{arguments.query}”相关的内容"
 
 
-def _answer_evidence(results: list[ContentResult]) -> list[dict[str, Any]]:
+def _answer_evidence(
+    results: list[ContentResult],
+    timezone_name: str | None = None,
+) -> list[dict[str, Any]]:
     evidence: list[dict[str, Any]] = []
     for result in results:
         for chunk in result.chunks:
@@ -564,12 +593,86 @@ def _answer_evidence(results: list[ContentResult]) -> list[dict[str, Any]]:
                     "sender_name": result.sender_name,
                     "conversation_name": result.conversation_name,
                     "sent_at": result.sent_at,
+                    "sent_at_local": _local_time(result.sent_at, timezone_name),
                     "position": chunk.position,
                     "quote": quote,
                     "snippet": quote,
                 }
             )
     return evidence
+
+
+def _source_evidence(
+    sources: list[SourceInfo],
+    timezone_name: str | None = None,
+) -> list[dict[str, Any]]:
+    """One evidence entry per source record, rendered as readable metadata.
+
+    The source lookup carries fields the content endpoint does not (the
+    conversation's platform, for instance), so a metadata question is answered
+    from these records rather than from message chunks.
+    """
+
+    evidence: list[dict[str, Any]] = []
+    for source in sources:
+        if len(evidence) >= MAX_ANSWER_CHUNKS:
+            break
+        local = _local_time(source.sent_at, timezone_name)
+        facts: list[str] = []
+        if source.conversation_name:
+            facts.append(f"群聊={source.conversation_name}")
+        if source.conversation_platform:
+            facts.append(f"平台={source.conversation_platform}")
+        if source.conversation_type:
+            facts.append(f"会话类型={source.conversation_type}")
+        if source.sender_name:
+            facts.append(f"发送人={source.sender_name}")
+        if local:
+            facts.append(f"发送时间={local}")
+        if source.file_name:
+            facts.append(f"文件名={source.file_name}")
+        if source.title:
+            facts.append(f"标题={source.title}")
+        if source.preview:
+            facts.append(f"摘要={source.preview[:200]}")
+        quote = "；".join(facts) or source.resource_id
+        evidence.append(
+            {
+                "evidence_id": f"source:{source.resource_id}",
+                "resource_id": source.resource_id,
+                "resource_type": source.resource_type,
+                "title": source.title,
+                "file_name": source.file_name,
+                "sender_name": source.sender_name,
+                "sender_platform": source.sender_platform,
+                "conversation_name": source.conversation_name,
+                "conversation_type": source.conversation_type,
+                "conversation_platform": source.conversation_platform,
+                "sent_at": source.sent_at,
+                "sent_at_local": local,
+                "quote": quote,
+                "snippet": quote,
+            }
+        )
+    return evidence
+
+
+def _local_time(value: str | None, timezone_name: str | None) -> str | None:
+    """Render a UTC timestamp in the user's timezone for the answer model."""
+
+    if not value or not timezone_name:
+        return None
+    try:
+        zone = ZoneInfo(timezone_name)
+    except (ZoneInfoNotFoundError, ValueError):
+        return None
+    try:
+        moment = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    return moment.astimezone(zone).strftime("%Y-%m-%d %H:%M")
 
 
 def _known_knowledge_citations(

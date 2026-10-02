@@ -204,6 +204,11 @@ class KnowledgeRoute:
     source_arguments: dict[str, Any]
     content_arguments: dict[str, Any]
     objective: str
+    # Human-readable window already resolved from "昨天"/"上周" etc. It travels
+    # with the plan so the answer step never recomputes relative dates.
+    time_range: str | None = None
+    # The user's timezone, so evidence timestamps can be rendered locally.
+    timezone: str | None = None
 
 
 def classify_knowledge_question(
@@ -307,7 +312,35 @@ def classify_knowledge_question(
         source_arguments={key: value for key, value in source_arguments.items() if value not in (None, "", [], False)},
         content_arguments=content_arguments,
         objective=objective,
+        time_range=_format_window(
+            occurred_after, occurred_before, timezone_name
+        ),
+        timezone=timezone_name,
     )
+
+
+def _format_window(
+    after: str | None,
+    before: str | None,
+    timezone_name: str,
+) -> str | None:
+    if not after and not before:
+        return None
+    try:
+        zone = ZoneInfo(timezone_name)
+    except (ZoneInfoNotFoundError, ValueError):
+        zone = timezone.utc
+
+    def render(value: str | None) -> str:
+        if not value:
+            return "?"
+        try:
+            moment = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        except ValueError:
+            return str(value)
+        return moment.astimezone(zone).strftime("%Y-%m-%d %H:%M")
+
+    return f"{render(after)} 至 {render(before)} ({timezone_name})"
 
 
 def build_knowledge_plan(
@@ -334,10 +367,11 @@ def build_knowledge_plan(
         return step
 
     search_content_step: PlanStep | None = None
+    sources_step: PlanStep | None = None
     if route.mode == "sources":
         if SEARCH_SOURCES_NAME not in registered:
             return None
-        add_step(SEARCH_SOURCES_NAME, dict(route.source_arguments))
+        sources_step = add_step(SEARCH_SOURCES_NAME, dict(route.source_arguments))
     elif route.mode == "content":
         if SEARCH_CONTENT_NAME not in registered:
             return None
@@ -354,7 +388,7 @@ def build_knowledge_plan(
             or SEARCH_CONTENT_NAME not in registered
         ):
             return None
-        add_step(SEARCH_SOURCES_NAME, dict(route.source_arguments))
+        sources_step = add_step(SEARCH_SOURCES_NAME, dict(route.source_arguments))
         search_content_step = add_step(
             SEARCH_CONTENT_NAME,
             {
@@ -364,20 +398,45 @@ def build_knowledge_plan(
             },
         )
 
-    if search_content_step is not None and KNOWLEDGE_ANSWER_NAME in registered:
+    reference: dict[str, Any] | None = None
+    if search_content_step is not None:
+        reference = {
+            "results_ref": {
+                "step": search_content_step.order,
+                "output": "results",
+            },
+            "metadata_coverage_ref": {
+                "step": search_content_step.order,
+                "output": "metadata_coverage",
+            },
+        }
+    elif sources_step is not None:
+        # A metadata question ("which platform is this group on") is answered
+        # from the source records, which carry fields the content endpoint
+        # does not expose.
+        reference = {
+            "sources_ref": {
+                "step": sources_step.order,
+                "output": "sources",
+            },
+            "metadata_coverage_ref": {
+                "step": sources_step.order,
+                "output": "metadata_coverage",
+            },
+        }
+
+    if reference is not None and KNOWLEDGE_ANSWER_NAME in registered:
+        answer_arguments: dict[str, Any] = {
+            "query": route.content_arguments["query"],
+            **reference,
+        }
+        if route.time_range:
+            answer_arguments["time_range"] = route.time_range
+        if route.timezone:
+            answer_arguments["timezone"] = route.timezone
         add_step(
             KNOWLEDGE_ANSWER_NAME,
-            {
-                "query": route.content_arguments["query"],
-                "results_ref": {
-                    "step": search_content_step.order,
-                    "output": "results",
-                },
-                "metadata_coverage_ref": {
-                    "step": search_content_step.order,
-                    "output": "metadata_coverage",
-                },
-            },
+            answer_arguments,
         )
 
     if not steps:

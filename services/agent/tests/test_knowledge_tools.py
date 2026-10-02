@@ -413,6 +413,33 @@ def test_conversation_platform_question_routes_to_sources() -> None:
     assert route.source_arguments["conversation_names"] == ["aims", "aims群"]
 
 
+def test_metadata_question_builds_a_source_plan_with_an_answer() -> None:
+    route = classify_knowledge_question("aims群在哪个平台")
+    assert route is not None
+
+    task = type("Task", (), {"task_id": "task-1"})()
+    plan = build_knowledge_plan(
+        route,
+        task,
+        [
+            KnowledgeSearchSourcesCapability.descriptor,
+            KnowledgeAnswerCapability.descriptor,
+        ],
+    )
+
+    assert plan is not None
+    # A source list alone does not answer "which platform": the answer step
+    # reads the source records, which carry the conversation's platform.
+    assert [step.capability for step in plan.steps] == [
+        "knowledge.search_sources",
+        "knowledge.answer",
+    ]
+    assert plan.steps[1].arguments["sources_ref"] == {
+        "step": 1,
+        "output": "sources",
+    }
+
+
 def test_content_with_sources_question_builds_three_step_plan() -> None:
     route = classify_knowledge_question("张三发的采购合同写了什么？")
     assert route is not None
@@ -520,7 +547,13 @@ def test_knowledge_routing_planner_intercepts_only_knowledge_questions() -> None
         [],
     )
 
-    assert [step.capability for step in plan.steps] == ["knowledge.search_sources"]
+    # The router builds the knowledge plan itself (the deterministic planner is
+    # never asked), and the source list is followed by an answer so the user
+    # gets a sentence as well as the matching records.
+    assert [step.capability for step in plan.steps] == [
+        "knowledge.search_sources",
+        "knowledge.answer",
+    ]
 
 
 def test_routing_planner_executes_content_pipeline_end_to_end() -> None:
