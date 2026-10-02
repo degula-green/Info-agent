@@ -73,6 +73,28 @@
                   <input v-model="approvalEditors[message.id].dueDate" type="date" />
                 </label>
               </template>
+              <template v-else-if="message.approval.capability === 'form.apply'">
+                <div class="agent-form">
+                  <p class="agent-form__title">
+                    {{ formDraft(message).title || '链接表单' }}
+                  </p>
+                  <p class="agent-form__summary">
+                    {{ formSummary(message).total }} 字段 ·
+                    {{ formSummary(message).filled }} 已填
+                    <span v-if="formSummary(message).empty"> · {{ formSummary(message).empty }} 待补</span>
+                    <span v-if="formDraft(message).target_cell"> · 写入 {{ formDraft(message).target_cell }}</span>
+                  </p>
+                  <p v-if="formDraft(message).missing?.length" class="agent-form__warning">
+                    缺少：{{ formDraft(message).missing.join('、') }}
+                  </p>
+                  <div class="agent-form__fields">
+                    <label v-for="(field, index) in formEditor(message)" :key="`${field.name}-${index}`">
+                      <span>{{ field.name }}</span>
+                      <input v-model="field.value" :disabled="message.submitting" />
+                    </label>
+                  </div>
+                </div>
+              </template>
               <pre v-else class="agent-approval__arguments">{{ JSON.stringify(message.approval.arguments, null, 2) }}</pre>
               <div class="agent-approval__actions">
                 <button type="button" class="agent-button agent-button--primary" :disabled="message.submitting" @click="confirmApproval(message)">确认</button>
@@ -316,6 +338,12 @@ const pageRef = ref<HTMLElement | null>(null)
 const textareaRef = ref<{ focus?: () => void } | null>(null)
 const activeTaskID = ref('')
 const approvalEditors = reactive<Record<string, { title: string; dueDate: string }>>({})
+/**
+ * The editable field list of a form.apply draft, keyed by message id. The
+ * owner's edits are what the confirm call sends back, so the values written
+ * are the ones on screen, not the ones the Agent proposed.
+ */
+const formEditors = reactive<Record<string, Array<{ name: string; value: string }>>>({})
 const inputValues = reactive<Record<string, string>>({})
 const expandedTraces = reactive<Record<string, boolean>>({})
 let activeController: AbortController | null = null
@@ -375,6 +403,9 @@ async function prepareApproval(message: AgentMessage, event: AgentTaskEvent): Pr
   approvalEditors[message.id] = {
     title: String(args.title || approval.capability || '待确认操作'),
     dueDate: typeof args.due_at === 'string' ? dayOfISO(args.due_at, timezone) : '',
+  }
+  if (approval.capability === 'form.apply') {
+    formEditors[message.id] = formFieldsFrom(args.draft)
   }
   message.status = 'waiting_approval'
   message.statusText = '等待确认'
@@ -1000,6 +1031,32 @@ function approvalEditor(message: AgentMessage) {
   return approvalEditors[message.id] || { title: '', dueDate: '' }
 }
 
+function formFieldsFrom(draft: unknown): Array<{ name: string; value: string }> {
+  const raw =
+    draft && typeof draft === 'object' && Array.isArray((draft as Record<string, unknown>).fields)
+      ? ((draft as Record<string, unknown>).fields as unknown[])
+      : []
+  return raw.map((item) => {
+    const field = item && typeof item === 'object' ? (item as Record<string, unknown>) : {}
+    return { name: String(field.name ?? ''), value: String(field.value ?? '') }
+  })
+}
+
+function formEditor(message: AgentMessage) {
+  return formEditors[message.id] || []
+}
+
+function formDraft(message: AgentMessage): Record<string, any> {
+  const draft = message.approval?.arguments?.draft
+  return draft && typeof draft === 'object' ? (draft as Record<string, any>) : {}
+}
+
+function formSummary(message: AgentMessage) {
+  const fields = formEditor(message)
+  const filled = fields.filter((field) => field.value.trim()).length
+  return { total: fields.length, filled, empty: fields.length - filled }
+}
+
 async function confirmApproval(message: AgentMessage): Promise<void> {
   if (!message.approval || message.submitting) return
   message.submitting = true
@@ -1011,6 +1068,31 @@ async function confirmApproval(message: AgentMessage): Promise<void> {
       const draft = buildScheduleDraft({ task: { task_id: message.taskId || '', source_type: 'chat', owner_user_id: '', status: 'waiting_approval' }, approval })
       const edited = composeEditedArguments(draft, { title: editor.title, dueDate: editor.dueDate })
       arguments_ = { ...approval.arguments, ...edited.arguments, title: editor.title }
+    }
+    if (approval.capability === 'form.apply') {
+      // Send back exactly what is on the card: the backend overwrites the Step
+      // arguments with this and re-fingerprints before writing.
+      const original = formDraft(message)
+      const originalFields = Array.isArray(original.fields) ? (original.fields as Array<Record<string, any>>) : []
+      const fields = formEditor(message).map((field, index) => {
+        const before: Record<string, any> = originalFields[index] || {}
+        const value = field.value.trim()
+        return {
+          ...before,
+          name: field.name || String(before.name ?? ''),
+          value: field.value,
+          source: value ? (before.source && before.source !== 'empty' ? before.source : 'user') : 'empty',
+          confidence: value ? 1 : 0,
+        }
+      })
+      const draft: Record<string, any> = { ...original, fields }
+      draft.missing = fields.filter((field) => !String(field.value || '').trim()).map((field) => String(field.name || ''))
+      arguments_ = {
+        ...approval.arguments,
+        draft,
+        values: [fields.map((field) => String(field.value || ''))],
+        action: draft.write_model === 'live_document' ? 'write_cells' : approval.arguments?.action || 'write_cells',
+      }
     }
     await approveAgentApproval(approval.approval_id, approval.version, arguments_)
     message.approval = undefined
@@ -1164,6 +1246,13 @@ onBeforeUnmount(() => activeController?.abort())
 .agent-approval label, .agent-input-request label { display: grid; gap: 5px; color: var(--td-text-color-secondary); font-size: 12px; }
 .agent-approval input, .agent-input-request input { width: 100%; min-height: 34px; padding: 6px 9px; border: 1px solid var(--td-component-stroke); border-radius: 6px; color: var(--td-text-color-primary); background: var(--td-bg-color-container); }
 .agent-approval__arguments { max-height: 220px; overflow: auto; margin: 0; padding: 10px; border-radius: 6px; color: var(--td-text-color-secondary); background: var(--td-bg-color-container); font-size: 12px; }
+.agent-form { display: grid; gap: 8px; }
+.agent-form__title { margin: 0; font-weight: 600; }
+.agent-form__summary { margin: 0; color: var(--td-text-color-secondary); font-size: 12px; }
+.agent-form__warning { margin: 0; color: var(--td-warning-color-6, #e37318); font-size: 12px; }
+.agent-form__fields { display: grid; gap: 8px; max-height: 260px; overflow: auto; }
+.agent-form__fields label { display: grid; gap: 4px; color: var(--td-text-color-secondary); font-size: 12px; }
+.agent-form__fields input { width: 100%; min-height: 32px; padding: 6px 9px; border: 1px solid var(--td-component-stroke); border-radius: 6px; color: var(--td-text-color-primary); background: var(--td-bg-color-container); }
 .agent-button { min-height: 34px; padding: 0 14px; border: 1px solid var(--td-component-stroke); border-radius: 7px; color: var(--td-text-color-primary); background: var(--td-bg-color-container); cursor: pointer; }
 .agent-button--primary { border-color: var(--td-brand-color); color: #fff; background: var(--td-brand-color); }
 .agent-button:disabled { cursor: not-allowed; opacity: .55; }
