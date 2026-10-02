@@ -174,7 +174,20 @@ def extract_values(headers: list[str], request: str) -> dict[str, str]:
     return found
 
 
-def build_fields(headers: list[str], values: dict[str, str]) -> tuple[list[FormField], list[str]]:
+def build_fields(
+    headers: list[str],
+    values: dict[str, str],
+    *,
+    sources: dict[str, str] | None = None,
+) -> tuple[list[FormField], list[str]]:
+    """One field per header, marking where a value came from.
+
+    A value the instruction supplied outranks one only the knowledge base
+    could answer, so callers merge in that order and pass ``sources`` for the
+    ones retrieval contributed.
+    """
+
+    origin = sources or {}
     fields: list[FormField] = []
     missing: list[str] = []
     for header in headers:
@@ -183,7 +196,12 @@ def build_fields(headers: list[str], values: dict[str, str]) -> tuple[list[FormF
         value = values.get(header, "")
         if value:
             fields.append(
-                FormField(name=header, value=value, source="instruction", confidence=0.9)
+                FormField(
+                    name=header,
+                    value=value,
+                    source=origin.get(header, "instruction"),
+                    confidence=0.9 if origin.get(header) != "knowledge" else 0.7,
+                )
             )
         else:
             fields.append(FormField(name=header, value="", source="empty", confidence=0.0))
@@ -239,8 +257,17 @@ class FormPreviewCapability:
         timeout_seconds=180,
     )
 
-    def __init__(self, client: FormBrowserClient, *, timeout_seconds: int = 180) -> None:
+    def __init__(
+        self,
+        client: FormBrowserClient,
+        *,
+        retriever: Any | None = None,
+        timeout_seconds: int = 180,
+    ) -> None:
         self.client = client
+        # Optional: without a retriever the draft simply comes from the
+        # instruction and the page, which is still a complete draft.
+        self.retriever = retriever
         if timeout_seconds:
             self.descriptor = type(self).descriptor.model_copy(
                 update={"timeout_seconds": int(timeout_seconds)}
@@ -248,6 +275,28 @@ class FormPreviewCapability:
 
     def validate(self, arguments: dict[str, Any]) -> FormPreviewInput:
         return FormPreviewInput.model_validate(arguments)
+
+    def _top_up_from_knowledge(
+        self, names: list[str], values: dict[str, str], request: str
+    ) -> dict[str, str]:
+        """Fill the gaps from internal retrieval, never overriding the ask.
+
+        The query is the field names themselves, and the answer is parsed with
+        the same ``字段名: 值`` reader used on the instruction, so retrieval can
+        only supply values the source actually states in that shape.
+        """
+
+        if self.retriever is None:
+            return {}
+        missing = [name for name in names if name and name not in values]
+        if not missing:
+            return {}
+        query = " ".join(missing[:10])
+        text = self.retriever.search(f"{query} {request}".strip())
+        if not text:
+            return {}
+        found = extract_values(names, text)
+        return {name: value for name, value in found.items() if name not in values}
 
     def execute(self, arguments: FormPreviewInput) -> dict[str, Any]:
         url = _trusted(arguments.url, arguments.request)
@@ -287,7 +336,15 @@ class FormPreviewCapability:
             headers = [str(item) for item in (grid.get("headers") or [])]
             rows = grid.get("rows") or []
             values = extract_values(headers, arguments.request)
-            fields, missing = build_fields(headers, values)
+            from_knowledge = self._top_up_from_knowledge(
+                headers, values, arguments.request
+            )
+            values.update(from_knowledge)
+            fields, missing = build_fields(
+                headers,
+                values,
+                sources={name: "knowledge" for name in from_knowledge},
+            )
             # New data goes on the first row after the ones already present.
             target_row = len(rows) + 2
             draft = FormDraft(
@@ -312,17 +369,26 @@ class FormPreviewCapability:
                 for item in raw_fields
             ]
             values = extract_values(names, arguments.request)
+            from_knowledge = self._top_up_from_knowledge(
+                names, values, arguments.request
+            )
+            values.update(from_knowledge)
             fields = []
             missing = []
             for item, name in zip(raw_fields, names):
                 value = values.get(name, "")
+                source = (
+                    "knowledge"
+                    if name in from_knowledge
+                    else ("instruction" if value else "empty")
+                )
                 fields.append(
                     FormField(
                         name=name,
                         ref=str(item.get("ref") or ""),
                         value=value,
-                        source="instruction" if value else "empty",
-                        confidence=0.9 if value else 0.0,
+                        source=source,
+                        confidence=0.9 if value and source == "instruction" else (0.7 if value else 0.0),
                     )
                 )
                 if not value:

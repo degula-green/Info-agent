@@ -426,3 +426,76 @@ def test_form_apply_refuses_when_the_form_changed() -> None:
             )
         )
     assert client.filled == []
+
+
+class FakeRetriever:
+    def __init__(self, text: str = "") -> None:
+        self.text = text
+        self.queries: list[str] = []
+
+    def search(self, query: str) -> str:
+        self.queries.append(query)
+        return self.text
+
+
+def test_preview_tops_missing_values_up_from_retrieval() -> None:
+    client = FakeClient()
+    retriever = FakeRetriever("性别: 男 联系电话: 13900000000")
+    capability = FormPreviewCapability(client, retriever=retriever)
+    request = f"填写 {URL} 学号：1000023 姓名：测试甲"
+    draft = capability.execute(capability.validate({"request": request, "url": URL}))["form"]
+    by_name = {field["name"]: field for field in draft["fields"]}
+    assert by_name["性别"]["value"] == "男"
+    assert by_name["性别"]["source"] == "knowledge"
+    assert by_name["学号"]["source"] == "instruction"
+    assert draft["missing"] == []
+    assert retriever.queries and "性别" in retriever.queries[0]
+
+
+def test_instruction_outranks_retrieval() -> None:
+    client = FakeClient()
+    retriever = FakeRetriever("性别: 女")
+    capability = FormPreviewCapability(client, retriever=retriever)
+    request = f"填写 {URL} 性别：男"
+    draft = capability.execute(capability.validate({"request": request, "url": URL}))["form"]
+    by_name = {field["name"]: field for field in draft["fields"]}
+    assert by_name["性别"]["value"] == "男"
+    assert by_name["性别"]["source"] == "instruction"
+
+
+def test_retrieval_unavailable_keeps_fields_missing() -> None:
+    """A retrieval outage degrades the draft; it never fails the preview."""
+
+    client = FakeClient()
+    capability = FormPreviewCapability(client, retriever=FakeRetriever(""))
+    request = f"填写 {URL} 学号：1000023"
+    draft = capability.execute(capability.validate({"request": request, "url": URL}))["form"]
+    assert set(draft["missing"]) == {"姓名", "性别", "联系电话"}
+    assert client.closed == ["sess-1"]
+
+
+def test_knowledge_retriever_flattens_chunks_and_swallows_failure() -> None:
+    from app.infrastructure.rag.form_retriever import KnowledgeFormRetriever
+
+    class Capability:
+        def validate(self, arguments: dict) -> dict:
+            return arguments
+
+        def execute(self, arguments: dict) -> dict:
+            return {
+                "results": [
+                    {"chunks": [{"text": "姓名: 张三"}]},
+                    {"chunks": [{"text": ""}]},
+                ]
+            }
+
+    assert "张三" in KnowledgeFormRetriever(Capability()).search("姓名")
+
+    class Down:
+        def validate(self, arguments: dict) -> dict:
+            return arguments
+
+        def execute(self, arguments: dict) -> dict:
+            raise RuntimeError("rag is down")
+
+    assert KnowledgeFormRetriever(Down()).search("姓名") == ""

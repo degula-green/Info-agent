@@ -25,6 +25,7 @@ from app.capabilities.web_research import WebResearchCapability
 from app.config import Settings, settings as default_settings
 from app.infrastructure.core.client import CoreClient, HttpCoreClient, NullCoreClient
 from app.infrastructure.rag.client import HttpRAGClient, RAGClient
+from app.infrastructure.rag.form_retriever import KnowledgeFormRetriever
 from app.infrastructure.search.searxng import SearxngSearchProvider
 from app.infrastructure.search.tavily import TavilySearchProvider
 from app.infrastructure.web.content_reader import ContentReader
@@ -251,21 +252,6 @@ def build_registry(
             timeout_seconds=_timeout_seconds(settings.answer_timeout_seconds),
         ),
     ]
-    if form_client is not None:
-        # Registered only when the browser sidecar is deployed: with no sidecar
-        # the form intent must report as unsupported rather than fail at run time.
-        capabilities.append(
-            FormPreviewCapability(
-                form_client,
-                timeout_seconds=_timeout_seconds(settings.form_preview_timeout_seconds),
-            )
-        )
-        capabilities.append(
-            FormApplyCapability(
-                form_client,
-                timeout_seconds=_timeout_seconds(settings.form_apply_timeout_seconds),
-            )
-        )
     if settings.chat_reply_enabled:
         # Non-task messages get a short reply instead of silence. Leaving the
         # capability out of the registry is the off switch: the deterministic
@@ -297,6 +283,35 @@ def build_registry(
                     timeout_seconds=_timeout_seconds(settings.answer_timeout_seconds),
                 ),
             ]
+        )
+    if form_client is not None:
+        # Registered only when the browser sidecar is deployed: with no sidecar
+        # the form intent must report as unsupported rather than fail at run time.
+        # Built after the knowledge tools so a preview can top missing field
+        # values up from internal retrieval when that is available.
+        knowledge_content = next(
+            (
+                item
+                for item in capabilities
+                if item.descriptor.name == "knowledge.search_content"
+            ),
+            None,
+        )
+        retriever = (
+            KnowledgeFormRetriever(knowledge_content) if knowledge_content else None
+        )
+        capabilities.append(
+            FormPreviewCapability(
+                form_client,
+                retriever=retriever,
+                timeout_seconds=_timeout_seconds(settings.form_preview_timeout_seconds),
+            )
+        )
+        capabilities.append(
+            FormApplyCapability(
+                form_client,
+                timeout_seconds=_timeout_seconds(settings.form_apply_timeout_seconds),
+            )
         )
     return CapabilityRegistry(capabilities)
 
