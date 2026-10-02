@@ -29,7 +29,6 @@
             <div v-if="primaryAnswer(message)" class="agent-answer__content" v-html="renderChatMarkdown(primaryAnswer(message))" />
             <div v-else-if="showsEmptyKnowledgeResult(message)" class="agent-empty-result">
               <strong>没有找到满足条件的内容。</strong>
-              <span v-if="metadataCoverage(message) === 'partial'">部分历史元数据尚未补齐，结果可能不完整。</span>
             </div>
 
             <section v-if="visibleSourceItems(message).length" class="agent-sources" aria-label="回答来源">
@@ -42,7 +41,6 @@
                 <span>
                   <t-icon name="file" />
                   来源 {{ visibleSourceItems(message).length }}
-                  <span v-if="metadataCoverage(message) === 'partial'" class="agent-coverage-tag">部分历史元数据缺失</span>
                 </span>
                 <t-icon :name="isSourcesExpanded(message) ? 'chevron-up' : 'chevron-down'" />
               </button>
@@ -55,7 +53,7 @@
                   </div>
                   <div class="agent-source-card__actions">
                     <button v-if="source.kind === 'attachment'" type="button" @click.stop="openSourceItem(source)">预览</button>
-                    <button v-if="source.conversation_id" type="button" @click.stop="jumpToSourceItem(source)">
+                    <button v-if="source.kind === 'attachment' && (source.conversation_id || source.conversation_name)" type="button" @click.stop="jumpToSourceItem(source)">
                       <t-icon :name="source.kind === 'attachment' ? 'file' : 'chat'" />
                       跳转到对应位置
                     </button>
@@ -232,6 +230,7 @@ import { renderChatMarkdown } from '@/utils/chatMarkdownRenderer'
 import { getKnowledgeAttachmentContent, listKnowledgeConversationAttachments } from '@/api/info-knowledge'
 import InfoAttachmentPreview from '@/components/InfoAttachmentPreview.vue'
 import type { InfoFile } from '@/mock'
+import { useInfoKnowledgeStore } from '@/stores/infoKnowledge'
 import { navigateToKnowledgeSource } from '@/utils/knowledge-source-navigation'
 import {
   approveAgentApproval,
@@ -331,6 +330,7 @@ type SourceItem = {
   kind: 'attachment' | 'message' | 'source'
   resource_id?: string
   conversation_id?: string | number | null
+  conversation_name?: string
   message_id?: string | number | null
   platform?: string
 }
@@ -556,7 +556,13 @@ function mapCitation(value: any): Citation {
     conversation_name: typeof value?.conversation_name === 'string' ? value.conversation_name : undefined,
     message_id: value?.message_id ?? value?.source_message_id ?? null,
     attachment_id: value?.attachment_id ?? null,
-    platform: typeof value?.platform === 'string' ? value.platform : typeof value?.source_platform === 'string' ? value.source_platform : undefined,
+    platform: typeof value?.platform === 'string'
+      ? value.platform
+      : typeof value?.source_platform === 'string'
+        ? value.source_platform
+        : typeof value?.conversation_platform === 'string'
+          ? value.conversation_platform
+          : undefined,
     sender_name: typeof value?.sender_name === 'string' ? value.sender_name : undefined,
     sent_at: typeof value?.sent_at === 'string' ? value.sent_at : undefined,
     position: value?.position && typeof value.position === 'object' ? value.position : null,
@@ -580,11 +586,6 @@ function showsEmptyKnowledgeResult(message: AgentMessage): boolean {
   if (message.status !== 'succeeded') return false
   if (primaryAnswer(message) || message.todo || message.approval || message.inputRequest) return false
   return !visibleSourceItems(message).length
-}
-
-function metadataCoverage(message: AgentMessage): 'complete' | 'partial' {
-  const block = message.blocks.find((item) => item.type === 'source_list' || item.type === 'content_results')
-  return block && 'metadata_coverage' in block && block.metadata_coverage === 'partial' ? 'partial' : 'complete'
 }
 
 function visibleSourceItems(message: AgentMessage): SourceItem[] {
@@ -617,6 +618,7 @@ function sourceItemFromCitation(citation: Citation): SourceItem | null {
     preview: truncateText(citation.quote, 120),
     resource_id: citation.resource_id || (citation.attachment_id != null ? String(citation.attachment_id) : undefined),
     conversation_id: citation.conversation_id,
+    conversation_name: citation.conversation_name,
     message_id: citation.message_id,
     platform: citation.platform,
   }
@@ -633,6 +635,7 @@ function sourceItemFromSource(source: SourceInfo): SourceItem {
     resource_id: source.resource_id,
     message_id: source.resource_type === 'attachment' ? undefined : source.resource_id,
     conversation_id: source.conversation_id,
+    conversation_name: source.conversation_name || undefined,
     platform: source.conversation_platform || undefined,
   }
 }
@@ -852,30 +855,29 @@ async function openSourceItem(source: SourceItem): Promise<void> {
     })
     return
   }
-  if (!source.conversation_id) {
-    MessagePlugin.info('该来源暂无可打开的详情')
-    return
-  }
-  try {
-    await navigateToKnowledgeSource(router, route, {
-      platform: source.platform,
-      conversationId: source.conversation_id,
-      messageId: source.message_id,
-    })
-  } catch {
-    MessagePlugin.error('无法定位来源会话，请稍后重试')
-  }
+  await jumpToSourceItem(source)
 }
 
 async function jumpToSourceItem(source: SourceItem): Promise<void> {
-  if (!source.conversation_id) {
+  const knowledgeStore = useInfoKnowledgeStore()
+  let conversationID = source.conversation_id ? String(source.conversation_id) : ''
+  let platform = source.platform
+  if (!conversationID && source.conversation_name) {
+    if (!knowledgeStore.allChats.length) await knowledgeStore.ensureSources()
+    const match = knowledgeStore.allChats.find((item) => item.name === source.conversation_name)
+    if (match) {
+      conversationID = String(match.id)
+      platform = match.source
+    }
+  }
+  if (!conversationID) {
     MessagePlugin.info('该来源暂无可定位的会话位置')
     return
   }
   try {
     await navigateToKnowledgeSource(router, route, {
-      platform: source.platform,
-      conversationId: source.conversation_id,
+      platform,
+      conversationId: conversationID,
       messageId: source.kind === 'attachment' ? null : source.message_id || source.resource_id,
       attachmentId: source.kind === 'attachment' ? source.resource_id : null,
     })
@@ -1476,12 +1478,11 @@ onBeforeUnmount(() => {
 .agent-empty-result strong { color: var(--td-text-color-primary); font-size: 13px; font-weight: 500; }
 .agent-empty-result span { color: var(--td-text-color-secondary); font-size: 12px; }
 .agent-sources { display: grid; gap: 8px; margin-top: 16px; }
-.agent-sources__toggle { display: flex; align-items: center; justify-content: space-between; width: 100%; min-height: 34px; padding: 6px 9px; border: 1px solid var(--td-component-stroke); border-radius: 7px; color: var(--td-brand-color); background: var(--td-brand-color-1); font-size: 12px; cursor: pointer; }
+.agent-sources__toggle { display: inline-flex; align-items: center; justify-content: flex-start; width: fit-content; min-height: 28px; gap: 10px; padding: 4px 8px; border: 1px solid var(--td-component-stroke); border-radius: 6px; color: var(--td-brand-color); background: var(--td-brand-color-1); font-size: 12px; cursor: pointer; }
 .agent-sources__toggle > span { display: inline-flex; align-items: center; gap: 6px; }
 .agent-sources__toggle > svg { width: 14px; height: 14px; }
 .agent-sources__list { display: grid; gap: 8px; }
 .agent-sources__header { display: flex; align-items: center; gap: 8px; color: var(--td-text-color-secondary); font-size: 12px; }
-.agent-coverage-tag { padding: 1px 7px; border-radius: 999px; color: var(--td-warning-color); background: var(--td-warning-color-1); font-size: 11px; }
 .agent-trace { margin-top: 14px; }
 .agent-trace__toggle { display: inline-flex; align-items: center; gap: 6px; padding: 0; border: 0; color: var(--td-text-color-secondary); background: transparent; font-size: 12px; cursor: pointer; }
 .agent-trace__toggle svg { transition: transform .15s ease; }
