@@ -210,7 +210,15 @@ if (-not (Test-Path (Join-Path $webPath 'node_modules'))) {
 # does not install Torch and the Laya model stack.
 Import-EnvFile (Join-Path $agentPath '.env')
 $configuredUnderstanding = [string]$env:AGENT_UNDERSTANDING_PROVIDER
-$intentEnabled = @('laya', 'hybrid') -contains $configuredUnderstanding.ToLowerInvariant()
+$configuredPrimary = [string]$env:AGENT_UNDERSTANDING_PRIMARY
+if (-not $configuredPrimary) { $configuredPrimary = 'laya' }
+# The Laya sidecar is only needed when Laya is the classifier that actually
+# runs; hybrid with PRIMARY=jev never builds it, so skip the torch install.
+$understandingProvider = $configuredUnderstanding.ToLowerInvariant()
+$understandingPrimary = $configuredPrimary.ToLowerInvariant()
+$intentEnabled =
+    $understandingProvider -eq 'laya' -or
+    ($understandingProvider -eq 'hybrid' -and $understandingPrimary -eq 'laya')
 
 if ($uv) {
     Write-Host 'Synchronizing RAG virtual environment...'

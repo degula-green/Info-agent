@@ -295,7 +295,11 @@ def test_metadata_question_routes_to_search_sources() -> None:
     assert route is not None
     assert route.mode == "sources"
     assert route.source_arguments["sender_names"] == ["张三"]
-    assert route.source_arguments["conversation_names"] == ["财务群"]
+    # The stored conversation name is the bare one ("财务"); the typed suffix
+    # ("群") is kept as a second acceptable filter value.
+    conversation_names = route.source_arguments["conversation_names"]
+    assert conversation_names[0] == "财务"
+    assert "财务群" in conversation_names
     assert route.source_arguments["resource_types"] == ["attachment"]
 
 
@@ -374,6 +378,39 @@ def test_internal_entity_without_public_wording_routes_to_knowledge(
     # wording (checked above) may fall through to the LLM planner.
     assert route is not None
     assert route.mode == "content"
+
+
+@pytest.mark.parametrize(
+    ("text", "bare_name"),
+    [
+        ("aims群里最近在聊什么", "aims"),
+        ("昨天晚上10点aims群里在聊什么", "aims"),
+        ("财务群里讨论了什么", "财务"),
+    ],
+)
+def test_chat_content_questions_route_to_filtered_sources(
+    text: str, bare_name: str
+) -> None:
+    route = classify_knowledge_question(text)
+
+    assert route is not None
+    # A group-chat question is answered from the filtered sources, not from a
+    # BM25 pass over the whole sentence.
+    assert route.mode == "content_with_sources"
+    names = route.source_arguments.get("conversation_names") or []
+    # Collected conversations are stored under the bare name ("aims"), so the
+    # typed suffix ("aims群") must not become the only filter value.
+    assert names and names[0] == bare_name
+
+
+def test_conversation_platform_question_routes_to_sources() -> None:
+    route = classify_knowledge_question("aims群在哪个平台")
+
+    assert route is not None
+    # "which platform" is a metadata question: it is answered by the source
+    # lookup, not by a content pass over the collected messages.
+    assert route.mode == "sources"
+    assert route.source_arguments["conversation_names"] == ["aims", "aims群"]
 
 
 def test_content_with_sources_question_builds_three_step_plan() -> None:

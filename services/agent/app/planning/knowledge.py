@@ -59,6 +59,15 @@ _CONTENT_MARKERS = (
     "分析",
     "总结",
     "解释",
+    "在聊什么",
+    "聊什么",
+    "聊了什么",
+    "聊了些",
+    "讨论什么",
+    "讨论了什么",
+    "都说了什么",
+    "说了些什么",
+    "什么话题",
 )
 _SOURCE_MARKERS = (
     "谁发",
@@ -74,6 +83,9 @@ _SOURCE_MARKERS = (
     "哪个群",
     "哪个聊天",
     "哪条消息",
+    "哪个平台",
+    "什么平台",
+    "在哪个软件",
     "什么时间",
     "什么时候",
     "哪些文件",
@@ -264,7 +276,12 @@ def classify_knowledge_question(
             or has_message
         )
         mode = "content_with_sources" if route_to_sources else "content"
-    elif has_source and has_content:
+    elif has_content and (
+        has_source or sender_names or conversation_names or occurred_after
+    ):
+        # A content question that names a sender, a conversation or a time range
+        # is answered from the filtered sources; a BM25 pass over the whole
+        # sentence would drown the filter words in the query.
         mode = "content_with_sources"
     elif has_source or (has_search and (has_file or has_message) and not has_content):
         mode = "sources"
@@ -518,9 +535,36 @@ def _conversation_names(text: str) -> list[str]:
     names: list[str] = []
     for match in _CONVERSATION_PATTERN.finditer(text):
         name = str(match.group("name") or "").strip().rsplit("在", 1)[-1]
-        if name and name not in names:
-            names.append(name)
+        # "昨天晚上10点aims群" carries the time phrase in front of the group
+        # name; keeping it would filter for a conversation that does not exist.
+        name = _LEADING_TIME_PREFIX.sub("", name).strip()
+        for candidate in _conversation_candidates(name):
+            if candidate and candidate not in names:
+                names.append(candidate)
     return names[:10]
+
+
+def _conversation_candidates(name: str) -> tuple[str, ...]:
+    """The typed phrase plus the bare name it wraps ("aims群" -> "aims").
+
+    Collected conversations are stored under the bare name while the user
+    types the generic suffix ("群里"), so filtering on the typed phrase alone
+    matched nothing. Both forms are offered; a filter simply gains one more
+    acceptable name.
+    """
+
+    stripped = re.sub(r"(?:群聊|群|频道)$", "", name).strip()
+    if stripped and stripped != name:
+        return (stripped, name)
+    return (name,)
+
+
+_LEADING_TIME_PREFIX = re.compile(
+    r"^(?:(?:今天|今日|昨天|昨晚|前天|明天|后天|本周|这周|上周"
+    r"|本月|这个月|上个月|最近|近)"
+    r"(?:早上|上午|中午|下午|晚上|凌晨)?"
+    r"[\s\d点:：半年月日号周星期礼拜]*)+"
+)
 
 
 def _resource_types(*, has_file: bool, has_message: bool) -> list[str]:

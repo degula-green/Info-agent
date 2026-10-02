@@ -287,13 +287,23 @@ def build_planner(settings: Settings):
     elif provider == "llm":
         planner = _build_llm_planner(settings)
     elif provider == "routing":
-        from app.planning.routing import RoutingPlanner
+        from app.planning.routing import (
+            KNOWLEDGE_ANSWER_INTENT,
+            WEB_RESEARCH_INTENT,
+            RoutingPlanner,
+        )
 
         # Collected text keeps its fixed pipeline; only chat turns whose intent
-        # needs composition reach the model.
+        # needs composition reach the model. knowledge.answer needs composition
+        # whenever the retrieval tools are registered: the deterministic planner
+        # can only answer it from an attachment.
+        llm_intents = {WEB_RESEARCH_INTENT}
+        if knowledge_tools_enabled(settings):
+            llm_intents.add(KNOWLEDGE_ANSWER_INTENT)
         planner = RoutingPlanner(
             deterministic=_build_deterministic_planner(settings),
             llm=_build_llm_planner(settings),
+            llm_intents=frozenset(llm_intents),
         )
     else:
         raise RuntimeError(f"unsupported AGENT_PLANNER_PROVIDER: {provider}")

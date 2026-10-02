@@ -30,7 +30,15 @@ class RAGClient(Protocol):
 
 
 class RAGUnavailable(RuntimeError):
-    pass
+    """The RAG service could not answer. Classified as retryable when the
+    failure looks transient (429 / 5xx / timeout / connection drop); a 4xx
+    describes the request itself and must not be retried."""
+
+    classification = "permanent_error"
+
+    def __init__(self, message: str, *, retryable: bool = False) -> None:
+        super().__init__(message)
+        self.classification = "retryable_error" if retryable else "permanent_error"
 
 
 class HttpRAGClient:
@@ -103,7 +111,9 @@ class HttpRAGClient:
                 timeout=self.timeout_seconds,
             )
         except IntegrationError as exc:
-            raise RAGUnavailable("RAG request failed") from exc
+            raise RAGUnavailable(
+                f"RAG request failed: {exc}", retryable=exc.retryable
+            ) from exc
         try:
             value = result.json()
         except IntegrationError as exc:

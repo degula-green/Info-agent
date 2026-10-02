@@ -126,7 +126,7 @@ def test_a_chat_to_do_stays_on_the_deterministic_planner() -> None:
 
 
 def test_an_intent_this_document_does_not_own_stays_deterministic() -> None:
-    """knowledge.answer and friends are not web research, however they read."""
+    """With no retrieval tools registered, knowledge.answer has no LLM plan."""
 
     planner, deterministic, llm = router()
 
@@ -139,6 +139,34 @@ def test_an_intent_this_document_does_not_own_stays_deterministic() -> None:
     )
 
     assert (deterministic.plans, llm.plans) == (1, 0)
+
+
+def test_a_knowledge_question_reaches_the_llm_planner_when_configured() -> None:
+    """With retrieval tools registered, knowledge.answer needs a composed plan.
+
+    The deterministic planner can only answer a document question from an
+    attachment; a question about collected company data has to be composed from
+    search_sources -> search_content -> knowledge.answer.
+    """
+
+    deterministic = RecordingPlanner("deterministic")
+    llm = RecordingPlanner("llm")
+    planner = RoutingPlanner(
+        deterministic=deterministic,
+        llm=llm,
+        llm_intents=frozenset({"web.research", "knowledge.answer"}),
+    )
+
+    plan = planner.create_plan(
+        envelope(text="昨天晚上10点aims群里在聊什么"),
+        [],
+        [],
+        PlanningConstraints(),
+        understanding("knowledge.answer"),
+    )
+
+    assert plan.objective == "llm"
+    assert (deterministic.plans, llm.plans) == (0, 1)
 
 
 def test_no_understanding_keeps_the_previous_behaviour() -> None:
