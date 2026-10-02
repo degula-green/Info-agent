@@ -20,6 +20,7 @@ from app.capabilities.knowledge import (
     KnowledgeSearchSourcesCapability,
 )
 from app.capabilities.todo import TodoCreateCapability
+from app.capabilities.form import FormApplyCapability, FormPreviewCapability
 from app.capabilities.web_research import WebResearchCapability
 from app.config import Settings, settings as default_settings
 from app.infrastructure.core.client import CoreClient, HttpCoreClient, NullCoreClient
@@ -29,6 +30,7 @@ from app.infrastructure.search.tavily import TavilySearchProvider
 from app.infrastructure.web.content_reader import ContentReader
 from app.infrastructure.web.crawl4ai_client import Crawl4AIClient
 from app.infrastructure.web.evidence import EvidenceBuilder
+from app.infrastructure.web.form_browser_client import FormBrowserClient
 from app.infrastructure.web.tavily_extractor import TavilyRenderer
 from app.infrastructure.web.url_tools import load_aliases
 from app.infrastructure.knowledge.client import HttpKnowledgeClient, KnowledgeClient
@@ -245,6 +247,26 @@ def build_registry(
             timeout_seconds=_timeout_seconds(settings.answer_timeout_seconds),
         ),
     ]
+    if settings.form_browser_url.strip():
+        # Registered only when the browser sidecar is deployed: with no sidecar
+        # the form intent must report as unsupported rather than fail at run time.
+        form_client = FormBrowserClient(
+            settings.form_browser_url,
+            api_token=settings.form_browser_token,
+            timeout_seconds=settings.form_browser_timeout_seconds,
+        )
+        capabilities.append(
+            FormPreviewCapability(
+                form_client,
+                timeout_seconds=_timeout_seconds(settings.form_preview_timeout_seconds),
+            )
+        )
+        capabilities.append(
+            FormApplyCapability(
+                form_client,
+                timeout_seconds=_timeout_seconds(settings.form_apply_timeout_seconds),
+            )
+        )
     if settings.chat_reply_enabled:
         # Non-task messages get a short reply instead of silence. Leaving the
         # capability out of the registry is the off switch: the deterministic
@@ -288,6 +310,7 @@ def build_planner(settings: Settings):
         planner = _build_llm_planner(settings)
     elif provider == "routing":
         from app.planning.routing import (
+            FORM_COMPLETE_INTENT,
             KNOWLEDGE_ANSWER_INTENT,
             WEB_RESEARCH_INTENT,
             RoutingPlanner,
@@ -300,6 +323,10 @@ def build_planner(settings: Settings):
         llm_intents = {WEB_RESEARCH_INTENT}
         if knowledge_tools_enabled(settings):
             llm_intents.add(KNOWLEDGE_ANSWER_INTENT)
+        if settings.form_browser_url.strip():
+            # form.complete needs a composed two-step plan (preview, then the
+            # approval-gated write), which only the LLM planner can produce.
+            llm_intents.add(FORM_COMPLETE_INTENT)
         planner = RoutingPlanner(
             deterministic=_build_deterministic_planner(settings),
             llm=_build_llm_planner(settings),
