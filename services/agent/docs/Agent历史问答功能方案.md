@@ -2,12 +2,17 @@
 
 ## 文档状态
 
-- 版本：v0.1
+- 版本：v0.2
 - 状态：待审核
 - 目标：为 Agent 页面建立统一的会话、消息、Task 历史模型，并作为后续记忆机制的基础
 - 范围：Agent 服务、Agent 数据库 schema、Agent 页面、旧 AI 问答页面退役
 - 数据库归属：同一 PostgreSQL 集群下的 `agent` schema
 - 历史兼容策略：不兼容旧 AI 问答历史表
+- 修订记录：
+  - v0.2（2026-10-02）：按合并后的代码校正 —— 对齐 `agent_tasks` 的 ID 类型与 Core JWT 鉴权链路；
+    修正 `AgentTurnView` 的现状描述；补充 Task↔Message 状态映射、会话创建与幂等规则；
+    明确本方案与知识问答（knowledge schema）的边界。
+  - v0.1：初稿。
 
 ## 1. 背景
 
@@ -64,6 +69,14 @@ Task 是执行单位，Conversation 是历史与记忆单位。
 
 旧 AI 问答页面保留代码作为参考，但不再作为主入口。
 
+### 2.1 与知识问答的边界
+
+```text
+本方案的 Conversation / Message：用户与 Agent 自己的聊天历史。
+知识问答（群聊、文档、公司资料）：仍在 knowledge / rag schema，经由知识检索工具回答。
+第一阶段不把 Agent 自己的会话历史写入 RAG，也不把 RAG 的检索结果当作对话历史。
+```
+
 ## 3. 明确不做
 
 - 不迁移旧 AI 问答历史表
@@ -115,8 +128,8 @@ info-agent database
 ```sql
 CREATE TABLE agent.conversations (
   id uuid PRIMARY KEY,
-  owner_user_id uuid NOT NULL,
-  organization_id uuid NULL,
+  owner_user_id text NOT NULL,      -- 与 agent.agent_tasks.owner_user_id 保持一致（TEXT）
+  organization_id text NULL,        -- 现有 agent 表以 TEXT 存组织 id
   title varchar(200) NOT NULL DEFAULT '新的对话',
   status varchar(32) NOT NULL DEFAULT 'active',
   source varchar(32) NOT NULL DEFAULT 'agent',
@@ -133,6 +146,9 @@ CREATE TABLE agent.conversations (
 - `source` 预留给未来的历史来源标识。
 - `summary` 和 `summary_cursor` 为后续记忆机制预留。
 - `last_message_at` 用于历史列表排序。
+- v0.2 校正：新表自身的主键用 `uuid`；但**凡是引用现有 `agent_tasks` 的列**
+  （`owner_user_id`、`task_id`）必须沿用现有的 `TEXT` 类型，否则外键与查询会失配。
+  把整个 agent schema 迁到 uuid 主键是独立的一次迁移，不在本方案范围。
 
 ### 5.2 messages
 
@@ -143,7 +159,7 @@ CREATE TABLE agent.messages (
   role varchar(32) NOT NULL,
   content text NOT NULL DEFAULT '',
   status varchar(32) NOT NULL DEFAULT 'pending',
-  task_id uuid NULL,
+  task_id text NULL,                -- 指向 agent.agent_tasks(task_id)，该列是 TEXT
   citations jsonb NOT NULL DEFAULT '[]'::jsonb,
   client_message_id varchar(128) NULL,
   created_at timestamptz NOT NULL DEFAULT now(),
@@ -167,6 +183,10 @@ ALTER TABLE agent.agent_tasks ADD COLUMN conversation_id uuid NULL;
 ALTER TABLE agent.agent_tasks ADD COLUMN request_message_id uuid NULL;
 ALTER TABLE agent.agent_tasks ADD COLUMN response_message_id uuid NULL;
 ```
+
+说明（v0.2 补充）：`conversation_id` / `request_message_id` / `response_message_id` 是新引入的
+uuid 列；`task_id` 保持现有 `TEXT` 类型不变，`agent.messages.task_id` 以 `TEXT` 引用它。
+迁移文件沿用仓库约定，成对提交：`db/migrations/<yyyymmdd>_agent_conversation_history.{up,down}.sql`。
 
 后续稳定后可以加：
 
@@ -193,6 +213,10 @@ CREATE TABLE agent.memory_records (
 ```
 
 ## 6. API 设计
+
+鉴权与隔离（v0.2 补充）：所有新接口都走 Core JWT（`Depends(current_user)` / `current_user_id`），
+服务端只按 `owner_user_id` 读写；用户 A 不得读取、修改或删除用户 B 的会话与消息。组织信息沿用
+`core_client.current_organization()`，不信任客户端传入的 `organization_id`。
 
 ### 6.1 Conversation API
 
@@ -269,6 +293,15 @@ POST /api/agent/v1/tasks
 }
 ```
 
+会话创建与幂等（v0.2 补充）：
+
+- 前端首次发送时可以先 `POST /conversations` 拿到 `conversation_id`，再带着它创建 Task；
+- 也可以不带 `conversation_id` 直接创建 Task，由服务端在同一事务里创建会话，并在响应中回传
+  `conversation_id`（推荐，少一次往返）；
+- 两种方式都必须复用现有的幂等键 `source_type:owner_user_id:client_message_id`：同键重放返回
+  同一个 Task 和同一个 Conversation，不得产生第二个会话；
+- 带 `conversation_id` 时必须校验它属于调用者，否则返回 403。
+
 保留：
 
 ```text
@@ -329,6 +362,23 @@ conversation_id: c-123
 -> 触发 conversation summary 更新任务
 ```
 
+### 7.6 Task 事件到 Message 的映射（v0.2 补充）
+
+```text
+task.accepted   -> 写入 user message(status=completed)
+                -> 写入 assistant message(status=pending)
+task.step_started / step_succeeded / step_failed
+                -> 不改写 message 内容，只作为"执行过程"展示
+task.waiting_input / task.waiting_approval
+                -> assistant message 保持 pending，前端按 Task 状态渲染输入/审批卡片
+task.completed  -> assistant message: content=answer、citations=...、status=completed
+                -> 更新 conversation.last_message_at
+                -> 触发 conversation summary 更新任务（Phase 4）
+task.failed     -> assistant message: status=failed、content=错误摘要
+```
+
+即：**Message 只承载用户可见的问答内容，Step / Observation 不进入 messages。**
+
 ## 8. Agent 页面改造
 
 ### 8.1 路由
@@ -385,7 +435,11 @@ GET /conversations
 
 ### 8.3 消息渲染
 
-继续使用第一阶段已经确定的 `AgentTurnView`：
+现状（v0.2 校正）：仓库里目前**没有** `AgentTurnView` 组件，回答 / 来源 / 执行过程是直接写在
+`InfoAgentChatPage.vue` 里的。Phase 2 需要先把这段渲染抽成组件（名称可沿用 `AgentTurnView`），
+让实时对话与历史加载共用同一套渲染。
+
+组件职责：
 
 ```text
 回答优先
@@ -497,17 +551,18 @@ Planner / Answer 不应读取全部历史。
 
 ### Phase 1：会话骨架
 
+- 一个 migration 对：`db/migrations/<yyyymmdd>_agent_conversation_history.{up,down}.sql`
 - 新建 `agent.conversations`
-- 新建 `agent.messages`
-- `agent_tasks` 增加 `conversation_id`
-- 新增 Conversation API
-- 新消息写入 conversation/message
+- 新建 `agent.messages`（ID 类型按 5.x 的 v0.2 校正）
+- `agent_tasks` 增加 `conversation_id` / `request_message_id` / `response_message_id`
+- 新增 Conversation API（Core JWT + owner 隔离）
+- `POST /tasks` 接受 `conversation_id`，按 7.6 的映射写入 message
 
 ### Phase 2：Agent 页面历史
 
+- 从 `InfoAgentChatPage.vue` 抽出 `AgentTurnView`（回答 / 来源 / 执行过程 / metadata）
 - 侧边栏读取 `GET /conversations`
-- 点击历史加载消息
-- 历史渲染复用 `AgentTurnView`
+- 点击历史加载消息（`GET /conversations/{id}` → `AgentTurnView`）
 - 当前新 Task 完成后刷新历史列表
 
 ### Phase 3：旧入口退役
@@ -538,6 +593,8 @@ Planner / Answer 不应读取全部历史。
 - 打开会话返回完整消息顺序
 - 分页正常
 - 首页并发发送不会串 conversation
+- 用户 A 无法读取 / 修改 / 删除用户 B 的会话（返回 403）
+- 同一 `client_message_id` 重放返回同一个 conversation 与 task
 
 ### 前端
 
@@ -557,6 +614,8 @@ Planner / Answer 不应读取全部历史。
 
 ## 13. 待审核决策
 
+> v0.2 只做"与现有代码对齐"的校正，以下决策项仍未拍板。
+
 1. 新表放在 `agent` schema，是否确认？
 2. 一个 Conversation 多 Task，是否确认？
 3. 第一阶段是否只做历史读取，不做重命名/删除？
@@ -572,3 +631,6 @@ agent_tasks 关联 conversation_id。
 /chat 成为唯一会话窗口。
 旧页面保留代码，不保留旧历史链路。
 ```
+
+v0.2 补充前提：新表的引用列沿用现有 `agent_tasks` 的 `TEXT` 类型；新接口全部走 Core JWT 并做
+owner 隔离；`AgentTurnView` 需要先抽取，不能按"已存在"来排期。
