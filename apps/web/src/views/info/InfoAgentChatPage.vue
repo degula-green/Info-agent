@@ -58,6 +58,15 @@
               <span>{{ message.todo.due_at || message.todo.due_expression || '未设置截止时间' }}</span>
             </div>
 
+            <div v-if="message.formResult" class="agent-form-result">
+              <div class="agent-form-result__title">
+                <t-icon name="check-circle" />
+                {{ message.formResult.verified ? '已写入表格' : '已提交' }}
+              </div>
+              <strong>{{ message.formResult.range }}</strong>
+              <span v-if="!message.formResult.verified">结果无法自动确认，请自行核对</span>
+            </div>
+
             <div v-if="message.approval" class="agent-approval">
               <div class="agent-approval__header">
                 <span><t-icon name="lock-on" />需要确认</span>
@@ -321,6 +330,8 @@ type AgentMessage = {
   citations: Citation[]
   error?: string
   todo?: TodoResult
+  /** Receipt for a form.preview / form.apply step, shown after a write. */
+  formResult?: { summary: string; range?: string; verified?: boolean }
   approval?: AgentApproval
   inputRequest?: { missing: string[] }
   submitting?: boolean
@@ -456,6 +467,18 @@ function handleTaskEvent(message: AgentMessage, event: AgentTaskEvent): boolean 
     case 'step.succeeded':
     case 'step.failed':
       addOrUpdateStep(message, event)
+      if (event.event_type === 'step.succeeded') {
+        const preview = payload.result_preview as Record<string, unknown> | undefined
+        const writtenRange = typeof preview?.written_range === 'string' ? preview.written_range : ''
+        // A preview step is only a progress line; a write produces the receipt.
+        if (writtenRange && typeof preview?.summary === 'string') {
+          message.formResult = {
+            summary: preview.summary,
+            range: writtenRange,
+            verified: Boolean(preview?.verified),
+          }
+        }
+      }
       message.status = event.event_type === 'step.failed' ? 'executing' : 'executing'
       message.statusText = event.event_type === 'step.started'
         ? stepStartText(String(payload.capability || ''))
@@ -540,7 +563,7 @@ function primaryAnswer(message: AgentMessage): string {
 
 function showsEmptyKnowledgeResult(message: AgentMessage): boolean {
   if (message.status !== 'succeeded') return false
-  if (primaryAnswer(message) || message.todo || message.approval || message.inputRequest) return false
+  if (primaryAnswer(message) || message.todo || message.formResult || message.approval || message.inputRequest) return false
   return !visibleSourceItems(message).length
 }
 
@@ -1239,6 +1262,9 @@ onBeforeUnmount(() => activeController?.abort())
 .agent-todo__title { display: flex; align-items: center; gap: 6px; color: var(--td-brand-color); font-size: 12px; }
 .agent-todo strong { font-size: 15px; }
 .agent-todo span { color: var(--td-text-color-secondary); font-size: 12px; }
+.agent-form-result { display: grid; gap: 4px; margin-top: 14px; padding: 12px 14px; border: 1px solid var(--td-success-color-3); border-radius: 9px; background: var(--td-success-color-1); }
+.agent-form-result__title { display: inline-flex; align-items: center; gap: 6px; font-weight: 600; }
+.agent-form-result span { color: var(--td-text-color-secondary); font-size: 12px; }
 .agent-approval, .agent-input-request { display: grid; gap: 11px; margin-top: 14px; padding: 14px; border: 1px solid var(--td-warning-color-3); border-radius: 9px; background: var(--td-warning-color-1); }
 .agent-approval__header, .agent-approval__actions { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 .agent-approval__header span { display: inline-flex; align-items: center; gap: 6px; font-weight: 600; }

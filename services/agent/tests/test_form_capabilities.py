@@ -258,3 +258,25 @@ def test_live_document_overrides_a_planner_submit_action() -> None:
         )
     )
     assert result["action"] == "write_cells"
+
+
+def test_result_preview_summarizes_form_steps() -> None:
+    from app.kernel.runtime import _result_preview
+
+    preview = _result_preview(
+        "form.preview",
+        {"form": {"title": "班级通讯录", "fields": [{"name": "学号"}], "missing": ["性别"]}},
+    )
+    assert preview is not None
+    assert preview["block_type"] == "form"
+    assert "班级通讯录" in preview["summary"]
+    assert "1 项待补" in preview["summary"]
+
+    applied = _result_preview(
+        "form.apply",
+        {"written_range": "A4:I4", "verified": True, "observed": [["x"]]},
+    )
+    assert applied is not None
+    assert applied["written_range"] == "A4:I4"
+    assert applied["verified"] is True
+    assert "A4:I4" in applied["summary"]
