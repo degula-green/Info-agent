@@ -111,7 +111,12 @@ class _RAG:
                     "resource_type": "attachment",
                     "title": "预算表.xlsx",
                     "sender": {"name": "张三"},
-                    "conversation": {"name": "财务群"},
+                    "conversation": {
+                        "id": "conversation-1",
+                        "name": "财务群",
+                        "type": "group",
+                        "platform": "feishu",
+                    },
                     "sent_at": "2026-10-01T10:30:00+08:00",
                     "best_score": 0.2,
                     "chunks": [
@@ -517,7 +522,10 @@ def test_knowledge_answer_keeps_only_known_enriched_citations() -> None:
             "resource_type": "attachment",
             "title": "预算表.xlsx",
             "sender_name": "张三",
+            "conversation_id": "conversation-1",
             "conversation_name": "财务群",
+            "conversation_type": "group",
+            "conversation_platform": "feishu",
             "sent_at": "2026-10-01T10:30:00+08:00",
             "position": {"paragraph_index": 2},
         }

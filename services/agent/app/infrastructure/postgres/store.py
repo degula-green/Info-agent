@@ -17,7 +17,9 @@ from psycopg_pool import ConnectionPool
 from app.kernel.models import (
     ApprovalRecord,
     CapabilityCallRecord,
+    ConversationRecord,
     EvidenceRecord,
+    MessageRecord,
     Observation,
     OutboxEvent,
     Plan,
@@ -80,6 +82,14 @@ class PostgresAgentStore:
     def _events(self) -> str:
         return f"{self.schema}.agent_task_events"
 
+    @property
+    def _conversations(self) -> str:
+        return f"{self.schema}.conversations"
+
+    @property
+    def _messages(self) -> str:
+        return f"{self.schema}.messages"
+
     @staticmethod
     def _task_model(row: dict[str, Any]) -> TaskRecord:
         return TaskRecord(
@@ -103,6 +113,46 @@ class PostgresAgentStore:
             last_error=row["last_error"],
             lease_owner=row["lease_owner"],
             lease_expires_at=row["lease_expires_at"],
+            conversation_id=(
+                str(row["conversation_id"]) if row.get("conversation_id") else None
+            ),
+            request_message_id=(
+                str(row["request_message_id"]) if row.get("request_message_id") else None
+            ),
+            response_message_id=(
+                str(row["response_message_id"]) if row.get("response_message_id") else None
+            ),
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+        )
+
+    @staticmethod
+    def _conversation_model(row: dict[str, Any]) -> ConversationRecord:
+        return ConversationRecord(
+            conversation_id=str(row["conversation_id"]),
+            owner_user_id=row["owner_user_id"],
+            organization_id=row.get("organization_id"),
+            title=row["title"],
+            status=row["status"],
+            source=row["source"],
+            summary=row.get("summary"),
+            summary_cursor=row.get("summary_cursor", 0),
+            last_message_at=row.get("last_message_at"),
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+        )
+
+    @staticmethod
+    def _message_model(row: dict[str, Any]) -> MessageRecord:
+        return MessageRecord(
+            message_id=str(row["message_id"]),
+            conversation_id=str(row["conversation_id"]),
+            role=row["role"],
+            content=row["content"] or "",
+            status=row["status"],
+            task_id=row.get("task_id"),
+            citations=row.get("citations") or [],
+            client_message_id=row.get("client_message_id"),
             created_at=row["created_at"],
             updated_at=row["updated_at"],
         )
@@ -269,6 +319,84 @@ class PostgresAgentStore:
             ),
         )
 
+    def _insert_input(self, cursor, item: TaskInput) -> None:
+        cursor.execute(
+            f"INSERT INTO {self._inputs} "
+            "(input_id, task_id, version, payload, created_at) "
+            "VALUES (%s, %s, %s, %s, %s) "
+            "ON CONFLICT (task_id, version) DO UPDATE SET payload = EXCLUDED.payload",
+            (
+                item.input_id,
+                item.task_id,
+                item.version,
+                _json(item.payload),
+                item.created_at,
+            ),
+        )
+
+    def _insert_conversation(
+        self, cursor, conversation: ConversationRecord
+    ) -> ConversationRecord:
+        cursor.execute(
+            f"""INSERT INTO {self._conversations} (
+                    conversation_id, owner_user_id, organization_id, title,
+                    status, source, summary, summary_cursor, last_message_at,
+                    created_at, updated_at
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (conversation_id) DO UPDATE SET
+                    title = EXCLUDED.title,
+                    status = EXCLUDED.status,
+                    summary = EXCLUDED.summary,
+                    summary_cursor = EXCLUDED.summary_cursor,
+                    last_message_at = EXCLUDED.last_message_at,
+                    updated_at = EXCLUDED.updated_at
+                RETURNING *""",
+            (
+                conversation.conversation_id,
+                conversation.owner_user_id,
+                conversation.organization_id,
+                conversation.title,
+                conversation.status,
+                conversation.source,
+                conversation.summary,
+                conversation.summary_cursor,
+                conversation.last_message_at,
+                conversation.created_at,
+                conversation.updated_at,
+            ),
+        )
+        row = cursor.fetchone()
+        return self._conversation_model(row)
+
+    def _insert_message(self, cursor, message: MessageRecord) -> MessageRecord:
+        cursor.execute(
+            f"""INSERT INTO {self._messages} (
+                    message_id, conversation_id, role, content, status,
+                    task_id, citations, client_message_id, created_at, updated_at
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                RETURNING *""",
+            (
+                message.message_id,
+                message.conversation_id,
+                message.role,
+                message.content,
+                message.status,
+                message.task_id,
+                _json(message.citations),
+                message.client_message_id,
+                message.created_at,
+                message.updated_at,
+            ),
+        )
+        row = cursor.fetchone()
+        cursor.execute(
+            f"""UPDATE {self._conversations}
+                SET last_message_at = %s, updated_at = %s
+                WHERE conversation_id = %s""",
+            (message.created_at, message.created_at, message.conversation_id),
+        )
+        return self._message_model(row)
+
     def _upsert_task(self, cursor, task: TaskRecord) -> None:
         cursor.execute(
             f"""
@@ -277,10 +405,12 @@ class PostgresAgentStore:
                 current_plan_version, idempotency_key, checkpoint, understanding, result,
                 replan_count, step_count, model_call_count, last_error,
                 lease_owner, lease_expires_at, input, source_ref, constraints,
+                conversation_id, request_message_id, response_message_id,
                 created_at, updated_at
             ) VALUES (
                 %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                %s, %s, %s
             )
             ON CONFLICT (task_id) DO UPDATE SET
                 status = EXCLUDED.status,
@@ -297,6 +427,9 @@ class PostgresAgentStore:
                 input = EXCLUDED.input,
                 source_ref = EXCLUDED.source_ref,
                 constraints = EXCLUDED.constraints,
+                conversation_id = EXCLUDED.conversation_id,
+                request_message_id = EXCLUDED.request_message_id,
+                response_message_id = EXCLUDED.response_message_id,
                 updated_at = EXCLUDED.updated_at
             """,
             (
@@ -320,6 +453,9 @@ class PostgresAgentStore:
                 _json(task.input),
                 _json(task.source_ref),
                 _json(task.constraints),
+                task.conversation_id,
+                task.request_message_id,
+                task.response_message_id,
                 task.created_at,
                 task.updated_at,
             ),
@@ -333,6 +469,9 @@ class PostgresAgentStore:
         *,
         events: list[TaskEvent] | None = None,
         outbox_events: list[OutboxEvent] | None = None,
+        inputs: list[TaskInput] | None = None,
+        conversation: ConversationRecord | None = None,
+        messages: list[MessageRecord] | None = None,
     ) -> TaskRecord:
         with self.pool.connection() as connection:
             with connection.cursor(row_factory=dict_row) as cursor:
@@ -344,7 +483,13 @@ class PostgresAgentStore:
                     existing = cursor.fetchone()
                     if existing is not None:
                         return self._task_model(existing)
+                if conversation is not None:
+                    self._insert_conversation(cursor, conversation)
                 self._upsert_task(cursor, task)
+                for item in inputs or []:
+                    self._insert_input(cursor, item)
+                for message in messages or []:
+                    self._insert_message(cursor, message)
                 for event in events or []:
                     self._insert_event(cursor, event)
                 for item in outbox_events or []:
@@ -445,11 +590,7 @@ class PostgresAgentStore:
     def add_input(self, item: TaskInput) -> None:
         with self.pool.connection() as connection:
             with connection.cursor() as cursor:
-                cursor.execute(
-                    f"INSERT INTO {self._inputs} (input_id, task_id, version, payload, created_at) "
-                    "VALUES (%s, %s, %s, %s, %s) ON CONFLICT (task_id, version) DO UPDATE SET payload = EXCLUDED.payload",
-                    (item.input_id, item.task_id, item.version, _json(item.payload), item.created_at),
-                )
+                self._insert_input(cursor, item)
 
     def list_inputs(self, task_id: str) -> list[TaskInput]:
         with self.pool.connection() as connection:
@@ -873,6 +1014,165 @@ class PostgresAgentStore:
                     "WHERE event_id = %s",
                     (error[:500], event_id),
                 )
+
+    # -- conversation history ---------------------------------------------
+
+    def create_conversation(
+        self, conversation: ConversationRecord
+    ) -> ConversationRecord:
+        with self.pool.connection() as connection:
+            with connection.cursor(row_factory=dict_row) as cursor:
+                stored = self._insert_conversation(cursor, conversation)
+            connection.commit()
+        return stored
+
+    def get_conversation(self, conversation_id: str) -> ConversationRecord | None:
+        with self.pool.connection() as connection:
+            with connection.cursor(row_factory=dict_row) as cursor:
+                cursor.execute(
+                    f"SELECT * FROM {self._conversations} WHERE conversation_id = %s",
+                    (conversation_id,),
+                )
+                row = cursor.fetchone()
+        return self._conversation_model(row) if row else None
+
+    def save_conversation(self, conversation: ConversationRecord) -> None:
+        with self.pool.connection() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    f"""UPDATE {self._conversations} SET
+                            title = %s, status = %s, summary = %s,
+                            summary_cursor = %s, last_message_at = %s, updated_at = %s
+                        WHERE conversation_id = %s""",
+                    (
+                        conversation.title,
+                        conversation.status,
+                        conversation.summary,
+                        conversation.summary_cursor,
+                        conversation.last_message_at,
+                        conversation.updated_at,
+                        conversation.conversation_id,
+                    ),
+                )
+            connection.commit()
+
+    def list_conversations_for_owner(
+        self,
+        owner_user_id: str,
+        *,
+        statuses: list[str] | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[ConversationRecord]:
+        sql = f"SELECT * FROM {self._conversations} WHERE owner_user_id = %s"
+        params: list[Any] = [owner_user_id]
+        if statuses:
+            sql += " AND status = ANY(%s)"
+            params.append(list(statuses))
+        sql += (
+            " ORDER BY COALESCE(last_message_at, created_at) DESC"
+            " LIMIT %s OFFSET %s"
+        )
+        params.append(max(int(limit), 1))
+        params.append(max(int(offset), 0))
+        with self.pool.connection() as connection:
+            with connection.cursor(row_factory=dict_row) as cursor:
+                cursor.execute(sql, tuple(params))
+                rows = cursor.fetchall()
+        return [self._conversation_model(row) for row in rows]
+
+    def count_conversations_for_owner(
+        self,
+        owner_user_id: str,
+        *,
+        statuses: list[str] | None = None,
+    ) -> int:
+        sql = f"SELECT COUNT(*) FROM {self._conversations} WHERE owner_user_id = %s"
+        params: list[Any] = [owner_user_id]
+        if statuses:
+            sql += " AND status = ANY(%s)"
+            params.append(list(statuses))
+        with self.pool.connection() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(sql, tuple(params))
+                row = cursor.fetchone()
+        return int(row[0]) if row else 0
+
+    def delete_conversation(
+        self, conversation_id: str, *, owner_user_id: str
+    ) -> bool:
+        # Messages are removed by the ON DELETE CASCADE foreign key.
+        with self.pool.connection() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    f"DELETE FROM {self._conversations} "
+                    "WHERE conversation_id = %s AND owner_user_id = %s",
+                    (conversation_id, owner_user_id),
+                )
+                deleted = cursor.rowcount > 0
+            connection.commit()
+        return deleted
+
+    def add_message(self, message: MessageRecord) -> MessageRecord:
+        with self.pool.connection() as connection:
+            with connection.cursor(row_factory=dict_row) as cursor:
+                stored = self._insert_message(cursor, message)
+            connection.commit()
+        return stored
+
+    def get_message(self, message_id: str) -> MessageRecord | None:
+        with self.pool.connection() as connection:
+            with connection.cursor(row_factory=dict_row) as cursor:
+                cursor.execute(
+                    f"SELECT * FROM {self._messages} WHERE message_id = %s",
+                    (message_id,),
+                )
+                row = cursor.fetchone()
+        return self._message_model(row) if row else None
+
+    def update_message(self, message: MessageRecord) -> None:
+        with self.pool.connection() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    f"""UPDATE {self._messages} SET
+                            content = %s, status = %s, citations = %s, updated_at = %s
+                        WHERE message_id = %s""",
+                    (
+                        message.content,
+                        message.status,
+                        _json(message.citations),
+                        message.updated_at,
+                        message.message_id,
+                    ),
+                )
+            connection.commit()
+
+    def list_messages(
+        self, conversation_id: str, *, limit: int | None = None
+    ) -> list[MessageRecord]:
+        sql = (
+            f"SELECT * FROM {self._messages} WHERE conversation_id = %s"
+            " ORDER BY created_at"
+        )
+        params: list[Any] = [conversation_id]
+        if limit is not None:
+            sql += " LIMIT %s"
+            params.append(max(int(limit), 1))
+        with self.pool.connection() as connection:
+            with connection.cursor(row_factory=dict_row) as cursor:
+                cursor.execute(sql, tuple(params))
+                rows = cursor.fetchall()
+        return [self._message_model(row) for row in rows]
+
+    def count_messages(self, conversation_id: str) -> int:
+        with self.pool.connection() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    f"SELECT COUNT(*) FROM {self._messages} WHERE conversation_id = %s",
+                    (conversation_id,),
+                )
+                row = cursor.fetchone()
+        return int(row[0]) if row else 0
 
 
 class PostgresTodoStore:

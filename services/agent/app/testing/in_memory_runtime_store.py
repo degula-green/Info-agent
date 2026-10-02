@@ -13,7 +13,9 @@ from app.kernel.events import utcnow
 from app.kernel.models import (
     ApprovalRecord,
     CapabilityCallRecord,
+    ConversationRecord,
     EvidenceRecord,
+    MessageRecord,
     Observation,
     OutboxEvent,
     Plan,
@@ -42,6 +44,8 @@ class InMemoryAgentStore:
         self.approvals: dict[str, ApprovalRecord] = {}
         self.events: dict[str, list[TaskEvent]] = {}
         self.outbox: dict[str, OutboxEvent] = {}
+        self.conversations: dict[str, ConversationRecord] = {}
+        self.messages: dict[str, MessageRecord] = {}
 
     # -- tasks ------------------------------------------------------------
 
@@ -51,6 +55,9 @@ class InMemoryAgentStore:
         *,
         events: list[TaskEvent] | None = None,
         outbox_events: list[OutboxEvent] | None = None,
+        inputs: list[TaskInput] | None = None,
+        conversation: ConversationRecord | None = None,
+        messages: list[MessageRecord] | None = None,
     ) -> TaskRecord:
         with self._lock:
             if task.idempotency_key:
@@ -58,10 +65,22 @@ class InMemoryAgentStore:
                 if existing_id is not None:
                     return self.tasks[existing_id].model_copy(deep=True)
                 self.idempotency[task.idempotency_key] = task.task_id
+            if conversation is not None:
+                self.conversations[conversation.conversation_id] = (
+                    conversation.model_copy(deep=True)
+                )
             self.tasks[task.task_id] = task.model_copy(deep=True)
             self.inputs.setdefault(task.task_id, [])
             self.observations.setdefault(task.task_id, [])
             self.events.setdefault(task.task_id, [])
+            for item in inputs or []:
+                self.add_input(item)
+            for message in messages or []:
+                self.messages[message.message_id] = message.model_copy(deep=True)
+                stored_conversation = self.conversations.get(message.conversation_id)
+                if stored_conversation is not None:
+                    stored_conversation.last_message_at = message.created_at
+                    stored_conversation.updated_at = message.created_at
             for event in events or []:
                 self.append_event(event)
             for item in outbox_events or []:
@@ -359,4 +378,122 @@ class InMemoryAgentStore:
             item.last_error = error
             item.available_at = utcnow() + timedelta(
                 seconds=max(self._outbox_retry_latency_seconds, 0.0)
+            )
+
+    # -- conversation history ---------------------------------------------
+
+    def create_conversation(
+        self, conversation: ConversationRecord
+    ) -> ConversationRecord:
+        with self._lock:
+            self.conversations[conversation.conversation_id] = (
+                conversation.model_copy(deep=True)
+            )
+            return conversation.model_copy(deep=True)
+
+    def get_conversation(self, conversation_id: str) -> ConversationRecord | None:
+        with self._lock:
+            item = self.conversations.get(conversation_id)
+            return item.model_copy(deep=True) if item else None
+
+    def save_conversation(self, conversation: ConversationRecord) -> None:
+        with self._lock:
+            stored = conversation.model_copy(deep=True)
+            stored.updated_at = utcnow()
+            self.conversations[stored.conversation_id] = stored
+
+    def list_conversations_for_owner(
+        self,
+        owner_user_id: str,
+        *,
+        statuses: list[str] | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[ConversationRecord]:
+        with self._lock:
+            items = [
+                item
+                for item in self.conversations.values()
+                if item.owner_user_id == owner_user_id
+                and (statuses is None or item.status in statuses)
+            ]
+            items.sort(
+                key=lambda item: item.last_message_at or item.created_at,
+                reverse=True,
+            )
+            start = max(int(offset), 0)
+            return [
+                item.model_copy(deep=True)
+                for item in items[start : start + max(int(limit), 1)]
+            ]
+
+    def count_conversations_for_owner(
+        self,
+        owner_user_id: str,
+        *,
+        statuses: list[str] | None = None,
+    ) -> int:
+        with self._lock:
+            return sum(
+                1
+                for item in self.conversations.values()
+                if item.owner_user_id == owner_user_id
+                and (statuses is None or item.status in statuses)
+            )
+
+    def delete_conversation(
+        self, conversation_id: str, *, owner_user_id: str
+    ) -> bool:
+        with self._lock:
+            item = self.conversations.get(conversation_id)
+            if item is None or item.owner_user_id != owner_user_id:
+                return False
+            del self.conversations[conversation_id]
+            for message_id in [
+                message.message_id
+                for message in self.messages.values()
+                if message.conversation_id == conversation_id
+            ]:
+                del self.messages[message_id]
+            return True
+
+    def add_message(self, message: MessageRecord) -> MessageRecord:
+        with self._lock:
+            self.messages[message.message_id] = message.model_copy(deep=True)
+            conversation = self.conversations.get(message.conversation_id)
+            if conversation is not None:
+                conversation.last_message_at = message.created_at
+            return message.model_copy(deep=True)
+
+    def get_message(self, message_id: str) -> MessageRecord | None:
+        with self._lock:
+            item = self.messages.get(message_id)
+            return item.model_copy(deep=True) if item else None
+
+    def update_message(self, message: MessageRecord) -> None:
+        with self._lock:
+            stored = message.model_copy(deep=True)
+            stored.updated_at = utcnow()
+            self.messages[stored.message_id] = stored
+
+    def list_messages(
+        self, conversation_id: str, *, limit: int | None = None
+    ) -> list[MessageRecord]:
+        with self._lock:
+            items = [
+                item
+                for item in self.messages.values()
+                if item.conversation_id == conversation_id
+            ]
+            items.sort(key=lambda item: item.created_at)
+            if limit is not None:
+                items = items[:limit]
+            return [item.model_copy(deep=True) for item in items]
+
+    def count_messages(self, conversation_id: str) -> int:
+        with self._lock:
+            return sum(
+                1
+                for item in self.messages.values()
+                if item.conversation_id == conversation_id
             )

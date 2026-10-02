@@ -1,14 +1,25 @@
 <template>
   <section ref="pageRef" class="agent-chat-page">
     <div ref="scrollRef" class="agent-chat-scroll">
-      <div v-if="!messages.length" class="agent-welcome">
+      <div v-if="restoringConversation" class="agent-welcome">
+        <h1>正在加载会话</h1>
+        <p>请稍候</p>
+      </div>
+
+      <div v-else-if="!messages.length" class="agent-welcome">
         <h1>开始新的对话</h1>
         <p>输入指令，Agent 会在后台规划、审批并执行</p>
       </div>
 
       <div v-else class="agent-transcript">
         <div v-for="message in messages" :key="message.id" :class="['agent-message', `agent-message--${message.role}`]">
-          <div v-if="message.role === 'user'" class="agent-user-bubble">{{ message.text }}</div>
+          <div v-if="message.role === 'user'" class="agent-user-message">
+            <div class="agent-user-bubble">{{ message.text }}</div>
+            <div class="agent-user-actions" aria-label="问题操作">
+              <button type="button" title="复制问题" aria-label="复制问题" @click="copyText(message.text || '', '问题已复制')"><t-icon name="file-copy" /></button>
+              <button type="button" title="编辑问题" aria-label="编辑问题" @click="editQuestion(message.text || '')"><t-icon name="edit-1" /></button>
+            </div>
+          </div>
           <div v-else class="agent-answer">
             <div class="agent-status" :class="`agent-status--${message.status || 'running'}`">
               <span class="agent-status__dot" />
@@ -18,25 +29,37 @@
             <div v-if="primaryAnswer(message)" class="agent-answer__content" v-html="renderChatMarkdown(primaryAnswer(message))" />
             <div v-else-if="showsEmptyKnowledgeResult(message)" class="agent-empty-result">
               <strong>没有找到满足条件的内容。</strong>
-              <span v-if="metadataCoverage(message) === 'partial'">部分历史元数据尚未补齐，结果可能不完整。</span>
             </div>
 
             <section v-if="visibleSourceItems(message).length" class="agent-sources" aria-label="回答来源">
-              <div class="agent-sources__header">
-                <span>来源 {{ visibleSourceItems(message).length }}</span>
-                <span v-if="metadataCoverage(message) === 'partial'" class="agent-coverage-tag">部分历史元数据缺失</span>
+              <button
+                type="button"
+                class="agent-sources__toggle"
+                :aria-expanded="isSourcesExpanded(message)"
+                @click="toggleSources(message)"
+              >
+                <span>
+                  <t-icon name="file" />
+                  来源 {{ visibleSourceItems(message).length }}
+                </span>
+                <t-icon :name="isSourcesExpanded(message) ? 'chevron-up' : 'chevron-down'" />
+              </button>
+              <div v-if="isSourcesExpanded(message)" class="agent-sources__list">
+                <article v-for="source in visibleSourceItems(message)" :key="source.key" class="agent-source-card" @click="openSourceItem(source)">
+                  <div class="agent-source-card__body">
+                    <strong>{{ source.title }}</strong>
+                    <span>{{ source.meta }}</span>
+                    <p v-if="source.preview">{{ source.preview }}</p>
+                  </div>
+                  <div class="agent-source-card__actions">
+                    <button v-if="source.kind === 'attachment'" type="button" @click.stop="openSourceItem(source)">预览</button>
+                    <button v-if="source.kind === 'attachment' && (source.conversation_id || source.conversation_name)" type="button" @click.stop="jumpToSourceItem(source)">
+                      <t-icon :name="source.kind === 'attachment' ? 'file' : 'chat'" />
+                      跳转到对应位置
+                    </button>
+                  </div>
+                </article>
               </div>
-              <article v-for="source in visibleSourceItems(message)" :key="source.key" class="agent-source-card" @click="openSourceItem(source)">
-                <div class="agent-source-card__body">
-                  <strong>{{ source.title }}</strong>
-                  <span>{{ source.meta }}</span>
-                  <p v-if="source.preview">{{ source.preview }}</p>
-                </div>
-                <div class="agent-source-card__actions">
-                  <span v-if="source.kind === 'attachment'">预览</span>
-                  <span v-else-if="source.conversation_id">来源会话</span>
-                </div>
-              </article>
             </section>
 
             <div v-if="message.steps.length" class="agent-trace">
@@ -91,14 +114,9 @@
 
             <p v-if="message.error" class="agent-error">{{ message.error }}</p>
 
-            <button
-              v-if="message.taskId && !isTerminalAgentTaskStatus(message.status || '') && message.status !== 'waiting_approval' && message.status !== 'waiting_input'"
-              type="button"
-              class="agent-cancel"
-              @click="cancelTask(message)"
-            >
-              取消任务
-            </button>
+            <div v-if="primaryAnswer(message) && !message.error" class="agent-answer__actions" aria-label="回答操作">
+              <button type="button" title="复制回答" aria-label="复制回答" @click="copyText(primaryAnswer(message), '回答已复制')"><t-icon name="file-copy" /></button>
+            </div>
           </div>
         </div>
       </div>
@@ -146,10 +164,21 @@
             <span v-else-if="uploading" class="agent-composer__hint">正在上传附件</span>
           </div>
           <button
+            v-if="activeTaskID"
+            type="button"
+            class="agent-stop"
+            aria-label="终止任务"
+            title="终止任务"
+            @click="stopActiveTask"
+          >
+            <t-icon name="stop-circle-filled" />
+          </button>
+          <button
+            v-else
             type="button"
             class="agent-send"
-            :class="{ disabled: Boolean(activeTaskID) || uploading || !question.trim() }"
-            :disabled="Boolean(activeTaskID) || uploading || !question.trim()"
+            :class="{ disabled: uploading || !question.trim() }"
+            :disabled="uploading || !question.trim()"
             aria-label="发送"
             @click="sendMessage"
           >
@@ -173,22 +202,35 @@
   >
     <article v-if="activeSourceFile" class="agent-source-preview">
       <main><InfoAttachmentPreview :file="activeSourceFile" :active="sourcePreviewVisible" /></main>
-      <footer v-if="activeSourceTarget?.conversation_id">
+      <footer v-if="activeSourceFile">
         <span>来自 Agent 检索结果</span>
-        <t-button variant="outline" @click="openActiveSourceConversation"><template #icon><t-icon name="chat" /></template>查看来源会话</t-button>
+        <div class="agent-source-preview__actions">
+          <t-button
+            variant="outline"
+            :loading="previewDownloading"
+            :disabled="activeSourceFile.contentAccessRequired"
+            @click="downloadActiveSourceFile"
+          >
+            <template #icon><t-icon name="download" /></template>下载
+          </t-button>
+          <t-button v-if="activeSourceTarget?.conversation_id" variant="outline" @click="openActiveSourceConversation">
+            <template #icon><t-icon name="chat" /></template>跳转到对应位置
+          </t-button>
+        </div>
       </footer>
     </article>
   </t-dialog>
 </template>
 
 <script setup lang="ts">
-import { nextTick, onBeforeUnmount, reactive, ref } from 'vue'
+import { nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { MessagePlugin } from 'tdesign-vue-next'
 import { useRoute, useRouter } from 'vue-router'
 import { renderChatMarkdown } from '@/utils/chatMarkdownRenderer'
-import { listKnowledgeConversationAttachments } from '@/api/info-knowledge'
+import { getKnowledgeAttachmentContent, listKnowledgeConversationAttachments } from '@/api/info-knowledge'
 import InfoAttachmentPreview from '@/components/InfoAttachmentPreview.vue'
 import type { InfoFile } from '@/mock'
+import { useInfoKnowledgeStore } from '@/stores/infoKnowledge'
 import { navigateToKnowledgeSource } from '@/utils/knowledge-source-navigation'
 import {
   approveAgentApproval,
@@ -197,14 +239,19 @@ import {
   composeEditedArguments,
   createAgentTask,
   dayOfISO,
+  getAgentConversation,
+  getAgentPlan,
   getAgentTask,
-  isTerminalAgentTaskStatus,
+  listAgentApprovals,
   listAgentObservations,
   rejectAgentApproval,
   streamAgentTaskEvents,
   submitAgentTaskInput,
   uploadAgentAttachment,
   type AgentApproval,
+  type AgentConversationDetail,
+  type AgentConversationMessage,
+  type AgentPlan,
   type AgentTaskEvent,
   type AgentObservation,
 } from '@/api/info-agent'
@@ -283,6 +330,7 @@ type SourceItem = {
   kind: 'attachment' | 'message' | 'source'
   resource_id?: string
   conversation_id?: string | number | null
+  conversation_name?: string
   message_id?: string | number | null
   platform?: string
 }
@@ -315,13 +363,18 @@ const scrollRef = ref<HTMLElement | null>(null)
 const pageRef = ref<HTMLElement | null>(null)
 const textareaRef = ref<{ focus?: () => void } | null>(null)
 const activeTaskID = ref('')
+const conversationId = ref('')
+const restoringConversation = ref(false)
 const approvalEditors = reactive<Record<string, { title: string; dueDate: string }>>({})
 const inputValues = reactive<Record<string, string>>({})
 const expandedTraces = reactive<Record<string, boolean>>({})
+const expandedSources = reactive<Record<string, boolean>>({})
 let activeController: AbortController | null = null
+let conversationLoadSequence = 0
 const router = useRouter()
 const route = useRoute()
 const sourcePreviewVisible = ref(false)
+const previewDownloading = ref(false)
 const activeSourceFile = ref<InfoFile | null>(null)
 const activeSourceTarget = ref<SourceInfo | Citation | null>(null)
 
@@ -342,6 +395,22 @@ function statusLabel(status?: string): string {
     unknown: '外部结果未知',
     cancelled: '任务已取消',
   } as Record<string, string>)[status || ''] || '正在处理'
+}
+
+function statusFromHistoryMessage(status: string): string {
+  return ({
+    completed: 'succeeded',
+    pending: 'executing',
+    streaming: 'executing',
+    failed: 'failed',
+    cancelled: 'cancelled',
+  } as Record<string, string>)[status] || status || 'executing'
+}
+
+function notifyConversationChanged(): void {
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent('agent-conversation-updated'))
+  }
 }
 
 function approvalArguments(event: AgentTaskEvent): Record<string, any> {
@@ -487,7 +556,13 @@ function mapCitation(value: any): Citation {
     conversation_name: typeof value?.conversation_name === 'string' ? value.conversation_name : undefined,
     message_id: value?.message_id ?? value?.source_message_id ?? null,
     attachment_id: value?.attachment_id ?? null,
-    platform: typeof value?.platform === 'string' ? value.platform : typeof value?.source_platform === 'string' ? value.source_platform : undefined,
+    platform: typeof value?.platform === 'string'
+      ? value.platform
+      : typeof value?.source_platform === 'string'
+        ? value.source_platform
+        : typeof value?.conversation_platform === 'string'
+          ? value.conversation_platform
+          : undefined,
     sender_name: typeof value?.sender_name === 'string' ? value.sender_name : undefined,
     sent_at: typeof value?.sent_at === 'string' ? value.sent_at : undefined,
     position: value?.position && typeof value.position === 'object' ? value.position : null,
@@ -511,11 +586,6 @@ function showsEmptyKnowledgeResult(message: AgentMessage): boolean {
   if (message.status !== 'succeeded') return false
   if (primaryAnswer(message) || message.todo || message.approval || message.inputRequest) return false
   return !visibleSourceItems(message).length
-}
-
-function metadataCoverage(message: AgentMessage): 'complete' | 'partial' {
-  const block = message.blocks.find((item) => item.type === 'source_list' || item.type === 'content_results')
-  return block && 'metadata_coverage' in block && block.metadata_coverage === 'partial' ? 'partial' : 'complete'
 }
 
 function visibleSourceItems(message: AgentMessage): SourceItem[] {
@@ -548,6 +618,7 @@ function sourceItemFromCitation(citation: Citation): SourceItem | null {
     preview: truncateText(citation.quote, 120),
     resource_id: citation.resource_id || (citation.attachment_id != null ? String(citation.attachment_id) : undefined),
     conversation_id: citation.conversation_id,
+    conversation_name: citation.conversation_name,
     message_id: citation.message_id,
     platform: citation.platform,
   }
@@ -562,7 +633,9 @@ function sourceItemFromSource(source: SourceInfo): SourceItem {
     meta: sourceMeta(source),
     preview: truncateText(source.preview, 120),
     resource_id: source.resource_id,
+    message_id: source.resource_type === 'attachment' ? undefined : source.resource_id,
     conversation_id: source.conversation_id,
+    conversation_name: source.conversation_name || undefined,
     platform: source.conversation_platform || undefined,
   }
 }
@@ -598,6 +671,14 @@ function isTraceOpen(message: AgentMessage): boolean {
 
 function toggleTrace(message: AgentMessage): void {
   expandedTraces[message.id] = !isTraceOpen(message)
+}
+
+function isSourcesExpanded(message: AgentMessage): boolean {
+  return expandedSources[message.id] === true
+}
+
+function toggleSources(message: AgentMessage): void {
+  expandedSources[message.id] = !isSourcesExpanded(message)
 }
 
 function displayStepLabel(label: string): string {
@@ -637,7 +718,24 @@ function stepSucceededText(capability: string): string {
 }
 
 function stepStatusLabel(status: string): string {
-  return ({ running: '进行中', succeeded: '已完成', failed: '失败' } as Record<string, string>)[status] || status
+  return ({
+    pending: '等待执行',
+    ready: '准备执行',
+    running: '进行中',
+    waiting_approval: '等待确认',
+    succeeded: '已完成',
+    failed: '失败',
+    skipped: '已跳过',
+  } as Record<string, string>)[status] || status
+}
+
+function stepsFromPlan(plan: AgentPlan | null): Step[] {
+  if (!plan?.steps?.length) return []
+  return plan.steps.map((step) => ({
+    id: step.step_id,
+    label: step.capability,
+    status: step.status || 'pending',
+  }))
 }
 
 function citationKey(citation: Citation): string {
@@ -757,18 +855,34 @@ async function openSourceItem(source: SourceItem): Promise<void> {
     })
     return
   }
-  if (!source.conversation_id) {
-    MessagePlugin.info('该来源暂无可打开的详情')
+  await jumpToSourceItem(source)
+}
+
+async function jumpToSourceItem(source: SourceItem): Promise<void> {
+  const knowledgeStore = useInfoKnowledgeStore()
+  let conversationID = source.conversation_id ? String(source.conversation_id) : ''
+  let platform = source.platform
+  if (!conversationID && source.conversation_name) {
+    if (!knowledgeStore.allChats.length) await knowledgeStore.ensureSources()
+    const match = knowledgeStore.allChats.find((item) => item.name === source.conversation_name)
+    if (match) {
+      conversationID = String(match.id)
+      platform = match.source
+    }
+  }
+  if (!conversationID) {
+    MessagePlugin.info('该来源暂无可定位的会话位置')
     return
   }
   try {
     await navigateToKnowledgeSource(router, route, {
-      platform: source.platform,
-      conversationId: source.conversation_id,
-      messageId: source.message_id,
+      platform,
+      conversationId: conversationID,
+      messageId: source.kind === 'attachment' ? null : source.message_id || source.resource_id,
+      attachmentId: source.kind === 'attachment' ? source.resource_id : null,
     })
   } catch {
-    MessagePlugin.error('无法定位来源会话，请稍后重试')
+    MessagePlugin.error('无法定位来源位置，请稍后重试')
   }
 }
 
@@ -880,6 +994,190 @@ async function openActiveSourceConversation(): Promise<void> {
   sourcePreviewVisible.value = false
 }
 
+async function downloadActiveSourceFile(): Promise<void> {
+  const file = activeSourceFile.value
+  if (!file || file.contentAccessRequired || previewDownloading.value) return
+  previewDownloading.value = true
+  try {
+    const blob = await getKnowledgeAttachmentContent(file.id, true)
+    const url = URL.createObjectURL(blob)
+    const anchor = document.createElement('a')
+    anchor.href = url
+    anchor.download = file.name || 'attachment'
+    anchor.click()
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000)
+  } catch (error) {
+    MessagePlugin.error(error instanceof Error ? error.message : '附件下载失败')
+  } finally {
+    previewDownloading.value = false
+  }
+}
+
+function applyRestoredApproval(message: AgentMessage, approval: AgentApproval): void {
+  const args = approval.arguments || {}
+  message.approval = approval
+  approvalEditors[message.id] = {
+    title: String(args.title || approval.capability || '待确认操作'),
+    dueDate: typeof args.due_at === 'string'
+      ? dayOfISO(args.due_at, String(args.timezone || 'Asia/Shanghai'))
+      : '',
+  }
+}
+
+async function restoreAssistantMessage(
+  historyMessage: AgentConversationMessage,
+  approvals: AgentApproval[],
+): Promise<AgentMessage> {
+  const restoredStatus = statusFromHistoryMessage(historyMessage.status)
+  const message: AgentMessage = {
+    id: historyMessage.message_id,
+    role: 'agent',
+    taskId: historyMessage.task_id || undefined,
+    status: restoredStatus,
+    statusText: statusLabel(restoredStatus),
+    steps: [],
+    blocks: [],
+    answer: historyMessage.content || '',
+    citations: Array.isArray(historyMessage.citations)
+      ? historyMessage.citations.map(mapCitation)
+      : [],
+    error: historyMessage.status === 'failed' ? historyMessage.content : undefined,
+    lastEventId: 0,
+  }
+  if (!message.taskId) return message
+
+  try {
+    const [task, plan, observations] = await Promise.all([
+      getAgentTask(message.taskId),
+      getAgentPlan(message.taskId).catch(() => null),
+      listAgentObservations(message.taskId).catch(() => [] as AgentObservation[]),
+    ])
+    message.taskId = task.task_id
+    message.status = task.status || message.status
+    message.statusText = statusLabel(message.status)
+    message.steps = stepsFromPlan(plan)
+
+    const taskAnswer = typeof task.result?.answer === 'string' ? task.result.answer : ''
+    if (taskAnswer) message.answer = taskAnswer
+    const resultCitations = Array.isArray(task.result?.citations) ? task.result.citations : null
+    const citations = resultCitations || message.citations
+    const evidence = evidenceForObservations(observations)
+    message.citations = citations.map((value: any) => {
+      const citation = mapCitation(value)
+      return evidence.get(citation.evidence_id)
+        ? { ...citation, ...evidence.get(citation.evidence_id) }
+        : citation
+    })
+    const blocks = blocksFromObservations(observations, message.answer, message.citations)
+    if (blocks.length) message.blocks = blocks
+    message.todo = todoFromObservations(observations)
+
+    if (message.status === 'waiting_approval') {
+      const approval = approvals.find(
+        (item) => item.task_id === message.taskId
+          && (item.status === 'waiting_approval' || item.status === 'expired'),
+      )
+      if (approval) applyRestoredApproval(message, approval)
+    } else if (message.status === 'waiting_input') {
+      const waiting = observations.find(
+        (item) => item.output?.requires_user_input === true,
+      )
+      message.inputRequest = {
+        missing: Array.isArray(waiting?.output?.missing_information)
+          ? waiting.output.missing_information.map(String)
+          : [],
+      }
+    }
+    if (task.last_error?.message) message.error = String(task.last_error.message)
+  } catch {
+    // The persisted message remains usable even if its execution detail is gone.
+  }
+  return message
+}
+
+async function restoreConversationMessages(
+  detail: AgentConversationDetail,
+  approvals: AgentApproval[],
+): Promise<AgentMessage[]> {
+  const restored: AgentMessage[] = []
+  for (const item of detail.messages || []) {
+    if (item.role === 'user') {
+      restored.push({
+        id: item.message_id,
+        role: 'user',
+        text: item.content,
+        steps: [],
+        blocks: [],
+        citations: [],
+        lastEventId: 0,
+      })
+      continue
+    }
+    if (item.role !== 'assistant') continue
+    restored.push(await restoreAssistantMessage(item, approvals))
+  }
+  return restored
+}
+
+function resetConversationState(): void {
+  activeController?.abort()
+  activeController = null
+  activeTaskID.value = ''
+  question.value = ''
+  selectedFile.value = null
+  if (fileInputRef.value) fileInputRef.value.value = ''
+  sourcePreviewVisible.value = false
+  activeSourceFile.value = null
+  activeSourceTarget.value = null
+  messages.value = []
+  for (const key of Object.keys(approvalEditors)) delete approvalEditors[key]
+  for (const key of Object.keys(inputValues)) delete inputValues[key]
+  for (const key of Object.keys(expandedTraces)) delete expandedTraces[key]
+  for (const key of Object.keys(expandedSources)) delete expandedSources[key]
+}
+
+async function loadConversation(id: string): Promise<void> {
+  const sequence = ++conversationLoadSequence
+  resetConversationState()
+  if (!id) {
+    conversationId.value = ''
+    restoringConversation.value = false
+    await nextTick()
+    return
+  }
+
+  restoringConversation.value = true
+  try {
+    const detail = await getAgentConversation(id)
+    const approvals = await listAgentApprovals().catch(() => [] as AgentApproval[])
+    const restored = await restoreConversationMessages(detail, approvals)
+    if (sequence !== conversationLoadSequence) return
+    conversationId.value = id
+    messages.value = restored
+    const resumable = [...restored].reverse().find(
+      (item) => item.role === 'agent'
+        && item.taskId
+        && ['received', 'planning', 'ready', 'executing'].includes(item.status || ''),
+    )
+    if (resumable) void watchTask(resumable, 0)
+  } catch (error) {
+    if (sequence !== conversationLoadSequence) return
+    conversationId.value = id
+    messages.value = []
+    MessagePlugin.error(error instanceof Error ? error.message : '会话历史加载失败')
+  } finally {
+    if (sequence === conversationLoadSequence) restoringConversation.value = false
+  }
+  await nextTick()
+  if (scrollRef.value) scrollRef.value.scrollTop = scrollRef.value.scrollHeight
+}
+
+async function syncConversationFromRoute(): Promise<void> {
+  const target = route.name === 'chat' ? String(route.query.conversation || '') : ''
+  if (target === conversationId.value) return
+  await loadConversation(target)
+}
+
 async function hydrateTerminal(message: AgentMessage): Promise<void> {
   if (!message.taskId) return
   try {
@@ -929,6 +1227,7 @@ async function watchTask(message: AgentMessage, after = message.lastEventId): Pr
     }
   } finally {
     if (activeTaskID.value === message.taskId) activeTaskID.value = ''
+    notifyConversationChanged()
   }
   await scrollToBottom()
 }
@@ -966,10 +1265,24 @@ async function sendMessage(): Promise<void> {
   messages.value.push(userMessage, agentMessage)
   question.value = ''
   try {
-    const created = await createAgentTask({ text, attachmentIds })
+    const created = await createAgentTask({
+      text,
+      attachmentIds,
+      conversationId: conversationId.value || undefined,
+    })
+    if (created.conversation_id && created.conversation_id !== conversationId.value) {
+      conversationId.value = created.conversation_id
+      if (route.name === 'chat') {
+        await router.replace({
+          path: '/chat',
+          query: { ...route.query, conversation: created.conversation_id },
+        })
+      }
+    }
     agentMessage.taskId = created.task_id
     agentMessage.status = created.status
     agentMessage.statusText = statusLabel(created.status)
+    notifyConversationChanged()
     await watchTask(agentMessage, 0)
   } catch (error) {
     agentMessage.status = 'failed'
@@ -978,8 +1291,36 @@ async function sendMessage(): Promise<void> {
     MessagePlugin.error(agentMessage.error)
   } finally {
     activeTaskID.value = ''
+    notifyConversationChanged()
     await scrollToBottom()
   }
+}
+
+async function copyText(text: string, successMessage: string): Promise<void> {
+  const value = String(text || '').trim()
+  if (!value) return
+  try {
+    await navigator.clipboard.writeText(value)
+    MessagePlugin.success(successMessage)
+  } catch {
+    MessagePlugin.info('复制失败，请检查浏览器剪贴板权限')
+  }
+}
+
+function editQuestion(text: string): void {
+  if (!String(text || '').trim()) return
+  question.value = text
+  void nextTick(() => textareaRef.value?.focus?.())
+}
+
+async function stopActiveTask(): Promise<void> {
+  const message = messages.value.find((item) => item.taskId === activeTaskID.value)
+  if (!message) return
+  const cancelled = await cancelTask(message)
+  if (!cancelled) return
+  activeController?.abort()
+  activeController = null
+  activeTaskID.value = ''
 }
 
 function handleFileChange(value: Event): void {
@@ -1062,14 +1403,16 @@ async function submitInput(message: AgentMessage): Promise<void> {
   }
 }
 
-async function cancelTask(message: AgentMessage): Promise<void> {
-  if (!message.taskId) return
+async function cancelTask(message: AgentMessage): Promise<boolean> {
+  if (!message.taskId) return false
   try {
     const task = await cancelAgentTask(message.taskId)
     message.status = task.status
     message.statusText = statusLabel(task.status)
+    return true
   } catch (error) {
     message.error = error instanceof Error ? error.message : '取消失败'
+    return false
   }
 }
 
@@ -1085,7 +1428,21 @@ async function scrollToBottom(): Promise<void> {
   scrollRef.value?.scrollTo({ top: scrollRef.value.scrollHeight, behavior: 'smooth' })
 }
 
-onBeforeUnmount(() => activeController?.abort())
+onMounted(() => {
+  void syncConversationFromRoute()
+})
+
+watch(
+  () => route.query.conversation,
+  () => {
+    void syncConversationFromRoute()
+  },
+)
+
+onBeforeUnmount(() => {
+  conversationLoadSequence += 1
+  activeController?.abort()
+})
 </script>
 
 <style lang="less" scoped>
@@ -1097,8 +1454,16 @@ onBeforeUnmount(() => activeController?.abort())
 .agent-transcript { width: min(960px, 100%); margin: 0 auto; padding-bottom: 20px; }
 .agent-message { display: flex; width: 100%; margin-bottom: 28px; }
 .agent-message--user { justify-content: flex-end; }
-.agent-user-bubble { max-width: min(620px, 75%); padding: 11px 15px; border-radius: 14px; color: var(--td-text-color-primary); background: var(--td-bg-color-secondarycontainer); font-size: 14px; line-height: 1.6; }
+.agent-user-message { display: flex; max-width: min(620px, 75%); flex-direction: column; align-items: flex-end; gap: 6px; }
+.agent-user-bubble { max-width: 100%; padding: 11px 15px; border-radius: 14px; color: var(--td-text-color-primary); background: var(--td-bg-color-secondarycontainer); font-size: 14px; line-height: 1.6; }
 .agent-answer { width: min(760px, 100%); padding-left: 2px; }
+.agent-user-actions, .agent-answer__actions { display: flex; align-items: center; gap: 7px; margin-top: 12px; opacity: 0; pointer-events: none; transition: opacity .15s ease; }
+.agent-user-actions { justify-content: flex-end; margin-top: 0; gap: 4px; }
+.agent-user-message:hover .agent-user-actions, .agent-user-message:focus-within .agent-user-actions,
+.agent-answer:hover .agent-answer__actions, .agent-answer:focus-within .agent-answer__actions { opacity: 1; pointer-events: auto; }
+.agent-user-actions button, .agent-answer__actions button { display: inline-grid; place-items: center; width: 28px; height: 28px; padding: 0; border: 0; border-radius: 6px; color: var(--td-text-color-placeholder); background: transparent; cursor: pointer; }
+.agent-user-actions button:hover, .agent-answer__actions button:hover { color: var(--td-text-color-secondary); background: var(--td-bg-color-secondarycontainer); }
+.agent-user-actions svg, .agent-answer__actions svg { width: 16px; height: 16px; }
 .agent-status { display: inline-flex; align-items: center; gap: 7px; margin-bottom: 10px; color: var(--td-text-color-secondary); font-size: 13px; }
 .agent-status__dot { width: 7px; height: 7px; border-radius: 50%; background: var(--td-brand-color); }
 .agent-status--succeeded .agent-status__dot { background: var(--td-success-color); }
@@ -1113,8 +1478,11 @@ onBeforeUnmount(() => activeController?.abort())
 .agent-empty-result strong { color: var(--td-text-color-primary); font-size: 13px; font-weight: 500; }
 .agent-empty-result span { color: var(--td-text-color-secondary); font-size: 12px; }
 .agent-sources { display: grid; gap: 8px; margin-top: 16px; }
+.agent-sources__toggle { display: inline-flex; align-items: center; justify-content: flex-start; width: fit-content; min-height: 28px; gap: 10px; padding: 4px 8px; border: 1px solid var(--td-component-stroke); border-radius: 6px; color: var(--td-brand-color); background: var(--td-brand-color-1); font-size: 12px; cursor: pointer; }
+.agent-sources__toggle > span { display: inline-flex; align-items: center; gap: 6px; }
+.agent-sources__toggle > svg { width: 14px; height: 14px; }
+.agent-sources__list { display: grid; gap: 8px; }
 .agent-sources__header { display: flex; align-items: center; gap: 8px; color: var(--td-text-color-secondary); font-size: 12px; }
-.agent-coverage-tag { padding: 1px 7px; border-radius: 999px; color: var(--td-warning-color); background: var(--td-warning-color-1); font-size: 11px; }
 .agent-trace { margin-top: 14px; }
 .agent-trace__toggle { display: inline-flex; align-items: center; gap: 6px; padding: 0; border: 0; color: var(--td-text-color-secondary); background: transparent; font-size: 12px; cursor: pointer; }
 .agent-trace__toggle svg { transition: transform .15s ease; }
@@ -1171,7 +1539,6 @@ onBeforeUnmount(() => activeController?.abort())
 .agent-input-request label { grid-column: 1; }
 .agent-input-request button { grid-column: 2; align-self: end; }
 .agent-error { margin: 12px 0 0; color: var(--td-error-color); font-size: 13px; line-height: 1.6; }
-.agent-cancel { margin-top: 12px; padding: 0; border: 0; color: var(--td-text-color-secondary); background: transparent; font-size: 12px; cursor: pointer; }
 .agent-composer-area { position: absolute; z-index: 5; right: 0; bottom: 0; left: 0; display: flex; flex-direction: column; align-items: center; padding: 0 24px 22px; background: linear-gradient(to top, var(--td-bg-color-container) 62%, transparent); }
 .agent-composer { position: relative; width: min(960px, 100%); border: 1px solid var(--td-component-stroke); border-radius: 14px; background: var(--td-bg-color-container); box-shadow: 0 2px 8px rgba(0, 0, 0, .04), 0 8px 16px -4px rgba(0, 0, 0, .06); transition: border-color .15s, box-shadow .15s; }
 .agent-composer--focused { border-color: var(--td-brand-color); box-shadow: 0 0 0 3px var(--td-brand-color-focus), 0 8px 18px -8px rgba(0, 0, 0, .18); }
@@ -1190,10 +1557,15 @@ onBeforeUnmount(() => activeController?.abort())
 .agent-send { display: grid; place-items: center; width: 38px; height: 38px; padding: 0; border: 0; border-radius: 50%; color: #fff; background: var(--td-brand-color); cursor: pointer; }
 .agent-send.disabled { background: var(--td-brand-color-disabled); cursor: not-allowed; }
 .agent-send svg { width: 21px; height: 21px; }
+.agent-stop { display: grid; place-items: center; width: 38px; height: 38px; padding: 0; border: 0; border-radius: 50%; color: var(--td-text-color-primary); background: var(--td-bg-color-secondarycontainer); cursor: pointer; }
+.agent-stop:hover { background: var(--td-bg-color-container-hover); }
+.agent-stop svg { width: 21px; height: 21px; }
 .agent-disclaimer { margin: 10px 0 0; color: var(--td-text-color-placeholder); font-size: 12px; }
 .agent-source-preview { display: flex; height: min(76vh, 820px); min-height: 480px; flex-direction: column; gap: 10px; }
 .agent-source-preview main { min-height: 0; flex: 1; }
 .agent-source-preview footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding-top: 10px; border-top: 1px solid var(--td-component-stroke); color: var(--td-text-color-secondary); font-size: 12px; }
+.agent-source-preview__actions { display: inline-flex; align-items: center; gap: 8px; }
 .agent-source-preview-dialog .t-dialog__body { padding: 0; }
 @media (max-width: 760px) { .agent-chat-page { min-height: 560px; } .agent-chat-scroll { padding: 24px 16px 185px; } .agent-welcome { padding-bottom: 80px; } .agent-welcome h1 { font-size: 28px; } .agent-user-bubble { max-width: 88%; font-size: 13px; } .agent-source-card { display: grid; } .agent-source-card__actions { justify-content: flex-start; } .agent-composer-area { padding: 0 12px 14px; } .agent-textarea :deep(.t-textarea__inner) { min-height: 100px; padding: 13px 14px 58px; font-size: 14px; } .agent-input-request { grid-template-columns: 1fr; } .agent-input-request button { grid-column: 1; } }
+@media (hover: none) { .agent-user-actions, .agent-answer__actions { opacity: 1; pointer-events: auto; } }
 </style>

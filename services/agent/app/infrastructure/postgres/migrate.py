@@ -24,16 +24,20 @@ BOOTSTRAP_MIGRATIONS = [
     REPO_ROOT / "db" / "migrations" / "20260927_agent_dynamic_plan.sql",
     REPO_ROOT / "db" / "migrations" / "20260927_agent_approval_binding.sql",
     REPO_ROOT / "db" / "migrations" / "20260927_agent_todo_ledger.sql",
+    REPO_ROOT / "db" / "migrations" / "20261002_agent_conversation_history.up.sql",
 ]
 BOOTSTRAP_ROLLBACKS = [
+    REPO_ROOT / "db" / "migrations" / "20261002_agent_conversation_history.down.sql",
     REPO_ROOT / "db" / "migrations" / "20260927_agent_todo_ledger.down.sql",
     REPO_ROOT / "db" / "migrations" / "20260927_agent_approval_binding.down.sql",
     REPO_ROOT / "db" / "migrations" / "20260927_agent_dynamic_plan.down.sql",
     REPO_ROOT / "db" / "migrations" / "20260925_agent_runtime_rebuild.down.sql",
 ]
-DEFAULT_MIGRATION = REPO_ROOT / "db" / "migrations" / "20260927_agent_approval_binding.sql"
+DEFAULT_MIGRATION = (
+    REPO_ROOT / "db" / "migrations" / "20261002_agent_conversation_history.up.sql"
+)
 DEFAULT_ROLLBACK = (
-    REPO_ROOT / "db" / "migrations" / "20260927_agent_approval_binding.down.sql"
+    REPO_ROOT / "db" / "migrations" / "20261002_agent_conversation_history.down.sql"
 )
 
 
