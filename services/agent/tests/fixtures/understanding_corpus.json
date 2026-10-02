@@ -1,5 +1,5 @@
 {
-  "version": 2,
+  "version": 3,
   "cases": [
     {
       "id": "noise-received",
@@ -510,7 +510,7 @@
       "gate": "n/a",
       "is_task": true,
       "expect": [
-        "form.prepare"
+        "form.complete"
       ],
       "forbid": [],
       "tags": [
@@ -523,12 +523,11 @@
       "source": "chat",
       "gate": "n/a",
       "is_task": true,
-      "expect": [
-        "document.compare"
-      ],
+      "expect": [],
       "forbid": [],
       "tags": [
-        "document"
+        "document",
+        "out_of_vocab"
       ]
     },
     {
@@ -566,7 +565,7 @@
       "gate": "n/a",
       "is_task": true,
       "expect": [
-        "form.prepare"
+        "form.complete"
       ],
       "forbid": [],
       "tags": [
@@ -580,12 +579,55 @@
       "source": "chat",
       "gate": "n/a",
       "is_task": true,
+      "expect": [],
+      "forbid": [],
+      "tags": [
+        "form",
+        "form_submit_boundary"
+      ]
+    },
+    {
+      "id": "chat-form-preview-confirm",
+      "text": "根据资料把申请表填好，填完让我预览确认",
+      "source": "chat",
+      "gate": "n/a",
+      "is_task": true,
       "expect": [
-        "form.submit"
+        "form.complete"
+      ],
+      "forbid": [],
+      "tags": [
+        "form",
+        "form_preview_boundary"
+      ]
+    },
+    {
+      "id": "chat-form-fill-fields",
+      "text": "把这份申请表的空白字段都补全",
+      "source": "chat",
+      "gate": "n/a",
+      "is_task": true,
+      "expect": [
+        "form.complete"
       ],
       "forbid": [],
       "tags": [
         "form"
+      ]
+    },
+    {
+      "id": "chat-form-submit-platform",
+      "text": "把已经填好的申请表递交到政务平台",
+      "source": "chat",
+      "gate": "n/a",
+      "is_task": true,
+      "expect": [],
+      "forbid": [
+        "form.complete"
+      ],
+      "tags": [
+        "form",
+        "form_submit_boundary"
       ]
     },
     {

@@ -13,12 +13,21 @@ from app.application.execution_service import ExecutionService
 from app.application.knowledge_events import KnowledgeEventService
 from app.application.task_service import TaskService
 from app.capabilities.answer import AnswerComposeCapability
+from app.capabilities.chat_reply import ChatReplyCapability
 from app.capabilities.todo import TodoCreateCapability
-from app.capabilities.web import WebExtractCapability, WebFetchCapability
+from app.capabilities.web_research import WebResearchCapability
 from app.config import Settings, settings as default_settings
+from app.infrastructure.search.searxng import SearxngSearchProvider
+from app.infrastructure.search.tavily import TavilySearchProvider
+from app.infrastructure.web.content_reader import ContentReader
+from app.infrastructure.web.crawl4ai_client import Crawl4AIClient
+from app.infrastructure.web.evidence import EvidenceBuilder
+from app.infrastructure.web.tavily_extractor import TavilyRenderer
+from app.infrastructure.web.url_tools import load_aliases
 from app.infrastructure.knowledge.client import HttpKnowledgeClient, KnowledgeClient
 from app.infrastructure.llm.client import OpenAIChatClient
 from app.providers.answer import LlmAnswerProvider
+from app.providers.chat import LlmChatReplyProvider
 from app.providers.page_fetcher import HttpPageFetcher
 from app.ingress.knowledge_events import KnowledgeEventIngress
 from app.kernel.models import OutboxEvent
@@ -78,75 +87,189 @@ def _timeout_seconds(value: float) -> int:
     return max(1, int(round(float(value))))
 
 
+def build_search_provider(settings: Settings):
+    """The discovery implementation named by configuration.
+
+    ``searxng`` needs a reachable self-hosted instance; ``tavily`` sends queries
+    to the vendor. An unset sidecar URL is not an error: research degrades to
+    reading the links the user supplied.
+    """
+
+    choice = (settings.web_search_provider or "searxng").strip().lower()
+    if choice == "none":
+        return None
+    if choice == "tavily":
+        return TavilySearchProvider(
+            settings.tavily_base_url,
+            api_key=settings.tavily_api_key,
+            search_depth=settings.tavily_search_depth,
+            include_raw_content=settings.tavily_include_raw_content,
+            timeout_seconds=settings.tavily_timeout_seconds,
+        )
+    if choice != "searxng":
+        raise RuntimeError(f"unsupported AGENT_WEB_SEARCH_PROVIDER: {choice}")
+    if not settings.searxng_base_url.strip():
+        return None
+    return SearxngSearchProvider(
+        settings.searxng_base_url,
+        timeout_seconds=settings.searxng_timeout_seconds,
+    )
+
+
+def build_renderer(settings: Settings):
+    """The rendering fallback named by configuration, or nothing.
+
+    Both implementations answer the same ``render(url)`` question, so the reader
+    above them does not know which one it is talking to -- only the Evidence
+    ``fetch_method`` records it.
+    """
+
+    choice = (settings.web_renderer or "").strip().lower()
+    if choice == "none":
+        return None
+    if choice == "tavily":
+        return TavilyRenderer(
+            settings.tavily_base_url,
+            api_key=settings.tavily_api_key,
+            extract_depth=settings.tavily_extract_depth,
+            timeout_seconds=settings.tavily_timeout_seconds,
+            allow_private_addresses=settings.web_allow_private_addresses,
+        )
+    if choice not in ("", "crawl4ai"):
+        raise RuntimeError(f"unsupported AGENT_WEB_RENDERER: {choice}")
+    if not settings.crawl4ai_base_url.strip():
+        return None
+    return Crawl4AIClient(
+        settings.crawl4ai_base_url,
+        api_token=settings.crawl4ai_api_token,
+        timeout_seconds=settings.crawl4ai_timeout_seconds,
+    )
+
+
 def build_registry(settings: Settings, todo_store: TodoStore) -> CapabilityRegistry:
     """Every capability the Agent can actually execute.
 
     The capability and the provider it calls are given the same timeout, so the
     descriptor the Runtime checks against and the socket the provider opens
-    cannot drift apart. todo.create stays the only writer: the three Step-4
-    capabilities are read-only and never ask for approval.
+    cannot drift apart. todo.create stays the only writer; the web capability
+    is read-only and never asks for approval.
+
+    The Planner sees one public-web capability. Fetching, rendering, search and
+    extraction stay behind ``web.research``: exposing them separately is what
+    let a model plan a fetch of a URL it had invented, or an extract step with
+    nothing to extract.
     """
 
-    web_timeout = _timeout_seconds(settings.web_timeout_seconds)
-    return CapabilityRegistry(
-        [
-            TodoCreateCapability(
-                todo_store,
-                default_timezone=settings.default_timezone,
+    fetcher = HttpPageFetcher(
+        timeout_seconds=settings.web_timeout_seconds,
+        max_bytes=settings.web_max_bytes,
+        max_redirects=settings.web_max_redirects,
+        allow_private_addresses=settings.web_allow_private_addresses,
+    )
+    renderer = build_renderer(settings)
+    search_provider = build_search_provider(settings)
+    capabilities = [
+        TodoCreateCapability(
+            todo_store,
+            default_timezone=settings.default_timezone,
+        ),
+        WebResearchCapability(
+            ContentReader(
+                fetcher,
+                renderer=renderer,
+                min_text_chars=settings.web_research_min_text_chars,
             ),
-            WebFetchCapability(
-                HttpPageFetcher(
-                    timeout_seconds=settings.web_timeout_seconds,
-                    max_bytes=settings.web_max_bytes,
-                    max_redirects=settings.web_max_redirects,
-                    allow_private_addresses=settings.web_allow_private_addresses,
-                ),
-                timeout_seconds=web_timeout,
+            search_provider=search_provider,
+            evidence_builder=EvidenceBuilder(
+                page_chars=settings.web_research_page_chars
             ),
-            WebExtractCapability(timeout_seconds=web_timeout),
-            AnswerComposeCapability(
-                LlmAnswerProvider(
+            aliases=load_aliases(settings.web_research_alias_path or None),
+            language=settings.searxng_language,
+            max_results=settings.web_research_max_results,
+            max_pages=settings.web_research_max_pages,
+            max_queries=settings.web_research_max_queries,
+            max_evidence_chars=settings.web_research_max_evidence_chars,
+            timeout_seconds=_timeout_seconds(settings.web_research_timeout_seconds),
+        ),
+        AnswerComposeCapability(
+            LlmAnswerProvider(
+                OpenAIChatClient(
+                    base_url=settings.llm_base_url,
+                    api_key=settings.llm_api_key,
+                    model=settings.llm_model,
+                    timeout_seconds=settings.answer_timeout_seconds,
+                    max_output_tokens=settings.answer_max_output_tokens,
+                    response_format=settings.llm_response_format,
+                )
+            ),
+            timeout_seconds=_timeout_seconds(settings.answer_timeout_seconds),
+        ),
+    ]
+    if settings.chat_reply_enabled:
+        # Non-task messages get a short reply instead of silence. Leaving the
+        # capability out of the registry is the off switch: the deterministic
+        # planner only plans steps for capabilities it can actually see.
+        capabilities.append(
+            ChatReplyCapability(
+                LlmChatReplyProvider(
                     OpenAIChatClient(
                         base_url=settings.llm_base_url,
                         api_key=settings.llm_api_key,
                         model=settings.llm_model,
-                        timeout_seconds=settings.answer_timeout_seconds,
-                        max_output_tokens=settings.answer_max_output_tokens,
+                        timeout_seconds=settings.chat_reply_timeout_seconds,
+                        max_output_tokens=settings.chat_reply_max_output_tokens,
                         response_format=settings.llm_response_format,
                     )
                 ),
-                timeout_seconds=_timeout_seconds(settings.answer_timeout_seconds),
-            ),
-        ]
-    )
+                timeout_seconds=_timeout_seconds(settings.chat_reply_timeout_seconds),
+            )
+        )
+    return CapabilityRegistry(capabilities)
 
 
 def build_planner(settings: Settings):
     provider = (settings.planner_provider or "deterministic").strip().lower()
     if provider == "deterministic":
-        return DeterministicPlanner(
-            default_timezone=settings.default_timezone,
-            min_confidence=settings.understanding_min_confidence,
-        )
+        return _build_deterministic_planner(settings)
     if provider == "llm":
-        from app.infrastructure.llm.client import OpenAIChatClient
-        from app.planning.llm import OpenAICompatiblePlanner
+        return _build_llm_planner(settings)
+    if provider == "routing":
+        from app.planning.routing import RoutingPlanner
 
-        return OpenAICompatiblePlanner(
-            OpenAIChatClient(
-                base_url=settings.llm_base_url,
-                api_key=settings.llm_api_key,
-                model=settings.llm_model,
-                timeout_seconds=settings.llm_timeout_seconds,
-                max_output_tokens=settings.llm_max_output_tokens,
-                # The Planner is the one caller that passes a real JSON Schema
-                # per request; the client is told it may ask for strict
-                # decoding here, and to fall back when the provider refuses.
-                response_format=settings.llm_planner_response_format,
-                json_schema_fallback=settings.llm_json_schema_fallback,
-            )
+        # Collected text keeps its fixed pipeline; only chat turns whose intent
+        # needs composition reach the model.
+        return RoutingPlanner(
+            deterministic=_build_deterministic_planner(settings),
+            llm=_build_llm_planner(settings),
         )
     raise RuntimeError(f"unsupported AGENT_PLANNER_PROVIDER: {provider}")
+
+
+def _build_deterministic_planner(settings: Settings) -> DeterministicPlanner:
+    return DeterministicPlanner(
+        default_timezone=settings.default_timezone,
+        min_confidence=settings.understanding_min_confidence,
+    )
+
+
+def _build_llm_planner(settings: Settings):
+    from app.infrastructure.llm.client import OpenAIChatClient
+    from app.planning.llm import OpenAICompatiblePlanner
+
+    return OpenAICompatiblePlanner(
+        OpenAIChatClient(
+            base_url=settings.llm_base_url,
+            api_key=settings.llm_api_key,
+            model=settings.llm_model,
+            timeout_seconds=settings.llm_timeout_seconds,
+            max_output_tokens=settings.llm_max_output_tokens,
+            # The Planner is the one caller that passes a real JSON Schema per
+            # request; the client is told it may ask for strict decoding here,
+            # and to fall back when the provider refuses.
+            response_format=settings.llm_planner_response_format,
+            json_schema_fallback=settings.llm_json_schema_fallback,
+        )
+    )
 
 
 def understanding_min_confidence(settings: Settings, *, source_type: str = "chat") -> float:
@@ -159,7 +282,15 @@ def understanding_min_confidence(settings: Settings, *, source_type: str = "chat
 
 def _build_laya_understanding_provider(settings: Settings):
     from app.infrastructure.laya.client import HttpLayaClient
-    from app.understanding.laya import LayaUnderstandingProvider
+    from app.understanding.laya import (
+        LayaUnderstandingProvider,
+        verify_model_contract,
+    )
+
+    if settings.laya_model_path:
+        # Fail at start-up rather than on the first request when the served
+        # checkpoint belongs to another intent contract.
+        verify_model_contract(settings.laya_model_path)
 
     return LayaUnderstandingProvider(
         HttpLayaClient(

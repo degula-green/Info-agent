@@ -1,5 +1,7 @@
 .env
 services/*/.env
+# Claude Code 本地配置（含中转站 key，禁止提交）
+.claude/settings.local.json
 node_modules/
 dist/
 __pycache__/

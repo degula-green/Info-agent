@@ -86,6 +86,7 @@ class AgentRuntime:
         limits: ExecutionLimits | None = None,
         understanding_provider: TaskUnderstandingProvider | None = None,
         understanding_mode: str = "off",
+        settings = None,
         clock: Callable[[], datetime] | None = None,
         sleep: Callable[[float], None] | None = None,
     ) -> None:
@@ -101,6 +102,7 @@ class AgentRuntime:
         )
         self.understanding_provider = understanding_provider
         self.understanding_mode = (understanding_mode or "off").strip().lower()
+        self.settings = settings
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._sleep = sleep or time.sleep
 
@@ -131,6 +133,11 @@ class AgentRuntime:
             + self.limits.max_steps
             + 10
         )
+
+        # 【附件预处理】在Understanding之前增强上下文
+        first_task = self.store.get_task(task_id)
+        if first_task and first_task.input.get("attachment_ids") and not first_task.input.get("_attachment_processed"):
+            self._preprocess_attachments(first_task)
 
         for _ in range(guard):
             task = self.store.get_task(task_id)
@@ -632,6 +639,12 @@ class AgentRuntime:
         """
 
         envelope = task.to_envelope()
+        # Intent comes from the user's own sentence. The enriched text keeps
+        # the parsed document for planning, but a 30K attachment body would
+        # otherwise dilute the classifier's signal.
+        original_text = task.input.get("_original_text")
+        if isinstance(original_text, str) and original_text.strip():
+            envelope.input["text"] = original_text
         understand = self.understanding_provider.understand
         threshold = self._understanding_threshold(task)
         if threshold is None:
@@ -664,6 +677,26 @@ class AgentRuntime:
         )
         return None
 
+    def _planner_call(self, call, *, attempts: int = 2):
+        """Runs one Planner call, retrying transient transport failures.
+
+        The Planner reaches a remote model through whatever network the host
+        has. A single dropped connection is not a reason to fail a Task -- and
+        when it happens on the closing call, it is not a reason to discard work
+        that already succeeded -- so a retryable failure is retried a couple of
+        times before it is reported.
+        """
+
+        attempt = 0
+        limit = max(1, int(attempts))
+        while True:
+            try:
+                return call()
+            except Exception as exc:  # noqa: BLE001 - classified below
+                attempt += 1
+                if classify_error(exc) != "retryable_error" or attempt >= limit:
+                    raise
+
     def _plan(
         self, task: TaskRecord, understanding: TaskUnderstanding | None
     ) -> Plan | TaskRunResult:
@@ -678,12 +711,14 @@ class AgentRuntime:
                 },
             )
         try:
-            plan = self.planner.create_plan(
-                task.to_envelope(),
-                self.registry.list_descriptors(),
-                self.store.list_observations(task.task_id),
-                self._planning_constraints(),
-                understanding,
+            plan = self._planner_call(
+                lambda: self.planner.create_plan(
+                    task.to_envelope(),
+                    self.registry.list_descriptors(),
+                    self.store.list_observations(task.task_id),
+                    self._planning_constraints(),
+                    understanding,
+                )
             )
         except Exception as exc:  # noqa: BLE001 - normalize planner failures
             return self._fail(
@@ -829,14 +864,36 @@ class AgentRuntime:
         if callable(set_capabilities):
             set_capabilities(self.registry.list_descriptors())
         try:
-            decision = self.planner.decide_after_observation(
-                task.to_envelope(),
-                plan,
-                observations,
-                self._planning_constraints(),
-                understanding,
+            decision = self._planner_call(
+                lambda: self.planner.decide_after_observation(
+                    task.to_envelope(),
+                    plan,
+                    observations,
+                    self._planning_constraints(),
+                    understanding,
+                )
             )
         except Exception as exc:  # noqa: BLE001 - normalize planner failures
+            steps = self.store.list_steps(plan.plan_id)
+            finished = bool(steps) and all(
+                step.status in {"succeeded", "skipped"} for step in steps
+            )
+            if finished:
+                # Everything the plan asked for is done. Whatever went wrong on
+                # the closing "what now?" call -- a dropped connection, an
+                # unparseable answer -- it must not throw finished work away.
+                # Observed in production as a completed answer lost to one
+                # transient "remote HTTP request failed".
+                return self._complete(
+                    task,
+                    plan,
+                    steps,
+                    executed,
+                    warnings=[
+                        "planner unavailable at the end of the plan "
+                        f"({type(exc).__name__}): {exc}"
+                    ],
+                )
             return self._fail(
                 task,
                 {
@@ -866,15 +923,35 @@ class AgentRuntime:
         )
 
         if decision.action == "continue":
-            if next_pending_step(self.store.list_steps(plan.plan_id)) is None:
-                return self._fail(
+            steps = self.store.list_steps(plan.plan_id)
+            if next_pending_step(steps) is None:
+                # The model said "keep going" with nothing left to run. Failing
+                # here threw away work the plan had already completed; when every
+                # step really did finish, "done" is the honest reading and the
+                # wrong action word is only worth a warning.
+                unfinished = [
+                    step
+                    for step in steps
+                    if step.status not in {"succeeded", "skipped"}
+                ]
+                if unfinished:
+                    return self._fail(
+                        task,
+                        {
+                            "classification": "permanent_error",
+                            "message": "planner returned continue with no pending step",
+                        },
+                        executed=executed,
+                        plan=plan,
+                    )
+                return self._complete(
                     task,
-                    {
-                        "classification": "permanent_error",
-                        "message": "planner returned continue with no pending step",
-                    },
-                    executed=executed,
-                    plan=plan,
+                    plan,
+                    steps,
+                    executed,
+                    warnings=[
+                        "planner returned continue with no pending step; completed instead"
+                    ],
                 )
             return None
         if decision.action == "replan":
@@ -1753,6 +1830,57 @@ class AgentRuntime:
             waiting_for=waiting_for,
             warnings=warnings,
         )
+
+    def _preprocess_attachments(self, task: TaskRecord) -> None:
+        """附件预处理：在Understanding之前增强上下文"""
+        from app.kernel.attachment_enricher import AttachmentContextEnricher
+        from app.infrastructure.attachment_store import RedisAttachmentStore
+        import redis
+
+        try:
+            # 获取settings和attachment_store
+            settings = getattr(self, 'settings', None)
+            if not settings:
+                # 尝试从store获取settings
+                settings = getattr(self.store, 'settings', None)
+
+            if not settings:
+                logger.warning("无法获取settings，跳过附件预处理")
+                return
+
+            r = redis.from_url(settings.redis_url)
+            attachment_store = RedisAttachmentStore(r, settings.attachment_ttl_hours)
+
+            enricher = AttachmentContextEnricher(
+                rag_service_url=settings.rag_service_url,
+                rag_internal_token=settings.rag_internal_token,
+                attachment_store=attachment_store
+            )
+
+            enriched = enricher.enrich(task.input)
+            # 更新text为增强后的版本
+            task.input["text"] = enriched.enriched_text
+            # 保留原始text供日志使用
+            task.input["_original_text"] = enriched.original_text
+            # 只有用户明确引用附件时，规划器才从附件参数里取材
+            task.input["_attachment_referenced"] = enriched.attachment_referenced
+            task.input["_attachment_excerpt"] = enriched.attachment_excerpt
+            task.input["_attachment_file_names"] = [
+                str(item.get("file_name"))
+                for item in enriched.attachment_metadata
+                if item.get("file_name")
+            ]
+            # 标记已处理
+            task.input["_attachment_processed"] = True
+
+            # AgentStore 没有 save_task；commit 的 upsert 会一并写回 input，
+            # 这是把增强文本带给后续 Understanding/Planning 的唯一通道。
+            self.store.commit(task)
+
+            logger.info(f"附件预处理成功，增强文本长度: {len(enriched.enriched_text)}")
+        except Exception as e:
+            logger.exception(f"附件预处理失败: {str(e)}")
+            # 失败不中断任务，使用原始text继续
 
 
 def _merge_warnings(*groups: list[str]) -> list[str]:

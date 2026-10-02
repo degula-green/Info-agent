@@ -28,7 +28,7 @@ CORPUS_PATH = Path(__file__).parent / "fixtures" / "understanding_corpus.json"
 
 def load_corpus() -> list[dict]:
     data = json.loads(CORPUS_PATH.read_text(encoding="utf-8"))
-    assert data["version"] == 2
+    assert data["version"] == 3
     return data["cases"]
 
 

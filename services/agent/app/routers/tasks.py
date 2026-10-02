@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field
 
 from app.application.task_service import TaskNotFoundError, TaskPermissionError, TaskStateError
 from app.container import AgentContainer
+from app.infrastructure.attachment_store import RedisAttachmentStore
 from app.kernel.approval import ApprovalError
 from app.kernel.errors import AgentContractError
 from app.kernel.states import TERMINAL_TASK_STATUSES, WAITING_TASK_STATUSES
@@ -34,6 +35,7 @@ def get_container() -> AgentContainer:
 
 class CreateTaskBody(BaseModel):
     text: str = Field(default="", max_length=8000)
+    attachment_ids: list[str] = Field(default_factory=list)  # 新增
     steps: list[dict[str, Any]] = Field(default_factory=list)
     source_type: str = "chat"
     client_message_id: str | None = None
@@ -60,6 +62,17 @@ def _current_user(x_agent_user_id: str | None) -> str:
     return fallback
 
 
+def get_attachment_store() -> RedisAttachmentStore:
+    """获取附件存储实例"""
+    import redis
+    container = get_container()
+    redis_url = (container.settings.redis_url or "").strip()
+    if not redis_url:
+        raise HTTPException(status_code=503, detail="attachment storage is not configured")
+    r = redis.from_url(redis_url)
+    return RedisAttachmentStore(r, container.settings.attachment_ttl_hours)
+
+
 @router.post("/tasks", status_code=202)
 def create_task(
     body: CreateTaskBody,
@@ -78,6 +91,18 @@ def create_task(
     if not (body.text or "").strip() and not body.steps:
         raise HTTPException(status_code=422, detail="text or steps is required")
     payload: dict[str, Any] = {"text": body.text}
+
+    # 校验附件所有权
+    if body.attachment_ids:
+        owner_id = _current_user(x_agent_user_id)
+        # Only attachment-bearing tasks need the attachment store. Building it
+        # eagerly made every plain chat turn depend on Redis.
+        store = get_attachment_store()
+        for att_id in body.attachment_ids:
+            if not store.validate_ownership(att_id, owner_id):
+                raise HTTPException(403, f"无权使用附件: {att_id}")
+        payload["attachment_ids"] = body.attachment_ids
+
     if body.steps:
         payload["steps"] = body.steps
     task = container.task_service.create_task(

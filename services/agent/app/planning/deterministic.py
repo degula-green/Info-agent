@@ -10,6 +10,7 @@ planner, which receives the whole Capability Catalog and returns a step list.
 
 from __future__ import annotations
 
+import hashlib
 import re
 from datetime import datetime, timezone
 from typing import Any, Callable
@@ -42,6 +43,15 @@ DEFAULT_TITLE = "待办"
 # names what the system can do, and nothing requires them to be the same string.
 INTENT_NAME = "todo.create"
 DEFAULT_CAPABILITY_NAME = "todo.create"
+# A question about an attached document is answered from the parsed body the
+# Runtime already injected; it never reaches a retriever.
+KNOWLEDGE_ANSWER_INTENT = "knowledge.answer"
+ANSWER_CAPABILITY_NAME = "answer.compose"
+# Non-task messages are answered, not ignored. The capability is optional: when
+# it is not registered the old behaviour (no step, no action) stands.
+DEFAULT_REPLY_CAPABILITY_NAME = "chat.reply"
+CHAT_REPLY_OBJECTIVE = "回应聊天消息"
+CHAT_REPLY_TEXT_LIMIT = 4000
 DEFAULT_MIN_CONFIDENCE = DEFAULT_MIN_CONFIDENCE
 _TRIM = " \t\r\n，。,.!！?？、:：;；\"'“”‘’()（）[]【】<>《》…~-_"
 
@@ -100,11 +110,13 @@ class DeterministicPlanner:
         *,
         default_timezone: str = "Asia/Shanghai",
         capability_name: str = DEFAULT_CAPABILITY_NAME,
+        reply_capability_name: str | None = DEFAULT_REPLY_CAPABILITY_NAME,
         clock: Callable[[], datetime] | None = None,
         min_confidence: float = DEFAULT_MIN_CONFIDENCE,
     ) -> None:
         self.default_timezone = default_timezone
         self.capability_name = capability_name
+        self.reply_capability_name = reply_capability_name
         self.clock = clock or (lambda: datetime.now(timezone.utc))
         self.min_confidence = max(0.0, min(1.0, float(min_confidence)))
 
@@ -118,6 +130,14 @@ class DeterministicPlanner:
     ) -> Plan:
         plan_id = str(uuid4())
         text = str(task.input.get("text") or "").strip()
+        # The user's own sentence drives the title and the intent gate. The
+        # merged attachment body is only used for parameters when the user
+        # explicitly pointed at the attachment.
+        instruction_text = str(task.input.get("_original_text") or text).strip()
+        attachment_referenced = bool(task.input.get("_attachment_referenced")) and bool(
+            task.input.get("attachment_ids")
+        )
+        evidence_text = text if attachment_referenced else instruction_text
         registered = {descriptor.name for descriptor in capabilities}
         steps: list[PlanStep] = []
         objective = "没有需要执行的动作"
@@ -137,15 +157,36 @@ class DeterministicPlanner:
                 if item.confidence >= self.min_confidence
             ]
             best = accepted[0].name if accepted else None
+            if understanding.is_task and best == KNOWLEDGE_ANSWER_INTENT:
+                answer_plan = self._answer_from_attachment(
+                    task, registered, plan_id, instruction_text
+                )
+                if answer_plan is not None:
+                    return answer_plan
             wants_todo = bool(understanding.is_task and best == INTENT_NAME)
-            unsupported = [item.name for item in accepted if item.name != best]
-            if best is not None and best != INTENT_NAME:
-                unsupported.append(best)
-            if wants_todo and self.capability_name not in registered:
-                # The intent is understood but cannot be executed right now.
-                unsupported.append(INTENT_NAME)
-                wants_todo = False
+            if understanding.is_task:
+                unsupported = [item.name for item in accepted if item.name != best]
+                if best is not None and best != INTENT_NAME:
+                    unsupported.append(best)
+                if wants_todo and self.capability_name not in registered:
+                    # The intent is understood but cannot be executed right now.
+                    unsupported.append(INTENT_NAME)
+                    wants_todo = False
+            else:
+                # Not a task at all. There is no intent to report as
+                # unsupported -- calling a greeting "unsupported" put noise on
+                # every chit-chat task -- and the message is answered instead.
+                unsupported = []
             if not wants_todo:
+                if not understanding.is_task:
+                    reply = self._reply_step(task, registered, plan_id)
+                    if reply is not None:
+                        return Plan(
+                            plan_id=plan_id,
+                            task_id=task.task_id,
+                            objective=CHAT_REPLY_OBJECTIVE,
+                            steps=[reply],
+                        )
                 if understanding.intent_candidates:
                     objective = "当前没有可执行的意图"
                 return Plan(
@@ -161,12 +202,14 @@ class DeterministicPlanner:
             # same gate the ingress uses, so "完成登录模块代码" -- which has no time
             # and no schedule keyword -- is still planned instead of dropped.
             wants_todo = bool(
-                text and task_candidate_hint(text) and not chitchat_only(text)
+                instruction_text
+                and task_candidate_hint(instruction_text)
+                and not chitchat_only(instruction_text)
             )
 
         if wants_todo and self.capability_name in registered:
-            expression, matched = extract_time_expression(text)
-            title = build_title(text, matched)
+            expression, matched = extract_time_expression(evidence_text)
+            title = build_title(instruction_text, matched)
             objective = f"创建待办：{title}"
             arguments: dict[str, Any] = {
                 "title": title,
@@ -179,6 +222,10 @@ class DeterministicPlanner:
                 "idempotency_key": capability_idempotency_key(task),
                 "source": self._source(task),
             }
+            if attachment_referenced:
+                excerpt = str(task.input.get("_attachment_excerpt") or "").strip()
+                if excerpt:
+                    arguments["notes"] = excerpt[:2000]
             # Resolve the phrase now so the approval shows the moment that will
             # actually be written. An ambiguous phrase stays unresolved: the
             # to-do is still created, only without a due time.
@@ -218,6 +265,89 @@ class DeterministicPlanner:
             unsupported_intents=unsupported,
             warnings=warnings,
             requires_user_confirmation=requires_confirmation,
+        )
+
+    def _reply_step(
+        self,
+        task: TaskEnvelope,
+        registered: set[str],
+        plan_id: str,
+    ) -> PlanStep | None:
+        """One short reply for a chat message that is not a task.
+
+        Collected messages never take this path. The collection entry only ever
+        creates to-dos, and answering a group-chat aside on the user's behalf
+        would be a different product decision than the one that entry made.
+        """
+
+        if not self.reply_capability_name or self.reply_capability_name not in registered:
+            return None
+        if str(task.source_type or "") != "chat":
+            return None
+        text = str(task.input.get("_original_text") or task.input.get("text") or "").strip()
+        if not text:
+            return None
+        return PlanStep(
+            step_id=f"{plan_id}-step-1",
+            plan_id=plan_id,
+            order=1,
+            capability=self.reply_capability_name,
+            arguments={"text": text[:CHAT_REPLY_TEXT_LIMIT]},
+        )
+
+    def _answer_from_attachment(
+        self,
+        task: TaskEnvelope,
+        registered: set[str],
+        plan_id: str,
+        question: str,
+    ) -> Plan | None:
+        """Answer from the attachment the Runtime already parsed.
+
+        The read-only counterpart of todo.create: a document question needs no
+        retrieval when the body is in ``_attachment_excerpt``. A question
+        without an attachment keeps the previous behaviour (unsupported).
+        """
+
+        if ANSWER_CAPABILITY_NAME not in registered:
+            return None
+        excerpt = str(task.input.get("_attachment_excerpt") or "").strip()
+        if not excerpt:
+            return None
+        file_names = [
+            str(item)
+            for item in (task.input.get("_attachment_file_names") or [])
+            if str(item).strip()
+        ]
+        digest = hashlib.sha256(excerpt.encode("utf-8")).hexdigest()
+        evidence = {
+            "evidence_id": f"att-{digest[:16]}",
+            "source_type": "document",
+            "title": file_names[0] if file_names else "附件",
+            "url": None,
+            "quote": excerpt[:500],
+            "text": excerpt,
+            "content_hash": digest,
+            "retrieved_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "fetch_method": "attachment",
+            "version": 1,
+        }
+        return Plan(
+            plan_id=plan_id,
+            task_id=task.task_id,
+            objective="根据附件回答",
+            steps=[
+                PlanStep(
+                    step_id=f"{plan_id}-step-1",
+                    plan_id=plan_id,
+                    order=1,
+                    capability=ANSWER_CAPABILITY_NAME,
+                    arguments={
+                        "question": (question or "这个附件的内容是什么？")[:2000],
+                        "evidence": [evidence],
+                    },
+                )
+            ],
         )
 
     def decide_after_observation(

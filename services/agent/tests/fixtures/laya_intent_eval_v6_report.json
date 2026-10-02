@@ -1,0 +1,3102 @@
+{
+  "top1": 0.9667,
+  "macro_f1": 0.9668,
+  "per_intent": {
+    "todo.create": {
+      "support": 30,
+      "recall": 0.9333,
+      "precision": 1.0,
+      "f1": 0.9655
+    },
+    "knowledge.answer": {
+      "support": 30,
+      "recall": 0.9667,
+      "precision": 1.0,
+      "f1": 0.9831
+    },
+    "web.research": {
+      "support": 30,
+      "recall": 0.9667,
+      "precision": 0.9667,
+      "f1": 0.9667
+    },
+    "compliance.assess": {
+      "support": 30,
+      "recall": 1.0,
+      "precision": 1.0,
+      "f1": 1.0
+    },
+    "form.complete": {
+      "support": 30,
+      "recall": 1.0,
+      "precision": 0.9091,
+      "f1": 0.9524
+    },
+    "non_task": {
+      "support": 30,
+      "recall": 1.0,
+      "precision": 1.0,
+      "f1": 1.0
+    },
+    "other_task": {
+      "support": 30,
+      "recall": 0.9,
+      "precision": 0.9,
+      "f1": 0.9
+    }
+  },
+  "confusion_matrix": {
+    "todo.create": {
+      "todo.create": 28,
+      "other_task": 1,
+      "form.complete": 1
+    },
+    "knowledge.answer": {
+      "knowledge.answer": 29,
+      "other_task": 1
+    },
+    "web.research": {
+      "web.research": 29,
+      "other_task": 1
+    },
+    "compliance.assess": {
+      "compliance.assess": 30
+    },
+    "form.complete": {
+      "form.complete": 30
+    },
+    "non_task": {
+      "non_task": 30
+    },
+    "other_task": {
+      "other_task": 27,
+      "form.complete": 2,
+      "web.research": 1
+    }
+  },
+  "schema_version": "intent-v6",
+  "option_order": [
+    "todo.create",
+    "knowledge.answer",
+    "web.research",
+    "compliance.assess",
+    "form.complete",
+    "non_task",
+    "other_task"
+  ],
+  "dataset": "C:\\Users\\123\\Desktop\\project\\Z-agent\\info-agent-agent\\services\\agent\\tests\\fixtures\\laya_intent_eval_v6.jsonl",
+  "dataset_sha256": "ab7a93c942a9acf29994bf3bfa87b6cb19307fb656402101ae295b34138acdbf",
+  "rows": 210,
+  "elapsed_seconds": 7.6,
+  "calibration": {
+    "target_precision": 0.95,
+    "recommended": {
+      "min_confidence": 0.5,
+      "min_margin": 0.05,
+      "coverage": 1.0,
+      "precision": 0.9667
+    },
+    "sweep": [
+      {
+        "min_confidence": 0.5,
+        "min_margin": 0.05,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.5,
+        "min_margin": 0.1,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.5,
+        "min_margin": 0.15,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.5,
+        "min_margin": 0.2,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.5,
+        "min_margin": 0.25,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.5,
+        "min_margin": 0.3,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.5,
+        "min_margin": 0.35,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.5,
+        "min_margin": 0.4,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.5,
+        "min_margin": 0.45,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.5,
+        "min_margin": 0.5,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.51,
+        "min_margin": 0.05,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.51,
+        "min_margin": 0.1,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.51,
+        "min_margin": 0.15,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.51,
+        "min_margin": 0.2,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.51,
+        "min_margin": 0.25,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.51,
+        "min_margin": 0.3,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.51,
+        "min_margin": 0.35,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.51,
+        "min_margin": 0.4,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.51,
+        "min_margin": 0.45,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.51,
+        "min_margin": 0.5,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.52,
+        "min_margin": 0.05,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.52,
+        "min_margin": 0.1,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.52,
+        "min_margin": 0.15,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.52,
+        "min_margin": 0.2,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.52,
+        "min_margin": 0.25,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.52,
+        "min_margin": 0.3,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.52,
+        "min_margin": 0.35,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.52,
+        "min_margin": 0.4,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.52,
+        "min_margin": 0.45,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.52,
+        "min_margin": 0.5,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.53,
+        "min_margin": 0.05,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.53,
+        "min_margin": 0.1,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.53,
+        "min_margin": 0.15,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.53,
+        "min_margin": 0.2,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.53,
+        "min_margin": 0.25,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.53,
+        "min_margin": 0.3,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.53,
+        "min_margin": 0.35,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.53,
+        "min_margin": 0.4,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.53,
+        "min_margin": 0.45,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.53,
+        "min_margin": 0.5,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.54,
+        "min_margin": 0.05,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.54,
+        "min_margin": 0.1,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.54,
+        "min_margin": 0.15,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.54,
+        "min_margin": 0.2,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.54,
+        "min_margin": 0.25,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.54,
+        "min_margin": 0.3,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.54,
+        "min_margin": 0.35,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.54,
+        "min_margin": 0.4,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.54,
+        "min_margin": 0.45,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.54,
+        "min_margin": 0.5,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.55,
+        "min_margin": 0.05,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.55,
+        "min_margin": 0.1,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.55,
+        "min_margin": 0.15,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.55,
+        "min_margin": 0.2,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.55,
+        "min_margin": 0.25,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.55,
+        "min_margin": 0.3,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.55,
+        "min_margin": 0.35,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.55,
+        "min_margin": 0.4,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.55,
+        "min_margin": 0.45,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.55,
+        "min_margin": 0.5,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.56,
+        "min_margin": 0.05,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.56,
+        "min_margin": 0.1,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.56,
+        "min_margin": 0.15,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.56,
+        "min_margin": 0.2,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.56,
+        "min_margin": 0.25,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.56,
+        "min_margin": 0.3,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.56,
+        "min_margin": 0.35,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.56,
+        "min_margin": 0.4,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.56,
+        "min_margin": 0.45,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.56,
+        "min_margin": 0.5,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.57,
+        "min_margin": 0.05,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.57,
+        "min_margin": 0.1,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.57,
+        "min_margin": 0.15,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.57,
+        "min_margin": 0.2,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.57,
+        "min_margin": 0.25,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.57,
+        "min_margin": 0.3,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.57,
+        "min_margin": 0.35,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.57,
+        "min_margin": 0.4,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.57,
+        "min_margin": 0.45,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.57,
+        "min_margin": 0.5,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.58,
+        "min_margin": 0.05,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.58,
+        "min_margin": 0.1,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.58,
+        "min_margin": 0.15,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.58,
+        "min_margin": 0.2,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.58,
+        "min_margin": 0.25,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.58,
+        "min_margin": 0.3,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.58,
+        "min_margin": 0.35,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.58,
+        "min_margin": 0.4,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.58,
+        "min_margin": 0.45,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.58,
+        "min_margin": 0.5,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.59,
+        "min_margin": 0.05,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.59,
+        "min_margin": 0.1,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.59,
+        "min_margin": 0.15,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.59,
+        "min_margin": 0.2,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.59,
+        "min_margin": 0.25,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.59,
+        "min_margin": 0.3,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.59,
+        "min_margin": 0.35,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.59,
+        "min_margin": 0.4,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.59,
+        "min_margin": 0.45,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.59,
+        "min_margin": 0.5,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.6,
+        "min_margin": 0.05,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.6,
+        "min_margin": 0.1,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.6,
+        "min_margin": 0.15,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.6,
+        "min_margin": 0.2,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.6,
+        "min_margin": 0.25,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.6,
+        "min_margin": 0.3,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.6,
+        "min_margin": 0.35,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.6,
+        "min_margin": 0.4,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.6,
+        "min_margin": 0.45,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.6,
+        "min_margin": 0.5,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.61,
+        "min_margin": 0.05,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.61,
+        "min_margin": 0.1,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.61,
+        "min_margin": 0.15,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.61,
+        "min_margin": 0.2,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.61,
+        "min_margin": 0.25,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.61,
+        "min_margin": 0.3,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.61,
+        "min_margin": 0.35,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.61,
+        "min_margin": 0.4,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.61,
+        "min_margin": 0.45,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.61,
+        "min_margin": 0.5,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.62,
+        "min_margin": 0.05,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.62,
+        "min_margin": 0.1,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.62,
+        "min_margin": 0.15,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.62,
+        "min_margin": 0.2,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.62,
+        "min_margin": 0.25,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.62,
+        "min_margin": 0.3,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.62,
+        "min_margin": 0.35,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.62,
+        "min_margin": 0.4,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.62,
+        "min_margin": 0.45,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.62,
+        "min_margin": 0.5,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.63,
+        "min_margin": 0.05,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.63,
+        "min_margin": 0.1,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.63,
+        "min_margin": 0.15,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.63,
+        "min_margin": 0.2,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.63,
+        "min_margin": 0.25,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.63,
+        "min_margin": 0.3,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.63,
+        "min_margin": 0.35,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.63,
+        "min_margin": 0.4,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.63,
+        "min_margin": 0.45,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.63,
+        "min_margin": 0.5,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.64,
+        "min_margin": 0.05,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.64,
+        "min_margin": 0.1,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.64,
+        "min_margin": 0.15,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.64,
+        "min_margin": 0.2,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.64,
+        "min_margin": 0.25,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.64,
+        "min_margin": 0.3,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.64,
+        "min_margin": 0.35,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.64,
+        "min_margin": 0.4,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.64,
+        "min_margin": 0.45,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.64,
+        "min_margin": 0.5,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.65,
+        "min_margin": 0.05,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.65,
+        "min_margin": 0.1,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.65,
+        "min_margin": 0.15,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.65,
+        "min_margin": 0.2,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.65,
+        "min_margin": 0.25,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.65,
+        "min_margin": 0.3,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.65,
+        "min_margin": 0.35,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.65,
+        "min_margin": 0.4,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.65,
+        "min_margin": 0.45,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.65,
+        "min_margin": 0.5,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.66,
+        "min_margin": 0.05,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.66,
+        "min_margin": 0.1,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.66,
+        "min_margin": 0.15,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.66,
+        "min_margin": 0.2,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.66,
+        "min_margin": 0.25,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.66,
+        "min_margin": 0.3,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.66,
+        "min_margin": 0.35,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.66,
+        "min_margin": 0.4,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.66,
+        "min_margin": 0.45,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.66,
+        "min_margin": 0.5,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.67,
+        "min_margin": 0.05,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.67,
+        "min_margin": 0.1,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.67,
+        "min_margin": 0.15,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.67,
+        "min_margin": 0.2,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.67,
+        "min_margin": 0.25,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.67,
+        "min_margin": 0.3,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.67,
+        "min_margin": 0.35,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.67,
+        "min_margin": 0.4,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.67,
+        "min_margin": 0.45,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.67,
+        "min_margin": 0.5,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.68,
+        "min_margin": 0.05,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.68,
+        "min_margin": 0.1,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.68,
+        "min_margin": 0.15,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.68,
+        "min_margin": 0.2,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.68,
+        "min_margin": 0.25,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.68,
+        "min_margin": 0.3,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.68,
+        "min_margin": 0.35,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.68,
+        "min_margin": 0.4,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.68,
+        "min_margin": 0.45,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.68,
+        "min_margin": 0.5,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.69,
+        "min_margin": 0.05,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.69,
+        "min_margin": 0.1,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.69,
+        "min_margin": 0.15,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.69,
+        "min_margin": 0.2,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.69,
+        "min_margin": 0.25,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.69,
+        "min_margin": 0.3,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.69,
+        "min_margin": 0.35,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.69,
+        "min_margin": 0.4,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.69,
+        "min_margin": 0.45,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.69,
+        "min_margin": 0.5,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.7,
+        "min_margin": 0.05,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.7,
+        "min_margin": 0.1,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.7,
+        "min_margin": 0.15,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.7,
+        "min_margin": 0.2,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.7,
+        "min_margin": 0.25,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.7,
+        "min_margin": 0.3,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.7,
+        "min_margin": 0.35,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.7,
+        "min_margin": 0.4,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.7,
+        "min_margin": 0.45,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.7,
+        "min_margin": 0.5,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.71,
+        "min_margin": 0.05,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.71,
+        "min_margin": 0.1,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.71,
+        "min_margin": 0.15,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.71,
+        "min_margin": 0.2,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.71,
+        "min_margin": 0.25,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.71,
+        "min_margin": 0.3,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.71,
+        "min_margin": 0.35,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.71,
+        "min_margin": 0.4,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.71,
+        "min_margin": 0.45,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.71,
+        "min_margin": 0.5,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.72,
+        "min_margin": 0.05,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.72,
+        "min_margin": 0.1,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.72,
+        "min_margin": 0.15,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.72,
+        "min_margin": 0.2,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.72,
+        "min_margin": 0.25,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.72,
+        "min_margin": 0.3,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.72,
+        "min_margin": 0.35,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.72,
+        "min_margin": 0.4,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.72,
+        "min_margin": 0.45,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.72,
+        "min_margin": 0.5,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.73,
+        "min_margin": 0.05,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.73,
+        "min_margin": 0.1,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.73,
+        "min_margin": 0.15,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.73,
+        "min_margin": 0.2,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.73,
+        "min_margin": 0.25,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.73,
+        "min_margin": 0.3,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.73,
+        "min_margin": 0.35,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.73,
+        "min_margin": 0.4,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.73,
+        "min_margin": 0.45,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.73,
+        "min_margin": 0.5,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.74,
+        "min_margin": 0.05,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.74,
+        "min_margin": 0.1,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.74,
+        "min_margin": 0.15,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.74,
+        "min_margin": 0.2,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.74,
+        "min_margin": 0.25,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.74,
+        "min_margin": 0.3,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.74,
+        "min_margin": 0.35,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.74,
+        "min_margin": 0.4,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.74,
+        "min_margin": 0.45,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.74,
+        "min_margin": 0.5,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.75,
+        "min_margin": 0.05,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.75,
+        "min_margin": 0.1,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.75,
+        "min_margin": 0.15,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.75,
+        "min_margin": 0.2,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.75,
+        "min_margin": 0.25,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.75,
+        "min_margin": 0.3,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.75,
+        "min_margin": 0.35,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.75,
+        "min_margin": 0.4,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.75,
+        "min_margin": 0.45,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.75,
+        "min_margin": 0.5,
+        "coverage": 1.0,
+        "precision": 0.9667
+      },
+      {
+        "min_confidence": 0.76,
+        "min_margin": 0.05,
+        "coverage": 0.9952,
+        "precision": 0.9713
+      },
+      {
+        "min_confidence": 0.76,
+        "min_margin": 0.1,
+        "coverage": 0.9952,
+        "precision": 0.9713
+      },
+      {
+        "min_confidence": 0.76,
+        "min_margin": 0.15,
+        "coverage": 0.9952,
+        "precision": 0.9713
+      },
+      {
+        "min_confidence": 0.76,
+        "min_margin": 0.2,
+        "coverage": 0.9952,
+        "precision": 0.9713
+      },
+      {
+        "min_confidence": 0.76,
+        "min_margin": 0.25,
+        "coverage": 0.9952,
+        "precision": 0.9713
+      },
+      {
+        "min_confidence": 0.76,
+        "min_margin": 0.3,
+        "coverage": 0.9952,
+        "precision": 0.9713
+      },
+      {
+        "min_confidence": 0.76,
+        "min_margin": 0.35,
+        "coverage": 0.9952,
+        "precision": 0.9713
+      },
+      {
+        "min_confidence": 0.76,
+        "min_margin": 0.4,
+        "coverage": 0.9952,
+        "precision": 0.9713
+      },
+      {
+        "min_confidence": 0.76,
+        "min_margin": 0.45,
+        "coverage": 0.9952,
+        "precision": 0.9713
+      },
+      {
+        "min_confidence": 0.76,
+        "min_margin": 0.5,
+        "coverage": 0.9952,
+        "precision": 0.9713
+      },
+      {
+        "min_confidence": 0.77,
+        "min_margin": 0.05,
+        "coverage": 0.9952,
+        "precision": 0.9713
+      },
+      {
+        "min_confidence": 0.77,
+        "min_margin": 0.1,
+        "coverage": 0.9952,
+        "precision": 0.9713
+      },
+      {
+        "min_confidence": 0.77,
+        "min_margin": 0.15,
+        "coverage": 0.9952,
+        "precision": 0.9713
+      },
+      {
+        "min_confidence": 0.77,
+        "min_margin": 0.2,
+        "coverage": 0.9952,
+        "precision": 0.9713
+      },
+      {
+        "min_confidence": 0.77,
+        "min_margin": 0.25,
+        "coverage": 0.9952,
+        "precision": 0.9713
+      },
+      {
+        "min_confidence": 0.77,
+        "min_margin": 0.3,
+        "coverage": 0.9952,
+        "precision": 0.9713
+      },
+      {
+        "min_confidence": 0.77,
+        "min_margin": 0.35,
+        "coverage": 0.9952,
+        "precision": 0.9713
+      },
+      {
+        "min_confidence": 0.77,
+        "min_margin": 0.4,
+        "coverage": 0.9952,
+        "precision": 0.9713
+      },
+      {
+        "min_confidence": 0.77,
+        "min_margin": 0.45,
+        "coverage": 0.9952,
+        "precision": 0.9713
+      },
+      {
+        "min_confidence": 0.77,
+        "min_margin": 0.5,
+        "coverage": 0.9952,
+        "precision": 0.9713
+      },
+      {
+        "min_confidence": 0.78,
+        "min_margin": 0.05,
+        "coverage": 0.9952,
+        "precision": 0.9713
+      },
+      {
+        "min_confidence": 0.78,
+        "min_margin": 0.1,
+        "coverage": 0.9952,
+        "precision": 0.9713
+      },
+      {
+        "min_confidence": 0.78,
+        "min_margin": 0.15,
+        "coverage": 0.9952,
+        "precision": 0.9713
+      },
+      {
+        "min_confidence": 0.78,
+        "min_margin": 0.2,
+        "coverage": 0.9952,
+        "precision": 0.9713
+      },
+      {
+        "min_confidence": 0.78,
+        "min_margin": 0.25,
+        "coverage": 0.9952,
+        "precision": 0.9713
+      },
+      {
+        "min_confidence": 0.78,
+        "min_margin": 0.3,
+        "coverage": 0.9952,
+        "precision": 0.9713
+      },
+      {
+        "min_confidence": 0.78,
+        "min_margin": 0.35,
+        "coverage": 0.9952,
+        "precision": 0.9713
+      },
+      {
+        "min_confidence": 0.78,
+        "min_margin": 0.4,
+        "coverage": 0.9952,
+        "precision": 0.9713
+      },
+      {
+        "min_confidence": 0.78,
+        "min_margin": 0.45,
+        "coverage": 0.9952,
+        "precision": 0.9713
+      },
+      {
+        "min_confidence": 0.78,
+        "min_margin": 0.5,
+        "coverage": 0.9952,
+        "precision": 0.9713
+      },
+      {
+        "min_confidence": 0.79,
+        "min_margin": 0.05,
+        "coverage": 0.9952,
+        "precision": 0.9713
+      },
+      {
+        "min_confidence": 0.79,
+        "min_margin": 0.1,
+        "coverage": 0.9952,
+        "precision": 0.9713
+      },
+      {
+        "min_confidence": 0.79,
+        "min_margin": 0.15,
+        "coverage": 0.9952,
+        "precision": 0.9713
+      },
+      {
+        "min_confidence": 0.79,
+        "min_margin": 0.2,
+        "coverage": 0.9952,
+        "precision": 0.9713
+      },
+      {
+        "min_confidence": 0.79,
+        "min_margin": 0.25,
+        "coverage": 0.9952,
+        "precision": 0.9713
+      },
+      {
+        "min_confidence": 0.79,
+        "min_margin": 0.3,
+        "coverage": 0.9952,
+        "precision": 0.9713
+      },
+      {
+        "min_confidence": 0.79,
+        "min_margin": 0.35,
+        "coverage": 0.9952,
+        "precision": 0.9713
+      },
+      {
+        "min_confidence": 0.79,
+        "min_margin": 0.4,
+        "coverage": 0.9952,
+        "precision": 0.9713
+      },
+      {
+        "min_confidence": 0.79,
+        "min_margin": 0.45,
+        "coverage": 0.9952,
+        "precision": 0.9713
+      },
+      {
+        "min_confidence": 0.79,
+        "min_margin": 0.5,
+        "coverage": 0.9952,
+        "precision": 0.9713
+      },
+      {
+        "min_confidence": 0.8,
+        "min_margin": 0.05,
+        "coverage": 0.9952,
+        "precision": 0.9713
+      },
+      {
+        "min_confidence": 0.8,
+        "min_margin": 0.1,
+        "coverage": 0.9952,
+        "precision": 0.9713
+      },
+      {
+        "min_confidence": 0.8,
+        "min_margin": 0.15,
+        "coverage": 0.9952,
+        "precision": 0.9713
+      },
+      {
+        "min_confidence": 0.8,
+        "min_margin": 0.2,
+        "coverage": 0.9952,
+        "precision": 0.9713
+      },
+      {
+        "min_confidence": 0.8,
+        "min_margin": 0.25,
+        "coverage": 0.9952,
+        "precision": 0.9713
+      },
+      {
+        "min_confidence": 0.8,
+        "min_margin": 0.3,
+        "coverage": 0.9952,
+        "precision": 0.9713
+      },
+      {
+        "min_confidence": 0.8,
+        "min_margin": 0.35,
+        "coverage": 0.9952,
+        "precision": 0.9713
+      },
+      {
+        "min_confidence": 0.8,
+        "min_margin": 0.4,
+        "coverage": 0.9952,
+        "precision": 0.9713
+      },
+      {
+        "min_confidence": 0.8,
+        "min_margin": 0.45,
+        "coverage": 0.9952,
+        "precision": 0.9713
+      },
+      {
+        "min_confidence": 0.8,
+        "min_margin": 0.5,
+        "coverage": 0.9952,
+        "precision": 0.9713
+      },
+      {
+        "min_confidence": 0.81,
+        "min_margin": 0.05,
+        "coverage": 0.9952,
+        "precision": 0.9713
+      },
+      {
+        "min_confidence": 0.81,
+        "min_margin": 0.1,
+        "coverage": 0.9952,
+        "precision": 0.9713
+      },
+      {
+        "min_confidence": 0.81,
+        "min_margin": 0.15,
+        "coverage": 0.9952,
+        "precision": 0.9713
+      },
+      {
+        "min_confidence": 0.81,
+        "min_margin": 0.2,
+        "coverage": 0.9952,
+        "precision": 0.9713
+      },
+      {
+        "min_confidence": 0.81,
+        "min_margin": 0.25,
+        "coverage": 0.9952,
+        "precision": 0.9713
+      },
+      {
+        "min_confidence": 0.81,
+        "min_margin": 0.3,
+        "coverage": 0.9952,
+        "precision": 0.9713
+      },
+      {
+        "min_confidence": 0.81,
+        "min_margin": 0.35,
+        "coverage": 0.9952,
+        "precision": 0.9713
+      },
+      {
+        "min_confidence": 0.81,
+        "min_margin": 0.4,
+        "coverage": 0.9952,
+        "precision": 0.9713
+      },
+      {
+        "min_confidence": 0.81,
+        "min_margin": 0.45,
+        "coverage": 0.9952,
+        "precision": 0.9713
+      },
+      {
+        "min_confidence": 0.81,
+        "min_margin": 0.5,
+        "coverage": 0.9952,
+        "precision": 0.9713
+      },
+      {
+        "min_confidence": 0.82,
+        "min_margin": 0.05,
+        "coverage": 0.9952,
+        "precision": 0.9713
+      },
+      {
+        "min_confidence": 0.82,
+        "min_margin": 0.1,
+        "coverage": 0.9952,
+        "precision": 0.9713
+      },
+      {
+        "min_confidence": 0.82,
+        "min_margin": 0.15,
+        "coverage": 0.9952,
+        "precision": 0.9713
+      },
+      {
+        "min_confidence": 0.82,
+        "min_margin": 0.2,
+        "coverage": 0.9952,
+        "precision": 0.9713
+      },
+      {
+        "min_confidence": 0.82,
+        "min_margin": 0.25,
+        "coverage": 0.9952,
+        "precision": 0.9713
+      },
+      {
+        "min_confidence": 0.82,
+        "min_margin": 0.3,
+        "coverage": 0.9952,
+        "precision": 0.9713
+      },
+      {
+        "min_confidence": 0.82,
+        "min_margin": 0.35,
+        "coverage": 0.9952,
+        "precision": 0.9713
+      },
+      {
+        "min_confidence": 0.82,
+        "min_margin": 0.4,
+        "coverage": 0.9952,
+        "precision": 0.9713
+      },
+      {
+        "min_confidence": 0.82,
+        "min_margin": 0.45,
+        "coverage": 0.9952,
+        "precision": 0.9713
+      },
+      {
+        "min_confidence": 0.82,
+        "min_margin": 0.5,
+        "coverage": 0.9952,
+        "precision": 0.9713
+      },
+      {
+        "min_confidence": 0.83,
+        "min_margin": 0.05,
+        "coverage": 0.9952,
+        "precision": 0.9713
+      },
+      {
+        "min_confidence": 0.83,
+        "min_margin": 0.1,
+        "coverage": 0.9952,
+        "precision": 0.9713
+      },
+      {
+        "min_confidence": 0.83,
+        "min_margin": 0.15,
+        "coverage": 0.9952,
+        "precision": 0.9713
+      },
+      {
+        "min_confidence": 0.83,
+        "min_margin": 0.2,
+        "coverage": 0.9952,
+        "precision": 0.9713
+      },
+      {
+        "min_confidence": 0.83,
+        "min_margin": 0.25,
+        "coverage": 0.9952,
+        "precision": 0.9713
+      },
+      {
+        "min_confidence": 0.83,
+        "min_margin": 0.3,
+        "coverage": 0.9952,
+        "precision": 0.9713
+      },
+      {
+        "min_confidence": 0.83,
+        "min_margin": 0.35,
+        "coverage": 0.9952,
+        "precision": 0.9713
+      },
+      {
+        "min_confidence": 0.83,
+        "min_margin": 0.4,
+        "coverage": 0.9952,
+        "precision": 0.9713
+      },
+      {
+        "min_confidence": 0.83,
+        "min_margin": 0.45,
+        "coverage": 0.9952,
+        "precision": 0.9713
+      },
+      {
+        "min_confidence": 0.83,
+        "min_margin": 0.5,
+        "coverage": 0.9952,
+        "precision": 0.9713
+      },
+      {
+        "min_confidence": 0.84,
+        "min_margin": 0.05,
+        "coverage": 0.9952,
+        "precision": 0.9713
+      },
+      {
+        "min_confidence": 0.84,
+        "min_margin": 0.1,
+        "coverage": 0.9952,
+        "precision": 0.9713
+      },
+      {
+        "min_confidence": 0.84,
+        "min_margin": 0.15,
+        "coverage": 0.9952,
+        "precision": 0.9713
+      },
+      {
+        "min_confidence": 0.84,
+        "min_margin": 0.2,
+        "coverage": 0.9952,
+        "precision": 0.9713
+      },
+      {
+        "min_confidence": 0.84,
+        "min_margin": 0.25,
+        "coverage": 0.9952,
+        "precision": 0.9713
+      },
+      {
+        "min_confidence": 0.84,
+        "min_margin": 0.3,
+        "coverage": 0.9952,
+        "precision": 0.9713
+      },
+      {
+        "min_confidence": 0.84,
+        "min_margin": 0.35,
+        "coverage": 0.9952,
+        "precision": 0.9713
+      },
+      {
+        "min_confidence": 0.84,
+        "min_margin": 0.4,
+        "coverage": 0.9952,
+        "precision": 0.9713
+      },
+      {
+        "min_confidence": 0.84,
+        "min_margin": 0.45,
+        "coverage": 0.9952,
+        "precision": 0.9713
+      },
+      {
+        "min_confidence": 0.84,
+        "min_margin": 0.5,
+        "coverage": 0.9952,
+        "precision": 0.9713
+      },
+      {
+        "min_confidence": 0.85,
+        "min_margin": 0.05,
+        "coverage": 0.9952,
+        "precision": 0.9713
+      },
+      {
+        "min_confidence": 0.85,
+        "min_margin": 0.1,
+        "coverage": 0.9952,
+        "precision": 0.9713
+      },
+      {
+        "min_confidence": 0.85,
+        "min_margin": 0.15,
+        "coverage": 0.9952,
+        "precision": 0.9713
+      },
+      {
+        "min_confidence": 0.85,
+        "min_margin": 0.2,
+        "coverage": 0.9952,
+        "precision": 0.9713
+      },
+      {
+        "min_confidence": 0.85,
+        "min_margin": 0.25,
+        "coverage": 0.9952,
+        "precision": 0.9713
+      },
+      {
+        "min_confidence": 0.85,
+        "min_margin": 0.3,
+        "coverage": 0.9952,
+        "precision": 0.9713
+      },
+      {
+        "min_confidence": 0.85,
+        "min_margin": 0.35,
+        "coverage": 0.9952,
+        "precision": 0.9713
+      },
+      {
+        "min_confidence": 0.85,
+        "min_margin": 0.4,
+        "coverage": 0.9952,
+        "precision": 0.9713
+      },
+      {
+        "min_confidence": 0.85,
+        "min_margin": 0.45,
+        "coverage": 0.9952,
+        "precision": 0.9713
+      },
+      {
+        "min_confidence": 0.85,
+        "min_margin": 0.5,
+        "coverage": 0.9952,
+        "precision": 0.9713
+      },
+      {
+        "min_confidence": 0.86,
+        "min_margin": 0.05,
+        "coverage": 0.9952,
+        "precision": 0.9713
+      },
+      {
+        "min_confidence": 0.86,
+        "min_margin": 0.1,
+        "coverage": 0.9952,
+        "precision": 0.9713
+      },
+      {
+        "min_confidence": 0.86,
+        "min_margin": 0.15,
+        "coverage": 0.9952,
+        "precision": 0.9713
+      },
+      {
+        "min_confidence": 0.86,
+        "min_margin": 0.2,
+        "coverage": 0.9952,
+        "precision": 0.9713
+      },
+      {
+        "min_confidence": 0.86,
+        "min_margin": 0.25,
+        "coverage": 0.9952,
+        "precision": 0.9713
+      },
+      {
+        "min_confidence": 0.86,
+        "min_margin": 0.3,
+        "coverage": 0.9952,
+        "precision": 0.9713
+      },
+      {
+        "min_confidence": 0.86,
+        "min_margin": 0.35,
+        "coverage": 0.9952,
+        "precision": 0.9713
+      },
+      {
+        "min_confidence": 0.86,
+        "min_margin": 0.4,
+        "coverage": 0.9952,
+        "precision": 0.9713
+      },
+      {
+        "min_confidence": 0.86,
+        "min_margin": 0.45,
+        "coverage": 0.9952,
+        "precision": 0.9713
+      },
+      {
+        "min_confidence": 0.86,
+        "min_margin": 0.5,
+        "coverage": 0.9952,
+        "precision": 0.9713
+      },
+      {
+        "min_confidence": 0.87,
+        "min_margin": 0.05,
+        "coverage": 0.9952,
+        "precision": 0.9713
+      },
+      {
+        "min_confidence": 0.87,
+        "min_margin": 0.1,
+        "coverage": 0.9952,
+        "precision": 0.9713
+      },
+      {
+        "min_confidence": 0.87,
+        "min_margin": 0.15,
+        "coverage": 0.9952,
+        "precision": 0.9713
+      },
+      {
+        "min_confidence": 0.87,
+        "min_margin": 0.2,
+        "coverage": 0.9952,
+        "precision": 0.9713
+      },
+      {
+        "min_confidence": 0.87,
+        "min_margin": 0.25,
+        "coverage": 0.9952,
+        "precision": 0.9713
+      },
+      {
+        "min_confidence": 0.87,
+        "min_margin": 0.3,
+        "coverage": 0.9952,
+        "precision": 0.9713
+      },
+      {
+        "min_confidence": 0.87,
+        "min_margin": 0.35,
+        "coverage": 0.9952,
+        "precision": 0.9713
+      },
+      {
+        "min_confidence": 0.87,
+        "min_margin": 0.4,
+        "coverage": 0.9952,
+        "precision": 0.9713
+      },
+      {
+        "min_confidence": 0.87,
+        "min_margin": 0.45,
+        "coverage": 0.9952,
+        "precision": 0.9713
+      },
+      {
+        "min_confidence": 0.87,
+        "min_margin": 0.5,
+        "coverage": 0.9952,
+        "precision": 0.9713
+      },
+      {
+        "min_confidence": 0.88,
+        "min_margin": 0.05,
+        "coverage": 0.9905,
+        "precision": 0.9712
+      },
+      {
+        "min_confidence": 0.88,
+        "min_margin": 0.1,
+        "coverage": 0.9905,
+        "precision": 0.9712
+      },
+      {
+        "min_confidence": 0.88,
+        "min_margin": 0.15,
+        "coverage": 0.9905,
+        "precision": 0.9712
+      },
+      {
+        "min_confidence": 0.88,
+        "min_margin": 0.2,
+        "coverage": 0.9905,
+        "precision": 0.9712
+      },
+      {
+        "min_confidence": 0.88,
+        "min_margin": 0.25,
+        "coverage": 0.9905,
+        "precision": 0.9712
+      },
+      {
+        "min_confidence": 0.88,
+        "min_margin": 0.3,
+        "coverage": 0.9905,
+        "precision": 0.9712
+      },
+      {
+        "min_confidence": 0.88,
+        "min_margin": 0.35,
+        "coverage": 0.9905,
+        "precision": 0.9712
+      },
+      {
+        "min_confidence": 0.88,
+        "min_margin": 0.4,
+        "coverage": 0.9905,
+        "precision": 0.9712
+      },
+      {
+        "min_confidence": 0.88,
+        "min_margin": 0.45,
+        "coverage": 0.9905,
+        "precision": 0.9712
+      },
+      {
+        "min_confidence": 0.88,
+        "min_margin": 0.5,
+        "coverage": 0.9905,
+        "precision": 0.9712
+      },
+      {
+        "min_confidence": 0.89,
+        "min_margin": 0.05,
+        "coverage": 0.9905,
+        "precision": 0.9712
+      },
+      {
+        "min_confidence": 0.89,
+        "min_margin": 0.1,
+        "coverage": 0.9905,
+        "precision": 0.9712
+      },
+      {
+        "min_confidence": 0.89,
+        "min_margin": 0.15,
+        "coverage": 0.9905,
+        "precision": 0.9712
+      },
+      {
+        "min_confidence": 0.89,
+        "min_margin": 0.2,
+        "coverage": 0.9905,
+        "precision": 0.9712
+      },
+      {
+        "min_confidence": 0.89,
+        "min_margin": 0.25,
+        "coverage": 0.9905,
+        "precision": 0.9712
+      },
+      {
+        "min_confidence": 0.89,
+        "min_margin": 0.3,
+        "coverage": 0.9905,
+        "precision": 0.9712
+      },
+      {
+        "min_confidence": 0.89,
+        "min_margin": 0.35,
+        "coverage": 0.9905,
+        "precision": 0.9712
+      },
+      {
+        "min_confidence": 0.89,
+        "min_margin": 0.4,
+        "coverage": 0.9905,
+        "precision": 0.9712
+      },
+      {
+        "min_confidence": 0.89,
+        "min_margin": 0.45,
+        "coverage": 0.9905,
+        "precision": 0.9712
+      },
+      {
+        "min_confidence": 0.89,
+        "min_margin": 0.5,
+        "coverage": 0.9905,
+        "precision": 0.9712
+      },
+      {
+        "min_confidence": 0.9,
+        "min_margin": 0.05,
+        "coverage": 0.9905,
+        "precision": 0.9712
+      },
+      {
+        "min_confidence": 0.9,
+        "min_margin": 0.1,
+        "coverage": 0.9905,
+        "precision": 0.9712
+      },
+      {
+        "min_confidence": 0.9,
+        "min_margin": 0.15,
+        "coverage": 0.9905,
+        "precision": 0.9712
+      },
+      {
+        "min_confidence": 0.9,
+        "min_margin": 0.2,
+        "coverage": 0.9905,
+        "precision": 0.9712
+      },
+      {
+        "min_confidence": 0.9,
+        "min_margin": 0.25,
+        "coverage": 0.9905,
+        "precision": 0.9712
+      },
+      {
+        "min_confidence": 0.9,
+        "min_margin": 0.3,
+        "coverage": 0.9905,
+        "precision": 0.9712
+      },
+      {
+        "min_confidence": 0.9,
+        "min_margin": 0.35,
+        "coverage": 0.9905,
+        "precision": 0.9712
+      },
+      {
+        "min_confidence": 0.9,
+        "min_margin": 0.4,
+        "coverage": 0.9905,
+        "precision": 0.9712
+      },
+      {
+        "min_confidence": 0.9,
+        "min_margin": 0.45,
+        "coverage": 0.9905,
+        "precision": 0.9712
+      },
+      {
+        "min_confidence": 0.9,
+        "min_margin": 0.5,
+        "coverage": 0.9905,
+        "precision": 0.9712
+      },
+      {
+        "min_confidence": 0.91,
+        "min_margin": 0.05,
+        "coverage": 0.9905,
+        "precision": 0.9712
+      },
+      {
+        "min_confidence": 0.91,
+        "min_margin": 0.1,
+        "coverage": 0.9905,
+        "precision": 0.9712
+      },
+      {
+        "min_confidence": 0.91,
+        "min_margin": 0.15,
+        "coverage": 0.9905,
+        "precision": 0.9712
+      },
+      {
+        "min_confidence": 0.91,
+        "min_margin": 0.2,
+        "coverage": 0.9905,
+        "precision": 0.9712
+      },
+      {
+        "min_confidence": 0.91,
+        "min_margin": 0.25,
+        "coverage": 0.9905,
+        "precision": 0.9712
+      },
+      {
+        "min_confidence": 0.91,
+        "min_margin": 0.3,
+        "coverage": 0.9905,
+        "precision": 0.9712
+      },
+      {
+        "min_confidence": 0.91,
+        "min_margin": 0.35,
+        "coverage": 0.9905,
+        "precision": 0.9712
+      },
+      {
+        "min_confidence": 0.91,
+        "min_margin": 0.4,
+        "coverage": 0.9905,
+        "precision": 0.9712
+      },
+      {
+        "min_confidence": 0.91,
+        "min_margin": 0.45,
+        "coverage": 0.9905,
+        "precision": 0.9712
+      },
+      {
+        "min_confidence": 0.91,
+        "min_margin": 0.5,
+        "coverage": 0.9905,
+        "precision": 0.9712
+      },
+      {
+        "min_confidence": 0.92,
+        "min_margin": 0.05,
+        "coverage": 0.9905,
+        "precision": 0.9712
+      },
+      {
+        "min_confidence": 0.92,
+        "min_margin": 0.1,
+        "coverage": 0.9905,
+        "precision": 0.9712
+      },
+      {
+        "min_confidence": 0.92,
+        "min_margin": 0.15,
+        "coverage": 0.9905,
+        "precision": 0.9712
+      },
+      {
+        "min_confidence": 0.92,
+        "min_margin": 0.2,
+        "coverage": 0.9905,
+        "precision": 0.9712
+      },
+      {
+        "min_confidence": 0.92,
+        "min_margin": 0.25,
+        "coverage": 0.9905,
+        "precision": 0.9712
+      },
+      {
+        "min_confidence": 0.92,
+        "min_margin": 0.3,
+        "coverage": 0.9905,
+        "precision": 0.9712
+      },
+      {
+        "min_confidence": 0.92,
+        "min_margin": 0.35,
+        "coverage": 0.9905,
+        "precision": 0.9712
+      },
+      {
+        "min_confidence": 0.92,
+        "min_margin": 0.4,
+        "coverage": 0.9905,
+        "precision": 0.9712
+      },
+      {
+        "min_confidence": 0.92,
+        "min_margin": 0.45,
+        "coverage": 0.9905,
+        "precision": 0.9712
+      },
+      {
+        "min_confidence": 0.92,
+        "min_margin": 0.5,
+        "coverage": 0.9905,
+        "precision": 0.9712
+      },
+      {
+        "min_confidence": 0.93,
+        "min_margin": 0.05,
+        "coverage": 0.9905,
+        "precision": 0.9712
+      },
+      {
+        "min_confidence": 0.93,
+        "min_margin": 0.1,
+        "coverage": 0.9905,
+        "precision": 0.9712
+      },
+      {
+        "min_confidence": 0.93,
+        "min_margin": 0.15,
+        "coverage": 0.9905,
+        "precision": 0.9712
+      },
+      {
+        "min_confidence": 0.93,
+        "min_margin": 0.2,
+        "coverage": 0.9905,
+        "precision": 0.9712
+      },
+      {
+        "min_confidence": 0.93,
+        "min_margin": 0.25,
+        "coverage": 0.9905,
+        "precision": 0.9712
+      },
+      {
+        "min_confidence": 0.93,
+        "min_margin": 0.3,
+        "coverage": 0.9905,
+        "precision": 0.9712
+      },
+      {
+        "min_confidence": 0.93,
+        "min_margin": 0.35,
+        "coverage": 0.9905,
+        "precision": 0.9712
+      },
+      {
+        "min_confidence": 0.93,
+        "min_margin": 0.4,
+        "coverage": 0.9905,
+        "precision": 0.9712
+      },
+      {
+        "min_confidence": 0.93,
+        "min_margin": 0.45,
+        "coverage": 0.9905,
+        "precision": 0.9712
+      },
+      {
+        "min_confidence": 0.93,
+        "min_margin": 0.5,
+        "coverage": 0.9905,
+        "precision": 0.9712
+      },
+      {
+        "min_confidence": 0.94,
+        "min_margin": 0.05,
+        "coverage": 0.9905,
+        "precision": 0.9712
+      },
+      {
+        "min_confidence": 0.94,
+        "min_margin": 0.1,
+        "coverage": 0.9905,
+        "precision": 0.9712
+      },
+      {
+        "min_confidence": 0.94,
+        "min_margin": 0.15,
+        "coverage": 0.9905,
+        "precision": 0.9712
+      },
+      {
+        "min_confidence": 0.94,
+        "min_margin": 0.2,
+        "coverage": 0.9905,
+        "precision": 0.9712
+      },
+      {
+        "min_confidence": 0.94,
+        "min_margin": 0.25,
+        "coverage": 0.9905,
+        "precision": 0.9712
+      },
+      {
+        "min_confidence": 0.94,
+        "min_margin": 0.3,
+        "coverage": 0.9905,
+        "precision": 0.9712
+      },
+      {
+        "min_confidence": 0.94,
+        "min_margin": 0.35,
+        "coverage": 0.9905,
+        "precision": 0.9712
+      },
+      {
+        "min_confidence": 0.94,
+        "min_margin": 0.4,
+        "coverage": 0.9905,
+        "precision": 0.9712
+      },
+      {
+        "min_confidence": 0.94,
+        "min_margin": 0.45,
+        "coverage": 0.9905,
+        "precision": 0.9712
+      },
+      {
+        "min_confidence": 0.94,
+        "min_margin": 0.5,
+        "coverage": 0.9905,
+        "precision": 0.9712
+      },
+      {
+        "min_confidence": 0.95,
+        "min_margin": 0.05,
+        "coverage": 0.9905,
+        "precision": 0.9712
+      },
+      {
+        "min_confidence": 0.95,
+        "min_margin": 0.1,
+        "coverage": 0.9905,
+        "precision": 0.9712
+      },
+      {
+        "min_confidence": 0.95,
+        "min_margin": 0.15,
+        "coverage": 0.9905,
+        "precision": 0.9712
+      },
+      {
+        "min_confidence": 0.95,
+        "min_margin": 0.2,
+        "coverage": 0.9905,
+        "precision": 0.9712
+      },
+      {
+        "min_confidence": 0.95,
+        "min_margin": 0.25,
+        "coverage": 0.9905,
+        "precision": 0.9712
+      },
+      {
+        "min_confidence": 0.95,
+        "min_margin": 0.3,
+        "coverage": 0.9905,
+        "precision": 0.9712
+      },
+      {
+        "min_confidence": 0.95,
+        "min_margin": 0.35,
+        "coverage": 0.9905,
+        "precision": 0.9712
+      },
+      {
+        "min_confidence": 0.95,
+        "min_margin": 0.4,
+        "coverage": 0.9905,
+        "precision": 0.9712
+      },
+      {
+        "min_confidence": 0.95,
+        "min_margin": 0.45,
+        "coverage": 0.9905,
+        "precision": 0.9712
+      },
+      {
+        "min_confidence": 0.95,
+        "min_margin": 0.5,
+        "coverage": 0.9905,
+        "precision": 0.9712
+      },
+      {
+        "min_confidence": 0.96,
+        "min_margin": 0.05,
+        "coverage": 0.9905,
+        "precision": 0.9712
+      },
+      {
+        "min_confidence": 0.96,
+        "min_margin": 0.1,
+        "coverage": 0.9905,
+        "precision": 0.9712
+      },
+      {
+        "min_confidence": 0.96,
+        "min_margin": 0.15,
+        "coverage": 0.9905,
+        "precision": 0.9712
+      },
+      {
+        "min_confidence": 0.96,
+        "min_margin": 0.2,
+        "coverage": 0.9905,
+        "precision": 0.9712
+      },
+      {
+        "min_confidence": 0.96,
+        "min_margin": 0.25,
+        "coverage": 0.9905,
+        "precision": 0.9712
+      },
+      {
+        "min_confidence": 0.96,
+        "min_margin": 0.3,
+        "coverage": 0.9905,
+        "precision": 0.9712
+      },
+      {
+        "min_confidence": 0.96,
+        "min_margin": 0.35,
+        "coverage": 0.9905,
+        "precision": 0.9712
+      },
+      {
+        "min_confidence": 0.96,
+        "min_margin": 0.4,
+        "coverage": 0.9905,
+        "precision": 0.9712
+      },
+      {
+        "min_confidence": 0.96,
+        "min_margin": 0.45,
+        "coverage": 0.9905,
+        "precision": 0.9712
+      },
+      {
+        "min_confidence": 0.96,
+        "min_margin": 0.5,
+        "coverage": 0.9905,
+        "precision": 0.9712
+      },
+      {
+        "min_confidence": 0.97,
+        "min_margin": 0.05,
+        "coverage": 0.9762,
+        "precision": 0.9707
+      },
+      {
+        "min_confidence": 0.97,
+        "min_margin": 0.1,
+        "coverage": 0.9762,
+        "precision": 0.9707
+      },
+      {
+        "min_confidence": 0.97,
+        "min_margin": 0.15,
+        "coverage": 0.9762,
+        "precision": 0.9707
+      },
+      {
+        "min_confidence": 0.97,
+        "min_margin": 0.2,
+        "coverage": 0.9762,
+        "precision": 0.9707
+      },
+      {
+        "min_confidence": 0.97,
+        "min_margin": 0.25,
+        "coverage": 0.9762,
+        "precision": 0.9707
+      },
+      {
+        "min_confidence": 0.97,
+        "min_margin": 0.3,
+        "coverage": 0.9762,
+        "precision": 0.9707
+      },
+      {
+        "min_confidence": 0.97,
+        "min_margin": 0.35,
+        "coverage": 0.9762,
+        "precision": 0.9707
+      },
+      {
+        "min_confidence": 0.97,
+        "min_margin": 0.4,
+        "coverage": 0.9762,
+        "precision": 0.9707
+      },
+      {
+        "min_confidence": 0.97,
+        "min_margin": 0.45,
+        "coverage": 0.9762,
+        "precision": 0.9707
+      },
+      {
+        "min_confidence": 0.97,
+        "min_margin": 0.5,
+        "coverage": 0.9762,
+        "precision": 0.9707
+      },
+      {
+        "min_confidence": 0.98,
+        "min_margin": 0.05,
+        "coverage": 0.9762,
+        "precision": 0.9707
+      },
+      {
+        "min_confidence": 0.98,
+        "min_margin": 0.1,
+        "coverage": 0.9762,
+        "precision": 0.9707
+      },
+      {
+        "min_confidence": 0.98,
+        "min_margin": 0.15,
+        "coverage": 0.9762,
+        "precision": 0.9707
+      },
+      {
+        "min_confidence": 0.98,
+        "min_margin": 0.2,
+        "coverage": 0.9762,
+        "precision": 0.9707
+      },
+      {
+        "min_confidence": 0.98,
+        "min_margin": 0.25,
+        "coverage": 0.9762,
+        "precision": 0.9707
+      },
+      {
+        "min_confidence": 0.98,
+        "min_margin": 0.3,
+        "coverage": 0.9762,
+        "precision": 0.9707
+      },
+      {
+        "min_confidence": 0.98,
+        "min_margin": 0.35,
+        "coverage": 0.9762,
+        "precision": 0.9707
+      },
+      {
+        "min_confidence": 0.98,
+        "min_margin": 0.4,
+        "coverage": 0.9762,
+        "precision": 0.9707
+      },
+      {
+        "min_confidence": 0.98,
+        "min_margin": 0.45,
+        "coverage": 0.9762,
+        "precision": 0.9707
+      },
+      {
+        "min_confidence": 0.98,
+        "min_margin": 0.5,
+        "coverage": 0.9762,
+        "precision": 0.9707
+      },
+      {
+        "min_confidence": 0.99,
+        "min_margin": 0.05,
+        "coverage": 0.9714,
+        "precision": 0.9755
+      },
+      {
+        "min_confidence": 0.99,
+        "min_margin": 0.1,
+        "coverage": 0.9714,
+        "precision": 0.9755
+      },
+      {
+        "min_confidence": 0.99,
+        "min_margin": 0.15,
+        "coverage": 0.9714,
+        "precision": 0.9755
+      },
+      {
+        "min_confidence": 0.99,
+        "min_margin": 0.2,
+        "coverage": 0.9714,
+        "precision": 0.9755
+      },
+      {
+        "min_confidence": 0.99,
+        "min_margin": 0.25,
+        "coverage": 0.9714,
+        "precision": 0.9755
+      },
+      {
+        "min_confidence": 0.99,
+        "min_margin": 0.3,
+        "coverage": 0.9714,
+        "precision": 0.9755
+      },
+      {
+        "min_confidence": 0.99,
+        "min_margin": 0.35,
+        "coverage": 0.9714,
+        "precision": 0.9755
+      },
+      {
+        "min_confidence": 0.99,
+        "min_margin": 0.4,
+        "coverage": 0.9714,
+        "precision": 0.9755
+      },
+      {
+        "min_confidence": 0.99,
+        "min_margin": 0.45,
+        "coverage": 0.9714,
+        "precision": 0.9755
+      },
+      {
+        "min_confidence": 0.99,
+        "min_margin": 0.5,
+        "coverage": 0.9714,
+        "precision": 0.9755
+      }
+    ]
+  }
+}

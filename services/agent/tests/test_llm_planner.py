@@ -343,3 +343,177 @@ def test_the_planner_asks_for_the_capability_schema(monkeypatch) -> None:
     rendered = json.dumps(schema, ensure_ascii=False)
     assert "document_ref" in rendered
     assert "web.fetch" in rendered and "web.extract" in rendered
+
+
+def test_a_decision_may_restate_the_answer_without_failing_the_task() -> None:
+    """The model often puts its prose answer in the decision; ignore it.
+
+    The answer already lives in the Observation, so a strict rejection here
+    failed an otherwise finished Task at the last step -- observed in a real
+    run against the live model.
+    """
+
+    from app.planning.llm import DecisionDraft
+
+    draft = DecisionDraft.model_validate(
+        {
+            "action": "complete",
+            "reason": "已经回答",
+            "answer": "1. 要点一\n2. 要点二",
+        }
+    )
+
+    assert draft.action == "complete"
+    assert draft.answer.startswith("1. 要点一")
+
+
+def test_an_unusable_replan_keeps_a_plan_that_still_has_steps() -> None:
+    """Observed from qwen-plus: it replans to add the answer step, numbering the
+    new plan from 1 and pointing evidence_ref at its own step. Failing there lost
+    a Task whose remaining step was perfectly executable."""
+
+    from app.capabilities.answer import AnswerComposeCapability
+    from app.capabilities.web_research import WebResearchCapability
+    from app.infrastructure.web.content_reader import ContentReader
+    from app.testing.fake_providers import FakeAnswerProvider, FakePageFetcher
+
+    bad = (
+        '{"action": "replan", "reason": "补上回答步骤", "steps": ['
+        '{"capability": "answer.compose", "arguments": {"question": "总结", '
+        '"evidence_ref": {"step": 1, "output": "evidence"}}}]}'
+    )
+    client = StubPlannerClient([bad, bad])
+    planner = OpenAICompatiblePlanner(client)
+    planner.set_capabilities(
+        [
+            WebResearchCapability(
+                ContentReader(FakePageFetcher(), renderer=None), aliases={}
+            ).descriptor,
+            AnswerComposeCapability(FakeAnswerProvider()).descriptor,
+        ]
+    )
+    plan = Plan(
+        plan_id="plan-1",
+        task_id="task-llm-planner",
+        objective="读网页并回答",
+        steps=[
+            PlanStep(
+                step_id="plan-1-step-1",
+                plan_id="plan-1",
+                order=1,
+                capability="web.research",
+                status="succeeded",
+                arguments={"request": "读一下", "urls": []},
+            ),
+            PlanStep(
+                step_id="plan-1-step-2",
+                plan_id="plan-1",
+                order=2,
+                capability="answer.compose",
+                arguments={
+                    "question": "总结",
+                    "evidence": "$steps.plan-1-step-1.output.evidence",
+                },
+            ),
+        ],
+    )
+
+    decision = planner.decide_after_observation(
+        envelope(), plan, [], PlanningConstraints()
+    )
+
+    # The plan still has the answer step to run, so the unusable replan is
+    # dropped and the Task continues instead of dying with it.
+    assert decision.action == "continue"
+    assert decision.plan is None
+    assert any("unusable replan" in item for item in decision.warnings)
+
+
+def test_a_replan_with_an_invented_argument_is_not_handed_to_the_runtime() -> None:
+    """Observed from qwen-plus: it echoed `fetch_method` back as an argument.
+
+    The plan path validates step arguments against the capability schemas; the
+    decision path did not, so the bad argument reached the Runtime and took the
+    whole Task down with a validation error.
+    """
+
+    from app.capabilities.web_research import WebResearchCapability
+    from app.infrastructure.web.content_reader import ContentReader
+    from app.testing.fake_providers import FakePageFetcher
+
+    bad = (
+        '{"action": "replan", "reason": "再读一次", "steps": ['
+        '{"capability": "web.research", "arguments": {"urls": ["https://a.example.com/1"], '
+        '"fetch_method": "tavily"}}]}'
+    )
+    client = StubPlannerClient([bad, bad])
+    capability = WebResearchCapability(
+        ContentReader(FakePageFetcher(), renderer=None), aliases={}
+    )
+    planner = OpenAICompatiblePlanner(client)
+    planner.set_capabilities([capability.descriptor])
+    # The container hands the planner the same validators the Runtime uses;
+    # without them the invented argument would look fine here.
+    planner.set_validators({"web.research": capability.validate})
+    plan = Plan(
+        plan_id="plan-1",
+        task_id="task-llm-planner",
+        objective="读网页",
+        steps=[
+            PlanStep(
+                step_id="plan-1-step-1",
+                plan_id="plan-1",
+                order=1,
+                capability="web.research",
+                status="succeeded",
+                arguments={"request": "读一下", "urls": []},
+            )
+        ],
+    )
+
+    decision = planner.decide_after_observation(
+        envelope(), plan, [], PlanningConstraints()
+    )
+
+    # The bad step never becomes a plan the Runtime can see. With nothing left to
+    # run in the current plan, that is a readable failure instead of a validation
+    # error from deep inside the executor.
+    assert decision.plan is None
+    assert decision.action == "fail"
+
+
+def test_the_planner_prompt_does_not_carry_the_whole_evidence_body() -> None:
+    """Only answer.compose needs the page text.
+
+    Shipping every observation's evidence verbatim made the request large enough
+    for the provider to answer HTTP 400 (and, before that, slow enough to time
+    out), so the Planner now sees a clipped view of it.
+    """
+
+    from datetime import datetime, timezone
+
+    from app.kernel.models import Observation
+
+    body = "网页正文片段" * 2000  # ~12k characters
+    observation = Observation(
+        observation_id="obs-1",
+        task_id="task-llm-planner",
+        plan_id="plan-1",
+        step_id="plan-1-step-1",
+        capability="web.research",
+        status="succeeded",
+        evidence=[
+            {"evidence_id": "ev-1", "url": "https://a.example.com/1", "text": body}
+        ],
+        created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+    )
+    client = StubPlannerClient(['{"objective": "读网页", "steps": []}'])
+    planner = OpenAICompatiblePlanner(client)
+
+    planner.create_plan(envelope(), [], [observation], PlanningConstraints())
+
+    prompt = client.calls[0][1]["content"]
+    assert body not in prompt
+    assert len(prompt) < 4000
+    # The identifying half survives, so the Planner can still reason about it.
+    assert "ev-1" in prompt and "https://a.example.com/1" in prompt

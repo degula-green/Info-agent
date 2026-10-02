@@ -1,13 +1,27 @@
-"""Wire schema and intent catalog for the task understanding provider."""
+"""Wire schema and intent catalog for the task understanding provider.
+
+The single source of truth for the intent taxonomy is ``intent_contract.json``
+next to this module. The Agent, the Laya provider, the training script and the
+dataset generator all read that file (or validate against it), so option names
+and their order cannot drift apart.
+"""
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
-from typing import Literal
+from pathlib import Path
+from typing import Any, Literal, Mapping
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.kernel.models import TaskUnderstanding, UnderstandingIntent
+
+CONTRACT_PATH = Path(__file__).with_name("intent_contract.json")
+
+TaskKind = Literal["answer", "action", "mixed"]
+VALID_TASK_KINDS = frozenset({"answer", "action", "mixed"})
+VALID_OPTION_KINDS = frozenset({"business", "boundary"})
 
 
 @dataclass(frozen=True)
@@ -15,64 +29,104 @@ class IntentDefinition:
     name: str
     description: str
     examples: tuple[str, ...]
+    task_kind: TaskKind | None
+    laya_criteria: str
+    generation_prompt: str
+    kind: str
 
 
-INTENT_CATALOG: tuple[IntentDefinition, ...] = (
+def _load_contract(path: Path = CONTRACT_PATH) -> dict[str, Any]:
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError as exc:  # pragma: no cover - packaging error
+        raise RuntimeError(f"intent contract not found: {path}") from exc
+    if not isinstance(raw, dict):
+        raise RuntimeError("intent contract must be a JSON object")
+
+    version = raw.get("schema_version")
+    if not isinstance(version, str) or not version.strip():
+        raise RuntimeError("intent contract has no schema_version")
+
+    options = raw.get("options")
+    if not isinstance(options, list) or not options:
+        raise RuntimeError("intent contract has no options")
+
+    seen: set[str] = set()
+    for option in options:
+        if not isinstance(option, dict):
+            raise RuntimeError("intent contract option must be an object")
+        name = option.get("name")
+        if not isinstance(name, str) or not name.strip():
+            raise RuntimeError("intent contract option has no name")
+        if name in seen:
+            raise RuntimeError(f"intent contract has a duplicate option: {name}")
+        seen.add(name)
+        if option.get("kind") not in VALID_OPTION_KINDS:
+            raise RuntimeError(f"intent contract option {name} has an invalid kind")
+        task_kind = option.get("task_kind")
+        if task_kind is not None and task_kind not in VALID_TASK_KINDS:
+            raise RuntimeError(f"intent contract option {name} has an invalid task_kind")
+        for field_name in ("description", "laya_criteria", "generation_prompt"):
+            value = option.get(field_name)
+            if not isinstance(value, str) or not value.strip():
+                raise RuntimeError(
+                    f"intent contract option {name} has no {field_name}"
+                )
+    return raw
+
+
+CONTRACT: Mapping[str, Any] = _load_contract()
+INTENT_SCHEMA_VERSION: str = str(CONTRACT["schema_version"])
+
+INTENT_OPTION_ORDER: tuple[str, ...] = tuple(
+    option["name"] for option in CONTRACT["options"]
+)
+
+INTENT_DEFINITIONS: tuple[IntentDefinition, ...] = tuple(
     IntentDefinition(
-        name="todo.create",
-        description="创建一条我要去做的事：会议、邀约、提醒、待办都算；不要求时间",
-        examples=(
-            "明天洗衣服",
-            "完成登录模块代码",
-            "明天下午三点跟张三开评审会",
-            "提醒我给妈妈打电话",
-        ),
-    ),
-    IntentDefinition(
-        name="knowledge.answer",
-        description="基于已有知识回答问题",
-        examples=("公司的办公地址是什么", "解释一下这份材料"),
-    ),
-    IntentDefinition(
-        name="web.research",
-        description="从公开网页或外部来源检索信息",
-        examples=("查一下这个政策的最新版本", "搜索行业公开数据"),
-    ),
-    IntentDefinition(
-        name="document.compare",
-        description="比较两份或多份材料并输出差异或结论",
-        examples=("把协议要求和公司简介对比", "比较两个版本有哪些变化"),
-    ),
-    IntentDefinition(
-        name="compliance.assess",
-        description="判断主体、材料或行为是否符合规则协议",
-        examples=("我们公司是否符合这个协议", "这份材料满足申请条件吗"),
-    ),
-    IntentDefinition(
-        name="form.prepare",
-        description="读取表单并生成填写草稿或预览",
-        examples=("根据资料填写这张申请表", "准备一份表单草稿"),
-    ),
-    IntentDefinition(
-        name="form.submit",
-        description="提交已经准备和确认的表单",
-        examples=("确认无误后提交申请表", "帮我提交这份表单"),
-    ),
+        name=option["name"],
+        description=option["description"],
+        examples=tuple(option.get("examples") or ()),
+        task_kind=option.get("task_kind"),
+        laya_criteria=option["laya_criteria"],
+        generation_prompt=option["generation_prompt"],
+        kind=option["kind"],
+    )
+    for option in CONTRACT["options"]
+)
+
+# The LLM prompt only offers the five business intents; the two boundary labels
+# are described separately as hard constraints.
+INTENT_CATALOG: tuple[IntentDefinition, ...] = tuple(
+    item for item in INTENT_DEFINITIONS if item.kind == "business"
 )
 
 INTENT_NAMES = frozenset(item.name for item in INTENT_CATALOG)
 
-INTENT_TASK_KINDS: dict[str, Literal["answer", "action", "mixed"]] = {
-    "todo.create": "action",
-    "knowledge.answer": "answer",
-    "web.research": "action",
-    "document.compare": "action",
-    "compliance.assess": "answer",
-    "form.prepare": "action",
-    "form.submit": "action",
+BOUNDARY_INTENTS = frozenset(
+    item.name for item in INTENT_DEFINITIONS if item.kind == "boundary"
+)
+
+ALL_INTENT_LABELS = frozenset(INTENT_OPTION_ORDER)
+
+INTENT_TASK_KINDS: dict[str, TaskKind] = {
+    item.name: item.task_kind  # type: ignore[misc]
+    for item in INTENT_DEFINITIONS
+    if item.task_kind is not None
 }
 
-BOUNDARY_INTENTS = frozenset({"non_task", "other_task"})
+LAYAYA_CRITERIA: dict[str, str] = {
+    item.name: item.laya_criteria for item in INTENT_DEFINITIONS
+}
+
+LAYAYA_INSTRUCTION: str = str(CONTRACT["instruction"])
+
+
+def generation_prompt(name: str) -> str:
+    for item in INTENT_DEFINITIONS:
+        if item.name == name:
+            return item.generation_prompt
+    raise KeyError(f"unknown intent: {name}")
 
 
 class UnderstandingIntentDraft(BaseModel):
@@ -148,7 +202,5 @@ def intent_catalog_text() -> str:
     )
 
 
-def intent_task_kind(
-    name: str,
-) -> Literal["answer", "action", "mixed"]:
+def intent_task_kind(name: str) -> TaskKind:
     return INTENT_TASK_KINDS.get(name, "action")

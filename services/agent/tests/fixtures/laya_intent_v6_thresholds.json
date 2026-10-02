@@ -1,0 +1,42 @@
+{
+  "schema_version": "intent-v6",
+  "option_order": [
+    "todo.create",
+    "knowledge.answer",
+    "web.research",
+    "compliance.assess",
+    "form.complete",
+    "non_task",
+    "other_task"
+  ],
+  "model_dir": "models\\laya-intent-v6",
+  "dataset": "..\\agent\\tests\\fixtures\\laya_intent_dataset.jsonl",
+  "validation_rows": 761,
+  "split": {
+    "holdout_ratio": 0.2,
+    "seed": 20260930,
+    "dataset_rows": 3810
+  },
+  "target_precision": 0.95,
+  "recommended": {
+    "min_confidence": 0.5,
+    "min_margin": 0.05,
+    "coverage": 1.0,
+    "precision": 0.9777,
+    "fallback_ratio": 0.0
+  },
+  "accepted_missed_by_actual": {
+    "todo.create": 9,
+    "knowledge.answer": 6,
+    "other_task": 1,
+    "form.complete": 1
+  },
+  "accepted_false_positive_by_prediction": {
+    "form.complete": 7,
+    "compliance.assess": 2,
+    "todo.create": 1,
+    "non_task": 2,
+    "other_task": 4,
+    "knowledge.answer": 1
+  }
+}

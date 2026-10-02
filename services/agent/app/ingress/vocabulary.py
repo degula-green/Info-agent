@@ -50,6 +50,20 @@ TIME_PHRASE_PATTERN = re.compile(
     rf"|(?:{PERIOD}\s*)?{CLOCK})"
 )
 
+# Signals that the user explicitly asked to take content or parameters from an
+# attachment. Matching this against the parsed body would let a document that
+# merely mentions "附件" trigger itself, so callers pass the user's own text.
+ATTACHMENT_REFERENCE_PATTERN = re.compile(
+    r"(?:附件|文档|文件|资料|材料)"
+    r"|(?:根据|按照|参考|基于|依据|结合)(?:上述|以上|下面|以下|其中|这个|该|这份)"
+)
+
+
+def references_attachment(text: str | None) -> bool:
+    """Whether the user asked to take content or parameters from an attachment."""
+
+    return ATTACHMENT_REFERENCE_PATTERN.search(str(text or "")) is not None
+
 
 # Text that is *only* social noise cannot carry a candidate goal, so it never
 # becomes a Task. This is the single judgement the pre-filter still makes; every

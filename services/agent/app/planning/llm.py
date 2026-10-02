@@ -79,6 +79,10 @@ class DecisionDraft(BaseModel):
     # Observation, so the field is accepted and ignored instead of failing the
     # Task at the last step.
     output: dict[str, Any] | None = None
+    # Same instinct, different shape: the model puts the prose answer straight
+    # into the decision. Ignoring it keeps a finished Task from failing on a
+    # field nobody reads.
+    answer: str | None = None
     required_input: list[str] = Field(default_factory=list)
     unsupported_intents: list[str] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
@@ -151,6 +155,7 @@ class OpenAICompatiblePlanner:
             ),
             capabilities,
         )
+        plan = _inject_task_text(plan, capabilities, task)
         plan = self._repair_plan(
             task,
             plan,
@@ -233,6 +238,7 @@ class OpenAICompatiblePlanner:
             ),
             capabilities,
         )
+        repaired = _inject_task_text(repaired, capabilities, task)
         if not remaining:
             remaining = _unusable_steps(repaired, self._validators)
         if remaining:
@@ -305,6 +311,7 @@ class OpenAICompatiblePlanner:
             ),
             capabilities,
         )
+        repaired = _inject_task_text(repaired, capabilities, task)
         if binding_problems:
             raise PlannerValidationError(
                 "plan reference binding failed: " + "；".join(binding_problems)
@@ -365,6 +372,11 @@ class OpenAICompatiblePlanner:
         )
         if not problems and decision.plan is not None:
             problems = unresolved_references(decision.plan, observations)
+        if not problems and decision.plan is not None:
+            # Same schema check the plan path runs: a replan that invents an
+            # argument (observed: it passed `fetch_method` back in) must be
+            # corrected or dropped here, not by the executor.
+            problems = _unusable_steps(decision.plan, self._validators)
         if not problems:
             return decision
         messages = messages + [
@@ -407,7 +419,25 @@ class OpenAICompatiblePlanner:
             )
             if not still:
                 still = unresolved_references(decision.plan, observations)
+            if not still:
+                # The plan path validates step arguments against the capability
+                # schemas; without the same check here a replan that invents an
+                # argument (observed: it passed `fetch_method` back in) reached
+                # the Runtime and failed the whole Task.
+                still = _unusable_steps(decision.plan, self._validators)
             if still:
+                # A replan we cannot execute is not a reason to throw away a
+                # plan that is still working. Observed from qwen-plus: after
+                # web.research succeeded it "replanned" to add the answer step,
+                # numbering the new plan from 1 and pointing evidence_ref at its
+                # own step. Failing there lost a Task that only needed its
+                # pending step to run.
+                if _has_pending_steps(current_plan):
+                    return PlannerDecision(
+                        action="continue",
+                        reason="replan 无法执行，继续当前计划",
+                        warnings=["ignored an unusable replan: " + "；".join(still)],
+                    )
                 return PlannerDecision(
                     action="fail",
                     reason="plan contains unresolvable references: "
@@ -499,6 +529,63 @@ def _unusable_steps(plan: Plan, validators: dict[str, Any]) -> list[str]:
         except Exception as exc:
             problems.append(f"{step.capability}: {exc}")
     return problems
+
+
+def _has_pending_steps(plan: Plan) -> bool:
+    """Whether the current plan still has work the Runtime could execute."""
+
+    return any(step.status in {"pending", "ready", "running"} for step in plan.steps)
+
+
+_PLANNER_TEXT_CHARS = 400
+_PLANNER_FIELD_CHARS = 600
+
+
+def _planner_view(value: Any, key: str | None = None) -> Any:
+    """The Planner's view of an observation: what happened, not the whole page.
+
+    Every observation used to arrive with its full evidence text, so a task that
+    read three pages sent ~25KB of prose with each decision request. The provider
+    answered that with HTTP 400 (and, before it, with timeouts); the page text is
+    answer.compose's input, not the Planner's, so it is clipped here.
+    """
+
+    if isinstance(value, str):
+        limit = _PLANNER_TEXT_CHARS if key == "text" else _PLANNER_FIELD_CHARS
+        if len(value) <= limit:
+            return value
+        return value[:limit] + "…"
+    if isinstance(value, dict):
+        return {name: _planner_view(item, name) for name, item in value.items()}
+    if isinstance(value, list):
+        return [_planner_view(item) for item in value]
+    return value
+
+
+def _inject_task_text(
+    plan: Plan,
+    capabilities: list[CapabilityDescriptor],
+    task: TaskEnvelope,
+) -> Plan:
+    """Fills the arguments that must carry the user's own words.
+
+    A capability that judges what the user asked for -- ``web.research`` decides
+    which URLs it may fetch by looking for them in the request text -- cannot
+    read a value the model is free to paraphrase. Asking the model for it either
+    fails closed on a link the user really did supply, or turns the check into
+    decoration. So the model is never asked; the planner copies the Task text in
+    after the plan is bound, which makes the check a real trust anchor.
+    """
+
+    text = str(task.input.get("text") or "")
+    by_name = {item.name: item for item in capabilities}
+    bound = plan.model_copy(deep=True)
+    for step in bound.steps:
+        descriptor = by_name.get(step.capability)
+        if descriptor is None or not descriptor.task_text_argument:
+            continue
+        step.arguments[descriptor.task_text_argument] = text
+    return bound
 
 
 def _bound_plan(
@@ -682,14 +769,18 @@ def _plan_messages(
                 "steps 里每个对象只能有 capability 与 arguments 两个字段，不要写 step_id。"
                 "跨步骤引用：capability 的 planner_input_schema 里以 _ref 结尾的参数接收一个"
                 "对象 {\"step\": <更早步骤的序号>, \"output\": \"<那个步骤输出的字段名>\"}。"
-                "例如先 web.fetch 再 web.extract，就是 "
-                "{\"document_ref\": {\"step\": 1, \"output\": \"content\"}}；"
-                "再把 web.extract 的结果交给 answer.compose，就是 "
-                "{\"evidence_ref\": {\"step\": 2, \"output\": \"evidence\"}}。"
+                "例如先 web.research 读取网页，再把它的证据交给 answer.compose，就是 "
+                "{\"evidence_ref\": {\"step\": 1, \"output\": \"evidence\"}}。"
+                "只要结果是要直接给用户看的（读链接、搜索、总结、比较等），就必须在 "
+                "web.research 之后追加 answer.compose 并引用它的 evidence；只有后续步骤"
+                "要消费这些证据、不需要直接回复用户时才可以不追加。"
+                "调用 web.research 时：用户给出的链接放 urls，检索词放 queries（最多 3 条），"
+                "两者可以同时给；不要只填参数以外的字段。"
                 "step 只能指向本计划中比当前步更早的步骤，output 只能用来源 capability 的 "
                 "output_schema 里声明的字段名。"
                 "引用本任务已有的 Observation 时写 "
                 "\"$observations.<observation_id>.output.<field>\"。"
+                "有些参数（例如用户原话）由系统填入，不在 schema 里，你不要写它们。"
                 "其它参数按该 capability 的 planner_input_schema（没有就用 input_schema）填写，"
                 "不要编造字段名。"
                 "也不要用 {{...}} 之类的模板语法。"
@@ -705,7 +796,8 @@ def _plan_messages(
                     else None,
                     "capabilities": [item.model_dump(mode="json") for item in capabilities],
                     "observations": [
-                        item.model_dump(mode="json") for item in observations
+                        _planner_view(item.model_dump(mode="json"))
+                        for item in observations
                     ],
                     "constraints": constraints.model_dump(mode="json"),
                 },
@@ -777,7 +869,8 @@ def _decision_messages(
                         item.model_dump(mode="json") for item in capabilities
                     ],
                     "observations": [
-                        item.model_dump(mode="json") for item in observations
+                        _planner_view(item.model_dump(mode="json"))
+                        for item in observations
                     ],
                     "constraints": constraints.model_dump(mode="json"),
                 },

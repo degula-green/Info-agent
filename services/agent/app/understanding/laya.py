@@ -2,55 +2,105 @@
 
 from __future__ import annotations
 
+import json
 import math
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Mapping
 
 from app.infrastructure.laya.client import LayaClient, LayaError
 from app.kernel.models import TaskEnvelope, TaskUnderstanding, UnderstandingIntent
 from app.understanding.schema import (
+    ALL_INTENT_LABELS,
     BOUNDARY_INTENTS,
     INTENT_NAMES,
+    INTENT_OPTION_ORDER,
+    INTENT_SCHEMA_VERSION,
+    LAYAYA_CRITERIA,
+    LAYAYA_INSTRUCTION,
     intent_task_kind,
 )
 
 DEFAULT_LAYAYA_MIN_CONFIDENCE = 0.80
 DEFAULT_LAYAYA_MIN_MARGIN = 0.15
 
-# The multilingual checkpoint follows English option descriptions much more
-# reliably than the Chinese catalog text used by the LLM prompt.
-_LAYAYA_INSTRUCTION = "Choose the workflow that best matches the user's primary intent."
-_LAYAYA_CRITERIA: dict[str, str] = {
-    "todo.create": (
-        "Create a personal to-do, meeting, invitation, reminder, or future "
-        "action item. This includes statements like I will do something tomorrow."
-    ),
-    "knowledge.answer": (
-        "Answer a question from existing company or internal knowledge."
-    ),
-    "web.research": (
-        "Search the public internet or external sources for information."
-    ),
-    "document.compare": (
-        "Compare two or more documents and report their differences."
-    ),
-    "compliance.assess": (
-        "Assess whether a person, document, or action complies with a rule or "
-        "agreement."
-    ),
-    "form.prepare": (
-        "Read a form and prepare a draft or preview before submission."
-    ),
-    "form.submit": "Submit an already prepared and confirmed form.",
-    "non_task": (
-        "Chit-chat, greetings, opinions, complaints, examples, hypotheses, "
-        "completed past actions, or no clear goal."
-    ),
-    "other_task": (
-        "A clear task that does not fit any category above, such as booking a "
-        "train ticket."
-    ),
-}
+
+def _ordered_criteria() -> dict[str, str]:
+    """Criteria in the frozen contract order; option position is the model target."""
+
+    ordered = {name: LAYAYA_CRITERIA[name] for name in INTENT_OPTION_ORDER}
+    if set(ordered) != set(LAYAYA_CRITERIA):
+        raise RuntimeError("Laya criteria do not match the intent contract options")
+    return ordered
+
+
+def verify_model_contract(model_dir: str | Path) -> dict[str, Any]:
+    """Refuse a checkpoint that was fine-tuned for a different intent contract.
+
+    Called during application start-up when ``AGENT_LAYAYA_MODEL_PATH`` points
+    at a local checkpoint, so a contract mismatch surfaces immediately instead
+    of on the first request.
+    """
+
+    config_path = Path(model_dir) / "rl_agent_config.json"
+    if not config_path.exists():
+        raise LayaError(f"Laya model config not found: {config_path}")
+    try:
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise LayaError(f"Laya model config is not valid JSON: {config_path}") from exc
+
+    version = config.get("intent_schema_version")
+    if version != INTENT_SCHEMA_VERSION:
+        raise LayaError(
+            f"Laya model schema version {version!r} does not match the Agent "
+            f"contract {INTENT_SCHEMA_VERSION!r}: {config_path}"
+        )
+    order = tuple(config.get("option_order") or ())
+    if order != INTENT_OPTION_ORDER:
+        raise LayaError(
+            f"Laya model option order {list(order)} does not match the Agent "
+            f"contract {list(INTENT_OPTION_ORDER)}: {config_path}"
+        )
+    return config
+
+
+def build_question() -> dict[str, dict[str, Any]]:
+    return {
+        "intent": {
+            "type": "choice",
+            "instructions": LAYAYA_INSTRUCTION,
+            "criteria": _ordered_criteria(),
+        }
+    }
+
+
+def score_text(
+    client: LayaClient,
+    text: str,
+    *,
+    max_len: int | None = None,
+    head_max_len: int | None = None,
+) -> tuple[str, float, dict[str, float]]:
+    """Raw option scores for one text, before any confidence gating."""
+
+    raw = client.predict(
+        # Keep the state minimal. Adding metadata such as source_type moves the
+        # stock multilingual checkpoint's distribution substantially.
+        {"text": text},
+        build_question(),
+        max_len=max_len,
+        head_max_len=head_max_len,
+    )
+    label, answer_confidence, probabilities = _parse_choice(raw)
+    unknown = sorted(name for name in probabilities if name not in ALL_INTENT_LABELS)
+    if unknown:
+        raise LayaError(
+            "Laya returned probabilities for unknown intents: " + ", ".join(unknown)
+        )
+    if label not in ALL_INTENT_LABELS:
+        raise LayaError(f"Laya returned unknown intent: {label}")
+    return label, answer_confidence, probabilities
 
 
 @dataclass(frozen=True)
@@ -62,6 +112,7 @@ class LayaEvaluation:
     probabilities: dict[str, float]
     accepted: bool
     fallback_reason: str | None = None
+    schema_version: str = INTENT_SCHEMA_VERSION
 
 
 class LayaUnderstandingProvider:
@@ -70,6 +121,7 @@ class LayaUnderstandingProvider:
     name = "laya"
     model_backed = True
     estimated_model_calls = 1
+    schema_version = INTENT_SCHEMA_VERSION
 
     def __init__(
         self,
@@ -134,24 +186,13 @@ class LayaUnderstandingProvider:
         # Runtime thresholds describe the minimum confidence exposed to the
         # planner. Laya keeps its own stricter fast-path gate.
         threshold = max(self.min_confidence, runtime_threshold)
-        questions = {
-            "intent": {
-                "type": "choice",
-                "instructions": _LAYAYA_INSTRUCTION,
-                "criteria": _LAYAYA_CRITERIA,
-            }
-        }
-
         self.last_call_count = 1
-        raw = self.client.predict(
-            # Keep the state minimal. Adding metadata such as source_type moves
-            # the stock multilingual checkpoint's distribution substantially.
-            {"text": text},
-            questions,
+        label, answer_confidence, probabilities = score_text(
+            self.client,
+            text,
             max_len=self.max_len,
             head_max_len=self.head_max_len,
         )
-        label, answer_confidence, probabilities = _parse_choice(raw)
         ordered = sorted(probabilities.items(), key=lambda item: item[1], reverse=True)
         second_probability = ordered[1][1] if len(ordered) > 1 else 0.0
         margin = answer_confidence - second_probability
@@ -159,8 +200,6 @@ class LayaUnderstandingProvider:
         self.last_answer_confidence = answer_confidence
         self.last_margin = margin
 
-        if label not in INTENT_NAMES and label not in BOUNDARY_INTENTS:
-            raise LayaError(f"Laya returned unknown intent: {label}")
         if answer_confidence < threshold:
             return self._uncertain(
                 text,

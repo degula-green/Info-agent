@@ -100,12 +100,38 @@
           @keydown="handleTextareaKeydown"
         />
         <div class="agent-composer__controls">
-          <span v-if="activeTaskID" class="agent-composer__hint">Agent 正在执行</span>
+          <div class="agent-composer__left">
+            <button
+              type="button"
+              class="agent-attach"
+              :class="{ disabled: Boolean(activeTaskID) }"
+              :disabled="Boolean(activeTaskID)"
+              aria-label="添加附件"
+              @click="openFilePicker"
+            >
+              <t-icon name="upload" />
+            </button>
+            <input
+              ref="fileInputRef"
+              class="agent-file-input"
+              type="file"
+              accept=".pdf,.docx,.png,.jpg,.jpeg"
+              :disabled="Boolean(activeTaskID)"
+              @change="handleFileChange"
+            />
+            <span v-if="selectedFile" class="agent-file-chip">
+              <t-icon name="file" />
+              <span>{{ selectedFile.name }}</span>
+              <button type="button" aria-label="移除附件" @click="clearFile"><t-icon name="close" /></button>
+            </span>
+            <span v-if="activeTaskID" class="agent-composer__hint">Agent 正在执行</span>
+            <span v-else-if="uploading" class="agent-composer__hint">正在上传附件</span>
+          </div>
           <button
             type="button"
             class="agent-send"
-            :class="{ disabled: Boolean(activeTaskID) || !question.trim() }"
-            :disabled="Boolean(activeTaskID) || !question.trim()"
+            :class="{ disabled: Boolean(activeTaskID) || uploading || !question.trim() }"
+            :disabled="Boolean(activeTaskID) || uploading || !question.trim()"
             aria-label="发送"
             @click="sendMessage"
           >
@@ -135,6 +161,7 @@ import {
   rejectAgentApproval,
   streamAgentTaskEvents,
   submitAgentTaskInput,
+  uploadAgentAttachment,
   type AgentApproval,
   type AgentTaskEvent,
   type AgentObservation,
@@ -164,6 +191,9 @@ type AgentMessage = {
 
 const question = ref('')
 const focused = ref(false)
+const uploading = ref(false)
+const selectedFile = ref<File | null>(null)
+const fileInputRef = ref<HTMLInputElement | null>(null)
 const messages = ref<AgentMessage[]>([])
 const scrollRef = ref<HTMLElement | null>(null)
 const pageRef = ref<HTMLElement | null>(null)
@@ -417,7 +447,23 @@ async function watchTask(message: AgentMessage, after = message.lastEventId): Pr
 
 async function sendMessage(): Promise<void> {
   const text = question.value.trim()
-  if (!text || activeTaskID.value) return
+  if (!text || activeTaskID.value || uploading.value) return
+  const file = selectedFile.value
+  let attachmentIds: string[] = []
+  if (file) {
+    uploading.value = true
+    try {
+      const uploaded = await uploadAgentAttachment(file)
+      attachmentIds = [uploaded.attachment_id]
+    } catch (error) {
+      uploading.value = false
+      MessagePlugin.error(error instanceof Error ? error.message : '附件上传失败')
+      return
+    }
+    uploading.value = false
+    selectedFile.value = null
+    if (fileInputRef.value) fileInputRef.value.value = ''
+  }
   const userMessage: AgentMessage = { id: newMessageID(), role: 'user', text, steps: [], citations: [], lastEventId: 0 }
   const agentMessage = reactive<AgentMessage>({
     id: newMessageID(),
@@ -431,7 +477,7 @@ async function sendMessage(): Promise<void> {
   messages.value.push(userMessage, agentMessage)
   question.value = ''
   try {
-    const created = await createAgentTask({ text })
+    const created = await createAgentTask({ text, attachmentIds })
     agentMessage.taskId = created.task_id
     agentMessage.status = created.status
     agentMessage.statusText = statusLabel(created.status)
@@ -445,6 +491,20 @@ async function sendMessage(): Promise<void> {
     activeTaskID.value = ''
     await scrollToBottom()
   }
+}
+
+function handleFileChange(value: Event): void {
+  const input = value.target as HTMLInputElement
+  selectedFile.value = input.files?.[0] || null
+}
+
+function openFilePicker(): void {
+  fileInputRef.value?.click()
+}
+
+function clearFile(): void {
+  selectedFile.value = null
+  if (fileInputRef.value) fileInputRef.value.value = ''
 }
 
 function approvalEditor(message: AgentMessage) {
@@ -594,6 +654,14 @@ onBeforeUnmount(() => activeController?.abort())
 .agent-textarea :deep(.t-textarea__inner) { min-height: 112px; padding: 16px 18px 56px; border: 0; border-radius: 14px; resize: none; color: var(--td-text-color-primary); font-size: 16px; line-height: 1.5; box-shadow: none; }
 .agent-textarea :deep(.t-textarea__inner:focus) { box-shadow: none; }
 .agent-composer__controls { position: absolute; right: 14px; bottom: 12px; left: 14px; display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.agent-composer__left { display: flex; align-items: center; min-width: 0; gap: 8px; }
+.agent-attach { display: grid; place-items: center; width: 30px; height: 30px; padding: 0; border: 0; border-radius: 8px; color: var(--td-text-color-secondary); background: transparent; cursor: pointer; }
+.agent-attach:hover { color: var(--td-brand-color); background: var(--td-bg-color-secondarycontainer); }
+.agent-attach:disabled { cursor: not-allowed; opacity: .5; }
+.agent-file-input { position: absolute; width: 1px; height: 1px; overflow: hidden; opacity: 0; pointer-events: none; }
+.agent-file-chip { display: inline-flex; align-items: center; max-width: 220px; gap: 5px; padding: 3px 8px; border-radius: 6px; color: var(--td-text-color-secondary); background: var(--td-bg-color-secondarycontainer); font-size: 12px; }
+.agent-file-chip > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.agent-file-chip button { display: grid; place-items: center; padding: 0; border: 0; color: inherit; background: transparent; cursor: pointer; }
 .agent-composer__hint { color: var(--td-text-color-secondary); font-size: 12px; }
 .agent-send { display: grid; place-items: center; width: 38px; height: 38px; padding: 0; border: 0; border-radius: 50%; color: #fff; background: var(--td-brand-color); cursor: pointer; }
 .agent-send.disabled { background: var(--td-brand-color-disabled); cursor: not-allowed; }

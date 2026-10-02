@@ -57,6 +57,7 @@ class Settings:
     http_port: int = _int("RAG_HTTP_PORT", 8000)
     log_level: str = _text("RAG_LOG_LEVEL", "INFO")
     internal_auth_token: str = _text("RAG_INTERNAL_AUTH_TOKEN")
+    rag_internal_token: str = _text("RAG_INTERNAL_TOKEN", "local-development-only")
 
     # RAG-owned PostgreSQL state (jobs, index records, search history, QA and
     # the RAG outbox). Knowledge/IAM tables remain owned by their services.
@@ -155,6 +156,12 @@ class Settings:
         "RAG_MINIO_DERIVED_BUCKET", "info-agent-rag-derived"
     )
     minio_derived_prefix: str = _text("RAG_MINIO_DERIVED_PREFIX", "parsed")
+    # Agent-uploaded temporary attachments live in their own bucket so they
+    # never enter the persistent knowledge library. The Agent service owns the
+    # upload; RAG only reads the object back for the internal parse call.
+    agent_attachment_bucket: str = _text(
+        "RAG_AGENT_ATTACHMENT_BUCKET", "agent-temp"
+    )
     minio_presigned_url_ttl_seconds: int = _int(
         "RAG_MINIO_PRESIGNED_URL_TTL_SECONDS", 900
     )
