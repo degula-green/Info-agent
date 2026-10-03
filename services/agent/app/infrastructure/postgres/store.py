@@ -1667,7 +1667,6 @@ class PostgresAgentStore:
         limit: int = 5,
     ) -> list[MemoryRecord]:
         normalized = str(query or "").strip()
-        keywords = [item for item in normalized.split() if item]
         sql = (
             f"SELECT * FROM {self._memories} "
             "WHERE owner_user_id = %s AND source_conversation_id = %s "
@@ -1682,9 +1681,13 @@ class PostgresAgentStore:
             ]
             pattern = f"%{normalized}%"
             params.extend([pattern, pattern, normalized])
-            if keywords:
-                conditions.append("keywords && %s::text[]")
-                params.append(keywords)
+            conditions.append(
+                "EXISTS ("
+                "SELECT 1 FROM unnest(keywords) AS memory_keyword "
+                "WHERE strpos(lower(%s), lower(memory_keyword)) > 0"
+                ")"
+            )
+            params.append(normalized)
             sql += " AND (" + " OR ".join(conditions) + ")"
         sql += " ORDER BY importance DESC, confidence DESC, updated_at DESC LIMIT %s"
         params.append(max(1, int(limit)))

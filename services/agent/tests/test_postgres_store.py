@@ -303,6 +303,11 @@ def test_postgres_conversation_memory_round_trip(store) -> None:
         conversation_id=conversation_id,
         query="青云官网",
     )[0].memory_id == stored.memory_id
+    assert store.search_memories(
+        "user-1",
+        conversation_id=conversation_id,
+        query="我想知道青云官网的部署位置",
+    )[0].memory_id == stored.memory_id
     assert store.list_memory_sources(stored.memory_id)[0].message_id == (
         source_message.message_id
     )
