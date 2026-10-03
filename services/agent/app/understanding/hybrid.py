@@ -8,6 +8,8 @@ the widest coverage.
 
 from __future__ import annotations
 
+import inspect
+
 from app.ingress.vocabulary import references_attachment
 from app.kernel.models import TaskEnvelope, TaskUnderstanding
 from app.understanding.laya import (
@@ -65,6 +67,7 @@ class HybridUnderstandingProvider:
         task: TaskEnvelope,
         *,
         min_confidence: float | None = None,
+        conversation_context=None,
     ) -> TaskUnderstanding:
         self.last_call_count = 0
         self.last_decision_source = ""
@@ -80,7 +83,12 @@ class HybridUnderstandingProvider:
         # let the LLM understanding follow the intent catalog instead.
         text = str(task.input.get("text") or "")
         if task.input.get("attachment_ids") and references_attachment(text):
-            result = _call_provider(self.fallback, task, min_confidence=min_confidence)
+            result = _call_provider(
+                self.fallback.understand,
+                task,
+                min_confidence=min_confidence,
+                conversation_context=conversation_context,
+            )
             self.last_call_count = max(
                 int(getattr(self.fallback, "last_call_count", 0)), 0
             )
@@ -90,7 +98,12 @@ class HybridUnderstandingProvider:
 
         evaluation = None
         try:
-            evaluation = self.primary.evaluate(task, min_confidence=min_confidence)
+            evaluation = _call_provider(
+                self.primary.evaluate,
+                task,
+                min_confidence=min_confidence,
+                conversation_context=conversation_context,
+            )
         except Exception as exc:  # noqa: BLE001 - any primary failure falls back
             self.last_call_count = max(
                 int(getattr(self.primary, "last_call_count", 1)), 1
@@ -114,7 +127,12 @@ class HybridUnderstandingProvider:
             )
             self._record_confidence(evaluation.answer_confidence, evaluation.margin)
 
-        result = _call_provider(self.fallback, task, min_confidence=min_confidence)
+        result = _call_provider(
+            self.fallback.understand,
+            task,
+            min_confidence=min_confidence,
+            conversation_context=conversation_context,
+        )
         self.last_call_count += max(
             int(getattr(self.fallback, "last_call_count", 0)), 0
         )
@@ -137,13 +155,28 @@ def _error_reason(exc: Exception, name: str) -> str:
     return f"{name}_error"
 
 
-def _call_provider(provider, task: TaskEnvelope, *, min_confidence: float | None):
-    if min_confidence is None:
-        return provider.understand(task)
-    try:
-        return provider.understand(task, min_confidence=min_confidence)
-    except TypeError:
-        return provider.understand(task)
+def _call_provider(
+    call,
+    task: TaskEnvelope,
+    *,
+    min_confidence: float | None,
+    conversation_context=None,
+):
+    kwargs = {
+        "min_confidence": min_confidence,
+        "conversation_context": conversation_context,
+    }
+    signature = inspect.signature(call)
+    accepts_kwargs = any(
+        parameter.kind is inspect.Parameter.VAR_KEYWORD
+        for parameter in signature.parameters.values()
+    )
+    accepted = (
+        kwargs
+        if accepts_kwargs
+        else {key: value for key, value in kwargs.items() if key in signature.parameters}
+    )
+    return call(task, **accepted)
 
 
 __all__ = [
