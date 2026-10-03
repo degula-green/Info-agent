@@ -13,6 +13,7 @@ from app.kernel.execution_context import ExecutionContext, bind_execution_contex
 from app.kernel.models import (
     ConversationContext,
     ConversationRecord,
+    MemoryRecord,
     MessageRecord,
     TaskRecord,
     TaskUnderstanding,
@@ -262,3 +263,50 @@ def test_chat_reply_receives_bound_conversation_context() -> None:
 
     assert result["answer"] == "我记得你是张三。"
     assert captured["context"] is context
+
+
+def test_chat_reply_answers_known_name_without_model_call() -> None:
+    class Provider:
+        def reply(self, text: str, *, conversation_context=None):
+            raise AssertionError("known conversation memory should not call the model")
+
+    memory = MemoryRecord(
+        memory_id="memory-1",
+        owner_user_id="user-1",
+        memory_type="fact",
+        title="当前会话中的用户名字",
+        content="用户在会话中自称为“李四”",
+        content_hash="hash",
+        memory_key=USER_NAME_MEMORY_KEY,
+        keywords=["李四"],
+        source_conversation_id="conversation-1",
+        extraction_method="explicit",
+        status="active",
+        created_at=datetime.now(timezone.utc),
+        updated_at=datetime.now(timezone.utc),
+    )
+    context = ConversationContext(
+        conversation_id="conversation-1",
+        relevant_memories=[memory],
+    )
+    execution = ExecutionContext(
+        task_id="task-1",
+        plan_id="plan-1",
+        step_id="step-1",
+        owner_user_id="user-1",
+        organization_id=None,
+        request_id="request-1",
+        trace_id="trace-1",
+        source_type="chat",
+        source_ref={},
+        conversation_context=context,
+    )
+    capability = ChatReplyCapability(Provider())
+
+    with bind_execution_context(execution):
+        result = capability.execute(
+            capability.validate({"text": "我是谁？"})
+        )
+
+    assert result["answer"] == "你在当前会话里说自己是“李四”。"
+    assert result["model_calls"] == 0

@@ -10,12 +10,29 @@ evidence and refuses to run without sources, which is the wrong shape for
 from __future__ import annotations
 
 import inspect
+import re
+from dataclasses import dataclass
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.kernel.execution_context import current_execution_context
 from app.kernel.models import CapabilityDescriptor
+
+_USER_NAME_MEMORY_KEY = "conversation:user_name"
+_IDENTITY_RECALL_MARKERS = (
+    "我是谁",
+    "我叫什么",
+    "我的名字",
+    "记住了吗",
+    "记得我吗",
+)
+
+
+@dataclass(frozen=True)
+class _StaticReply:
+    reply: str
+    model_calls: int = 0
 
 CAPABILITY_NAME = "chat.reply"
 DEFAULT_TIMEOUT_SECONDS = 30
@@ -85,6 +102,10 @@ def _reply_with_context(provider, text: str):
     if context is None:
         return provider.reply(text)
 
+    static = _known_name_reply(text, context)
+    if static is not None:
+        return static
+
     signature = inspect.signature(provider.reply)
     accepts_kwargs = any(
         parameter.kind is inspect.Parameter.VAR_KEYWORD
@@ -93,3 +114,24 @@ def _reply_with_context(provider, text: str):
     if "conversation_context" not in signature.parameters and not accepts_kwargs:
         return provider.reply(text)
     return provider.reply(text, conversation_context=context)
+
+
+def _known_name_reply(text: str, context):
+    normalized = " ".join(str(text or "").split())
+    if not any(marker in normalized for marker in _IDENTITY_RECALL_MARKERS):
+        return None
+    for memory in getattr(context, "relevant_memories", []) or []:
+        if str(getattr(memory, "memory_key", "")) != _USER_NAME_MEMORY_KEY:
+            continue
+        match = re.search(r"“([^”]+)”", str(getattr(memory, "content", "")))
+        if not match:
+            continue
+        name = match.group(1).strip()
+        if not name:
+            continue
+        if "记住了吗" in normalized or "记得我吗" in normalized:
+            reply = f"记住了，你在当前会话里说自己是“{name}”。"
+        else:
+            reply = f"你在当前会话里说自己是“{name}”。"
+        return _StaticReply(reply=reply)
+    return None
