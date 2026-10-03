@@ -5,12 +5,18 @@ from __future__ import annotations
 import asyncio
 import json
 from typing import Any, AsyncIterator
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from app.application.task_service import TaskNotFoundError, TaskPermissionError, TaskStateError
+from app.application.task_service import (
+    ConversationNotFoundError,
+    TaskNotFoundError,
+    TaskPermissionError,
+    TaskStateError,
+)
 from app.auth import AuthenticatedUser, current_user, current_user_id
 from app.container import AgentContainer
 from app.infrastructure.attachment_store import RedisAttachmentStore
@@ -39,7 +45,8 @@ class CreateTaskBody(BaseModel):
     attachment_ids: list[str] = Field(default_factory=list)  # 新增
     steps: list[dict[str, Any]] = Field(default_factory=list)
     source_type: str = "chat"
-    client_message_id: str | None = None
+    conversation_id: UUID | None = None
+    client_message_id: str | None = Field(default=None, max_length=128)
     constraints: dict[str, Any] = Field(default_factory=dict)
     source_ref: dict[str, Any] = Field(default_factory=dict)
 
@@ -102,17 +109,27 @@ def create_task(
     organization_id = container.core_client.current_organization(user.access_token)
     if organization_id:
         source_ref["organization_id"] = organization_id
-    task = container.task_service.create_task(
-        owner_user_id=user.user_id,
-        source_type=body.source_type,
-        payload=payload,
-        source_ref=source_ref,
-        constraints=body.constraints,
-        client_message_id=body.client_message_id,
-    )
+    try:
+        task = container.task_service.create_task(
+            owner_user_id=user.user_id,
+            source_type=body.source_type,
+            payload=payload,
+            source_ref=source_ref,
+            constraints=body.constraints,
+            client_message_id=body.client_message_id,
+            conversation_id=(
+                str(body.conversation_id) if body.conversation_id else None
+            ),
+            organization_id=organization_id,
+        )
+    except ConversationNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except TaskPermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
     return {
         "task_id": task.task_id,
         "status": task.status,
+        "conversation_id": task.conversation_id,
         "events_url": f"/api/agent/v1/tasks/{task.task_id}/events",
     }
 

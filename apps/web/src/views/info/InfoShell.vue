@@ -5,11 +5,12 @@
       :nickname="sidebarNickname"
       :avatar="sidebarAvatar"
       :avatar-url="sidebarAvatarUrl"
-      :qa-sessions="qaConversations.map((item) => ({ id: String(item.id), question: item.title, answer: '', summary: `${item.message_count} 条问答`, source: '全部数据', time: item.last_message_at || '' }))"
+      :history-items="sidebarHistoryItems"
+      :active-history-id="sidebarActiveHistoryID"
       @navigate="navigate"
-      @qa="openQaSession"
-      @qa-rename="renameQaSession"
-      @qa-delete="deleteQaSession"
+      @history-select="selectSidebarHistory"
+      @history-rename="renameSidebarHistory"
+      @history-delete="deleteSidebarHistory"
       @collapsed-change="sidebarCollapsed = $event"
       @menu-action="handleUserMenuAction"
     />
@@ -115,6 +116,12 @@ import { isAbortError, mapRagSearchItems } from '@/utils/info-search-result'
 import { navigateToKnowledgeSource } from '@/utils/knowledge-source-navigation'
 import { listQaConversations, type QaConversation } from '@/mock-api/qa-history'
 import { renameQaConversation, deleteQaConversation } from '@/mock-api/qa-history'
+import {
+  deleteAgentConversation,
+  listAgentConversations,
+  renameAgentConversation,
+  type AgentConversationSummary,
+} from '@/api/info-agent'
 
 const store = useInfoMockStore(); const auth = useAuthStore(); const knowledgeStore = useInfoKnowledgeStore(); const router = useRouter(); const route = useRoute()
 // Keep the mock profile out of the initial render; the profile API is authoritative.
@@ -122,17 +129,50 @@ const sidebarNickname = ref('')
 const sidebarAvatar = ref('')
 const sidebarAvatarUrl = ref<string | null>(null)
 const qaConversations = ref<QaConversation[]>([])
+const agentConversations = ref<AgentConversationSummary[]>([])
 const renameDialogVisible = ref(false)
 const renameSessionId = ref('')
 const renameTitle = ref('')
 const deleteDialogVisible = ref(false)
 const deleteSessionId = ref('')
 const qaDialogSubmitting = ref(false)
+const historyDialogMode = ref<'agent' | 'qa'>('qa')
+// The Agent conversation is the application-level history. Keep it visible
+// while navigating knowledge, contacts and other pages; only the legacy
+// /rag-chat page still points at the old QA history source.
+const sidebarHistoryMode = computed<'agent' | 'qa'>(() => route.name === 'ragChat' ? 'qa' : 'agent')
+const sidebarHistoryItems = computed(() => (
+  sidebarHistoryMode.value === 'agent'
+    ? agentConversations.value.map((item) => ({
+        id: item.conversation_id,
+        title: item.title || '新的对话',
+        subtitle: `${item.message_count || 0} 条消息`,
+      }))
+    : qaConversations.value.map((item) => ({
+        id: String(item.id),
+        title: item.title,
+        subtitle: `${item.message_count} 条问答`,
+      }))
+))
+const sidebarActiveHistoryID = computed(() => (
+  sidebarHistoryMode.value === 'agent'
+    ? String(route.query.conversation || '')
+    : String(route.query.session || '')
+))
 async function refreshQaConversations() {
   try { qaConversations.value = (await listQaConversations()).items || [] } catch {
     // Keep the last successful list during transient route/API failures.
     // Clearing it here makes persisted history look deleted until the next refresh.
   }
+}
+async function refreshAgentConversations() {
+  try { agentConversations.value = (await listAgentConversations(1, 100)).items || [] } catch {
+    // Keep the last successful list during transient route/API failures.
+  }
+}
+async function refreshSidebarHistory() {
+  if (sidebarHistoryMode.value === 'agent') await refreshAgentConversations()
+  else await refreshQaConversations()
 }
 onMounted(async () => {
   try {
@@ -153,12 +193,19 @@ onMounted(async () => {
       sidebarAvatar.value = store.profile.avatar
     }
   }
-  await refreshQaConversations()
+  await refreshSidebarHistory()
   await knowledgeStore.ensureSources()
 })
 function handleAvatarUpdated(event: Event) { sidebarAvatarUrl.value = (event as CustomEvent<string | null>).detail || null }
 onMounted(() => window.addEventListener('profile-avatar-updated', handleAvatarUpdated))
-onBeforeUnmount(() => window.removeEventListener('profile-avatar-updated', handleAvatarUpdated))
+function handleAgentConversationUpdated() {
+  if (sidebarHistoryMode.value === 'agent') void refreshAgentConversations()
+}
+onMounted(() => window.addEventListener('agent-conversation-updated', handleAgentConversationUpdated))
+onBeforeUnmount(() => {
+  window.removeEventListener('profile-avatar-updated', handleAvatarUpdated)
+  window.removeEventListener('agent-conversation-updated', handleAgentConversationUpdated)
+})
 function handleGlobalSearchShortcut(event: KeyboardEvent) {
   if (event.defaultPrevented || event.repeat || event.isComposing) return
   if (!(event.ctrlKey || event.metaKey) || event.key.toLowerCase() !== 'k') return
@@ -167,8 +214,8 @@ function handleGlobalSearchShortcut(event: KeyboardEvent) {
 }
 onMounted(() => window.addEventListener('keydown', handleGlobalSearchShortcut, { capture: true }))
 onBeforeUnmount(() => window.removeEventListener('keydown', handleGlobalSearchShortcut, { capture: true }))
-watch(() => route.fullPath, () => { void refreshQaConversations() })
-watch(() => store.qaSessions, () => { void refreshQaConversations() }, { deep: true })
+watch(() => route.fullPath, () => { void refreshSidebarHistory() })
+watch(() => store.qaSessions, () => { if (sidebarHistoryMode.value === 'qa') void refreshQaConversations() }, { deep: true })
 const knowledgePollTimer = ref<number | null>(null)
 onMounted(() => {
   // Keep the knowledge directory stable while navigating. A forced periodic
@@ -200,7 +247,7 @@ async function navigate(view: string) {
   if (view === 'new-chat') {
     // Creating a conversation is deferred until the first question is sent.
     // Repeated clicks on "新对话" must not create empty history rows.
-    if (route.name !== 'chat' || route.query.session) router.push('/chat')
+    if (route.name !== 'chat' || route.query.conversation) router.push('/chat')
     return
   }
   router.push(view === 'knowledge' ? '/knowledge' : view === 'organization' ? '/organization' : view === 'contacts' ? '/contacts' : view === 'profile' || view === 'capabilities' ? '/profile' : '/dashboard')
@@ -214,9 +261,18 @@ function handleUserMenuAction(action: 'profile' | 'terms' | 'privacy' | 'logout'
   if (action === 'terms' || action === 'privacy') { protocolType.value = action; protocolDialogVisible.value = true; return }
   void auth.logout(); store.logout(); router.push('/login')
 }
-function openQaSession(id: string) { router.push({ path: '/rag-chat', query: { session: id } }) }
-function renameQaSession(id: string) {
-  const current = qaConversations.value.find((item) => String(item.id) === id)
+function selectSidebarHistory(id: string) {
+  if (sidebarHistoryMode.value === 'agent') {
+    router.push({ path: '/chat', query: { conversation: id } })
+    return
+  }
+  router.push({ path: '/rag-chat', query: { session: id } })
+}
+function renameSidebarHistory(id: string) {
+  historyDialogMode.value = sidebarHistoryMode.value
+  const current = historyDialogMode.value === 'agent'
+    ? agentConversations.value.find((item) => item.conversation_id === id)
+    : qaConversations.value.find((item) => String(item.id) === id)
   if (!current) { MessagePlugin.error('未找到该历史会话'); return }
   renameSessionId.value = id
   renameTitle.value = current.title || ''
@@ -227,9 +283,15 @@ async function confirmRenameQaSession() {
   if (!title || !renameSessionId.value || qaDialogSubmitting.value) return
   qaDialogSubmitting.value = true
   try {
-    const updated = await renameQaConversation(renameSessionId.value, title)
-    const current = qaConversations.value.find((item) => String(item.id) === renameSessionId.value)
-    if (current) current.title = updated.title
+    if (historyDialogMode.value === 'agent') {
+      const updated = await renameAgentConversation(renameSessionId.value, title)
+      const current = agentConversations.value.find((item) => item.conversation_id === renameSessionId.value)
+      if (current) current.title = updated.title
+    } else {
+      const updated = await renameQaConversation(renameSessionId.value, title)
+      const current = qaConversations.value.find((item) => String(item.id) === renameSessionId.value)
+      if (current) current.title = updated.title
+    }
     renameDialogVisible.value = false
     MessagePlugin.success('会话名称已更新')
   } catch {
@@ -238,8 +300,12 @@ async function confirmRenameQaSession() {
     qaDialogSubmitting.value = false
   }
 }
-function deleteQaSession(id: string) {
-  if (!qaConversations.value.some((item) => String(item.id) === id)) { MessagePlugin.error('未找到该历史会话'); return }
+function deleteSidebarHistory(id: string) {
+  historyDialogMode.value = sidebarHistoryMode.value
+  const exists = historyDialogMode.value === 'agent'
+    ? agentConversations.value.some((item) => item.conversation_id === id)
+    : qaConversations.value.some((item) => String(item.id) === id)
+  if (!exists) { MessagePlugin.error('未找到该历史会话'); return }
   deleteSessionId.value = id
   deleteDialogVisible.value = true
 }
@@ -248,10 +314,21 @@ async function confirmDeleteQaSession() {
   if (!id || qaDialogSubmitting.value) return
   qaDialogSubmitting.value = true
   try {
-    await deleteQaConversation(id)
-    qaConversations.value = qaConversations.value.filter((item) => String(item.id) !== id)
+    if (historyDialogMode.value === 'agent') {
+      await deleteAgentConversation(id)
+      agentConversations.value = agentConversations.value.filter((item) => item.conversation_id !== id)
+    } else {
+      await deleteQaConversation(id)
+      qaConversations.value = qaConversations.value.filter((item) => String(item.id) !== id)
+    }
     deleteDialogVisible.value = false
-    if (String(route.query.session || '') === id) await router.push('/chat')
+    if (
+      historyDialogMode.value === 'agent'
+        ? String(route.query.conversation || '') === id
+        : String(route.query.session || '') === id
+    ) {
+      await router.push(historyDialogMode.value === 'agent' ? '/chat' : '/rag-chat')
+    }
     MessagePlugin.success('历史会话已删除')
   } catch {
     MessagePlugin.error('删除历史失败')

@@ -593,6 +593,7 @@ def build_container(
             publisher=resolved_publisher,
             settings=resolved,
             understanding_provider=resolved_understanding,
+            message_sync=task_service.sync_task_messages,
         ),
         knowledge_ingress=resolved_ingress,
         knowledge_client=resolved_knowledge,

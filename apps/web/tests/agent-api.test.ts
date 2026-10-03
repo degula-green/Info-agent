@@ -10,14 +10,19 @@ import {
   completeAgentTodo,
   composeEditedArguments,
   composeTimeFixText,
+  createAgentConversation,
   createAgentTask,
   dayOfISO,
+  deleteAgentConversation,
   deleteAgentTodo,
   draftSortKey,
   endOfDayISO,
+  getAgentConversation,
+  listAgentConversations,
   listAgentTodos,
   loadScheduleDrafts,
   rejectAgentApproval,
+  renameAgentConversation,
   sortAgentTodos,
   streamAgentTaskEvents,
   submitAgentTaskInput,
@@ -756,6 +761,91 @@ test('creating a task with an attachment sends attachment_ids', async () => {
     source_ref: {},
     constraints: {},
   })
+})
+
+test('a follow-up task carries its conversation id', async () => {
+  installStorage()
+  const calls: Array<{ url: string; method: string; body: any }> = []
+  globalThis.fetch = async (input, init = {}) => {
+    const url = String(input)
+    if (url.endsWith('/auth/me')) return json({ id: USER_ID, email: 'user@example.com', nickname: 'user', status: 'active' })
+    calls.push({ url, method: String(init.method || 'GET'), body: init.body ? JSON.parse(String(init.body)) : null })
+    return json({
+      task_id: 'task-2',
+      status: 'received',
+      events_url: '/api/agent/v1/tasks/task-2/events',
+      conversation_id: 'conversation-1',
+    }, 202)
+  }
+
+  const created = await createAgentTask({
+    text: '继续查一下',
+    conversationId: 'conversation-1',
+    clientMessageId: 'client-2',
+  })
+
+  assert.equal(created.conversation_id, 'conversation-1')
+  assert.deepEqual(calls[0].body, {
+    text: '继续查一下',
+    attachment_ids: [],
+    source_type: 'chat',
+    client_message_id: 'client-2',
+    conversation_id: 'conversation-1',
+    source_ref: {},
+    constraints: {},
+  })
+})
+
+test('conversation history API uses the Agent conversation contract', async () => {
+  installStorage()
+  const calls: Array<{ url: string; method: string; body: any }> = []
+  globalThis.fetch = async (input, init = {}) => {
+    const url = String(input)
+    if (url.endsWith('/auth/me')) return json({ id: USER_ID, email: 'user@example.com', nickname: 'user', status: 'active' })
+    calls.push({ url, method: String(init.method || 'GET'), body: init.body ? JSON.parse(String(init.body)) : null })
+    if (init.method === 'DELETE') return new Response(null, { status: 204 })
+    if (url.includes('/conversations?')) {
+      return json({
+        items: [{ conversation_id: 'conversation-1', title: '青云官网', status: 'active', last_message_at: '2026-10-02T10:00:00Z', message_count: 2 }],
+        page: 1,
+        page_size: 20,
+        total: 1,
+      })
+    }
+    if (init.method === 'POST') {
+      return json({ conversation_id: 'conversation-2', title: '新会话', status: 'active', message_count: 0 })
+    }
+    if (init.method === 'PATCH') {
+      return json({ conversation_id: 'conversation-1', title: '改名后', status: 'active', message_count: 2 })
+    }
+    return json({
+      conversation_id: 'conversation-1',
+      owner_user_id: USER_ID,
+      title: '青云官网',
+      status: 'active',
+      source: 'agent',
+      summary_cursor: 0,
+      message_count: 2,
+      messages: [
+        { message_id: 'message-1', conversation_id: 'conversation-1', role: 'user', content: '第一问', status: 'completed', task_id: 'task-1', created_at: '2026-10-02T09:59:00Z', updated_at: '2026-10-02T09:59:00Z' },
+        { message_id: 'message-2', conversation_id: 'conversation-1', role: 'assistant', content: '回答', status: 'completed', task_id: 'task-1', citations: [], created_at: '2026-10-02T10:00:00Z', updated_at: '2026-10-02T10:00:00Z' },
+      ],
+      created_at: '2026-10-02T09:59:00Z',
+      updated_at: '2026-10-02T10:00:00Z',
+    })
+  }
+
+  const listed = await listAgentConversations(1, 20)
+  const detail = await getAgentConversation('conversation-1')
+  const created = await createAgentConversation('新会话')
+  const renamed = await renameAgentConversation('conversation-1', '改名后')
+  await deleteAgentConversation('conversation-1')
+
+  assert.equal(listed.items[0].conversation_id, 'conversation-1')
+  assert.equal(detail.messages[1].content, '回答')
+  assert.equal(created.conversation_id, 'conversation-2')
+  assert.equal(renamed.title, '改名后')
+  assert.ok(calls.some((call) => call.method === 'DELETE' && call.url.endsWith('/conversations/conversation-1')))
 })
 
 test('uploading an attachment posts multipart without a JSON content type', async () => {

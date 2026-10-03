@@ -8,7 +8,9 @@ from app.kernel.models import (
     ApprovalRecord,
     CapabilityCallRecord,
     CapabilityDescriptor,
+    ConversationRecord,
     EvidenceRecord,
+    MessageRecord,
     OutboxEvent,
     Plan,
     PlanStep,
@@ -179,7 +181,17 @@ class AgentStore(Protocol):
         *,
         events: list[TaskEvent],
         outbox_events: list[OutboxEvent],
+        inputs: list[TaskInput] | None = None,
+        conversation: ConversationRecord | None = None,
+        messages: list[MessageRecord] | None = None,
     ) -> TaskRecord:
+        """Persist a new Task and its creation-time side records atomically.
+
+        ``conversation`` and ``messages`` are optional because knowledge-event
+        fan-out has no user-facing conversation. When supplied, they are written
+        in the same transaction as the Task so an idempotent replay cannot leave
+        a half-created chat turn behind.
+        """
         ...
 
     def get_task(self, task_id: str) -> TaskRecord | None:
@@ -309,6 +321,57 @@ class AgentStore(Protocol):
         ...
 
     def mark_outbox_failed(self, event_id: str, error: str) -> None:
+        ...
+
+    # -- conversation history ------------------------------------------------
+
+    def create_conversation(self, conversation: ConversationRecord) -> ConversationRecord:
+        ...
+
+    def get_conversation(self, conversation_id: str) -> ConversationRecord | None:
+        ...
+
+    def save_conversation(self, conversation: ConversationRecord) -> None:
+        ...
+
+    def list_conversations_for_owner(
+        self,
+        owner_user_id: str,
+        *,
+        statuses: list[str] | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[ConversationRecord]:
+        ...
+
+    def count_conversations_for_owner(
+        self,
+        owner_user_id: str,
+        *,
+        statuses: list[str] | None = None,
+    ) -> int:
+        ...
+
+    def delete_conversation(
+        self, conversation_id: str, *, owner_user_id: str
+    ) -> bool:
+        ...
+
+    def add_message(self, message: MessageRecord) -> MessageRecord:
+        ...
+
+    def get_message(self, message_id: str) -> MessageRecord | None:
+        ...
+
+    def update_message(self, message: MessageRecord) -> None:
+        ...
+
+    def list_messages(
+        self, conversation_id: str, *, limit: int | None = None
+    ) -> list[MessageRecord]:
+        ...
+
+    def count_messages(self, conversation_id: str) -> int:
         ...
 
 
