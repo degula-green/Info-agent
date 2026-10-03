@@ -10,7 +10,16 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from app.application.execution_service import ExecutionService
+from app.application.conversation_memory import (
+    ConversationContextService,
+    ConversationSummaryService,
+    LlmConversationSummaryProvider,
+)
+from app.application.conversation_memory_extraction import (
+    ConversationMemoryExtractionService,
+)
 from app.application.knowledge_events import KnowledgeEventService
+from app.application.memory_service import MemoryService
 from app.application.task_service import TaskService
 from app.capabilities.answer import AnswerComposeCapability
 from app.capabilities.chat_reply import ChatReplyCapability
@@ -68,6 +77,7 @@ class AgentContainer:
     todo_store: TodoStore
     understanding_provider: object | None
     task_service: TaskService
+    memory_service: MemoryService
     execution_service: ExecutionService
     knowledge_ingress: KnowledgeEventIngress
     knowledge_client: KnowledgeClient
@@ -574,6 +584,37 @@ def build_container(
         platforms=resolved.knowledge_platform_allowlist
     )
     task_service = TaskService(resolved_store)
+    memory_service = MemoryService(resolved_store)
+    memory_extraction_service = ConversationMemoryExtractionService(
+        resolved_store,
+        resolved,
+        memory_service,
+    )
+    conversation_context_service = ConversationContextService(
+        resolved_store,
+        resolved,
+        memory_service=memory_service,
+    )
+    summary_service = None
+    if (
+        resolved.conversation_summary_enabled
+        and resolved.llm_base_url
+        and resolved.llm_model
+    ):
+        summary_service = ConversationSummaryService(
+            resolved_store,
+            resolved,
+            LlmConversationSummaryProvider(
+                OpenAIChatClient(
+                    base_url=resolved.llm_base_url,
+                    api_key=resolved.llm_api_key,
+                    model=resolved.llm_model,
+                    timeout_seconds=resolved.llm_timeout_seconds,
+                    max_output_tokens=resolved.conversation_summary_max_output_tokens,
+                    response_format="json_object",
+                )
+            ),
+        )
 
     return AgentContainer(
         settings=resolved,
@@ -585,6 +626,7 @@ def build_container(
         todo_store=resolved_todo_store,
         understanding_provider=resolved_understanding,
         task_service=task_service,
+        memory_service=memory_service,
         execution_service=ExecutionService(
             store=resolved_store,
             registry=registry,
@@ -594,6 +636,9 @@ def build_container(
             settings=resolved,
             understanding_provider=resolved_understanding,
             message_sync=task_service.sync_task_messages,
+            conversation_context_loader=conversation_context_service.load,
+            summary_service=summary_service,
+            memory_extraction_service=memory_extraction_service,
         ),
         knowledge_ingress=resolved_ingress,
         knowledge_client=resolved_knowledge,

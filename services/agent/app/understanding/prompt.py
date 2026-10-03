@@ -97,6 +97,7 @@ def build_understanding_messages(
     min_confidence: float = DEFAULT_MIN_CONFIDENCE,
     *,
     catalog_text: str | None = None,
+    conversation_context: Any | None = None,
 ) -> list[dict[str, str]]:
     context: dict[str, Any] = {
         "source_type": task.source_type,
@@ -106,6 +107,12 @@ def build_understanding_messages(
         value = task.source_ref.get(key)
         if value is not None:
             context[key] = value
+    if conversation_context is not None:
+        context["conversation_context"] = (
+            conversation_context.model_dump(mode="json")
+            if hasattr(conversation_context, "model_dump")
+            else conversation_context
+        )
     # The threshold lives in configuration; rendering it from the same value the
     # provider filters with keeps the prompt and the code from drifting apart.
     # The catalog is filtered by the caller so the model never sees an intent

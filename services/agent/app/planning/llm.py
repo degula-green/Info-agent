@@ -149,6 +149,8 @@ class OpenAICompatiblePlanner:
         observations: list[Observation],
         constraints: PlanningConstraints,
         understanding: TaskUnderstanding | None = None,
+        *,
+        conversation_context=None,
     ) -> Plan:
         self._capabilities = list(capabilities)
         # The id is minted before the model is asked, because the prompt has to
@@ -156,7 +158,13 @@ class OpenAICompatiblePlanner:
         # name is a reference it cannot write.
         plan_id = str(uuid4())
         messages = _plan_messages(
-            task, capabilities, observations, constraints, understanding, plan_id
+            task,
+            capabilities,
+            observations,
+            constraints,
+            understanding,
+            plan_id,
+            conversation_context=conversation_context,
         )
         schema = plan_draft_schema(capabilities)
         draft = self._call(
@@ -179,13 +187,20 @@ class OpenAICompatiblePlanner:
             observations,
             constraints,
             understanding,
+            conversation_context=conversation_context,
             schema=schema,
             # A reference the binder refused leaves the planner-facing argument
             # in place, so the schema problems it would also produce are noise.
             problems=binding_problems or _unusable_steps(plan, self._validators),
         )
         return self._repair_unresolved_references(
-            task, plan, capabilities, observations, constraints, understanding
+            task,
+            plan,
+            capabilities,
+            observations,
+            constraints,
+            understanding,
+            conversation_context=conversation_context,
         )
 
     def _repair_plan(
@@ -197,6 +212,7 @@ class OpenAICompatiblePlanner:
         constraints: PlanningConstraints,
         understanding: TaskUnderstanding | None,
         *,
+        conversation_context=None,
         schema: dict[str, Any],
         problems: list[str],
     ) -> Plan:
@@ -213,7 +229,13 @@ class OpenAICompatiblePlanner:
         if not problems:
             return plan
         messages = _plan_messages(
-            task, capabilities, observations, constraints, understanding, plan.plan_id
+            task,
+            capabilities,
+            observations,
+            constraints,
+            understanding,
+            plan.plan_id,
+            conversation_context=conversation_context,
         )
         messages = messages + [
             {
@@ -271,6 +293,8 @@ class OpenAICompatiblePlanner:
         observations: list[Observation],
         constraints: PlanningConstraints,
         understanding: TaskUnderstanding | None,
+        *,
+        conversation_context=None,
     ) -> Plan:
         """Re-asks once when a reference could never resolve.
 
@@ -284,7 +308,13 @@ class OpenAICompatiblePlanner:
         if not problems:
             return plan
         messages = _plan_messages(
-            task, capabilities, observations, constraints, understanding, plan.plan_id
+            task,
+            capabilities,
+            observations,
+            constraints,
+            understanding,
+            plan.plan_id,
+            conversation_context=conversation_context,
         )
         messages = messages + [
             {
@@ -346,6 +376,8 @@ class OpenAICompatiblePlanner:
         observations: list[Observation],
         constraints: PlanningConstraints,
         understanding: TaskUnderstanding | None = None,
+        *,
+        conversation_context=None,
     ) -> PlannerDecision:
         # A form draft is reviewed field by field on the approval card. Leaving
         # this to the model let it divert into ``request_input`` -- a single
@@ -366,6 +398,7 @@ class OpenAICompatiblePlanner:
             constraints,
             understanding,
             plan_id,
+            conversation_context=conversation_context,
         )
         schema = decision_draft_schema(self._capabilities)
         try:
@@ -833,6 +866,8 @@ def _plan_messages(
     constraints: PlanningConstraints,
     understanding: TaskUnderstanding | None,
     plan_id: str,
+    *,
+    conversation_context=None,
 ) -> list[dict[str, str]]:
     return [
         {
@@ -899,6 +934,11 @@ def _plan_messages(
                         for item in observations
                     ],
                     "constraints": constraints.model_dump(mode="json"),
+                    "conversation_context": (
+                        conversation_context.model_dump(mode="json")
+                        if hasattr(conversation_context, "model_dump")
+                        else conversation_context
+                    ),
                 },
                 ensure_ascii=False,
                 separators=(",", ":"),
@@ -915,6 +955,8 @@ def _decision_messages(
     constraints: PlanningConstraints,
     understanding: TaskUnderstanding | None,
     plan_id: str,
+    *,
+    conversation_context=None,
 ) -> list[dict[str, str]]:
     return [
         {
@@ -972,6 +1014,11 @@ def _decision_messages(
                         for item in observations
                     ],
                     "constraints": constraints.model_dump(mode="json"),
+                    "conversation_context": (
+                        conversation_context.model_dump(mode="json")
+                        if hasattr(conversation_context, "model_dump")
+                        else conversation_context
+                    ),
                 },
                 ensure_ascii=False,
                 separators=(",", ":"),

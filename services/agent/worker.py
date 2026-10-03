@@ -57,6 +57,7 @@ def main() -> None:
         try:
             container.execution_service.dispatch_outbox()
             worker.run_once()
+            container.execution_service.run_summary_jobs(limit=10)
         except Exception:  # noqa: BLE001 - keep the long-lived worker alive
             logger.exception("agent worker iteration failed; retrying")
             time.sleep(1.0)

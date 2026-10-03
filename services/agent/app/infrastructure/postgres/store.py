@@ -18,8 +18,11 @@ from app.kernel.models import (
     ApprovalRecord,
     CapabilityCallRecord,
     ConversationRecord,
+    ConversationSummaryJob,
     EvidenceRecord,
     MessageRecord,
+    MemoryRecord,
+    MemorySourceRecord,
     Observation,
     OutboxEvent,
     Plan,
@@ -90,6 +93,18 @@ class PostgresAgentStore:
     def _messages(self) -> str:
         return f"{self.schema}.messages"
 
+    @property
+    def _summary_jobs(self) -> str:
+        return f"{self.schema}.conversation_summary_jobs"
+
+    @property
+    def _memories(self) -> str:
+        return f"{self.schema}.memory_records"
+
+    @property
+    def _memory_sources(self) -> str:
+        return f"{self.schema}.memory_sources"
+
     @staticmethod
     def _task_model(row: dict[str, Any]) -> TaskRecord:
         return TaskRecord(
@@ -137,6 +152,15 @@ class PostgresAgentStore:
             source=row["source"],
             summary=row.get("summary"),
             summary_cursor=row.get("summary_cursor", 0),
+            summary_until_message_id=(
+                str(row["summary_until_message_id"])
+                if row.get("summary_until_message_id")
+                else None
+            ),
+            summary_version=row.get("summary_version", 0),
+            summary_updated_at=row.get("summary_updated_at"),
+            summary_method=row.get("summary_method") or "incremental",
+            summary_token_count=row.get("summary_token_count", 0) or 0,
             last_message_at=row.get("last_message_at"),
             created_at=row["created_at"],
             updated_at=row["updated_at"],
@@ -153,6 +177,70 @@ class PostgresAgentStore:
             task_id=row.get("task_id"),
             citations=row.get("citations") or [],
             client_message_id=row.get("client_message_id"),
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+        )
+
+    @staticmethod
+    def _summary_job_model(row: dict[str, Any]) -> ConversationSummaryJob:
+        return ConversationSummaryJob(
+            job_id=str(row["job_id"]),
+            conversation_id=str(row["conversation_id"]),
+            expected_summary_version=int(row["expected_summary_version"]),
+            boundary_from_message_id=(
+                str(row["boundary_from_message_id"])
+                if row.get("boundary_from_message_id")
+                else None
+            ),
+            boundary_to_message_id=str(row["boundary_to_message_id"]),
+            status=row["status"],
+            attempt_count=int(row.get("attempt_count") or 0),
+            available_at=row["available_at"],
+            lease_owner=row.get("lease_owner"),
+            lease_until=row.get("lease_until"),
+            last_error=row.get("last_error"),
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+            finished_at=row.get("finished_at"),
+        )
+
+    @staticmethod
+    def _memory_model(row: dict[str, Any]) -> MemoryRecord:
+        return MemoryRecord(
+            memory_id=str(row["memory_id"]),
+            owner_user_id=row["owner_user_id"],
+            organization_id=row.get("organization_id"),
+            memory_type=row["memory_type"],
+            scope=row.get("scope") or "conversation",
+            title=row["title"],
+            content=row["content"],
+            content_hash=row["content_hash"],
+            memory_key=row["memory_key"],
+            keywords=row.get("keywords") or [],
+            source_conversation_id=str(row["source_conversation_id"]),
+            source_message_ids=[
+                str(item) for item in (row.get("source_message_ids") or [])
+            ],
+            extraction_method=row.get("extraction_method"),
+            extraction_job_id=(
+                str(row["extraction_job_id"])
+                if row.get("extraction_job_id")
+                else None
+            ),
+            confidence=float(row.get("confidence") or 0),
+            importance=float(row.get("importance") or 0),
+            access_count=int(row.get("access_count") or 0),
+            last_accessed_at=row.get("last_accessed_at"),
+            status=row["status"],
+            superseded_by_memory_id=(
+                str(row["superseded_by_memory_id"])
+                if row.get("superseded_by_memory_id")
+                else None
+            ),
+            expires_at=row.get("expires_at"),
+            deleted_at=row.get("deleted_at"),
+            embedding_model=row.get("embedding_model"),
+            embedding_version=row.get("embedding_version"),
             created_at=row["created_at"],
             updated_at=row["updated_at"],
         )
@@ -340,14 +428,24 @@ class PostgresAgentStore:
         cursor.execute(
             f"""INSERT INTO {self._conversations} (
                     conversation_id, owner_user_id, organization_id, title,
-                    status, source, summary, summary_cursor, last_message_at,
+                    status, source, summary, summary_cursor,
+                    summary_until_message_id, summary_version, summary_updated_at,
+                    summary_method, summary_token_count, last_message_at,
                     created_at, updated_at
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ) VALUES (
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s, %s
+                )
                 ON CONFLICT (conversation_id) DO UPDATE SET
                     title = EXCLUDED.title,
                     status = EXCLUDED.status,
                     summary = EXCLUDED.summary,
                     summary_cursor = EXCLUDED.summary_cursor,
+                    summary_until_message_id = EXCLUDED.summary_until_message_id,
+                    summary_version = EXCLUDED.summary_version,
+                    summary_updated_at = EXCLUDED.summary_updated_at,
+                    summary_method = EXCLUDED.summary_method,
+                    summary_token_count = EXCLUDED.summary_token_count,
                     last_message_at = EXCLUDED.last_message_at,
                     updated_at = EXCLUDED.updated_at
                 RETURNING *""",
@@ -360,6 +458,11 @@ class PostgresAgentStore:
                 conversation.source,
                 conversation.summary,
                 conversation.summary_cursor,
+                conversation.summary_until_message_id,
+                conversation.summary_version,
+                conversation.summary_updated_at,
+                conversation.summary_method,
+                conversation.summary_token_count,
                 conversation.last_message_at,
                 conversation.created_at,
                 conversation.updated_at,
@@ -1042,13 +1145,21 @@ class PostgresAgentStore:
                 cursor.execute(
                     f"""UPDATE {self._conversations} SET
                             title = %s, status = %s, summary = %s,
-                            summary_cursor = %s, last_message_at = %s, updated_at = %s
+                            summary_cursor = %s, summary_until_message_id = %s,
+                            summary_version = %s, summary_updated_at = %s,
+                            summary_method = %s, summary_token_count = %s,
+                            last_message_at = %s, updated_at = %s
                         WHERE conversation_id = %s""",
                     (
                         conversation.title,
                         conversation.status,
                         conversation.summary,
                         conversation.summary_cursor,
+                        conversation.summary_until_message_id,
+                        conversation.summary_version,
+                        conversation.summary_updated_at,
+                        conversation.summary_method,
+                        conversation.summary_token_count,
                         conversation.last_message_at,
                         conversation.updated_at,
                         conversation.conversation_id,
@@ -1173,6 +1284,467 @@ class PostgresAgentStore:
                 )
                 row = cursor.fetchone()
         return int(row[0]) if row else 0
+
+    def list_completed_messages_after_boundary(
+        self,
+        conversation_id: str,
+        *,
+        boundary_message_id: str | None = None,
+        boundary_to_message_id: str | None = None,
+        exclude_task_id: str | None = None,
+        limit: int | None = None,
+    ) -> list[MessageRecord]:
+        with self.pool.connection() as connection:
+            with connection.cursor(row_factory=dict_row) as cursor:
+                boundary = None
+                if boundary_message_id:
+                    cursor.execute(
+                        f"SELECT message_id, created_at FROM {self._messages} "
+                        "WHERE message_id = %s",
+                        (boundary_message_id,),
+                    )
+                    boundary = cursor.fetchone()
+                    if boundary is None:
+                        return []
+                boundary_to = None
+                if boundary_to_message_id:
+                    cursor.execute(
+                        f"SELECT message_id, created_at FROM {self._messages} "
+                        "WHERE message_id = %s",
+                        (boundary_to_message_id,),
+                    )
+                    boundary_to = cursor.fetchone()
+                    if boundary_to is None:
+                        return []
+
+                sql = (
+                    f"SELECT * FROM {self._messages} "
+                    "WHERE conversation_id = %s AND status = 'completed'"
+                )
+                params: list[Any] = [conversation_id]
+                if exclude_task_id is not None:
+                    sql += " AND COALESCE(task_id, '') <> %s"
+                    params.append(exclude_task_id)
+                if boundary is not None:
+                    sql += " AND (created_at, message_id) > (%s, %s)"
+                    params.extend([boundary["created_at"], boundary["message_id"]])
+                if boundary_to is not None:
+                    sql += " AND (created_at, message_id) <= (%s, %s)"
+                    params.extend(
+                        [boundary_to["created_at"], boundary_to["message_id"]]
+                    )
+                sql += " ORDER BY created_at, message_id"
+                if limit is not None:
+                    sql += " LIMIT %s"
+                    params.append(max(0, int(limit)))
+                cursor.execute(sql, tuple(params))
+                rows = cursor.fetchall()
+        return [self._message_model(row) for row in rows]
+
+    def create_conversation_summary_job(
+        self, job: ConversationSummaryJob
+    ) -> ConversationSummaryJob:
+        with self.pool.connection() as connection:
+            with connection.cursor(row_factory=dict_row) as cursor:
+                cursor.execute(
+                    f"""INSERT INTO {self._summary_jobs} (
+                            job_id, conversation_id, expected_summary_version,
+                            boundary_from_message_id, boundary_to_message_id,
+                            status, attempt_count, available_at, lease_owner,
+                            lease_until, last_error, created_at, updated_at, finished_at
+                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        ON CONFLICT (
+                            conversation_id, expected_summary_version, boundary_to_message_id
+                        ) DO NOTHING
+                        RETURNING *""",
+                    (
+                        job.job_id,
+                        job.conversation_id,
+                        job.expected_summary_version,
+                        job.boundary_from_message_id,
+                        job.boundary_to_message_id,
+                        job.status,
+                        job.attempt_count,
+                        job.available_at,
+                        job.lease_owner,
+                        job.lease_until,
+                        job.last_error,
+                        job.created_at,
+                        job.updated_at,
+                        job.finished_at,
+                    ),
+                )
+                row = cursor.fetchone()
+                if row is None:
+                    cursor.execute(
+                        f"""SELECT * FROM {self._summary_jobs}
+                            WHERE conversation_id = %s
+                              AND expected_summary_version = %s
+                              AND boundary_to_message_id = %s""",
+                        (
+                            job.conversation_id,
+                            job.expected_summary_version,
+                            job.boundary_to_message_id,
+                        ),
+                    )
+                    row = cursor.fetchone()
+            connection.commit()
+        if row is None:
+            raise RuntimeError("conversation summary job was not persisted")
+        return self._summary_job_model(row)
+
+    def claim_conversation_summary_jobs(
+        self,
+        *,
+        owner: str,
+        limit: int = 10,
+        lease_seconds: float = 120.0,
+        max_attempts: int = 5,
+    ) -> list[ConversationSummaryJob]:
+        with self.pool.connection() as connection:
+            with connection.cursor(row_factory=dict_row) as cursor:
+                cursor.execute(
+                    f"""WITH claimable AS (
+                            SELECT job_id
+                            FROM {self._summary_jobs}
+                            WHERE status IN ('pending', 'failed')
+                              AND available_at <= NOW()
+                              AND attempt_count < %s
+                              AND (
+                                  lease_until IS NULL
+                                  OR lease_until <= NOW()
+                                  OR lease_owner = %s
+                              )
+                            ORDER BY created_at
+                            LIMIT %s
+                            FOR UPDATE SKIP LOCKED
+                        )
+                        UPDATE {self._summary_jobs} AS jobs
+                        SET status = 'running',
+                            lease_owner = %s,
+                            lease_until = NOW() + make_interval(secs => %s),
+                            updated_at = NOW()
+                        FROM claimable
+                        WHERE jobs.job_id = claimable.job_id
+                        RETURNING jobs.*""",
+                    (
+                        max(1, int(max_attempts)),
+                        owner,
+                        max(1, int(limit)),
+                        owner,
+                        max(1.0, float(lease_seconds)),
+                    ),
+                )
+                rows = cursor.fetchall()
+            connection.commit()
+        return [self._summary_job_model(row) for row in rows]
+
+    def complete_conversation_summary_job(
+        self, job_id: str, *, owner: str, finished_at: datetime
+    ) -> None:
+        with self.pool.connection() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    f"""UPDATE {self._summary_jobs}
+                        SET status = 'succeeded', lease_owner = NULL,
+                            lease_until = NULL, finished_at = %s,
+                            updated_at = %s, last_error = NULL
+                        WHERE job_id = %s AND lease_owner = %s""",
+                    (finished_at, finished_at, job_id, owner),
+                )
+            connection.commit()
+
+    def fail_conversation_summary_job(
+        self,
+        job_id: str,
+        *,
+        owner: str,
+        error: str,
+        available_at: datetime,
+    ) -> None:
+        with self.pool.connection() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    f"""UPDATE {self._summary_jobs}
+                        SET status = 'failed',
+                            attempt_count = attempt_count + 1,
+                            last_error = %s,
+                            available_at = %s,
+                            lease_owner = NULL,
+                            lease_until = NULL,
+                            updated_at = NOW()
+                        WHERE job_id = %s AND lease_owner = %s""",
+                    (error[:1000], available_at, job_id, owner),
+                )
+            connection.commit()
+
+    def compare_and_set_conversation_summary(
+        self,
+        *,
+        conversation_id: str,
+        expected_version: int,
+        boundary_from_message_id: str | None,
+        boundary_to_message_id: str,
+        summary: str,
+        summary_token_count: int,
+        summary_method: str,
+        updated_at: datetime,
+    ) -> bool:
+        del boundary_from_message_id
+        with self.pool.connection() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    f"""UPDATE {self._conversations}
+                        SET summary = %s,
+                            summary_cursor = summary_cursor + 1,
+                            summary_until_message_id = %s,
+                            summary_version = summary_version + 1,
+                            summary_updated_at = %s,
+                            summary_method = %s,
+                            summary_token_count = %s,
+                            updated_at = %s
+                        WHERE conversation_id = %s
+                          AND summary_version = %s
+                        RETURNING conversation_id""",
+                    (
+                        summary,
+                        boundary_to_message_id,
+                        updated_at,
+                        summary_method,
+                        max(0, int(summary_token_count)),
+                        updated_at,
+                        conversation_id,
+                        expected_version,
+                    ),
+                )
+                updated = cursor.fetchone() is not None
+            connection.commit()
+        return updated
+
+    def create_memory(self, memory: MemoryRecord) -> MemoryRecord:
+        with self.pool.connection() as connection:
+            with connection.cursor(row_factory=dict_row) as cursor:
+                cursor.execute(
+                    f"""INSERT INTO {self._memories} (
+                            memory_id, owner_user_id, organization_id, memory_type,
+                            scope, title, content, content_hash, memory_key, keywords,
+                            source_conversation_id, source_message_ids, extraction_method,
+                            extraction_job_id, confidence, importance, access_count,
+                            last_accessed_at, status, superseded_by_memory_id, expires_at,
+                            deleted_at, embedding_model, embedding_version,
+                            created_at, updated_at
+                        ) VALUES (
+                            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::text[],
+                            %s, %s::uuid[], %s, %s::uuid, %s, %s, %s, %s, %s, %s,
+                            %s, %s, %s, %s, %s, %s
+                        )
+                        ON CONFLICT (
+                            owner_user_id, source_conversation_id, memory_type, memory_key
+                        ) WHERE status = 'active'
+                        DO NOTHING
+                        RETURNING *""",
+                    (
+                        memory.memory_id,
+                        memory.owner_user_id,
+                        memory.organization_id,
+                        memory.memory_type,
+                        memory.scope,
+                        memory.title,
+                        memory.content,
+                        memory.content_hash,
+                        memory.memory_key,
+                        memory.keywords,
+                        memory.source_conversation_id,
+                        memory.source_message_ids,
+                        memory.extraction_method,
+                        memory.extraction_job_id,
+                        memory.confidence,
+                        memory.importance,
+                        memory.access_count,
+                        memory.last_accessed_at,
+                        memory.status,
+                        memory.superseded_by_memory_id,
+                        memory.expires_at,
+                        memory.deleted_at,
+                        memory.embedding_model,
+                        memory.embedding_version,
+                        memory.created_at,
+                        memory.updated_at,
+                    ),
+                )
+                row = cursor.fetchone()
+                if row is None and memory.status == "active":
+                    cursor.execute(
+                        f"""SELECT * FROM {self._memories}
+                            WHERE owner_user_id = %s
+                              AND source_conversation_id = %s
+                              AND memory_type = %s
+                              AND memory_key = %s
+                              AND status = 'active'""",
+                        (
+                            memory.owner_user_id,
+                            memory.source_conversation_id,
+                            memory.memory_type,
+                            memory.memory_key,
+                        ),
+                    )
+                    row = cursor.fetchone()
+            connection.commit()
+        if row is None:
+            raise RuntimeError("memory was not persisted")
+        return self._memory_model(row)
+
+    def get_memory(self, memory_id: str) -> MemoryRecord | None:
+        with self.pool.connection() as connection:
+            with connection.cursor(row_factory=dict_row) as cursor:
+                cursor.execute(
+                    f"SELECT * FROM {self._memories} WHERE memory_id = %s",
+                    (memory_id,),
+                )
+                row = cursor.fetchone()
+        return self._memory_model(row) if row else None
+
+    def list_memories(
+        self,
+        owner_user_id: str,
+        *,
+        conversation_id: str,
+        statuses: list[str] | None = None,
+        memory_types: list[str] | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[MemoryRecord]:
+        sql = (
+            f"SELECT * FROM {self._memories} "
+            "WHERE owner_user_id = %s AND source_conversation_id = %s"
+        )
+        params: list[Any] = [owner_user_id, conversation_id]
+        if statuses:
+            sql += " AND status = ANY(%s)"
+            params.append(list(statuses))
+        if memory_types:
+            sql += " AND memory_type = ANY(%s)"
+            params.append(list(memory_types))
+        sql += " ORDER BY importance DESC, updated_at DESC LIMIT %s OFFSET %s"
+        params.extend([max(1, int(limit)), max(0, int(offset))])
+        with self.pool.connection() as connection:
+            with connection.cursor(row_factory=dict_row) as cursor:
+                cursor.execute(sql, tuple(params))
+                rows = cursor.fetchall()
+        return [self._memory_model(row) for row in rows]
+
+    def count_memories(
+        self,
+        owner_user_id: str,
+        *,
+        conversation_id: str,
+        statuses: list[str] | None = None,
+        memory_types: list[str] | None = None,
+    ) -> int:
+        sql = (
+            f"SELECT COUNT(*) FROM {self._memories} "
+            "WHERE owner_user_id = %s AND source_conversation_id = %s"
+        )
+        params: list[Any] = [owner_user_id, conversation_id]
+        if statuses:
+            sql += " AND status = ANY(%s)"
+            params.append(list(statuses))
+        if memory_types:
+            sql += " AND memory_type = ANY(%s)"
+            params.append(list(memory_types))
+        with self.pool.connection() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(sql, tuple(params))
+                row = cursor.fetchone()
+        return int(row[0]) if row else 0
+
+    def search_memories(
+        self,
+        owner_user_id: str,
+        *,
+        conversation_id: str,
+        query: str,
+        limit: int = 5,
+    ) -> list[MemoryRecord]:
+        normalized = str(query or "").strip()
+        sql = (
+            f"SELECT * FROM {self._memories} "
+            "WHERE owner_user_id = %s AND source_conversation_id = %s "
+            "AND status = 'active'"
+        )
+        params: list[Any] = [owner_user_id, conversation_id]
+        if normalized:
+            conditions = [
+                "content ILIKE %s",
+                "title ILIKE %s",
+                "to_tsvector('simple', content) @@ plainto_tsquery('simple', %s)",
+            ]
+            pattern = f"%{normalized}%"
+            params.extend([pattern, pattern, normalized])
+            conditions.append(
+                "EXISTS ("
+                "SELECT 1 FROM unnest(keywords) AS memory_keyword "
+                "WHERE strpos(lower(%s), lower(memory_keyword)) > 0"
+                ")"
+            )
+            params.append(normalized)
+            sql += " AND (" + " OR ".join(conditions) + ")"
+        sql += " ORDER BY importance DESC, confidence DESC, updated_at DESC LIMIT %s"
+        params.append(max(1, int(limit)))
+        with self.pool.connection() as connection:
+            with connection.cursor(row_factory=dict_row) as cursor:
+                cursor.execute(sql, tuple(params))
+                rows = cursor.fetchall()
+        return [self._memory_model(row) for row in rows]
+
+    def delete_memory(
+        self,
+        memory_id: str,
+        *,
+        owner_user_id: str,
+        conversation_id: str,
+    ) -> bool:
+        with self.pool.connection() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    f"""DELETE FROM {self._memories}
+                        WHERE memory_id = %s
+                          AND owner_user_id = %s
+                          AND source_conversation_id = %s""",
+                    (memory_id, owner_user_id, conversation_id),
+                )
+                deleted = cursor.rowcount > 0
+            connection.commit()
+        return deleted
+
+    def add_memory_sources(self, sources: list[MemorySourceRecord]) -> None:
+        if not sources:
+            return
+        with self.pool.connection() as connection:
+            with connection.cursor() as cursor:
+                for source in sources:
+                    cursor.execute(
+                        f"""INSERT INTO {self._memory_sources} (memory_id, message_id)
+                            VALUES (%s, %s)
+                            ON CONFLICT DO NOTHING""",
+                        (source.memory_id, source.message_id),
+                    )
+            connection.commit()
+
+    def list_memory_sources(self, memory_id: str) -> list[MemorySourceRecord]:
+        with self.pool.connection() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    f"""SELECT memory_id::text, message_id::text
+                        FROM {self._memory_sources}
+                        WHERE memory_id = %s
+                        ORDER BY message_id""",
+                    (memory_id,),
+                )
+                rows = cursor.fetchall()
+        return [
+            MemorySourceRecord(memory_id=row[0], message_id=row[1]) for row in rows
+        ]
 
 
 class PostgresTodoStore:

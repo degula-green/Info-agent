@@ -10,6 +10,8 @@ LLM planner over a to-do.
 
 from __future__ import annotations
 
+import inspect
+
 from app.kernel.models import (
     CapabilityDescriptor,
     Observation,
@@ -18,6 +20,10 @@ from app.kernel.models import (
     PlanningConstraints,
     TaskEnvelope,
     TaskUnderstanding,
+)
+from app.planning.conversation_memory import (
+    build_conversation_memory_plan,
+    decide_conversation_memory_plan,
 )
 
 WEB_RESEARCH_INTENT = "web.research"
@@ -78,10 +84,22 @@ class RoutingPlanner:
         observations: list[Observation],
         constraints: PlanningConstraints | None = None,
         understanding: TaskUnderstanding | None = None,
+        *,
+        conversation_context=None,
     ) -> Plan:
+        memory_plan = build_conversation_memory_plan(task, capabilities)
+        if memory_plan is not None:
+            self._last_call_count = 0
+            return memory_plan
         planner = self.route(task, understanding)
-        return planner.create_plan(
-            task, capabilities, observations, constraints, understanding
+        return _call_planner(
+            planner.create_plan,
+            task,
+            capabilities,
+            observations,
+            constraints,
+            understanding,
+            conversation_context=conversation_context,
         )
 
     def decide_after_observation(
@@ -91,8 +109,34 @@ class RoutingPlanner:
         observations: list[Observation],
         constraints: PlanningConstraints,
         understanding: TaskUnderstanding | None = None,
+        *,
+        conversation_context=None,
     ) -> PlannerDecision:
-        planner = self.route(task, understanding)
-        return planner.decide_after_observation(
-            task, current_plan, observations, constraints, understanding
+        memory_decision = decide_conversation_memory_plan(
+            current_plan,
+            observations,
         )
+        if memory_decision is not None:
+            self._last_call_count = 0
+            return memory_decision
+        planner = self.route(task, understanding)
+        return _call_planner(
+            planner.decide_after_observation,
+            task,
+            current_plan,
+            observations,
+            constraints,
+            understanding,
+            conversation_context=conversation_context,
+        )
+
+
+def _call_planner(call, *args, conversation_context=None):
+    signature = inspect.signature(call)
+    accepts_kwargs = any(
+        parameter.kind is inspect.Parameter.VAR_KEYWORD
+        for parameter in signature.parameters.values()
+    )
+    if accepts_kwargs or "conversation_context" in signature.parameters:
+        return call(*args, conversation_context=conversation_context)
+    return call(*args)

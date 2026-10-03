@@ -425,6 +425,80 @@ class Settings:
     answer_max_output_tokens: int = _int(
         1200, "AGENT_ANSWER_MAX_OUTPUT_TOKENS", "agent_ANSWER_MAX_OUTPUT_TOKENS"
     )
+    # Conversation memory Phase 1: inject the recent tail plus a rolling
+    # summary for the same conversation only. No cross-session memory.
+    conversation_context_enabled: bool = _bool(
+        True,
+        "AGENT_CONVERSATION_CONTEXT_ENABLED",
+        "agent_CONVERSATION_CONTEXT_ENABLED",
+    )
+    conversation_context_recent_max_tokens: int = _int(
+        4000,
+        "AGENT_CONVERSATION_CONTEXT_RECENT_MAX_TOKENS",
+        "agent_CONVERSATION_CONTEXT_RECENT_MAX_TOKENS",
+    )
+    conversation_context_summary_max_tokens: int = _int(
+        1000,
+        "AGENT_CONVERSATION_CONTEXT_SUMMARY_MAX_TOKENS",
+        "agent_CONVERSATION_CONTEXT_SUMMARY_MAX_TOKENS",
+    )
+    conversation_context_max_messages: int = _int(
+        20,
+        "AGENT_CONVERSATION_CONTEXT_MAX_MESSAGES",
+        "agent_CONVERSATION_CONTEXT_MAX_MESSAGES",
+    )
+    conversation_summary_enabled: bool = _bool(
+        True,
+        "AGENT_CONVERSATION_SUMMARY_ENABLED",
+        "agent_CONVERSATION_SUMMARY_ENABLED",
+    )
+    conversation_summary_min_messages: int = _int(
+        10,
+        "AGENT_CONVERSATION_SUMMARY_MIN_MESSAGES",
+        "agent_CONVERSATION_SUMMARY_MIN_MESSAGES",
+    )
+    conversation_summary_target_tokens: int = _int(
+        600,
+        "AGENT_CONVERSATION_SUMMARY_TARGET_TOKENS",
+        "agent_CONVERSATION_SUMMARY_TARGET_TOKENS",
+    )
+    conversation_summary_max_output_tokens: int = _int(
+        800,
+        "AGENT_CONVERSATION_SUMMARY_MAX_OUTPUT_TOKENS",
+        "agent_CONVERSATION_SUMMARY_MAX_OUTPUT_TOKENS",
+    )
+    conversation_summary_lease_seconds: float = _float(
+        120.0,
+        "AGENT_CONVERSATION_SUMMARY_LEASE_SECONDS",
+        "agent_CONVERSATION_SUMMARY_LEASE_SECONDS",
+    )
+    conversation_summary_retry_seconds: float = _float(
+        30.0,
+        "AGENT_CONVERSATION_SUMMARY_RETRY_SECONDS",
+        "agent_CONVERSATION_SUMMARY_RETRY_SECONDS",
+    )
+    conversation_summary_max_attempts: int = _int(
+        5,
+        "AGENT_CONVERSATION_SUMMARY_MAX_ATTEMPTS",
+        "agent_CONVERSATION_SUMMARY_MAX_ATTEMPTS",
+    )
+    # Phase 2: conversation-scoped structured memory. Enabled by default now
+    # that the read and explicit write paths are connected.
+    conversation_memory_enabled: bool = _bool(
+        True,
+        "AGENT_CONVERSATION_MEMORY_ENABLED",
+        "agent_CONVERSATION_MEMORY_ENABLED",
+    )
+    conversation_memory_top_k: int = _int(
+        5,
+        "AGENT_CONVERSATION_MEMORY_TOP_K",
+        "agent_CONVERSATION_MEMORY_TOP_K",
+    )
+    conversation_memory_max_content_chars: int = _int(
+        4000,
+        "AGENT_CONVERSATION_MEMORY_MAX_CONTENT_CHARS",
+        "agent_CONVERSATION_MEMORY_MAX_CONTENT_CHARS",
+    )
     # Chat replies cost one model call per non-task message. The switch exists
     # so an operator can stop paying for greetings without a code change; when
     # it is off the capability is not registered and the planner simply has

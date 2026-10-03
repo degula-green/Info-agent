@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
-from typing import Protocol
+from typing import Any, Protocol
 
 from pydantic import ValidationError
 
@@ -148,6 +148,7 @@ class OpenAICompatibleUnderstandingProvider:
         task: TaskEnvelope,
         *,
         min_confidence: float | None = None,
+        conversation_context: Any | None = None,
     ) -> TaskUnderstanding:
         self.last_call_count = 0
         threshold = (
@@ -156,7 +157,10 @@ class OpenAICompatibleUnderstandingProvider:
             else max(0.0, min(1.0, float(min_confidence)))
         )
         messages = build_understanding_messages(
-            task, threshold, catalog_text=self.catalog_text
+            task,
+            threshold,
+            catalog_text=self.catalog_text,
+            conversation_context=conversation_context,
         )
         try:
             raw = self.client.complete(messages)

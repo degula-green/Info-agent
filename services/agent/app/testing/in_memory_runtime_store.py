@@ -7,15 +7,18 @@ PostgreSQL or Redis instance. Behaviour mirrors the PostgreSQL store.
 from __future__ import annotations
 
 import threading
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 from app.kernel.events import utcnow
 from app.kernel.models import (
     ApprovalRecord,
     CapabilityCallRecord,
     ConversationRecord,
+    ConversationSummaryJob,
     EvidenceRecord,
     MessageRecord,
+    MemoryRecord,
+    MemorySourceRecord,
     Observation,
     OutboxEvent,
     Plan,
@@ -46,6 +49,9 @@ class InMemoryAgentStore:
         self.outbox: dict[str, OutboxEvent] = {}
         self.conversations: dict[str, ConversationRecord] = {}
         self.messages: dict[str, MessageRecord] = {}
+        self.summary_jobs: dict[str, ConversationSummaryJob] = {}
+        self.memories: dict[str, MemoryRecord] = {}
+        self.memory_sources: dict[str, list[MemorySourceRecord]] = {}
 
     # -- tasks ------------------------------------------------------------
 
@@ -455,6 +461,19 @@ class InMemoryAgentStore:
                 if message.conversation_id == conversation_id
             ]:
                 del self.messages[message_id]
+            for job_id in [
+                job.job_id
+                for job in self.summary_jobs.values()
+                if job.conversation_id == conversation_id
+            ]:
+                del self.summary_jobs[job_id]
+            for memory_id in [
+                memory.memory_id
+                for memory in self.memories.values()
+                if memory.source_conversation_id == conversation_id
+            ]:
+                self.memories.pop(memory_id, None)
+                self.memory_sources.pop(memory_id, None)
             return True
 
     def add_message(self, message: MessageRecord) -> MessageRecord:
@@ -497,3 +516,299 @@ class InMemoryAgentStore:
                 for item in self.messages.values()
                 if item.conversation_id == conversation_id
             )
+
+    def list_completed_messages_after_boundary(
+        self,
+        conversation_id: str,
+        *,
+        boundary_message_id: str | None = None,
+        boundary_to_message_id: str | None = None,
+        exclude_task_id: str | None = None,
+        limit: int | None = None,
+    ) -> list[MessageRecord]:
+        with self._lock:
+            boundary = (
+                self.messages.get(boundary_message_id)
+                if boundary_message_id
+                else None
+            )
+            if boundary_message_id and boundary is None:
+                return []
+            boundary_to = (
+                self.messages.get(boundary_to_message_id)
+                if boundary_to_message_id
+                else None
+            )
+            if boundary_to_message_id and boundary_to is None:
+                return []
+            items = []
+            for item in self.messages.values():
+                if item.conversation_id != conversation_id:
+                    continue
+                if item.status != "completed":
+                    continue
+                if exclude_task_id is not None and item.task_id == exclude_task_id:
+                    continue
+                if boundary is not None:
+                    if (item.created_at, item.message_id) <= (
+                        boundary.created_at,
+                        boundary.message_id,
+                    ):
+                        continue
+                if boundary_to is not None:
+                    if (item.created_at, item.message_id) > (
+                        boundary_to.created_at,
+                        boundary_to.message_id,
+                    ):
+                        continue
+                items.append(item.model_copy(deep=True))
+            items.sort(key=lambda item: (item.created_at, item.message_id))
+            if limit is not None:
+                items = items[: max(0, int(limit))]
+            return items
+
+    def create_conversation_summary_job(
+        self, job: ConversationSummaryJob
+    ) -> ConversationSummaryJob:
+        with self._lock:
+            for existing in self.summary_jobs.values():
+                if (
+                    existing.conversation_id == job.conversation_id
+                    and existing.expected_summary_version == job.expected_summary_version
+                    and existing.boundary_to_message_id == job.boundary_to_message_id
+                ):
+                    return existing.model_copy(deep=True)
+            stored = job.model_copy(deep=True)
+            self.summary_jobs[stored.job_id] = stored
+            return stored.model_copy(deep=True)
+
+    def claim_conversation_summary_jobs(
+        self,
+        *,
+        owner: str,
+        limit: int = 10,
+        lease_seconds: float = 120.0,
+        max_attempts: int = 5,
+    ) -> list[ConversationSummaryJob]:
+        with self._lock:
+            now = utcnow()
+            claimable = [
+                job
+                for job in self.summary_jobs.values()
+                if job.status in {"pending", "failed"}
+                and job.available_at <= now
+                and job.attempt_count < max(1, int(max_attempts))
+                and (
+                    job.lease_until is None
+                    or job.lease_until <= now
+                    or job.lease_owner == owner
+                )
+            ]
+            claimable.sort(key=lambda item: item.created_at)
+            claimed: list[ConversationSummaryJob] = []
+            for job in claimable[: max(1, int(limit))]:
+                job.status = "running"
+                job.lease_owner = owner
+                job.lease_until = now + timedelta(seconds=max(1.0, lease_seconds))
+                job.updated_at = now
+                claimed.append(job.model_copy(deep=True))
+            return claimed
+
+    def complete_conversation_summary_job(
+        self, job_id: str, *, owner: str, finished_at: datetime
+    ) -> None:
+        with self._lock:
+            job = self.summary_jobs.get(job_id)
+            if job is None or job.lease_owner != owner:
+                return
+            job.status = "succeeded"
+            job.lease_owner = None
+            job.lease_until = None
+            job.finished_at = finished_at
+            job.updated_at = finished_at
+
+    def fail_conversation_summary_job(
+        self,
+        job_id: str,
+        *,
+        owner: str,
+        error: str,
+        available_at: datetime,
+    ) -> None:
+        with self._lock:
+            job = self.summary_jobs.get(job_id)
+            if job is None or job.lease_owner != owner:
+                return
+            job.status = "failed"
+            job.attempt_count += 1
+            job.last_error = error[:1000]
+            job.available_at = available_at
+            job.lease_owner = None
+            job.lease_until = None
+            job.updated_at = utcnow()
+
+    def compare_and_set_conversation_summary(
+        self,
+        *,
+        conversation_id: str,
+        expected_version: int,
+        boundary_from_message_id: str | None,
+        boundary_to_message_id: str,
+        summary: str,
+        summary_token_count: int,
+        summary_method: str,
+        updated_at: datetime,
+    ) -> bool:
+        with self._lock:
+            conversation = self.conversations.get(conversation_id)
+            if conversation is None or conversation.summary_version != expected_version:
+                return False
+            conversation.summary = summary
+            conversation.summary_cursor += 1
+            conversation.summary_until_message_id = boundary_to_message_id
+            conversation.summary_version += 1
+            conversation.summary_updated_at = updated_at
+            conversation.summary_method = summary_method
+            conversation.summary_token_count = max(0, int(summary_token_count))
+            conversation.updated_at = updated_at
+            return True
+
+    def create_memory(self, memory: MemoryRecord) -> MemoryRecord:
+        with self._lock:
+            if memory.status == "active":
+                for existing in self.memories.values():
+                    if (
+                        existing.owner_user_id == memory.owner_user_id
+                        and existing.source_conversation_id
+                        == memory.source_conversation_id
+                        and existing.memory_type == memory.memory_type
+                        and existing.memory_key == memory.memory_key
+                        and existing.status == "active"
+                    ):
+                        return existing.model_copy(deep=True)
+            stored = memory.model_copy(deep=True)
+            self.memories[stored.memory_id] = stored
+            self.memory_sources.setdefault(stored.memory_id, [])
+            return stored.model_copy(deep=True)
+
+    def get_memory(self, memory_id: str) -> MemoryRecord | None:
+        with self._lock:
+            memory = self.memories.get(memory_id)
+            return memory.model_copy(deep=True) if memory else None
+
+    def list_memories(
+        self,
+        owner_user_id: str,
+        *,
+        conversation_id: str,
+        statuses: list[str] | None = None,
+        memory_types: list[str] | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[MemoryRecord]:
+        with self._lock:
+            memories = [
+                memory
+                for memory in self.memories.values()
+                if memory.owner_user_id == owner_user_id
+                and memory.source_conversation_id == conversation_id
+                and (statuses is None or memory.status in statuses)
+                and (memory_types is None or memory.memory_type in memory_types)
+            ]
+            memories.sort(
+                key=lambda item: (item.importance, item.updated_at),
+                reverse=True,
+            )
+            start = max(0, int(offset))
+            return [
+                memory.model_copy(deep=True)
+                for memory in memories[start : start + max(1, int(limit))]
+            ]
+
+    def count_memories(
+        self,
+        owner_user_id: str,
+        *,
+        conversation_id: str,
+        statuses: list[str] | None = None,
+        memory_types: list[str] | None = None,
+    ) -> int:
+        with self._lock:
+            return sum(
+                1
+                for memory in self.memories.values()
+                if memory.owner_user_id == owner_user_id
+                and memory.source_conversation_id == conversation_id
+                and (statuses is None or memory.status in statuses)
+                and (memory_types is None or memory.memory_type in memory_types)
+            )
+
+    def search_memories(
+        self,
+        owner_user_id: str,
+        *,
+        conversation_id: str,
+        query: str,
+        limit: int = 5,
+    ) -> list[MemoryRecord]:
+        normalized = str(query or "").strip().lower()
+        tokens = [item for item in normalized.split() if item]
+        ranked: list[tuple[float, MemoryRecord]] = []
+        with self._lock:
+            for memory in self.memories.values():
+                if (
+                    memory.owner_user_id != owner_user_id
+                    or memory.source_conversation_id != conversation_id
+                    or memory.status != "active"
+                ):
+                    continue
+                haystack = f"{memory.title}\n{memory.content}".lower()
+                keyword_hit = any(
+                    keyword.lower() in normalized
+                    for keyword in memory.keywords
+                    if keyword
+                )
+                text_hit = normalized and normalized in haystack
+                token_hit = any(token in haystack for token in tokens)
+                if normalized and not (keyword_hit or text_hit or token_hit):
+                    continue
+                score = (
+                    float(memory.importance) * 0.6
+                    + float(memory.confidence) * 0.4
+                )
+                ranked.append((score, memory.model_copy(deep=True)))
+        ranked.sort(key=lambda item: item[0], reverse=True)
+        return [memory for _, memory in ranked[: max(0, int(limit))]]
+
+    def delete_memory(
+        self,
+        memory_id: str,
+        *,
+        owner_user_id: str,
+        conversation_id: str,
+    ) -> bool:
+        with self._lock:
+            memory = self.memories.get(memory_id)
+            if (
+                memory is None
+                or memory.owner_user_id != owner_user_id
+                or memory.source_conversation_id != conversation_id
+            ):
+                return False
+            del self.memories[memory_id]
+            self.memory_sources.pop(memory_id, None)
+            return True
+
+    def add_memory_sources(self, sources: list[MemorySourceRecord]) -> None:
+        with self._lock:
+            for source in sources:
+                bucket = self.memory_sources.setdefault(source.memory_id, [])
+                if not any(item.message_id == source.message_id for item in bucket):
+                    bucket.append(source.model_copy(deep=True))
+
+    def list_memory_sources(self, memory_id: str) -> list[MemorySourceRecord]:
+        with self._lock:
+            return [
+                item.model_copy(deep=True)
+                for item in self.memory_sources.get(memory_id, [])
+            ]
