@@ -10,6 +10,7 @@ from app.kernel.errors import classify_error
 from app.kernel.execution_context import (
     ExecutionContext,
     bind_execution_context,
+    current_conversation_context,
 )
 from app.kernel.models import (
     CapabilityCallRecord,
@@ -119,6 +120,7 @@ class CapabilityExecutor:
                 plan,
                 step,
                 request_id=call.request_id,
+                conversation_context=current_conversation_context(),
             )
             with bind_execution_context(execution_context):
                 output = capability.execute(arguments)

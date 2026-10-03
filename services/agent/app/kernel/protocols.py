@@ -8,7 +8,9 @@ from app.kernel.models import (
     ApprovalRecord,
     CapabilityCallRecord,
     CapabilityDescriptor,
+    ConversationContext,
     ConversationRecord,
+    ConversationSummaryJob,
     EvidenceRecord,
     MessageRecord,
     OutboxEvent,
@@ -74,6 +76,7 @@ class TaskUnderstandingProvider(Protocol):
         self,
         task: TaskEnvelope,
         *,
+        conversation_context: ConversationContext | None = None,
         min_confidence: float | None = None,
     ) -> TaskUnderstanding:
         ...
@@ -87,6 +90,8 @@ class Planner(Protocol):
         observations: list[Observation],
         constraints: PlanningConstraints,
         understanding: TaskUnderstanding | None = None,
+        *,
+        conversation_context: ConversationContext | None = None,
     ) -> Plan:
         ...
 
@@ -97,6 +102,8 @@ class Planner(Protocol):
         observations: list[Observation],
         constraints: PlanningConstraints,
         understanding: TaskUnderstanding | None = None,
+        *,
+        conversation_context: ConversationContext | None = None,
     ) -> PlannerDecision:
         ...
 
@@ -372,6 +379,61 @@ class AgentStore(Protocol):
         ...
 
     def count_messages(self, conversation_id: str) -> int:
+        ...
+
+    def list_completed_messages_after_boundary(
+        self,
+        conversation_id: str,
+        *,
+        boundary_message_id: str | None = None,
+        boundary_to_message_id: str | None = None,
+        exclude_task_id: str | None = None,
+        limit: int | None = None,
+    ) -> list[MessageRecord]:
+        ...
+
+    def create_conversation_summary_job(
+        self, job: ConversationSummaryJob
+    ) -> ConversationSummaryJob:
+        ...
+
+    def claim_conversation_summary_jobs(
+        self,
+        *,
+        owner: str,
+        limit: int = 10,
+        lease_seconds: float = 120.0,
+        max_attempts: int = 5,
+    ) -> list[ConversationSummaryJob]:
+        ...
+
+    def complete_conversation_summary_job(
+        self, job_id: str, *, owner: str, finished_at: datetime
+    ) -> None:
+        ...
+
+    def fail_conversation_summary_job(
+        self,
+        job_id: str,
+        *,
+        owner: str,
+        error: str,
+        available_at: datetime,
+    ) -> None:
+        ...
+
+    def compare_and_set_conversation_summary(
+        self,
+        *,
+        conversation_id: str,
+        expected_version: int,
+        boundary_from_message_id: str | None,
+        boundary_to_message_id: str,
+        summary: str,
+        summary_token_count: int,
+        summary_method: str,
+        updated_at: datetime,
+    ) -> bool:
         ...
 
 

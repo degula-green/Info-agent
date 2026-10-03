@@ -45,6 +45,7 @@ class AnswerProvider(Protocol):
         evidence: list[dict[str, Any]],
         *,
         time_range: str | None = None,
+        conversation_context: Any | None = None,
     ) -> AnswerDraft:
         ...
 
@@ -81,11 +82,18 @@ class LlmAnswerProvider:
         evidence: list[dict[str, Any]],
         *,
         time_range: str | None = None,
+        conversation_context: Any | None = None,
     ) -> AnswerDraft:
         self.last_call_count = 0
         payload: dict[str, Any] = {"question": question, "evidence": evidence}
         if time_range:
             payload["time_range"] = time_range
+        if conversation_context is not None:
+            payload["conversation_context"] = (
+                conversation_context.model_dump(mode="json")
+                if hasattr(conversation_context, "model_dump")
+                else conversation_context
+            )
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT},
             {

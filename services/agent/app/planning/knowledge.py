@@ -8,6 +8,7 @@ Capability plan before the configured planner gets a chance to drift.
 
 from __future__ import annotations
 
+import inspect
 import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -489,6 +490,8 @@ class KnowledgeRoutingPlanner:
         observations: list[Observation],
         constraints: PlanningConstraints | None = None,
         understanding: TaskUnderstanding | None = None,
+        *,
+        conversation_context=None,
     ) -> Plan:
         route = classify_knowledge_question(
             str(task.input.get("text") or ""),
@@ -500,12 +503,14 @@ class KnowledgeRoutingPlanner:
             if plan is not None:
                 self._last_call_count = 0
                 return plan
-        built = self.base.create_plan(
+        built = _call_plan(
+            self.base.create_plan,
             task,
             capabilities,
             observations,
             constraints,
             understanding,
+            conversation_context=conversation_context,
         )
         self._last_call_count = max(
             int(getattr(self.base, "last_call_count", 0) or 0),
@@ -520,22 +525,37 @@ class KnowledgeRoutingPlanner:
         observations: list[Observation],
         constraints: PlanningConstraints,
         understanding: TaskUnderstanding | None = None,
+        *,
+        conversation_context=None,
     ) -> PlannerDecision:
         if _is_knowledge_plan(current_plan):
             self._last_call_count = 0
             return _decide_knowledge_plan(current_plan, observations)
-        decision = self.base.decide_after_observation(
+        decision = _call_plan(
+            self.base.decide_after_observation,
             task,
             current_plan,
             observations,
             constraints,
             understanding,
+            conversation_context=conversation_context,
         )
         self._last_call_count = max(
             int(getattr(self.base, "last_call_count", 0) or 0),
             0,
         )
         return decision
+
+
+def _call_plan(call, *args, conversation_context=None):
+    signature = inspect.signature(call)
+    accepts_kwargs = any(
+        parameter.kind is inspect.Parameter.VAR_KEYWORD
+        for parameter in signature.parameters.values()
+    )
+    if accepts_kwargs or "conversation_context" in signature.parameters:
+        return call(*args, conversation_context=conversation_context)
+    return call(*args)
 
 
 def _decide_knowledge_plan(

@@ -33,10 +33,13 @@ class ExecutionService:
         understanding_provider=None,
         lease_owner: str | None = None,
         message_sync=None,
+        conversation_context_loader=None,
+        summary_service=None,
     ) -> None:
         self.store = store
         self.settings = settings
         self.message_sync = message_sync
+        self.summary_service = summary_service
         # The lease must identify this driver, not a fixed role name: two drivers
         # sharing "worker" would both pass the lease check and drive the same Task
         # concurrently (the API's /run racing the worker process).
@@ -56,6 +59,7 @@ class ExecutionService:
             understanding_provider=understanding_provider,
             understanding_mode=settings.understanding_mode,
             settings=settings,
+            conversation_context_loader=conversation_context_loader,
         )
         self.dispatcher = OutboxDispatcher(
             store, publisher, batch_size=settings.outbox_batch_size
@@ -65,7 +69,19 @@ class ExecutionService:
         result = self.runtime.run_task(task_id, lease_owner=self.lease_owner)
         if self.message_sync is not None:
             self.message_sync(task_id)
+        if self.summary_service is not None and result.status in {
+            "succeeded",
+            "failed",
+            "cancelled",
+            "unknown",
+        }:
+            self.summary_service.enqueue_after_task(task_id)
         return result.status
+
+    def run_summary_jobs(self, *, limit: int = 10) -> int:
+        if self.summary_service is None:
+            return 0
+        return self.summary_service.run_once(limit=limit)
 
     def handle_wakeup(self, task_id: str) -> None:
         try:

@@ -5,7 +5,7 @@ from contextvars import ContextVar, Token
 from dataclasses import dataclass
 from typing import Any, Iterator
 
-from app.kernel.models import Plan, PlanStep, TaskRecord
+from app.kernel.models import ConversationContext, Plan, PlanStep, TaskRecord
 
 
 @dataclass(frozen=True)
@@ -19,6 +19,7 @@ class ExecutionContext:
     trace_id: str
     source_type: str
     source_ref: dict[str, Any]
+    conversation_context: ConversationContext | None = None
 
     @classmethod
     def from_task(
@@ -28,6 +29,7 @@ class ExecutionContext:
         step: PlanStep,
         *,
         request_id: str,
+        conversation_context: ConversationContext | None = None,
     ) -> "ExecutionContext":
         source_ref = dict(task.source_ref)
         organization_id = _text(source_ref.get("organization_id"))
@@ -46,6 +48,7 @@ class ExecutionContext:
             trace_id=trace_id,
             source_type=task.source_type,
             source_ref=source_ref,
+            conversation_context=conversation_context,
         )
 
 
@@ -69,6 +72,27 @@ def bind_execution_context(context: ExecutionContext) -> Iterator[None]:
         yield
     finally:
         _execution_context.reset(token)
+
+
+_conversation_context: ContextVar[ConversationContext | None] = ContextVar(
+    "agent_conversation_context",
+    default=None,
+)
+
+
+def current_conversation_context() -> ConversationContext | None:
+    return _conversation_context.get()
+
+
+@contextmanager
+def bind_conversation_context(
+    context: ConversationContext | None,
+) -> Iterator[None]:
+    token = _conversation_context.set(context)
+    try:
+        yield
+    finally:
+        _conversation_context.reset(token)
 
 
 def _text(value: Any) -> str | None:

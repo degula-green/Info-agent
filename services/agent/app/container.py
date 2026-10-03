@@ -10,6 +10,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from app.application.execution_service import ExecutionService
+from app.application.conversation_memory import (
+    ConversationContextService,
+    ConversationSummaryService,
+    LlmConversationSummaryProvider,
+)
 from app.application.knowledge_events import KnowledgeEventService
 from app.application.task_service import TaskService
 from app.capabilities.answer import AnswerComposeCapability
@@ -525,6 +530,30 @@ def build_container(
         platforms=resolved.knowledge_platform_allowlist
     )
     task_service = TaskService(resolved_store)
+    conversation_context_service = ConversationContextService(
+        resolved_store,
+        resolved,
+    )
+    summary_service = None
+    if (
+        resolved.conversation_summary_enabled
+        and resolved.llm_base_url
+        and resolved.llm_model
+    ):
+        summary_service = ConversationSummaryService(
+            resolved_store,
+            resolved,
+            LlmConversationSummaryProvider(
+                OpenAIChatClient(
+                    base_url=resolved.llm_base_url,
+                    api_key=resolved.llm_api_key,
+                    model=resolved.llm_model,
+                    timeout_seconds=resolved.llm_timeout_seconds,
+                    max_output_tokens=resolved.conversation_summary_max_output_tokens,
+                    response_format="json_object",
+                )
+            ),
+        )
 
     return AgentContainer(
         settings=resolved,
@@ -545,6 +574,8 @@ def build_container(
             settings=resolved,
             understanding_provider=resolved_understanding,
             message_sync=task_service.sync_task_messages,
+            conversation_context_loader=conversation_context_service.load,
+            summary_service=summary_service,
         ),
         knowledge_ingress=resolved_ingress,
         knowledge_client=resolved_knowledge,

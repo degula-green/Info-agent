@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import inspect
 import logging
 import time
 from datetime import datetime, timezone
@@ -12,6 +13,10 @@ from app.kernel.bindings import bind_plan_references
 from app.kernel.checkpoint import build_checkpoint, next_pending_step, resume_step
 from app.kernel.errors import ContractValidationError, TaskNotFoundError, classify_error
 from app.kernel.events import new_task_event, utcnow
+from app.kernel.execution_context import (
+    bind_conversation_context,
+    current_conversation_context,
+)
 from app.kernel.executor import CapabilityExecutor
 from app.kernel.limits import ExecutionLimits
 from app.kernel.models import (
@@ -63,6 +68,32 @@ from app.kernel.approval import approval_matches_arguments
 logger = logging.getLogger("agent.runtime")
 
 
+def _call_with_optional_kwargs(call, *args, **kwargs):
+    """Call a collaborator with the context keywords it actually accepts.
+
+    Protocol providers gain optional context parameters over time, while test
+    doubles and third-party planners may still expose the old signature.
+    Inspecting the signature avoids swallowing a real TypeError raised inside
+    the implementation.
+    """
+
+    signature = inspect.signature(call)
+    accepts_kwargs = any(
+        parameter.kind is inspect.Parameter.VAR_KEYWORD
+        for parameter in signature.parameters.values()
+    )
+    accepted = (
+        kwargs
+        if accepts_kwargs
+        else {
+            name: value
+            for name, value in kwargs.items()
+            if name in signature.parameters
+        }
+    )
+    return call(*args, **accepted)
+
+
 def _describe_arguments(arguments: dict | None) -> str:
     """A short, stable rendering of Step arguments for an error message."""
 
@@ -89,6 +120,7 @@ class AgentRuntime:
         settings = None,
         clock: Callable[[], datetime] | None = None,
         sleep: Callable[[float], None] | None = None,
+        conversation_context_loader: Callable[[TaskRecord], Any] | None = None,
     ) -> None:
         self.store = store
         self.registry = registry
@@ -105,6 +137,7 @@ class AgentRuntime:
         self.settings = settings
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._sleep = sleep or time.sleep
+        self._conversation_context_loader = conversation_context_loader
 
     def run_task(self, task_id: str, *, lease_owner: str = "worker") -> TaskRunResult:
         task = self.store.get_task(task_id)
@@ -117,8 +150,17 @@ class AgentRuntime:
             )
         if not self.store.acquire_lease(task_id, lease_owner, self.limits.lease_seconds):
             return self._result(task, waiting_for="lease")
+        conversation_context = None
+        if self._conversation_context_loader is not None:
+            try:
+                conversation_context = self._conversation_context_loader(task)
+            except Exception:  # noqa: BLE001 - history must not kill execution
+                logger.exception(
+                    "failed to load conversation context for task %s", task_id
+                )
         try:
-            return self._drive(task_id)
+            with bind_conversation_context(conversation_context):
+                return self._drive(task_id)
         finally:
             self.store.release_lease(task_id, lease_owner)
 
@@ -677,12 +719,12 @@ class AgentRuntime:
             envelope.input["text"] = original_text
         understand = self.understanding_provider.understand
         threshold = self._understanding_threshold(task)
-        if threshold is None:
-            return understand(envelope)
-        try:
-            return understand(envelope, min_confidence=threshold)
-        except TypeError:
-            return understand(envelope)
+        return _call_with_optional_kwargs(
+            understand,
+            envelope,
+            conversation_context=current_conversation_context(),
+            min_confidence=threshold,
+        )
 
     def _understanding_threshold(self, task: TaskRecord) -> float | None:
         collected = self.limits.understanding_min_confidence_collected
@@ -742,12 +784,14 @@ class AgentRuntime:
             )
         try:
             plan = self._planner_call(
-                lambda: self.planner.create_plan(
+                lambda: _call_with_optional_kwargs(
+                    self.planner.create_plan,
                     task.to_envelope(),
                     self.registry.list_descriptors(),
                     self.store.list_observations(task.task_id),
                     self._planning_constraints(),
                     understanding,
+                    conversation_context=current_conversation_context(),
                 )
             )
         except Exception as exc:  # noqa: BLE001 - normalize planner failures
@@ -895,12 +939,14 @@ class AgentRuntime:
             set_capabilities(self.registry.list_descriptors())
         try:
             decision = self._planner_call(
-                lambda: self.planner.decide_after_observation(
+                lambda: _call_with_optional_kwargs(
+                    self.planner.decide_after_observation,
                     task.to_envelope(),
                     plan,
                     observations,
                     self._planning_constraints(),
                     understanding,
+                    conversation_context=current_conversation_context(),
                 )
             )
         except Exception as exc:  # noqa: BLE001 - normalize planner failures

@@ -14,8 +14,10 @@ from datetime import datetime, timezone
 
 import pytest
 
+from app.kernel.events import utcnow
 from app.kernel.models import (
     ConversationRecord,
+    ConversationSummaryJob,
     MessageRecord,
     TaskEvent,
     TaskInput,
@@ -179,6 +181,63 @@ def test_conversation_task_and_messages_commit_together(store) -> None:
     )
     assert store.get_conversation(conversation_id) is None
     assert store.list_messages(conversation_id) == []
+
+
+def test_postgres_summary_job_and_cas_round_trip(store) -> None:
+    from datetime import timedelta
+
+    moment = utcnow()
+    conversation_id = str(uuid.uuid4())
+    conversation = ConversationRecord(
+        conversation_id=conversation_id,
+        owner_user_id="user-1",
+        title="summary",
+        created_at=moment,
+        updated_at=moment,
+    )
+    store.create_conversation(conversation)
+    message = MessageRecord(
+        message_id=str(uuid.uuid4()),
+        conversation_id=conversation_id,
+        role="assistant",
+        content="完成一轮对话",
+        status="completed",
+        created_at=moment,
+        updated_at=moment,
+    )
+    store.add_message(message)
+    job = ConversationSummaryJob(
+        job_id=str(uuid.uuid4()),
+        conversation_id=conversation_id,
+        expected_summary_version=0,
+        boundary_to_message_id=message.message_id,
+        available_at=moment - timedelta(seconds=1),
+        created_at=moment,
+        updated_at=moment,
+    )
+    store.create_conversation_summary_job(job)
+    claimed = store.claim_conversation_summary_jobs(owner="test-summary", limit=1)
+    assert [item.job_id for item in claimed] == [job.job_id]
+    assert store.compare_and_set_conversation_summary(
+        conversation_id=conversation_id,
+        expected_version=0,
+        boundary_from_message_id=None,
+        boundary_to_message_id=message.message_id,
+        summary="会话摘要",
+        summary_token_count=10,
+        summary_method="incremental",
+        updated_at=utcnow(),
+    )
+    updated = store.get_conversation(conversation_id)
+    assert updated.summary == "会话摘要"
+    assert updated.summary_version == 1
+    assert updated.summary_until_message_id == message.message_id
+    store.complete_conversation_summary_job(
+        job.job_id,
+        owner="test-summary",
+        finished_at=utcnow(),
+    )
+    assert store.delete_conversation(conversation_id, owner_user_id="user-1")
 
 
 def test_task_payload_survives_a_round_trip(store) -> None:

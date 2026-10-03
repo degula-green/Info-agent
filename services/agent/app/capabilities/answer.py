@@ -8,6 +8,7 @@ text, it never writes anywhere.
 
 from __future__ import annotations
 
+import inspect
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -17,6 +18,7 @@ from app.kernel.models import (
     CapabilityInputBinding,
     StepOutputRef,
 )
+from app.kernel.execution_context import current_execution_context
 
 CAPABILITY_NAME = "answer.compose"
 DEFAULT_TIMEOUT_SECONDS = 60
@@ -91,6 +93,28 @@ def keep_known_citations(
     return kept
 
 
+def _compose_with_context(provider, question: str, evidence: list[dict[str, Any]]):
+    try:
+        context = current_execution_context().conversation_context
+    except RuntimeError:
+        # Unit callers can exercise the capability directly; the kernel binds
+        # this context for real executions.
+        context = None
+    if context is None:
+        return provider.compose(question, evidence)
+    signature = inspect.signature(provider.compose)
+    if "conversation_context" not in signature.parameters and not any(
+        parameter.kind is inspect.Parameter.VAR_KEYWORD
+        for parameter in signature.parameters.values()
+    ):
+        return provider.compose(question, evidence)
+    return provider.compose(
+        question,
+        evidence,
+        conversation_context=context,
+    )
+
+
 class AnswerComposeCapability:
     """Calls the answer provider and validates the citations it returns."""
 
@@ -130,7 +154,11 @@ class AnswerComposeCapability:
         return AnswerComposeInput.model_validate(arguments)
 
     def execute(self, arguments: AnswerComposeInput) -> dict[str, Any]:
-        draft = self.provider.compose(arguments.question, arguments.evidence)
+        draft = _compose_with_context(
+            self.provider,
+            arguments.question,
+            arguments.evidence,
+        )
         return AnswerComposeResult(
             answer=draft.answer,
             citations=keep_known_citations(draft.citations, arguments.evidence),

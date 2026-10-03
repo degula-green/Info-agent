@@ -371,6 +371,11 @@ class ConversationRecord(BaseModel):
     source: str = "agent"
     summary: str | None = None
     summary_cursor: int = Field(default=0, ge=0)
+    summary_until_message_id: str | None = None
+    summary_version: int = Field(default=0, ge=0)
+    summary_updated_at: datetime | None = None
+    summary_method: str = "incremental"
+    summary_token_count: int = Field(default=0, ge=0)
     last_message_at: datetime | None = None
     created_at: datetime
     updated_at: datetime
@@ -393,3 +398,34 @@ class MessageRecord(BaseModel):
     client_message_id: str | None = None
     created_at: datetime
     updated_at: datetime
+
+
+class ConversationContext(BaseModel):
+    """Read-only context assembled for one Task.
+
+    Conversation history travels beside ``TaskEnvelope`` instead of inside its
+    ``input`` dict. The Runtime loads this once and binds it for planners and
+    capabilities.
+    """
+
+    conversation_id: str
+    summary: str | None = None
+    summary_until_message_id: str | None = None
+    recent_messages: list[MessageRecord] = Field(default_factory=list)
+
+
+class ConversationSummaryJob(BaseModel):
+    job_id: str
+    conversation_id: str
+    expected_summary_version: int = Field(ge=0)
+    boundary_from_message_id: str | None = None
+    boundary_to_message_id: str
+    status: str = "pending"
+    attempt_count: int = Field(default=0, ge=0)
+    available_at: datetime
+    lease_owner: str | None = None
+    lease_until: datetime | None = None
+    last_error: str | None = None
+    created_at: datetime
+    updated_at: datetime
+    finished_at: datetime | None = None
