@@ -94,8 +94,10 @@ async def _page_info(page: Any) -> PageInfo:
     except Exception:  # noqa: BLE001
         title = ""
 
+    # Editors render their chrome long after `load`; give the grid the whole
+    # settle budget, then fall back to a form check that is already rendered.
     driver = GridDriver(page, settle_ms=settings.settle_ms)
-    is_grid = await driver.detect()
+    is_grid = await driver.detect(timeout_ms=settings.settle_ms)
     login_required = any(marker in body for marker in LOGIN_MARKERS)
     kind = "spreadsheet" if is_grid else "unknown"
     editor = "kdocs-grid" if is_grid else ""
@@ -103,7 +105,7 @@ async def _page_info(page: Any) -> PageInfo:
 
     # A form page is one that actually exposes editable fields and no grid.
     if not is_grid:
-        if await FormDriver(page, settle_ms=settings.settle_ms).detect():
+        if await FormDriver(page, settle_ms=settings.settle_ms).detect(timeout_ms=1000):
             kind = "form"
             editor = "html-form"
 
@@ -158,7 +160,13 @@ async def open_url(session_id: str, body: OpenRequest) -> PageInfo:
         )
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=502, detail=f"navigation failed: {exc}") from exc
-    await session.page.wait_for_timeout(settings.settle_ms)
+    # Give the editor a chance to stop re-rendering before anything is clicked.
+    try:
+        await session.page.wait_for_load_state("networkidle", timeout=15000)
+    except Exception:  # noqa: BLE001 - a chatty page still gets a readiness check
+        pass
+    # Readiness is polled below, so this is only a beat for the first paint.
+    await session.page.wait_for_timeout(800)
     info = await _page_info(session.page)
     session.url = info.final_url
     session.login_required = info.login_required

@@ -8,6 +8,7 @@ still find the same control.
 
 from __future__ import annotations
 
+import time
 from typing import Any
 
 from .models import FormFieldInfo, FormFillResult, FormSnapshot, FormSubmitResult
@@ -98,11 +99,17 @@ class FormDriver:
         self.page = page
         self.settle_ms = max(int(settle_ms), 0)
 
-    async def detect(self) -> bool:
-        try:
-            return await self.page.locator(CONTROL_SELECTOR).count() > 0
-        except Exception:  # noqa: BLE001
-            return False
+    async def detect(self, *, timeout_ms: int = 0) -> bool:
+        deadline = time.monotonic() + max(int(timeout_ms), 0) / 1000
+        while True:
+            try:
+                if await self.page.locator(CONTROL_SELECTOR).count() > 0:
+                    return True
+            except Exception:  # noqa: BLE001
+                pass
+            if time.monotonic() >= deadline:
+                return False
+            await self.page.wait_for_timeout(200)
 
     async def snapshot(self) -> FormSnapshot:
         try:

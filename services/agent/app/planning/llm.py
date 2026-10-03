@@ -102,6 +102,22 @@ class DecisionDraft(BaseModel):
 
         if isinstance(value, str):
             return [value]
+        if isinstance(value, list):
+            # An entry written as {"name": ...} is a label the model chose to
+            # describe; the name is the part a reader needs.
+            coerced: list[Any] = []
+            for item in value:
+                if isinstance(item, dict):
+                    label = (
+                        item.get("name")
+                        or item.get("field")
+                        or item.get("label")
+                        or item.get("title")
+                    )
+                    coerced.append(str(label) if label else json.dumps(item, ensure_ascii=False))
+                else:
+                    coerced.append(item)
+            return coerced
         return value
 
 
@@ -782,6 +798,13 @@ def _plan_messages(
                 "只要结果是要直接给用户看的（读链接、搜索、总结、比较等），就必须在 "
                 "获取证据后追加 answer.compose；只有后续步骤要消费这些证据、"
                 "不需要直接回复用户时才可以不追加。"
+                "表单填写是这条规则的例外：form.preview 读取表单并产出草稿，"
+                "form.apply 用 draft_ref 指向 form.preview 的 form 输出把草稿写入，"
+                "写完后系统会直接给用户回执，不要再追加 answer.compose；"
+                "answer.compose 的 evidence_ref / evidence_refs 只接受 web.research "
+                "的 evidence，指向 form.preview 会被拒绝。"
+                "用户只要求填写、没有提供任何字段值时，仍然照常规划 "
+                "form.preview + form.apply：缺的字段由用户在草稿卡片上补。"
                 "调用 web.research 时：用户给出的链接放 urls，检索词放 queries（最多 3 条），"
                 "两者可以同时给；不要只填参数以外的字段。"
                 "step 只能指向本计划中比当前步更早的步骤，output 只能用来源 capability 的 "

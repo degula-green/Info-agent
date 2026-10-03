@@ -569,3 +569,14 @@ def test_latest_write_is_found_for_undo() -> None:
         )
     )
     assert _latest_write(empty, "t") == (None, None)
+
+
+def test_bound_reference_schema_names_the_source_capability() -> None:
+    """The model must be told which step a reference may point at."""
+
+    from app.planning.schema import planner_arguments_schema
+
+    schema = planner_arguments_schema(FormApplyCapability(FakeClient()).descriptor)
+    hint = schema["properties"]["draft_ref"]["description"]
+    assert "form.preview" in hint
+    assert "form" in hint

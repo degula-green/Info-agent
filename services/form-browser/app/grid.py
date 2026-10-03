@@ -15,6 +15,7 @@ miss from being mistaken for a successful fill.
 
 from __future__ import annotations
 
+import time
 from typing import Any
 
 from .cells import block_range, format_range, parse_range
@@ -96,32 +97,47 @@ class GridDriver:
     async def _settle(self, factor: float = 1.0) -> None:
         await self.page.wait_for_timeout(int(self.settle_ms * factor))
 
-    async def detect(self) -> bool:
-        """True when the page exposes the name box / canvas pair."""
+    async def detect(self, *, timeout_ms: int = 0) -> bool:
+        """True when the page exposes the name box / canvas pair.
 
-        try:
-            if await self.page.locator(NAME_BOX).count() == 0:
+        A spreadsheet editor renders its chrome well after ``load``, so with a
+        budget the check polls instead of sampling once: a fixed sleep is a
+        race that fails exactly when the page is slow.
+        """
+
+        deadline = time.monotonic() + max(int(timeout_ms), 0) / 1000
+        while True:
+            try:
+                if (
+                    await self.page.locator(NAME_BOX).count() > 0
+                    and await self.page.locator("canvas").count() > 0
+                ):
+                    return True
+            except Exception:  # noqa: BLE001 - detection never raises
+                pass
+            if time.monotonic() >= deadline:
                 return False
-            return await self.page.locator("canvas").count() > 0
-        except Exception:  # noqa: BLE001 - detection never raises
-            return False
+            await self.page.wait_for_timeout(250)
 
     async def select(self, ref: str) -> str:
         """Move the selection to ``ref`` and return what the name box shows."""
 
-        try:
-            box = self.page.locator(NAME_BOX).first
-            await box.click(timeout=8000)
-            await box.press("Control+a")
-            await box.fill(ref)
-            await box.press("Enter")
-        except Exception as exc:  # noqa: BLE001
-            raise GridUnavailable(f"could not select {ref}: {exc}") from exc
-        await self._settle(0.15)
-        try:
-            return (await box.input_value()).strip()
-        except Exception:  # noqa: BLE001
-            return ref
+        box = self.page.locator(NAME_BOX).first
+        last: Exception | None = None
+        # A freshly painted editor keeps re-rendering, and Playwright refuses
+        # to click an element that is not stable. Retrying rides that out.
+        for _ in range(3):
+            try:
+                await box.click(timeout=5000)
+                await box.press("Control+a")
+                await box.fill(ref)
+                await box.press("Enter")
+                await self._settle(0.15)
+                return (await box.input_value()).strip()
+            except Exception as exc:  # noqa: BLE001
+                last = exc
+                await self.page.wait_for_timeout(1200)
+        raise GridUnavailable(f"could not select {ref}: {last}")
 
     async def _set_clipboard(self, text: str) -> None:
         await self.page.evaluate(
@@ -147,10 +163,20 @@ class GridDriver:
         # it, not the sheet, so a whole-sheet read names a generous range and
         # trims the padding afterwards.
         ref = span or f"{start_cell}:{self.scan_columns}{self.max_rows}"
-        await self.select(ref)
-        await self.page.keyboard.press("Control+c")
-        await self._settle(0.2)
-        return parse_tsv(await self._read_clipboard())
+        # The name box can exist before the sheet paints, and copying a grid
+        # that has not painted yields an empty clipboard. Retry rather than
+        # report "the sheet is empty" for a page that is merely slow.
+        matrix: list[list[str]] = []
+        for attempt in range(3):
+            await self.select(ref)
+            await self.page.keyboard.press("Control+c")
+            await self._settle(0.2)
+            matrix = parse_tsv(await self._read_clipboard())
+            if matrix:
+                return matrix
+            if attempt < 2:
+                await self.page.wait_for_timeout(1000)
+        return matrix
 
     async def header_and_rows(self, *, header_span: str = "A1:Z1") -> tuple[list[str], list[list[str]], str]:
         """Split the sheet into a header row, data rows, and the used range."""
