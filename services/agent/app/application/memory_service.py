@@ -62,6 +62,10 @@ class MemoryService:
         keywords: list[str] | None = None,
         importance: float = 0.5,
         confidence: float = 0.8,
+        memory_key: str | None = None,
+        source_message_ids: list[str] | None = None,
+        extraction_method: str = "manual",
+        status: str = "active",
     ) -> MemoryRecord:
         conversation = self._owned_conversation(
             conversation_id=conversation_id,
@@ -88,21 +92,83 @@ class MemoryService:
             title=resolved_title,
             content=resolved_content,
             content_hash=hashlib.sha256(resolved_content.encode("utf-8")).hexdigest(),
-            memory_key=_memory_key(resolved_title, resolved_content),
+            memory_key=memory_key or _memory_key(resolved_title, resolved_content),
             keywords=[
                 item.strip()
                 for item in (keywords or [])
                 if item and item.strip()
             ][:20],
             source_conversation_id=conversation_id,
-            extraction_method="manual",
+            source_message_ids=list(source_message_ids or []),
+            extraction_method=extraction_method,
             confidence=max(0.0, min(1.0, float(confidence))),
             importance=max(0.0, min(1.0, float(importance))),
-            status="active",
+            status=status,
             created_at=moment,
             updated_at=moment,
         )
         return self.store.create_memory(memory)
+
+    def upsert_conversation_memory(
+        self,
+        *,
+        owner_user_id: str,
+        conversation_id: str,
+        memory_type: str,
+        title: str,
+        content: str,
+        memory_key: str,
+        keywords: list[str] | None = None,
+        importance: float = 0.5,
+        confidence: float = 0.8,
+        source_message_ids: list[str] | None = None,
+        extraction_method: str = "explicit",
+    ) -> MemoryRecord:
+        """Replace the active value for one stable conversation memory key."""
+
+        resolved_type = str(memory_type or "").strip().lower()
+        if resolved_type not in ALLOWED_MEMORY_TYPES:
+            raise MemoryValidationError(
+                "memory_type must be one of fact, decision, relation, context"
+            )
+        resolved_title = _normalize_text(title)
+        resolved_content = _normalize_text(content)
+        if not resolved_title or not resolved_content:
+            raise MemoryValidationError("memory title and content are required")
+        if not memory_key.strip():
+            raise MemoryValidationError("memory_key is required")
+
+        content_hash = hashlib.sha256(resolved_content.encode("utf-8")).hexdigest()
+        existing = self.store.list_memories(
+            owner_user_id,
+            conversation_id=conversation_id,
+            statuses=["active"],
+            memory_types=[resolved_type],
+            limit=500,
+        )
+        matches = [item for item in existing if item.memory_key == memory_key]
+        if matches and matches[0].content_hash == content_hash:
+            return matches[0]
+        for item in matches:
+            self.store.delete_memory(
+                item.memory_id,
+                owner_user_id=owner_user_id,
+                conversation_id=conversation_id,
+            )
+        return self.create(
+            owner_user_id=owner_user_id,
+            conversation_id=conversation_id,
+            memory_type=resolved_type,
+            title=resolved_title,
+            content=resolved_content,
+            keywords=keywords,
+            importance=importance,
+            confidence=confidence,
+            memory_key=memory_key,
+            source_message_ids=source_message_ids,
+            extraction_method=extraction_method,
+            status="active",
+        )
 
     def list(
         self,

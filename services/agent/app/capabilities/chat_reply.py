@@ -9,10 +9,12 @@ evidence and refuses to run without sources, which is the wrong shape for
 
 from __future__ import annotations
 
+import inspect
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.kernel.execution_context import current_execution_context
 from app.kernel.models import CapabilityDescriptor
 
 CAPABILITY_NAME = "chat.reply"
@@ -66,10 +68,28 @@ class ChatReplyCapability:
         return ChatReplyInput.model_validate(arguments)
 
     def execute(self, arguments: ChatReplyInput) -> dict[str, Any]:
-        draft = self.provider.reply(arguments.text)
+        draft = _reply_with_context(self.provider, arguments.text)
         return ChatReplyResult(
             answer=draft.reply,
             # Reported so the Runtime can charge the Task budget: a capability
             # that spends model calls must not be able to spend them for free.
             model_calls=max(int(getattr(draft, "model_calls", 0) or 0), 0),
         ).model_dump()
+
+
+def _reply_with_context(provider, text: str):
+    try:
+        context = current_execution_context().conversation_context
+    except RuntimeError:
+        context = None
+    if context is None:
+        return provider.reply(text)
+
+    signature = inspect.signature(provider.reply)
+    accepts_kwargs = any(
+        parameter.kind is inspect.Parameter.VAR_KEYWORD
+        for parameter in signature.parameters.values()
+    )
+    if "conversation_context" not in signature.parameters and not accepts_kwargs:
+        return provider.reply(text)
+    return provider.reply(text, conversation_context=context)

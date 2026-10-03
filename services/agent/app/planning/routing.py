@@ -21,6 +21,10 @@ from app.kernel.models import (
     TaskEnvelope,
     TaskUnderstanding,
 )
+from app.planning.conversation_memory import (
+    build_conversation_memory_plan,
+    decide_conversation_memory_plan,
+)
 
 WEB_RESEARCH_INTENT = "web.research"
 KNOWLEDGE_ANSWER_INTENT = "knowledge.answer"
@@ -83,6 +87,10 @@ class RoutingPlanner:
         *,
         conversation_context=None,
     ) -> Plan:
+        memory_plan = build_conversation_memory_plan(task, capabilities)
+        if memory_plan is not None:
+            self._last_call_count = 0
+            return memory_plan
         planner = self.route(task, understanding)
         return _call_planner(
             planner.create_plan,
@@ -104,6 +112,13 @@ class RoutingPlanner:
         *,
         conversation_context=None,
     ) -> PlannerDecision:
+        memory_decision = decide_conversation_memory_plan(
+            current_plan,
+            observations,
+        )
+        if memory_decision is not None:
+            self._last_call_count = 0
+            return memory_decision
         planner = self.route(task, understanding)
         return _call_planner(
             planner.decide_after_observation,

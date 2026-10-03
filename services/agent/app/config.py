@@ -482,10 +482,10 @@ class Settings:
         "AGENT_CONVERSATION_SUMMARY_MAX_ATTEMPTS",
         "agent_CONVERSATION_SUMMARY_MAX_ATTEMPTS",
     )
-    # Phase 2: conversation-scoped structured memory. Kept behind a separate
-    # switch so Phase 1 can ship without changing retrieval behaviour.
+    # Phase 2: conversation-scoped structured memory. Enabled by default now
+    # that the read and explicit write paths are connected.
     conversation_memory_enabled: bool = _bool(
-        False,
+        True,
         "AGENT_CONVERSATION_MEMORY_ENABLED",
         "agent_CONVERSATION_MEMORY_ENABLED",
     )

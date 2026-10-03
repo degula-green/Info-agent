@@ -33,6 +33,10 @@ from app.kernel.models import (
     TaskEnvelope,
     TaskUnderstanding,
 )
+from app.planning.conversation_memory import (
+    build_conversation_memory_plan,
+    decide_conversation_memory_plan,
+)
 
 KnowledgeMode = Literal["sources", "content", "content_with_sources"]
 
@@ -507,6 +511,10 @@ class KnowledgeRoutingPlanner:
         *,
         conversation_context=None,
     ) -> Plan:
+        memory_plan = build_conversation_memory_plan(task, capabilities)
+        if memory_plan is not None:
+            self._last_call_count = 0
+            return memory_plan
         route = classify_knowledge_question(
             str(task.input.get("text") or ""),
             timezone_name=self.default_timezone,
@@ -547,6 +555,13 @@ class KnowledgeRoutingPlanner:
         *,
         conversation_context=None,
     ) -> PlannerDecision:
+        memory_decision = decide_conversation_memory_plan(
+            current_plan,
+            observations,
+        )
+        if memory_decision is not None:
+            self._last_call_count = 0
+            return memory_decision
         if _is_knowledge_plan(current_plan):
             self._last_call_count = 0
             return _decide_knowledge_plan(current_plan, observations)

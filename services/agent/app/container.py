@@ -15,6 +15,9 @@ from app.application.conversation_memory import (
     ConversationSummaryService,
     LlmConversationSummaryProvider,
 )
+from app.application.conversation_memory_extraction import (
+    ConversationMemoryExtractionService,
+)
 from app.application.knowledge_events import KnowledgeEventService
 from app.application.memory_service import MemoryService
 from app.application.task_service import TaskService
@@ -582,6 +585,11 @@ def build_container(
     )
     task_service = TaskService(resolved_store)
     memory_service = MemoryService(resolved_store)
+    memory_extraction_service = ConversationMemoryExtractionService(
+        resolved_store,
+        resolved,
+        memory_service,
+    )
     conversation_context_service = ConversationContextService(
         resolved_store,
         resolved,
@@ -630,6 +638,7 @@ def build_container(
             message_sync=task_service.sync_task_messages,
             conversation_context_loader=conversation_context_service.load,
             summary_service=summary_service,
+            memory_extraction_service=memory_extraction_service,
         ),
         knowledge_ingress=resolved_ingress,
         knowledge_client=resolved_knowledge,

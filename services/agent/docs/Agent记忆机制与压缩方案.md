@@ -2,7 +2,7 @@
 
 ## 文档状态
 
-- 版本：v1.7
+- 版本：v1.8
 - 状态：Phase 1/2 已实现待评审，Phase 3+ 未开工
 - 作者：架构师（Claude）
 - 创建日期：2026-10-03
@@ -1112,8 +1112,15 @@ Response: {
   `ConversationContext` 注入、conversation-scoped `memory_records`、
   keywords + `simple` FTS + `ILIKE` 检索和最小管理 API 均已实现。
 - `AGENT_CONVERSATION_CONTEXT_ENABLED` 默认开启；
-  `AGENT_CONVERSATION_MEMORY_ENABLED` 默认关闭，需要显式开启后才会把
-  conversation memory 注入上下文或对外联调。
+  `AGENT_CONVERSATION_MEMORY_ENABLED` 默认开启。
+- 当前只覆盖同一 Conversation 内的记忆：
+  - Conversation 摘要、最近消息和 active memory 统一进入
+    Understanding / Planner / Answer / `chat.reply`；
+  - “记住了吗、我是谁、我叫什么、刚才我说”等召回表达优先走会话记忆回复，
+    不再被误路由到内部知识检索；
+  - Task 终态后会把“我是/我叫/记住…”这类显式表达写入当前 Conversation
+    的 `memory_records`；同名身份记忆会替换旧的 active 记录。
+- 本轮仍不创建跨会话/全局记忆，也不拉取用户个人信息；这些留到后续阶段。
 - 本轮没有代码级阻塞。后续阶段启动前需要先完成下面的数据模型和产品决策，
   不能直接在 Phase 2 表上继续叠加：
   - Phase 3 缺少 `memory_extraction_jobs` 持久化状态机，无法可靠实现
@@ -1432,6 +1439,9 @@ Phase 1 上线后按实际 prompt 长度重新测量。
 ---
 
 **文档版本控制**：
+- v1.8 (2026-10-03)：补齐会话内记忆闭环。`chat.reply` 接入
+  ConversationContext；增加会话记忆召回路由；Task 终态后写入显式会话记忆，
+  并保持 conversation 隔离；全局记忆和用户资料不在本轮范围。
 - v1.7 (2026-10-03)：确认开发库支持 `pg_trgm`，Phase 2 迁移增加可降级的
   content/title trigram 索引；扩展不可用时保持 keywords + FTS + ILIKE。
 - v1.6 (2026-10-03)：写入 Phase 1/2 完成状态与 Phase 3+ 启动阻塞。
