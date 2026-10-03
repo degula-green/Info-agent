@@ -24,6 +24,7 @@ from app.kernel.models import (
 
 WEB_RESEARCH_INTENT = "web.research"
 KNOWLEDGE_ANSWER_INTENT = "knowledge.answer"
+FORM_COMPLETE_INTENT = "form.complete"
 # Intents whose plan has to be composed from several capabilities. The
 # container adds ``knowledge.answer`` when the internal knowledge tools are
 # registered; otherwise the deterministic planner is the only one that can

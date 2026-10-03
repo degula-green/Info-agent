@@ -322,7 +322,7 @@ function connectorSummary(connector: Connector) {
   if (connector.cleanup_pending) return connector.last_error === 'wechat_stop_failed' ? '采集器尚未停止，请重试解绑' : '认证凭据尚未清理，请重试解绑'
   if (!connector.bound) return `未绑定，绑定后开放${connector.display_name}知识库`
   if (connector.last_error === 'token_refresh_failed') return '飞书授权刷新失败，请重新授权'
-  if (connector.last_error === 'refresh_token_invalid' || connector.last_error === 'authorization_expired') return '飞书授权已失效，请重新授权'
+  if (connector.last_error === 'refresh_token_invalid' || connector.last_error === 'authorization_expired' || connector.last_error === 'credential_store_unavailable') return '飞书授权已失效，请重新授权'
   if (connector.last_error === 'conversation_discovery_failed') return '会话列表获取失败，请重试'
   if (connector.status === 'expired' || connector.status === 'reauthorization_required') return '授权已失效，请重新授权'
   if (connector.platform === 'wechat') {
@@ -333,7 +333,7 @@ function connectorSummary(connector: Connector) {
   return connector.account_name || '已绑定，等待同步账号信息'
 }
 function needsFeishuAuthorization(connector: Connector) {
-  return connector.platform === 'feishu' && (connector.status === 'expired' || connector.status === 'reauthorization_required' || connector.last_error === 'token_refresh_failed' || connector.last_error === 'refresh_token_invalid' || connector.last_error === 'authorization_expired')
+  return connector.platform === 'feishu' && (connector.status === 'expired' || connector.status === 'reauthorization_required' || connector.last_error === 'token_refresh_failed' || connector.last_error === 'refresh_token_invalid' || connector.last_error === 'authorization_expired' || connector.last_error === 'credential_store_unavailable')
 }
 function heartbeatAge(value?: string | null) {
   if (!value) return '未知'

@@ -12,10 +12,14 @@ from datetime import datetime, timezone
 
 import pytest
 
+from app.capabilities.answer import AnswerComposeCapability
+from app.capabilities.knowledge import KnowledgeSearchContentCapability
 from app.capabilities.todo import TodoCreateCapability
 from app.capabilities.web import WebExtractCapability, WebFetchCapability
+from app.capabilities.web_research import WebResearchCapability
 from app.kernel.models import (
     CapabilityDescriptor,
+    Observation,
     Plan,
     PlanningConstraints,
     PlanStep,
@@ -429,6 +433,56 @@ def test_an_unusable_replan_keeps_a_plan_that_still_has_steps() -> None:
     assert any("unusable replan" in item for item in decision.warnings)
 
 
+def test_a_finished_form_write_completes_instead_of_asking_again() -> None:
+    """Fields the owner left blank on the card are their choice, not a question."""
+
+    plan = Plan(
+        plan_id="p",
+        task_id="task-llm-planner",
+        objective="填写表单",
+        steps=[
+            PlanStep(
+                step_id="p-step-1",
+                plan_id="p",
+                order=1,
+                capability="form.preview",
+                status="succeeded",
+            ),
+            PlanStep(
+                step_id="p-step-2",
+                plan_id="p",
+                order=2,
+                capability="form.apply",
+                status="succeeded",
+            ),
+        ],
+    )
+    observation = Observation(
+        observation_id="o-2",
+        task_id="task-llm-planner",
+        plan_id="p",
+        step_id="p-step-2",
+        capability="form.apply",
+        status="succeeded",
+        output={
+            "operation": "form.apply",
+            "status": "written",
+            "written_range": "A4:I4",
+            "target": "A4",
+            "verified": True,
+        },
+        created_at=datetime(2026, 10, 3, tzinfo=timezone.utc),
+    )
+    planner = OpenAICompatiblePlanner(StubPlannerClient([]))
+
+    decision = planner.decide_after_observation(
+        envelope("填写这个表格"), plan, [observation], PlanningConstraints()
+    )
+
+    assert decision.action == "complete"
+    assert decision.plan is None
+
+
 def test_a_replan_with_an_invented_argument_is_not_handed_to_the_runtime() -> None:
     """Observed from qwen-plus: it echoed `fetch_method` back as an argument.
 
@@ -517,3 +571,166 @@ def test_the_planner_prompt_does_not_carry_the_whole_evidence_body() -> None:
     assert len(prompt) < 4000
     # The identifying half survives, so the Planner can still reason about it.
     assert "ev-1" in prompt and "https://a.example.com/1" in prompt
+
+
+def test_planner_can_combine_personal_knowledge_and_web_evidence() -> None:
+    plan_json = json.dumps(
+        {
+            "objective": "结合公司资料和公开标准进行判断",
+            "steps": [
+                {
+                    "capability": "knowledge.search_content",
+                    "arguments": {
+                        "query": "公司简介 成立时间 估值 融资 上市",
+                        "include_personal": True,
+                    },
+                },
+                {
+                    "capability": "web.research",
+                    "arguments": {"urls": ["https://example.com/standard"]},
+                },
+                {
+                    "capability": "answer.compose",
+                    "arguments": {
+                        "question": "根据标准判断我的公司",
+                        "evidence_ref": None,
+                        "knowledge_evidence_refs": [
+                            {"step": 1, "output": "evidence"}
+                        ],
+                        "evidence_refs": [{"step": 2, "output": "evidence"}],
+                    },
+                },
+            ],
+        },
+        ensure_ascii=False,
+    )
+    planner = OpenAICompatiblePlanner(StubPlannerClient([plan_json]))
+
+    plan = planner.create_plan(
+        envelope("根据这个网址判断我的公司是不是独角兽"),
+        [
+            KnowledgeSearchContentCapability.descriptor,
+            WebResearchCapability.descriptor,
+            AnswerComposeCapability.descriptor,
+        ],
+        [],
+        PlanningConstraints(),
+    )
+
+    assert [item.capability for item in plan.steps] == [
+        "knowledge.search_content",
+        "web.research",
+        "answer.compose",
+    ]
+    assert plan.steps[2].arguments["knowledge_evidence"] == {
+        "$concat": [f"$steps.{plan.plan_id}-step-1.output.evidence"]
+    }
+    assert plan.steps[2].arguments["evidence"] == {
+        "$concat": [f"$steps.{plan.plan_id}-step-2.output.evidence"]
+    }
+
+
+def test_a_replan_gets_the_task_text_argument_the_model_never_supplies() -> None:
+    """``form.preview``'s ``request`` is filled by the planner, not the model.
+
+    A replan that omits it used to be judged unusable ("request Field
+    required") and failed the whole Task, even though the model is never
+    allowed to supply that argument in the first place.
+    """
+
+    from app.capabilities.form import FormApplyCapability, FormPreviewCapability
+
+    class Browser:
+        def create_session(self) -> str:
+            return "s"
+
+        def open(self, *args: object, **kwargs: object) -> dict:
+            return {}
+
+        def read_grid(self, *args: object, **kwargs: object) -> dict:
+            return {}
+
+        def read_form(self, *args: object, **kwargs: object) -> dict:
+            return {}
+
+        def close_session(self, *args: object, **kwargs: object) -> None:
+            return None
+
+    preview = FormPreviewCapability(Browser())
+    apply_cap = FormApplyCapability(Browser())
+    replan = json.dumps(
+        {
+            "action": "replan",
+            "steps": [
+                {
+                    "capability": "form.preview",
+                    "arguments": {"url": "https://example.com/form"},
+                }
+            ],
+        }
+    )
+    # A repair round may follow; the same answer is fine for both.
+    planner = OpenAICompatiblePlanner(StubPlannerClient([replan, replan]))
+    planner.set_capabilities([preview.descriptor, apply_cap.descriptor])
+    planner.set_validators(
+        {"form.preview": preview.validate, "form.apply": apply_cap.validate}
+    )
+
+    decision = planner.decide_after_observation(
+        envelope("帮我填写 https://example.com/form 这个表单"),
+        _plan(),
+        [],
+        PlanningConstraints(),
+    )
+
+    assert decision.plan is not None
+    assert decision.plan.steps[0].arguments["request"] == "帮我填写 https://example.com/form 这个表单"
+
+
+def test_a_form_draft_continues_to_the_write_step_instead_of_asking() -> None:
+    """The approval card is the review; one "please supply information" box is not.
+
+    The model used to divert into ``request_input`` here. The stub client has
+    no outputs, so reaching the model at all would raise: this path is decided
+    by the planner, not guessed by the model.
+    """
+
+    plan = Plan(
+        plan_id="p",
+        task_id="task-llm-planner",
+        objective="填写表单",
+        steps=[
+            PlanStep(
+                step_id="p-step-1",
+                plan_id="p",
+                order=1,
+                capability="form.preview",
+                status="succeeded",
+            ),
+            PlanStep(
+                step_id="p-step-2",
+                plan_id="p",
+                order=2,
+                capability="form.apply",
+                status="pending",
+            ),
+        ],
+    )
+    observation = Observation(
+        observation_id="o-1",
+        task_id="task-llm-planner",
+        plan_id="p",
+        step_id="p-step-1",
+        capability="form.preview",
+        status="succeeded",
+        output={"form": {"headers": ["学号"], "fields": [], "missing": ["学号"]}},
+        created_at=datetime(2026, 10, 3, tzinfo=timezone.utc),
+    )
+    planner = OpenAICompatiblePlanner(StubPlannerClient([]))
+
+    decision = planner.decide_after_observation(
+        envelope("填写这个表格"), plan, [observation], PlanningConstraints()
+    )
+
+    assert decision.action == "continue"
+    assert decision.plan is None

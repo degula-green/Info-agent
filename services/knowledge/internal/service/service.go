@@ -1819,6 +1819,29 @@ func (s *Service) GetConversation(ctx context.Context, userID, id string) (*doma
 	return nil, apperror.Clone(apperror.ErrForbidden)
 }
 
+func (s *Service) UpdateConversationStart(
+	ctx context.Context,
+	userID, conversationID string,
+	start time.Time,
+) (*domain.ConversationIngestion, error) {
+	conversation, err := s.Repo.GetConversation(ctx, conversationID)
+	if err != nil {
+		return nil, err
+	}
+	if conversation.OwnerUserID != userID || conversation.ConversationType != "private" {
+		return nil, apperror.Clone(apperror.ErrForbidden)
+	}
+	now := s.Now().UTC()
+	start = start.UTC()
+	if start.Before(now.Add(-7 * 24 * time.Hour)) {
+		return nil, apperror.New("history_start_too_old", "history start cannot be older than seven days", 400, false)
+	}
+	if start.After(now) {
+		return nil, apperror.New("history_start_in_future", "history start cannot be in the future", 400, false)
+	}
+	return s.Repo.UpdateConversationStart(ctx, userID, conversationID, start)
+}
+
 func (s *Service) IngestMessage(ctx context.Context, input repository.IngestMessageInput) (*repository.IngestResult, error) {
 	if input.MessageType == "" {
 		input.MessageType = "text"

@@ -119,7 +119,7 @@ INTENT_REQUIRES: dict[str, frozenset[str] | None] = {
     "knowledge.answer": frozenset({"knowledge.search_content"}),
     "web.research": frozenset({"web.research"}),
     "compliance.assess": None,
-    "form.complete": None,
+    "form.complete": frozenset({"form.preview"}),
 }
 
 

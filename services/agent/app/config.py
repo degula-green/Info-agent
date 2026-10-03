@@ -397,6 +397,28 @@ class Settings:
     tavily_timeout_seconds: float = _float(
         30.0, "AGENT_TAVILY_TIMEOUT_SECONDS", "agent_TAVILY_TIMEOUT_SECONDS"
     )
+    # Form filling drives a real browser, so the browser lives in its own
+    # service. An empty base URL means the capability is not registered and
+    # the form intent reports as unsupported instead of failing at runtime.
+    form_browser_url: str = _text(
+        "", "AGENT_FORM_BROWSER_URL", "agent_FORM_BROWSER_URL"
+    )
+    form_browser_token: str = _text(
+        "", "AGENT_FORM_BROWSER_TOKEN", "agent_FORM_BROWSER_TOKEN"
+    )
+    form_browser_timeout_seconds: float = _float(
+        180.0, "AGENT_FORM_BROWSER_TIMEOUT_SECONDS", "agent_FORM_BROWSER_TIMEOUT_SECONDS"
+    )
+    form_preview_timeout_seconds: float = _float(
+        180.0, "AGENT_FORM_PREVIEW_TIMEOUT_SECONDS", "agent_FORM_PREVIEW_TIMEOUT_SECONDS"
+    )
+    form_apply_timeout_seconds: float = _float(
+        120.0, "AGENT_FORM_APPLY_TIMEOUT_SECONDS", "agent_FORM_APPLY_TIMEOUT_SECONDS"
+    )
+    # How many data rows a preview reads back before it stops.
+    form_max_rows: int = _int(
+        50, "AGENT_FORM_MAX_ROWS", "agent_FORM_MAX_ROWS"
+    )
     answer_timeout_seconds: float = _float(
         60.0, "AGENT_ANSWER_TIMEOUT_SECONDS", "agent_ANSWER_TIMEOUT_SECONDS"
     )

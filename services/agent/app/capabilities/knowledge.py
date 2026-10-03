@@ -141,6 +141,8 @@ class SearchContentOutput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     results: list[ContentResult]
+    # The same chunks in the common evidence shape consumed by answer.compose.
+    evidence: list[dict[str, Any]] = Field(default_factory=list, max_length=50)
     returned_source_count: int
     returned_chunk_count: int
     has_more: bool
@@ -327,6 +329,7 @@ class KnowledgeSearchContentCapability:
         merged = _merge_content(responses, limit=arguments.top_k)
         output = SearchContentOutput(
             results=merged,
+            evidence=_answer_evidence(merged),
             returned_source_count=len(merged),
             returned_chunk_count=sum(len(item.chunks) for item in merged),
             has_more=any(bool(item.get("has_more")) for item in responses),

@@ -97,6 +97,23 @@ def test_a_non_ascii_path_is_percent_encoded() -> None:
     )
 
 
+def test_an_unencoded_chinese_path_is_extracted_and_normalized() -> None:
+    request = (
+        "https://baike.baidu.com/item/独角兽企业/22449491 "
+        "根据这个网址的内容，判断我的公司是否是独角兽公司。"
+    )
+
+    assert extract_http_urls(request) == [
+        "https://baike.baidu.com/item/独角兽企业/22449491"
+    ]
+    assert trusted_urls([], request) == [
+        (
+            "https://baike.baidu.com/item/"
+            "%E7%8B%AC%E8%A7%92%E5%85%BD%E4%BC%81%E4%B8%9A/22449491"
+        )
+    ]
+
+
 def test_normalization_makes_two_spellings_one_page() -> None:
     same = [
         "https://Example.COM:443/page#section",

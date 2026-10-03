@@ -50,6 +50,17 @@ def _resolve_value(
             for item in value
         ]
     if isinstance(value, dict):
+        if set(value) == {"$concat"} and isinstance(value.get("$concat"), list):
+            merged: list[Any] = []
+            for item in value["$concat"]:
+                resolved = _resolve_value(
+                    item, by_observation, by_step, referrer=referrer
+                )
+                if isinstance(resolved, list):
+                    merged.extend(resolved)
+                else:
+                    merged.append(resolved)
+            return merged
         return {
             key: _resolve_value(item, by_observation, by_step, referrer=key)
             for key, item in value.items()

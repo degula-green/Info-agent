@@ -978,6 +978,61 @@ func conversationSourceKey(input AttachInput) string {
 	return "conversation:" + hex.EncodeToString(sum[:])
 }
 
+func (s *PostgresStore) UpdateConversationStart(
+	ctx context.Context,
+	userID, conversationID string,
+	start time.Time,
+) (*domain.ConversationIngestion, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, dbError(err)
+	}
+	defer tx.Rollback(ctx)
+
+	var ownerUserID string
+	err = tx.QueryRow(
+		ctx,
+		`SELECT owner_user_id::text FROM knowledge.conversation_ingestions WHERE id=$1 FOR UPDATE`,
+		conversationID,
+	).Scan(&ownerUserID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, apperror.New("conversation_not_found", "conversation not found", 404, false)
+	}
+	if err != nil {
+		return nil, dbError(err)
+	}
+	if ownerUserID != userID {
+		return nil, apperror.Clone(apperror.ErrForbidden)
+	}
+
+	if _, err = tx.Exec(
+		ctx,
+		`UPDATE knowledge.conversation_ingestions
+		 SET requested_start_at=$2,effective_start_at=$2,status='active',pause_reason=NULL,updated_at=now()
+		 WHERE id=$1`,
+		conversationID,
+		start.UTC(),
+	); err != nil {
+		return nil, dbError(err)
+	}
+	// A changed history start invalidates every collector cursor for this
+	// conversation; otherwise polling would resume from the old, earlier point.
+	if _, err = tx.Exec(
+		ctx,
+		`UPDATE knowledge.conversation_collectors
+		 SET last_cursor=NULL,last_success_at=NULL,last_attempt_at=NULL,next_poll_at=NULL,
+		     consecutive_failures=0,last_error=NULL,updated_at=now()
+		 WHERE conversation_ingestion_id=$1`,
+		conversationID,
+	); err != nil {
+		return nil, dbError(err)
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return nil, dbError(err)
+	}
+	return s.GetConversation(ctx, conversationID)
+}
+
 func (s *PostgresStore) GetConversation(ctx context.Context, id string) (*domain.ConversationIngestion, error) {
 	c, err := scanConversation(s.pool.QueryRow(ctx, `SELECT `+conversationColumns+` FROM knowledge.conversation_ingestions WHERE id=$1`, id))
 	if errors.Is(err, pgx.ErrNoRows) {

@@ -2033,6 +2033,31 @@ def _result_preview(capability: str, output: dict[str, Any]) -> dict[str, Any] |
             "summary": "待办已创建",
             "item_count": 1,
         }
+    if capability == "form.preview" and isinstance(output.get("form"), dict):
+        form = output["form"]
+        fields = form.get("fields") or []
+        missing = form.get("missing") or []
+        summary = f"已读取「{form.get('title') or '表单'}」：{len(fields)} 个字段"
+        if missing:
+            summary += f"，{len(missing)} 项待补"
+        return {
+            "block_type": "form",
+            "summary": summary,
+            "item_count": len(fields),
+        }
+    if capability == "form.apply":
+        observed = output.get("observed") or []
+        return {
+            "block_type": "form",
+            "summary": (
+                f"已写入 {output.get('written_range')}"
+                if output.get("verified")
+                else "已提交，结果无法自动确认"
+            ),
+            "item_count": len(observed),
+            "written_range": str(output.get("written_range") or ""),
+            "verified": bool(output.get("verified")),
+        }
     return None
 
 

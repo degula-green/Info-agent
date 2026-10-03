@@ -1,29 +1,38 @@
 import assert from 'node:assert/strict'
 import { afterEach, test } from 'node:test'
 import {
+  agentTodoSourceInitial,
+  agentTodoSourceLabel,
+  agentTodoTimeLabel,
   approveAgentApproval,
   buildScheduleDraft,
   cancelAgentTask,
+  completeAgentTodo,
   composeEditedArguments,
   composeTimeFixText,
   createAgentConversation,
   createAgentTask,
   dayOfISO,
   deleteAgentConversation,
+  deleteAgentTodo,
   draftSortKey,
   endOfDayISO,
   getAgentConversation,
   listAgentConversations,
+  listAgentTodos,
   loadScheduleDrafts,
   rejectAgentApproval,
   renameAgentConversation,
+  sortAgentTodos,
   streamAgentTaskEvents,
   submitAgentTaskInput,
+  updateAgentTodo,
   uploadAgentAttachment,
   type AgentApproval,
   type AgentObservation,
   type AgentTask,
   type AgentTaskEvent,
+  type AgentTodo,
 } from '../src/api/info-agent.ts'
 
 const originalFetch = globalThis.fetch
@@ -127,6 +136,24 @@ function observation(overrides: Partial<AgentObservation> = {}): AgentObservatio
     status: 'succeeded',
     output: {},
     created_at: '2026-09-25T10:59:00Z',
+    ...overrides,
+  }
+}
+
+function todo(overrides: Partial<AgentTodo> = {}): AgentTodo {
+  return {
+    todo_id: 'todo-1',
+    owner_user_id: USER_ID,
+    title: '提交周报',
+    due_at: '2026-10-05T07:59:00Z',
+    due_expression: '下周一',
+    timezone: 'Asia/Shanghai',
+    notes: null,
+    status: 'open',
+    source: { sender_display_name: '张三', conversation_type: 'group' },
+    created_at: '2026-10-01T08:00:00Z',
+    updated_at: '2026-10-01T08:00:00Z',
+    completed_at: null,
     ...overrides,
   }
 }
@@ -898,4 +925,113 @@ test('rejecting an approval posts its optimistic version', async () => {
   assert.ok(calls[0].url.endsWith('/approvals/approval-1/reject'))
   assert.equal(calls[0].method, 'POST')
   assert.deepEqual(calls[0].body, { version: 3 })
+})
+
+test('reading the to-do ledger asks for open and done rows', async () => {
+  installStorage()
+  const calls: string[] = []
+  globalThis.fetch = async (input) => {
+    const url = String(input)
+    if (url.endsWith('/auth/me')) return json({ id: USER_ID, email: 'user@example.com', nickname: 'user', status: 'active' })
+    calls.push(url)
+    return json({ items: [todo(), todo({ todo_id: 'todo-2', status: 'done' })] })
+  }
+
+  const items = await listAgentTodos(['open', 'done'])
+
+  assert.equal(items.length, 2)
+  assert.equal(calls.length, 1)
+  const requestURL = new URL(calls[0], 'http://localhost')
+  assert.equal(requestURL.pathname, '/api/agent/v1/todos')
+  assert.equal(requestURL.searchParams.get('status'), 'open,done')
+})
+
+test('completing and restoring a to-do patches only its status', async () => {
+  installStorage()
+  const calls: Array<{ url: string; method: string; body: unknown }> = []
+  globalThis.fetch = async (input, init = {}) => {
+    const url = String(input)
+    if (url.endsWith('/auth/me')) return json({ id: USER_ID, email: 'user@example.com', nickname: 'user', status: 'active' })
+    const body = init.body ? JSON.parse(String(init.body)) : null
+    calls.push({ url, method: String(init.method || 'GET'), body })
+    return json(todo({ status: body?.status || 'open', completed_at: body?.status === 'done' ? '2026-10-02T01:00:00Z' : null }))
+  }
+
+  await completeAgentTodo('todo-1')
+  await updateAgentTodo('todo-1', { status: 'open' })
+
+  assert.equal(calls.length, 2)
+  assert.ok(calls[0].url.endsWith('/todos/todo-1'))
+  assert.equal(calls[0].method, 'PATCH')
+  assert.deepEqual(calls[0].body, { status: 'done' })
+  assert.deepEqual(calls[1].body, { status: 'open' })
+})
+
+test('deleting a to-do uses the explicit delete endpoint', async () => {
+  installStorage()
+  const calls: Array<{ url: string; method: string }> = []
+  globalThis.fetch = async (input, init = {}) => {
+    const url = String(input)
+    if (url.endsWith('/auth/me')) return json({ id: USER_ID, email: 'user@example.com', nickname: 'user', status: 'active' })
+    calls.push({ url, method: String(init.method || 'GET') })
+    return new Response(null, { status: 204 })
+  }
+
+  await deleteAgentTodo('todo-1')
+
+  assert.equal(calls.length, 1)
+  assert.ok(calls[0].url.endsWith('/todos/todo-1'))
+  assert.equal(calls[0].method, 'DELETE')
+})
+
+test('real to-do labels preserve the ledger phrase and source', () => {
+  const now = new Date('2026-10-02T00:00:00Z')
+  assert.equal(agentTodoTimeLabel(todo({ due_at: '2026-10-02T08:00:00Z' }), now), '今天')
+  assert.equal(agentTodoTimeLabel(todo({ due_at: '2026-10-03T08:00:00Z' }), now), '明天')
+  assert.equal(
+    agentTodoTimeLabel(todo({ due_at: null, due_expression: '下周三下午' }), now),
+    '下周三下午',
+  )
+  assert.equal(agentTodoTimeLabel(todo({ due_at: null, due_expression: null }), now), '无时间')
+  assert.equal(agentTodoSourceLabel(todo()), '张三')
+  assert.equal(agentTodoSourceInitial(todo()), '张')
+})
+
+test('real to-do sorting keeps urgent open work first and new completed work first', () => {
+  const rows = [
+    todo({
+      todo_id: 'undated-new',
+      due_at: null,
+      created_at: '2026-10-02T02:00:00Z',
+    }),
+    todo({
+      todo_id: 'due-late',
+      due_at: '2026-10-05T08:00:00Z',
+      created_at: '2026-10-01T01:00:00Z',
+    }),
+    todo({
+      todo_id: 'due-soon',
+      due_at: '2026-10-03T08:00:00Z',
+      created_at: '2026-10-01T02:00:00Z',
+    }),
+    todo({
+      todo_id: 'done-old',
+      status: 'done',
+      created_at: '2026-09-30T02:00:00Z',
+    }),
+    todo({
+      todo_id: 'done-new',
+      status: 'done',
+      created_at: '2026-10-01T02:00:00Z',
+    }),
+  ]
+
+  assert.deepEqual(
+    sortAgentTodos(rows, 'open').map((item) => item.todo_id),
+    ['due-soon', 'due-late', 'undated-new'],
+  )
+  assert.deepEqual(
+    sortAgentTodos(rows, 'done').map((item) => item.todo_id),
+    ['done-new', 'done-old'],
+  )
 })
