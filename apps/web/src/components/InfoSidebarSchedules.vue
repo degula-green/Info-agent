@@ -199,9 +199,11 @@ import {
   submitAgentTaskInput,
   type ScheduleDraft,
 } from '../api/info-agent.ts'
+import { useTodoLedgerStore } from '../stores/todoLedger.ts'
 
 const props = defineProps<{ collapsed: boolean }>()
 const emit = defineEmits<{ (event: 'request-expand'): void }>()
+const todoLedger = useTodoLedgerStore()
 
 const POLL_MS = 5000
 const VISIBLE_LIMIT = 5
@@ -332,6 +334,9 @@ async function load() {
         const shown = drafts.value.find((item) => item.taskId === draft.taskId)
         finished.value = [shown ? mergeCompletion(shown, draft) : draft, ...finished.value]
       }
+      if (settled.some((draft) => draft.state === 'created')) {
+        void todoLedger.refresh()
+      }
     }
     drafts.value = built.filter((draft) => !settled.some((item) => item.taskId === draft.taskId))
     // "Creating" is a local hint, so it must never outlive the state it
@@ -455,6 +460,7 @@ async function confirm(draft: ScheduleDraft) {
     delete (merged as Record<string, unknown>).location
     delete (merged as Record<string, unknown>).description
     await approveAgentApproval(draft.approvalId, draft.approvalVersion, merged)
+    todoLedger.scheduleRefresh()
     // Keep the card in place: it leaves the waiting_* list the moment the step
     // starts, so without tracking it would vanish until the result arrives.
     approvedApprovalIDs.value = { ...approvedApprovalIDs.value, [draft.taskId]: draft.approvalId }

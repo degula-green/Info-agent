@@ -48,6 +48,36 @@ MAX_FIELD_VALUE_CHARS = 60
 _SENTENCE_MARKERS = "。！？!?\n"
 # One lookup per field, so a wide form does not turn into a search storm.
 MAX_RETRIEVAL_FIELDS = 8
+# Particles people put between a label and its value ("学号是2025").
+_VALUE_PREFIXES = _SEPARATORS + "是为"
+
+# Collected data is typed by a person, so the label is whatever they happen to
+# call the column and it is usually glued straight to the value --
+# "学号20251714205", "qq号123456789", "电话13800000001". Each column therefore
+# recognises several spellings, matched case-insensitively.
+_FIELD_ALIASES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("学号", ("学籍号", "学工号", "学号")),
+    ("姓名", ("名字叫", "名字", "我叫", "我姓", "姓名")),
+    ("性别", ("性别",)),
+    ("联系电话", ("联系电话", "联系方式", "电话")),
+    ("手机号", ("手机号码", "手机号", "手机")),
+    ("QQ号", ("qq号", "qq")),
+    ("家长姓名", ("家长姓名", "家长名字", "父母姓名", "监护人")),
+    ("家长电话", ("家长电话", "家长手机", "家长联系方式")),
+    ("家庭住址", ("家庭住址", "家庭地址", "住址", "地址")),
+)
+# Longest alias first, so 家长电话 is never read as 电话.
+_ALIASES: tuple[tuple[str, str], ...] = tuple(
+    sorted(
+        (
+            (alias.lower(), canonical)
+            for canonical, aliases in _FIELD_ALIASES
+            for alias in aliases
+        ),
+        key=lambda item: len(item[0]),
+        reverse=True,
+    )
+)
 
 @dataclass(frozen=True)
 class _FieldRule:
@@ -67,9 +97,6 @@ class _FieldRule:
     # Reject a match whose *value* looks like this. A student id that is
     # phone-shaped is almost certainly somebody's mobile number.
     reject_value: str = ""
-    # Field names this rule must not apply to: "我叫李雷" is the owner's name,
-    # not their parent's.
-    exclude_names: tuple[str, ...] = ()
 
 
 # Order matters: a phone-shaped number should land in a phone column rather
@@ -79,7 +106,6 @@ _RELAXED_RULES: tuple[tuple[str, _FieldRule], ...] = (
     ("手机号", _FieldRule(r"(1[3-9]\d{9})", 0.85)),
     ("联系电话", _FieldRule(r"(1[3-9]\d{9})", 0.85)),
     ("家长电话", _FieldRule(r"(1[3-9]\d{9})", 0.7)),
-    ("电话", _FieldRule(r"(1[3-9]\d{9})", 0.7)),
     (
         "QQ号",
         _FieldRule(
@@ -102,14 +128,13 @@ _RELAXED_RULES: tuple[tuple[str, _FieldRule], ...] = (
         _FieldRule(
             r"(?:我叫|我姓|名字叫|姓名是|姓名[:：])\s*([\u4e00-\u9fa5]{2,4})",
             0.6,
-            exclude_names=("家长", "父亲", "母亲", "监护人", "紧急"),
         ),
     ),
     (
         # Matched with ``in``, so this also covers 家庭住址 / 联系地址.
         # An administrative marker is required: without it any phrase ending
         # in 号 ("你发个手机号") reads as an address.
-        "住址",
+        "家庭住址",
         _FieldRule(
             r"([\u4e00-\u9fa5A-Za-z0-9]{2,20}"
             r"(?:省|市|区|县|镇|村|街|路|道|巷|小区)"
@@ -173,6 +198,10 @@ class FormPreviewResult(BaseModel):
 
     form: FormDraft
     warnings: list[str] = Field(default_factory=list)
+    # What the capability did, in the owner's words. The chat renders these
+    # under the step so "opened the form / searched the knowledge base /
+    # pre-filled" is visible instead of one opaque line.
+    stages: list[str] = Field(default_factory=list)
 
 
 class FormApplyInput(BaseModel):
@@ -231,79 +260,159 @@ def fingerprint_headers(headers: list[str]) -> str:
 
 
 def extract_values(
-    headers: list[str], request: str, *, relaxed: bool = False
+    headers: list[str], text: str, *, relaxed: bool = False
 ) -> dict[str, str]:
-    """Pull ``header: value`` pairs out of the owner's own sentence.
+    """Read field values out of chat-shaped text.
 
-    Longest header first so ``家长姓名`` wins over ``姓名``. Values end where
-    the next header begins, which is what makes ``姓名：张三 性别：男`` yield
-    two pairs instead of one long string.
+    Collected data is typed by a person, so the label is whatever they happen
+    to call the column and it is usually glued straight to the value:
+    "学号20251714205", "qq号123456789", "电话13800000001". Everything is read
+    line by line -- one chat message is one line -- so a value can never run
+    into the next message, and a label sitting right beside a value is used
+    instead of guessing from the value's shape.
     """
 
-    text = str(request or "")
-    known = sorted({h for h in headers if h and h.strip()}, key=len, reverse=True)
-    if not text or not known:
-        return {}
-    pattern = "|".join(re.escape(item) for item in known)
-    matches = list(re.finditer(pattern, text))
+    lines = [line.strip() for line in str(text or "").splitlines()]
+    names = [str(item) for item in headers if str(item).strip()]
     found: dict[str, str] = {}
-    for index, match in enumerate(matches):
-        name = match.group(0)
-        start = match.end()
-        end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
-        raw = text[start:end].strip()
-        value = raw.lstrip(_SEPARATORS).strip().strip(_TRAILING).strip()
-        if value and name not in found and _looks_like_a_value(value):
-            found[name] = value
+    if not names:
+        return found
+    used: set[str] = set()
+    labelled: set[int] = set()
+    labels = _labels_for(names)
+
+    for index, line in enumerate(lines):
+        if not line:
+            continue
+        lowered = line.lower()
+        # One line can carry several pairs ("姓名：张三 性别：男"), so walk every
+        # label on it in the order they appear.
+        cursor = 0
+        while cursor < len(line):
+            hit = _first_label(lowered, cursor, labels)
+            if hit is None:
+                break
+            position, alias, canonical = hit
+            labelled.add(index)
+            value_start = position + len(alias)
+            cut = _next_label_position(lowered, value_start, labels)
+            value = (
+                line[value_start:cut]
+                .lstrip(_VALUE_PREFIXES)
+                .strip()
+                .strip(_TRAILING)
+                .strip()
+            )
+            header = _target_header(canonical, names)
+            if (
+                header is not None
+                and header not in found
+                and value
+                and value not in used
+                and _looks_like_a_value(value)
+            ):
+                found[header] = value
+                used.add(value)
+            cursor = cut if cut > value_start else value_start
+
     if relaxed:
-        _fill_bare_values(headers, text, found)
+        _fill_bare_values(names, lines, found, used, labelled)
     return found
 
 
-def _fill_bare_values(
-    names: list[str], text: str, found: dict[str, str]
-) -> None:
-    """Accept a label-less value when its shape identifies the field.
+def _labels_for(names: list[str]) -> tuple[tuple[str, str], ...]:
+    """Every spelling that may sit next to a value, longest first.
 
-    Only used on retrieved text: the owner's instruction keeps the stricter
-    reading, because a stray number in a sentence should not become a value.
-    A shape is taken only when the text offers exactly one candidate for it,
-    and never when another field already claimed that value.
+    A column is "学号"; an HTML form's label is whatever the page calls it
+    ("Customer name:"). People also write "电话" for 联系电话. All of those are
+    labels, so they are matched together.
     """
 
-    used = set(found.values())
-    # Walk the rules, not the columns. Rule order encodes which shape is the
-    # more specific one, so a phone-shaped number is claimed by a phone column
-    # before the looser student-id rule ever sees it.
-    for key, rule in _RELAXED_RULES:
-        target = next(
-            (
-                name
-                for name in names
-                if name not in found
-                and key in name
-                and not any(bad in name for bad in rule.exclude_names)
-            ),
-            None,
-        )
-        if target is None:
+    entries = list(_ALIASES)
+    entries.extend((name.lower(), name) for name in names)
+    return tuple(sorted(entries, key=lambda item: len(item[0]), reverse=True))
+
+
+def _first_label(
+    lowered: str, start: int, labels: tuple[tuple[str, str], ...]
+) -> tuple[int, str, str] | None:
+    """The next label on the line from ``start``, longest match at a position."""
+
+    best: tuple[int, str, str] | None = None
+    for alias, canonical in labels:
+        position = lowered.find(alias, start)
+        if position < 0:
             continue
-        hits: set[str] = set()
-        for match in re.finditer(rule.pattern, text):
-            value = match.group(1) if match.groups() else match.group(0)
-            before = text[max(0, match.start() - 6) : match.start()]
-            if any(marker in before for marker in rule.reject_before):
+        if (
+            best is None
+            or position < best[0]
+            or (position == best[0] and len(alias) > len(best[1]))
+        ):
+            best = (position, alias, canonical)
+    return best
+
+
+def _next_label_position(
+    lowered: str, start: int, labels: tuple[tuple[str, str], ...]
+) -> int:
+    """Where the value after a label has to stop."""
+
+    hit = _first_label(lowered, start, labels)
+    return hit[0] if hit is not None else len(lowered)
+
+
+def _target_header(canonical: str, names: list[str]) -> str | None:
+    """The column ``canonical`` refers to, preferring an exact name match."""
+
+    for name in names:
+        if name == canonical:
+            return name
+    containing = [name for name in names if canonical in name]
+    if not containing:
+        return None
+    # The shortest container is the more specific column (家庭住址 over 住址).
+    return min(containing, key=len)
+
+
+def _fill_bare_values(
+    names: list[str],
+    lines: list[str],
+    found: dict[str, str],
+    used: set[str],
+    labelled: set[int],
+) -> None:
+    """Last resort for a line that carries no label at all.
+
+    A shape is used only when that one line offers exactly one candidate, and
+    never for a value another column already claimed *by name*: when the owner
+    writes "电话13800000001" the label decides. Reading shapes first is what
+    used to push that number into the 手机号 column.
+    """
+
+    for index, line in enumerate(lines):
+        if not line or index in labelled:
+            continue
+        for key, rule in _RELAXED_RULES:
+            header = _target_header(key, names)
+            if header is None or header in found:
                 continue
-            if rule.reject_value and re.fullmatch(rule.reject_value, value):
-                continue
-            if not _looks_like_a_value(value):
-                continue
-            hits.add(value)
-        hits -= used
-        if len(hits) == 1:
-            value = hits.pop()
-            found[target] = value
-            used.add(value)
+            hits: set[str] = set()
+            for match in re.finditer(rule.pattern, line):
+                value = match.group(1) if match.groups() else match.group(0)
+                before = line[max(0, match.start() - 6) : match.start()]
+                if any(marker in before for marker in rule.reject_before):
+                    continue
+                if rule.reject_value and re.fullmatch(rule.reject_value, value):
+                    continue
+                if not _looks_like_a_value(value):
+                    continue
+                hits.add(value)
+            hits -= used
+            if len(hits) == 1:
+                value = hits.pop()
+                found[header] = value
+                used.add(value)
+                break
 
 
 def _looks_like_a_value(value: str) -> bool:
@@ -583,7 +692,19 @@ class FormPreviewCapability:
         warnings: list[str] = []
         if missing:
             warnings.append("缺少字段：" + "、".join(missing))
-        return FormPreviewResult(form=draft, warnings=warnings).model_dump()
+        filled = sum(1 for field in fields if field.value)
+        stages = [
+            f"已打开「{draft.title or '表单'}」，识别到 {len(draft.headers)} 个字段",
+            (
+                f"已检索知识库，取到 {len(from_knowledge)} 条可用信息"
+                if from_knowledge
+                else "已检索知识库，未找到可用信息"
+            ),
+            f"预填写完成：{filled} 项已填 · {len(missing)} 项待补",
+        ]
+        return FormPreviewResult(
+            form=draft, warnings=warnings, stages=stages
+        ).model_dump()
 
 
 class FormApplyCapability:

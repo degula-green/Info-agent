@@ -2044,6 +2044,9 @@ def _result_preview(capability: str, output: dict[str, Any]) -> dict[str, Any] |
             "block_type": "form",
             "summary": summary,
             "item_count": len(fields),
+            # The capability's own account of what it did, rendered as
+            # sub-steps so the work is not one opaque line.
+            "stages": [str(item) for item in (output.get("stages") or [])],
         }
     if capability == "form.apply":
         observed = output.get("observed") or []
