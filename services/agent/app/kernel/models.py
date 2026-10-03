@@ -71,6 +71,11 @@ class CapabilityInputBinding(BaseModel):
     runtime_argument: str
     source_capability: str
     source_output: str
+    # A comparison or synthesis step often consumes evidence from more than one
+    # earlier source. The planner sees an array and the runtime receives a
+    # flattened list after reference resolution.
+    aggregate: bool = False
+    required: bool = True
 
 
 class CapabilityDescriptor(BaseModel):

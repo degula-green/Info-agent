@@ -7,6 +7,7 @@ from typing import Any
 import pytest
 from pydantic import ValidationError
 
+from app.capabilities.answer import AnswerComposeCapability
 from app.capabilities.knowledge import (
     KnowledgeAnswerCapability,
     KnowledgeAnswerInput,
@@ -16,7 +17,15 @@ from app.capabilities.knowledge import (
     SearchContentInput,
     SearchSourcesInput,
 )
+from app.capabilities.web_research import WebResearchCapability
 from app.container import build_container, build_planner, build_registry
+from app.kernel.models import (
+    Observation,
+    Plan,
+    PlanningConstraints,
+    PlanStep,
+    TaskEnvelope,
+)
 from app.kernel.registry import CapabilityRegistry
 from app.planning.knowledge import (
     KnowledgeRoutingPlanner,
@@ -562,6 +571,228 @@ def test_knowledge_routing_planner_intercepts_only_knowledge_questions() -> None
         "knowledge.search_sources",
         "knowledge.answer",
     ]
+
+
+def test_personal_comparison_plan_gains_knowledge_source_without_attachment() -> None:
+    class BasePlanner:
+        name = "stub"
+        last_call_count = 0
+
+        def create_plan(
+            self,
+            task: TaskEnvelope,
+            capabilities,
+            observations,
+            constraints,
+            understanding=None,
+        ) -> Plan:
+            return Plan(
+                plan_id="plan-personal",
+                task_id=task.task_id,
+                objective="比较",
+                steps=[
+                    PlanStep(
+                        step_id="plan-personal-step-1",
+                        plan_id="plan-personal",
+                        order=1,
+                        capability="web.research",
+                        arguments={"urls": ["https://example.com/standard"]},
+                    ),
+                    PlanStep(
+                        step_id="plan-personal-step-2",
+                        plan_id="plan-personal",
+                        order=2,
+                        capability="answer.compose",
+                        arguments={
+                            "question": "判断我的公司",
+                            "evidence_ref": {"step": 1, "output": "evidence"},
+                        },
+                    ),
+                ],
+            )
+
+    task = TaskEnvelope(
+        task_id="task-personal",
+        source_type="chat",
+        owner_user_id="user-1",
+        input={
+            "text": "https://example.com/standard 根据这个网址判断我的公司是否符合标准"
+        },
+        created_at=datetime.now(timezone.utc),
+    )
+    planner = KnowledgeRoutingPlanner(BasePlanner())
+
+    plan = planner.create_plan(
+        task,
+        [
+            KnowledgeSearchContentCapability.descriptor,
+            WebResearchCapability.descriptor,
+            AnswerComposeCapability.descriptor,
+        ],
+        [],
+        PlanningConstraints(),
+    )
+
+    assert [step.capability for step in plan.steps] == [
+        "knowledge.search_content",
+        "web.research",
+        "answer.compose",
+    ]
+    assert plan.steps[0].arguments["include_personal"] is True
+    assert plan.steps[2].arguments["knowledge_evidence_refs"] == [
+        {"step": 1, "output": "evidence"}
+    ]
+    assert plan.steps[2].arguments["evidence_ref"] == {"step": 2, "output": "evidence"}
+
+
+def test_existing_personal_knowledge_step_gets_an_attribute_query_and_answer_ref() -> None:
+    class BasePlanner:
+        name = "stub"
+        last_call_count = 0
+
+        def create_plan(
+            self,
+            task: TaskEnvelope,
+            capabilities,
+            observations,
+            constraints,
+            understanding=None,
+        ) -> Plan:
+            return Plan(
+                plan_id="plan-personal-existing",
+                task_id=task.task_id,
+                objective="比较",
+                steps=[
+                    PlanStep(
+                        step_id="plan-personal-existing-step-1",
+                        plan_id="plan-personal-existing",
+                        order=1,
+                        capability="web.research",
+                        arguments={"urls": ["https://example.com/standard"]},
+                    ),
+                    PlanStep(
+                        step_id="plan-personal-existing-step-2",
+                        plan_id="plan-personal-existing",
+                        order=2,
+                        capability="knowledge.search_content",
+                        arguments={
+                            "query": "我的公司是否是独角兽企业",
+                            "include_personal": False,
+                        },
+                    ),
+                    PlanStep(
+                        step_id="plan-personal-existing-step-3",
+                        plan_id="plan-personal-existing",
+                        order=3,
+                        capability="answer.compose",
+                        arguments={
+                            "question": "判断我的公司",
+                            "knowledge_evidence": [],
+                            "evidence_ref": {"step": 1, "output": "evidence"},
+                        },
+                    ),
+                ],
+            )
+
+    task = TaskEnvelope(
+        task_id="task-personal-existing",
+        source_type="chat",
+        owner_user_id="user-1",
+        input={
+            "text": "https://example.com/standard 根据这个网址判断我的公司是否是独角兽企业"
+        },
+        created_at=datetime.now(timezone.utc),
+    )
+    planner = KnowledgeRoutingPlanner(BasePlanner())
+
+    plan = planner.create_plan(
+        task,
+        [
+            KnowledgeSearchContentCapability.descriptor,
+            WebResearchCapability.descriptor,
+            AnswerComposeCapability.descriptor,
+        ],
+        [],
+        PlanningConstraints(),
+    )
+
+    knowledge_step = next(
+        step for step in plan.steps if step.capability == "knowledge.search_content"
+    )
+    answer_step = next(
+        step for step in plan.steps if step.capability == "answer.compose"
+    )
+    assert knowledge_step.arguments["include_personal"] is True
+    assert "公司简介" in knowledge_step.arguments["query"]
+    assert "估值" in knowledge_step.arguments["query"]
+    assert "knowledge_evidence" not in answer_step.arguments
+    assert answer_step.arguments["knowledge_evidence_refs"] == [
+        {"step": knowledge_step.order, "output": "evidence"}
+    ]
+
+
+def test_composite_source_plan_continues_after_a_successful_step() -> None:
+    class FailIfCalledPlanner:
+        name = "stub"
+        last_call_count = 0
+
+        def decide_after_observation(self, *args, **kwargs):
+            raise AssertionError("the base planner must not replan a viable composite plan")
+
+    plan = Plan(
+        plan_id="plan-composite",
+        task_id="task-1",
+        objective="多来源比较",
+        steps=[
+            PlanStep(
+                step_id="plan-composite-step-1",
+                plan_id="plan-composite",
+                order=1,
+                capability="knowledge.search_content",
+                status="succeeded",
+            ),
+            PlanStep(
+                step_id="plan-composite-step-2",
+                plan_id="plan-composite",
+                order=2,
+                capability="web.research",
+                status="pending",
+            ),
+            PlanStep(
+                step_id="plan-composite-step-3",
+                plan_id="plan-composite",
+                order=3,
+                capability="answer.compose",
+                status="pending",
+            ),
+        ],
+    )
+    observation = Observation(
+        observation_id="obs-1",
+        task_id="task-1",
+        plan_id=plan.plan_id,
+        step_id="plan-composite-step-1",
+        capability="knowledge.search_content",
+        status="succeeded",
+        output={"evidence": [{"evidence_id": "doc-1"}]},
+        created_at=datetime.now(timezone.utc),
+    )
+    planner = KnowledgeRoutingPlanner(FailIfCalledPlanner())
+
+    decision = planner.decide_after_observation(
+        TaskEnvelope(
+            task_id="task-1",
+            source_type="chat",
+            owner_user_id="user-1",
+            input={"text": "比较"},
+            created_at=datetime.now(timezone.utc),
+        ),
+        plan,
+        [observation],
+        PlanningConstraints(),
+    )
+
+    assert decision.action == "continue"
 
 
 def test_routing_planner_executes_content_pipeline_end_to_end() -> None:

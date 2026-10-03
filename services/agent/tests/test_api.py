@@ -135,6 +135,45 @@ def test_todo_api_uses_jwt_owner_and_ignores_identity_header() -> None:
     assert client.get("/api/agent/v1/todos").status_code == 401
 
 
+def test_todo_api_soft_completes_and_restores_the_same_row() -> None:
+    container, _store, _publisher, _registry = build_test_container()
+    client = TestClient(make_app(container))
+
+    created = client.post(
+        "/api/agent/v1/todos",
+        json={"title": "提交周报", "client_message_id": "todo-soft-complete"},
+        headers=USER,
+    ).json()
+    todo_id = created["todo_id"]
+
+    completed = client.patch(
+        f"/api/agent/v1/todos/{todo_id}",
+        json={"status": "done"},
+        headers=USER,
+    )
+    assert completed.status_code == 200
+    assert completed.json()["status"] == "done"
+    assert completed.json()["completed_at"] is not None
+    assert client.get("/api/agent/v1/todos?status=open", headers=USER).json()["items"] == []
+    assert [
+        item["todo_id"]
+        for item in client.get("/api/agent/v1/todos?status=done", headers=USER).json()["items"]
+    ] == [todo_id]
+
+    restored = client.patch(
+        f"/api/agent/v1/todos/{todo_id}",
+        json={"status": "open"},
+        headers=USER,
+    )
+    assert restored.status_code == 200
+    assert restored.json()["status"] == "open"
+    assert restored.json()["completed_at"] is None
+    assert [
+        item["todo_id"]
+        for item in client.get("/api/agent/v1/todos?status=open", headers=USER).json()["items"]
+    ] == [todo_id]
+
+
 def test_read_task_flow_exposes_plan_and_observations() -> None:
     container, _store, _publisher, _registry = build_test_container()
     client = TestClient(make_app(container))

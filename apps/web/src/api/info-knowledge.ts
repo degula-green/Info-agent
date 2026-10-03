@@ -306,6 +306,13 @@ export async function attachConversation(input: { platform: ConnectorPlatform; e
   })
 }
 
+export async function updateConversationStart(conversationID: string, requestedStartAt: string) {
+  return knowledgeRequest<ConversationDTO>(`/conversations/${encodeURIComponent(conversationID)}/start`, {
+    method: 'PATCH',
+    body: JSON.stringify({ requested_start_at: requestedStartAt }),
+  })
+}
+
 export async function addConversationCollector(conversationID: string) {
   return knowledgeRequest<CollectorDTO>(`/conversations/${encodeURIComponent(conversationID)}/collectors`, { method: 'POST' })
 }

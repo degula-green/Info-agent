@@ -32,50 +32,72 @@ def bind_plan_references(
             errors.append(f"unknown capability: {step.capability}")
             continue
         for binding in descriptor.input_bindings:
-            if binding.planner_argument not in step.arguments:
+            if (
+                binding.planner_argument not in step.arguments
+                or step.arguments.get(binding.planner_argument) is None
+            ):
                 continue
             raw_reference = step.arguments.get(binding.planner_argument)
-            try:
-                reference = StepOutputRef.model_validate(raw_reference)
-            except Exception as exc:  # noqa: BLE001 - report a compact contract error
+            raw_references = raw_reference if binding.aggregate else [raw_reference]
+            if binding.aggregate and not isinstance(raw_references, list):
                 errors.append(
-                    f"{step.step_id}.{binding.planner_argument} is not a valid step reference: {exc}"
+                    f"{step.step_id}.{binding.planner_argument} must be an array of step references"
+                )
+                continue
+            if binding.aggregate and not raw_references:
+                errors.append(
+                    f"{step.step_id}.{binding.planner_argument} must contain at least one step reference"
                 )
                 continue
 
-            target = by_order.get(reference.step)
-            if target is None:
-                errors.append(
-                    f"{step.step_id}.{binding.planner_argument} references missing step {reference.step}"
-                )
-                continue
-            if target.order >= step.order:
-                errors.append(
-                    f"{step.step_id}.{binding.planner_argument} must reference an earlier step"
-                )
-                continue
-            if target.capability != binding.source_capability:
-                errors.append(
-                    f"{step.step_id}.{binding.planner_argument} references "
-                    f"{target.capability}, expected {binding.source_capability}"
-                )
-                continue
-            if reference.output != binding.source_output:
-                errors.append(
-                    f"{step.step_id}.{binding.planner_argument} references output "
-                    f"{reference.output}, expected {binding.source_output}"
-                )
-                continue
-
-            target_descriptor = descriptors.get(target.capability)
-            if target_descriptor is not None:
-                output_properties = target_descriptor.output_schema.get("properties", {})
-                if binding.source_output not in output_properties:
+            canonical_references: list[str] = []
+            for item in raw_references:
+                try:
+                    reference = StepOutputRef.model_validate(item)
+                except Exception as exc:  # noqa: BLE001 - report a compact contract error
                     errors.append(
-                        f"{target.capability} does not declare output {binding.source_output}"
+                        f"{step.step_id}.{binding.planner_argument} is not a valid step reference: {exc}"
                     )
                     continue
 
+                target = by_order.get(reference.step)
+                if target is None:
+                    errors.append(
+                        f"{step.step_id}.{binding.planner_argument} references missing step {reference.step}"
+                    )
+                    continue
+                if target.order >= step.order:
+                    errors.append(
+                        f"{step.step_id}.{binding.planner_argument} must reference an earlier step"
+                    )
+                    continue
+                if target.capability != binding.source_capability:
+                    errors.append(
+                        f"{step.step_id}.{binding.planner_argument} references "
+                        f"{target.capability}, expected {binding.source_capability}"
+                    )
+                    continue
+                if reference.output != binding.source_output:
+                    errors.append(
+                        f"{step.step_id}.{binding.planner_argument} references output "
+                        f"{reference.output}, expected {binding.source_output}"
+                    )
+                    continue
+
+                target_descriptor = descriptors.get(target.capability)
+                if target_descriptor is not None:
+                    output_properties = target_descriptor.output_schema.get("properties", {})
+                    if binding.source_output not in output_properties:
+                        errors.append(
+                            f"{target.capability} does not declare output {binding.source_output}"
+                        )
+                        continue
+                canonical_references.append(
+                    f"$steps.{target.step_id}.output.{binding.source_output}"
+                )
+
+            if not canonical_references:
+                continue
             if binding.runtime_argument in step.arguments:
                 errors.append(
                     f"{step.step_id} contains both {binding.planner_argument} "
@@ -83,7 +105,9 @@ def bind_plan_references(
                 )
                 continue
             step.arguments[binding.runtime_argument] = (
-                f"$steps.{target.step_id}.output.{binding.source_output}"
+                {"$concat": canonical_references}
+                if binding.aggregate
+                else canonical_references[0]
             )
             del step.arguments[binding.planner_argument]
 

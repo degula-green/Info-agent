@@ -17,6 +17,7 @@ import {
   removeConversationCollector,
   saveWechatConfig,
   setConversationStatus,
+  updateConversationStart,
   type AttachmentDTO,
   type ConnectorDTO,
   type ConversationDTO,
@@ -444,7 +445,11 @@ export const useInfoKnowledgeStore = defineStore('infoKnowledge', () => {
     if (!candidate || !discovery) throw new Error('会话不在当前发现结果中，请刷新列表')
     const available = source.availableSessions.find((item) => String(item.externalId || item.id) === String(id)) || mapAvailable(candidate)
     const action = discoveryAction(available)
-    if (action === 'attached') return findConversation(platform, available.attachedConversationId || id)
+    if (action === 'attached') {
+      const conversationID = available.attachedConversationId || id
+      await updateExistingHistoryStart(platform, candidate.conversation_type, conversationID, historyStart)
+      return findConversation(platform, conversationID)
+    }
     if (action === 'join' && available.attachedConversationId) {
       await addConversationCollector(available.attachedConversationId)
       await enableWechatConversation(platform, available.externalId || id)
@@ -470,7 +475,10 @@ export const useInfoKnowledgeStore = defineStore('infoKnowledge', () => {
     const source = findSource(platform)
     if (!source || !source.bound) return undefined
     const available = source.availableSessions.find((item) => String(item.externalId || item.id) === String(candidate.external_id))
-    if (available?.attachedConversationId) return findConversation(platform, available.attachedConversationId)
+    if (available?.attachedConversationId) {
+      await updateExistingHistoryStart(platform, conversationType, available.attachedConversationId, historyStart)
+      return findConversation(platform, available.attachedConversationId)
+    }
     const attached = await attachConversationByType({ type: conversationType, platform, externalConversationID: candidate.external_id, conversationType, name: candidate.name, discoveryID, requestedStartAt: historyStart || null })
     await enableWechatConversation(platform, candidate.external_id)
     const chat = mapConversation(attached)
@@ -479,6 +487,24 @@ export const useInfoKnowledgeStore = defineStore('infoKnowledge', () => {
     if (available) { available.attachedConversationId = chat.id; available.currentUserCollector = true }
     await refreshLibraries()
     return chat
+  }
+
+  async function updateExistingHistoryStart(
+    platform: SourceKey,
+    conversationType: string,
+    conversationID: string,
+    historyStart?: string | null,
+  ) {
+    if (platform !== 'wechat' || conversationType !== 'private' || historyStart === undefined) return
+    // Clearing the field means "use the seven-day default". Leave a small
+    // margin so request latency cannot make the value fail the server's
+    // seven-day lower-bound check.
+    const requestedStart = historyStart || new Date(Date.now() - 7 * 24 * 60 * 60 * 1000 + 5 * 60 * 1000).toISOString()
+    const updated = await updateConversationStart(conversationID, requestedStart)
+    const existing = findConversation(platform, conversationID)
+    if (!existing) return
+    existing.historyStartAt = updated.effective_start_at || updated.requested_start_at || requestedStart
+    existing.historyStart = displayTime(existing.historyStartAt || '')
   }
 
   async function enableWechatConversation(platform: SourceKey, externalID: string) {

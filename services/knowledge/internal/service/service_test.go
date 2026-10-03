@@ -972,6 +972,55 @@ func TestWorkerFiltersHistoryAndCommitsEmptyPageCursor(t *testing.T) {
 	}
 }
 
+func TestUpdateConversationStartMovesBoundaryAndResetsCursor(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	service, repo, _ := newServiceForTest(nil)
+	service.Now = func() time.Time { return now }
+	oldStart := now.Add(-48 * time.Hour)
+	conversation, err := repo.AttachConversation(context.Background(), repository.AttachInput{
+		UserID:                 "u1",
+		Platform:               domain.PlatformWechat,
+		WorkspaceKey:           "wxid-owner",
+		ExternalConversationID: "wxid-peer",
+		ConversationType:       "private",
+		RequestedStartAt:       &oldStart,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	collector, err := repo.AddCollector(context.Background(), repository.CollectorInput{
+		ConversationID:     conversation.ID,
+		ConnectorAccountID: "connector-1",
+		CollectorUserID:    "u1",
+		Role:               domain.CollectorPrimary,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.RecordCursorReceipt(context.Background(), collector.ID, "100", now); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.AdvanceCursor(context.Background(), collector.ID, "100", now); err != nil {
+		t.Fatal(err)
+	}
+
+	nextStart := now.Add(-time.Hour)
+	updated, err := service.UpdateConversationStart(context.Background(), "u1", conversation.ID, nextStart)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.EffectiveStartAt == nil || !updated.EffectiveStartAt.Equal(nextStart) {
+		t.Fatalf("history start was not moved: %+v", updated.EffectiveStartAt)
+	}
+	current, err := repo.GetCollector(context.Background(), collector.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current.LastCursor != "" {
+		t.Fatalf("stale cursor would replay older messages: %q", current.LastCursor)
+	}
+}
+
 func TestWorkerContinuesPollingWhenPermissionSyncFails(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
 	provider := &fakeOAuthProvider{

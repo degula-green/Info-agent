@@ -320,7 +320,7 @@ func newApp(cfg config.Config) *App {
 		recordStartup(errors.New("knowledge database is required when jwt authentication is enabled"))
 	}
 	core := coreclient.New(cfg.CoreURL, cfg.CoreServiceToken)
- 	app := &App{Service: service.New(repo, store, vault.New(store, keyring), objects, feishu, core, cfg), Auth: validator, Config: cfg, StartupError: startupErr}
+	app := &App{Service: service.New(repo, store, vault.New(store, keyring), objects, feishu, core, cfg), Auth: validator, Config: cfg, StartupError: startupErr}
 	if startupErr == nil {
 		app.worker = service.NewWorker(app.Service, cfg.WorkerInterval)
 	}
@@ -900,6 +900,27 @@ func registerUserRoutes(r *gin.Engine, app *App, prefix string) {
 				out.MessageCount = len(view.Scope.Messages)
 				out.AttachmentCount = len(view.Scope.Attachments)
 			}
+		}
+		c.JSON(http.StatusOK, publicConversationFromDomain(*out))
+	})
+	g.PATCH("/conversations/:conversation_id/start", func(c *gin.Context) {
+		p := principal(c)
+		var body struct {
+			RequestedStartAt string `json:"requested_start_at"`
+		}
+		if err := c.ShouldBindJSON(&body); err != nil {
+			writeError(c, apperror.New("invalid_request", "invalid start request", 400, false))
+			return
+		}
+		start, err := parseTime(body.RequestedStartAt)
+		if err != nil || start == nil {
+			writeError(c, apperror.New("invalid_request", "invalid requested_start_at", 400, false))
+			return
+		}
+		out, err := app.Service.UpdateConversationStart(c, p.UserID, c.Param("conversation_id"), *start)
+		if err != nil {
+			writeError(c, err)
+			return
 		}
 		c.JSON(http.StatusOK, publicConversationFromDomain(*out))
 	})
@@ -1554,8 +1575,8 @@ func registerInternalRoutes(r *gin.Engine, app *App, prefix string) {
 			writeError(c, err)
 			return
 		}
-			c.JSON(http.StatusOK, result)
-		})
+		c.JSON(http.StatusOK, result)
+	})
 
 	// The Agent service and RAG share the internal token; the caller marker and
 	// the path allow-list keep the two capabilities apart.

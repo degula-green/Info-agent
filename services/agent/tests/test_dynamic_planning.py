@@ -153,6 +153,44 @@ def test_cross_plan_reference_uses_observation_id() -> None:
     assert resolved == {"value": "from-observation"}
 
 
+def test_concatenated_evidence_references_flatten_in_order() -> None:
+    knowledge = Observation(
+        observation_id="knowledge-obs",
+        task_id="task-1",
+        plan_id="plan-1",
+        step_id="plan-1-step-1",
+        capability="knowledge.search_content",
+        status="succeeded",
+        output={"evidence": [{"evidence_id": "doc-1", "quote": "公司成立于 2023"}]},
+        created_at=datetime.now(timezone.utc),
+    )
+    web = Observation(
+        observation_id="web-obs",
+        task_id="task-1",
+        plan_id="plan-1",
+        step_id="plan-1-step-2",
+        capability="web.research",
+        status="succeeded",
+        output={"evidence": [{"evidence_id": "web-1", "quote": "估值超过 10 亿美元"}]},
+        created_at=datetime.now(timezone.utc),
+    )
+
+    resolved = resolve_arguments(
+        {
+            "knowledge_evidence": {
+                "$concat": ["$steps.plan-1-step-1.output.evidence"]
+            },
+            "evidence": {
+                "$concat": ["$steps.plan-1-step-2.output.evidence"]
+            },
+        },
+        [knowledge, web],
+    )
+
+    assert [item["evidence_id"] for item in resolved["knowledge_evidence"]] == ["doc-1"]
+    assert [item["evidence_id"] for item in resolved["evidence"]] == ["web-1"]
+
+
 def test_a_retryable_failure_is_absorbed_by_the_in_place_retry() -> None:
     """The retry succeeds, so no new Plan version is minted.
 

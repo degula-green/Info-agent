@@ -314,6 +314,24 @@ services:
     ports:
       - "127.0.0.1:11235:11235"
 
+  # Stateful browser for the Agent's form-filling capability. Separate from the
+  # renderer because it holds login state and drives typing, not just reads.
+  form-browser:
+    build: ../services/form-browser
+    environment:
+      FORM_BROWSER_PORT: 8500
+      # Every endpoint is behind this token; it must match
+      # AGENT_FORM_BROWSER_TOKEN on the Agent side.
+      FORM_BROWSER_API_TOKEN: ${FORM_BROWSER_API_TOKEN:-local-development-only}
+      FORM_BROWSER_HEADLESS: ${FORM_BROWSER_HEADLESS:-true}
+      # Point this at a Playwright storage-state file to reuse a login.
+      FORM_BROWSER_STORAGE_STATE: ${FORM_BROWSER_STORAGE_STATE:-}
+    # Chromium needs more than Docker's default 64MB shared memory.
+    shm_size: 1g
+    # Bound to loopback only, exactly like the renderer sidecar.
+    ports:
+      - "127.0.0.1:8500:8500"
+
 volumes:
   elasticsearch-data:
   postgres-data:

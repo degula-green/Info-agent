@@ -620,6 +620,7 @@ type Repository interface {
 	ListDiscoveries(ctx context.Context, userID, connectorID string) ([]domain.Discovery, error)
 
 	AttachConversation(ctx context.Context, input AttachInput) (*domain.ConversationIngestion, error)
+	UpdateConversationStart(ctx context.Context, userID, conversationID string, start time.Time) (*domain.ConversationIngestion, error)
 	GetConversation(ctx context.Context, id string) (*domain.ConversationIngestion, error)
 	FindConversationByExternal(ctx context.Context, platform, workspaceKey, externalConversationID string) (*domain.ConversationIngestion, error)
 	ListConversations(ctx context.Context, userID, platform string) ([]domain.ConversationIngestion, error)

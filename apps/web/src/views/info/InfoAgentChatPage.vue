@@ -81,6 +81,23 @@
               <span>{{ message.todo.due_at || message.todo.due_expression || '未设置截止时间' }}</span>
             </div>
 
+            <div v-if="message.formResult" class="agent-form-result">
+              <div class="agent-form-result__title">
+                <t-icon name="check-circle" />
+                {{ message.formResult.verified ? '已写入表格' : '已提交' }}
+              </div>
+              <strong>{{ message.formResult.range }}</strong>
+              <span v-if="!message.formResult.verified">结果无法自动确认，请自行核对</span>
+              <span v-if="formUndone[message.id]" class="agent-form-result__undone">已撤销，已恢复写入前的内容</span>
+              <button
+                v-if="formUndo[message.id] && !formUndone[message.id]"
+                type="button"
+                class="agent-button agent-form-result__undo"
+                :disabled="undoBusy[message.id]"
+                @click="undoForm(message)"
+              >撤销</button>
+            </div>
+
             <div v-if="message.approval" class="agent-approval">
               <div class="agent-approval__header">
                 <span><t-icon name="lock-on" />需要确认</span>
@@ -96,6 +113,34 @@
                   <input v-model="approvalEditors[message.id].dueDate" type="date" />
                 </label>
               </template>
+              <template v-else-if="message.approval.capability === 'form.apply'">
+                <div class="agent-form">
+                  <p class="agent-form__title">
+                    {{ formDraft(message).title || '链接表单' }}
+                  </p>
+                  <p class="agent-form__summary">
+                    {{ formSummary(message).total }} 字段 ·
+                    {{ formSummary(message).filled }} 已填
+                    <span v-if="formSummary(message).empty"> · {{ formSummary(message).empty }} 待补</span>
+                    <span v-if="formDraft(message).target_cell"> · 写入 {{ formDraft(message).target_cell }}</span>
+                  </p>
+                  <p v-if="formDraft(message).missing?.length" class="agent-form__warning">
+                    缺少：{{ formDraft(message).missing.join('、') }}
+                  </p>
+                  <p v-if="formHasRetrieved(message)" class="agent-form__hint">
+                    部分字段来自知识库语义检索，可能取错上下文，请核对后再确认
+                  </p>
+                  <div class="agent-form__fields">
+                    <label v-for="(field, index) in formEditor(message)" :key="`${field.name}-${index}`">
+                      <span>
+                        {{ field.name }}
+                        <small class="agent-form__source">{{ formSourceLabel(field.source) }}</small>
+                      </span>
+                      <input v-model="field.value" :disabled="message.submitting" />
+                    </label>
+                  </div>
+                </div>
+              </template>
               <pre v-else class="agent-approval__arguments">{{ JSON.stringify(message.approval.arguments, null, 2) }}</pre>
               <div class="agent-approval__actions">
                 <button type="button" class="agent-button agent-button--primary" :disabled="message.submitting" @click="confirmApproval(message)">确认</button>
@@ -103,7 +148,47 @@
               </div>
             </div>
 
-            <form v-if="message.inputRequest" class="agent-input-request" @submit.prevent="submitInput(message)">
+            <div v-if="isTakeover(message)" class="agent-takeover">
+              <p class="agent-takeover__hint">
+                目标页面需要登录后才可编辑。下面是在真实浏览器里的画面，直接点击操作，完成后继续。
+              </p>
+              <img
+                v-if="takeoverFrames[message.id]"
+                class="agent-takeover__screen"
+                :src="takeoverFrames[message.id]"
+                alt="接管浏览器画面"
+                @click="takeoverClick(message, $event)"
+              />
+              <p v-else class="agent-takeover__hint">正在获取浏览器画面…</p>
+              <div class="agent-takeover__controls">
+                <input
+                  v-model="takeoverText[message.id]"
+                  :disabled="takeoverBusy[message.id]"
+                  placeholder="输入要键入的内容"
+                  @keydown.enter.prevent="takeoverSendText(message)"
+                />
+                <button
+                  type="button"
+                  class="agent-button"
+                  :disabled="takeoverBusy[message.id] || !(takeoverText[message.id] || '').trim()"
+                  @click="takeoverSendText(message)"
+                >键入</button>
+                <button
+                  type="button"
+                  class="agent-button"
+                  :disabled="takeoverBusy[message.id]"
+                  @click="takeoverPressEnter(message)"
+                >回车</button>
+              </div>
+              <button
+                type="button"
+                class="agent-button agent-button--primary"
+                :disabled="message.submitting"
+                @click="continueAfterTakeover(message)"
+              >我已完成登录，继续</button>
+            </div>
+
+            <form v-else-if="message.inputRequest" class="agent-input-request" @submit.prevent="submitInput(message)">
               <label>
                 <span>需要补充的信息</span>
                 <small v-if="message.inputRequest.missing.length">{{ message.inputRequest.missing.join('、') }}</small>
@@ -239,12 +324,16 @@ import {
   composeEditedArguments,
   createAgentTask,
   dayOfISO,
+  fetchTakeoverFrame,
   getAgentConversation,
   getAgentPlan,
   getAgentTask,
+  getFormUndo,
   listAgentApprovals,
   listAgentObservations,
   rejectAgentApproval,
+  sendAgentTakeoverInput,
+  undoFormWrite,
   streamAgentTaskEvents,
   submitAgentTaskInput,
   uploadAgentAttachment,
@@ -347,6 +436,8 @@ type AgentMessage = {
   citations: Citation[]
   error?: string
   todo?: TodoResult
+  /** Receipt for a form.preview / form.apply step, shown after a write. */
+  formResult?: { summary: string; range?: string; verified?: boolean }
   approval?: AgentApproval
   inputRequest?: { missing: string[] }
   submitting?: boolean
@@ -366,6 +457,12 @@ const activeTaskID = ref('')
 const conversationId = ref('')
 const restoringConversation = ref(false)
 const approvalEditors = reactive<Record<string, { title: string; dueDate: string }>>({})
+/**
+ * The editable field list of a form.apply draft, keyed by message id. The
+ * owner's edits are what the confirm call sends back, so the values written
+ * are the ones on screen, not the ones the Agent proposed.
+ */
+const formEditors = reactive<Record<string, Array<{ name: string; value: string; source: string }>>>({})
 const inputValues = reactive<Record<string, string>>({})
 const expandedTraces = reactive<Record<string, boolean>>({})
 const expandedSources = reactive<Record<string, boolean>>({})
@@ -428,6 +525,7 @@ function rememberEvent(message: AgentMessage, event: AgentTaskEvent): void {
 }
 
 async function prepareApproval(message: AgentMessage, event: AgentTaskEvent): Promise<void> {
+  stopTakeover(message)
   const args = approvalArguments(event)
   const timezone = String(args.timezone || 'Asia/Shanghai')
   const approval: AgentApproval = {
@@ -444,6 +542,9 @@ async function prepareApproval(message: AgentMessage, event: AgentTaskEvent): Pr
   approvalEditors[message.id] = {
     title: String(args.title || approval.capability || '待确认操作'),
     dueDate: typeof args.due_at === 'string' ? dayOfISO(args.due_at, timezone) : '',
+  }
+  if (approval.capability === 'form.apply') {
+    formEditors[message.id] = formFieldsFrom(args.draft)
   }
   message.status = 'waiting_approval'
   message.statusText = '等待确认'
@@ -494,6 +595,19 @@ function handleTaskEvent(message: AgentMessage, event: AgentTaskEvent): boolean 
     case 'step.succeeded':
     case 'step.failed':
       addOrUpdateStep(message, event)
+      if (event.event_type === 'step.succeeded') {
+        const preview = payload.result_preview as Record<string, unknown> | undefined
+        const writtenRange = typeof preview?.written_range === 'string' ? preview.written_range : ''
+        // A preview step is only a progress line; a write produces the receipt.
+        if (writtenRange && typeof preview?.summary === 'string') {
+          message.formResult = {
+            summary: preview.summary,
+            range: writtenRange,
+            verified: Boolean(preview?.verified),
+          }
+          void refreshFormUndo(message)
+        }
+      }
       message.status = event.event_type === 'step.failed' ? 'executing' : 'executing'
       message.statusText = event.event_type === 'step.started'
         ? stepStartText(String(payload.capability || ''))
@@ -508,6 +622,7 @@ function handleTaskEvent(message: AgentMessage, event: AgentTaskEvent): boolean 
       message.status = 'waiting_input'
       message.statusText = '需要补充信息'
       message.inputRequest = { missing: Array.isArray(payload.missing_information) ? payload.missing_information.map(String) : [] }
+      startTakeover(message)
       return false
     case 'task.preview_confirmed':
       message.todo = {
@@ -523,6 +638,7 @@ function handleTaskEvent(message: AgentMessage, event: AgentTaskEvent): boolean 
       message.error = '审批已拒绝，任务不会执行'
       return false
     case 'task.completed':
+      stopTakeover(message)
       message.status = 'succeeded'
       message.statusText = '任务已完成'
       if (typeof payload.answer === 'string') message.answer = payload.answer
@@ -531,11 +647,13 @@ function handleTaskEvent(message: AgentMessage, event: AgentTaskEvent): boolean 
       void hydrateTerminal(message)
       return false
     case 'task.failed':
+      stopTakeover(message)
       message.status = payload.task_status === 'unknown' ? 'unknown' : 'failed'
       message.statusText = payload.task_status === 'unknown' ? '外部结果未知' : '任务失败'
       message.error = String(payload.error?.message || '任务执行失败')
       return false
     case 'task.cancelled':
+      stopTakeover(message)
       message.status = 'cancelled'
       message.statusText = '任务已取消'
       return false
@@ -584,7 +702,7 @@ function primaryAnswer(message: AgentMessage): string {
 
 function showsEmptyKnowledgeResult(message: AgentMessage): boolean {
   if (message.status !== 'succeeded') return false
-  if (primaryAnswer(message) || message.todo || message.approval || message.inputRequest) return false
+  if (primaryAnswer(message) || message.todo || message.formResult || message.approval || message.inputRequest) return false
   return !visibleSourceItems(message).length
 }
 
@@ -1341,6 +1459,179 @@ function approvalEditor(message: AgentMessage) {
   return approvalEditors[message.id] || { title: '', dueDate: '' }
 }
 
+function formFieldsFrom(draft: unknown): Array<{ name: string; value: string; source: string }> {
+  const raw =
+    draft && typeof draft === 'object' && Array.isArray((draft as Record<string, unknown>).fields)
+      ? ((draft as Record<string, unknown>).fields as unknown[])
+      : []
+  return raw.map((item) => {
+    const field = item && typeof item === 'object' ? (item as Record<string, unknown>) : {}
+    return {
+      name: String(field.name ?? ''),
+      value: String(field.value ?? ''),
+      source: String(field.source ?? 'empty'),
+    }
+  })
+}
+
+/** Where a draft value came from, in the owner's words. */
+function formSourceLabel(source: string): string {
+  return (
+    {
+      instruction: '来自指令',
+      knowledge: '来自知识库',
+      user: '你填写的',
+      page: '页面已有',
+      empty: '待补充',
+    } as Record<string, string>
+  )[source] || '待补充'
+}
+
+function formEditor(message: AgentMessage) {
+  return formEditors[message.id] || []
+}
+
+function formDraft(message: AgentMessage): Record<string, any> {
+  const draft = message.approval?.arguments?.draft
+  return draft && typeof draft === 'object' ? (draft as Record<string, any>) : {}
+}
+
+function formSummary(message: AgentMessage) {
+  const fields = formEditor(message)
+  const filled = fields.filter((field) => field.value.trim()).length
+  return { total: fields.length, filled, empty: fields.length - filled }
+}
+
+/**
+ * Whether any value came from retrieval.
+ *
+ * Semantic search has no notion of context or ordering, so a retrieved value
+ * can be the wrong one for the field. The card is the safety net, and it only
+ * works if it says so.
+ */
+function formHasRetrieved(message: AgentMessage): boolean {
+  return formEditor(message).some((field) => field.source === 'knowledge')
+}
+
+/** The sidecar captures at this viewport, so clicks map back through it. */
+const TAKEOVER_VIEWPORT = { width: 1440, height: 900 }
+const takeoverFrames = reactive<Record<string, string>>({})
+const takeoverText = reactive<Record<string, string>>({})
+const takeoverBusy = reactive<Record<string, boolean>>({})
+const takeoverTimers = new Map<string, number>()
+
+/** Undo availability for the write receipt, and whether it was taken. */
+const formUndo = reactive<Record<string, boolean>>({})
+const formUndone = reactive<Record<string, boolean>>({})
+const undoBusy = reactive<Record<string, boolean>>({})
+
+async function refreshFormUndo(message: AgentMessage): Promise<void> {
+  if (!message.taskId) return
+  try {
+    const state = await getFormUndo(message.taskId)
+    formUndo[message.id] = Boolean(state.available)
+  } catch {
+    formUndo[message.id] = false
+  }
+}
+
+async function undoForm(message: AgentMessage): Promise<void> {
+  if (!message.taskId || undoBusy[message.id]) return
+  undoBusy[message.id] = true
+  try {
+    await undoFormWrite(message.taskId)
+    formUndo[message.id] = false
+    formUndone[message.id] = true
+  } catch (error) {
+    message.error = error instanceof Error ? error.message : '撤销失败'
+    MessagePlugin.error(message.error)
+  } finally {
+    undoBusy[message.id] = false
+  }
+}
+
+function isTakeover(message: AgentMessage): boolean {
+  return Boolean(message.taskId) && Boolean(message.inputRequest?.missing?.includes('form_login'))
+}
+
+async function refreshTakeoverFrame(message: AgentMessage): Promise<void> {
+  if (!message.taskId) return
+  try {
+    const url = await fetchTakeoverFrame(message.taskId)
+    const previous = takeoverFrames[message.id]
+    takeoverFrames[message.id] = url
+    if (previous) URL.revokeObjectURL(previous)
+  } catch {
+    // A single missed frame is not fatal; the next tick retries.
+  }
+}
+
+function startTakeover(message: AgentMessage): void {
+  if (!isTakeover(message) || takeoverTimers.has(message.id)) return
+  void refreshTakeoverFrame(message)
+  takeoverTimers.set(
+    message.id,
+    window.setInterval(() => void refreshTakeoverFrame(message), 1500),
+  )
+}
+
+function stopTakeover(message: AgentMessage): void {
+  const timer = takeoverTimers.get(message.id)
+  if (timer !== undefined) {
+    window.clearInterval(timer)
+    takeoverTimers.delete(message.id)
+  }
+  const frame = takeoverFrames[message.id]
+  if (frame) {
+    URL.revokeObjectURL(frame)
+    takeoverFrames[message.id] = ''
+  }
+}
+
+async function sendTakeover(
+  message: AgentMessage,
+  input: Parameters<typeof sendAgentTakeoverInput>[1],
+): Promise<void> {
+  if (!message.taskId || takeoverBusy[message.id]) return
+  takeoverBusy[message.id] = true
+  try {
+    await sendAgentTakeoverInput(message.taskId, input)
+  } catch (error) {
+    message.error = error instanceof Error ? error.message : '接管操作失败'
+  } finally {
+    takeoverBusy[message.id] = false
+    await refreshTakeoverFrame(message)
+  }
+}
+
+async function takeoverClick(message: AgentMessage, event: MouseEvent): Promise<void> {
+  const image = event.currentTarget as HTMLImageElement
+  const rect = image.getBoundingClientRect()
+  if (!rect.width || !rect.height) return
+  await sendTakeover(message, {
+    kind: 'click',
+    x: ((event.clientX - rect.left) / rect.width) * TAKEOVER_VIEWPORT.width,
+    y: ((event.clientY - rect.top) / rect.height) * TAKEOVER_VIEWPORT.height,
+  })
+}
+
+async function takeoverSendText(message: AgentMessage): Promise<void> {
+  const text = (takeoverText[message.id] || '').trim()
+  if (!text) return
+  await sendTakeover(message, { kind: 'type', text })
+  takeoverText[message.id] = ''
+}
+
+async function takeoverPressEnter(message: AgentMessage): Promise<void> {
+  await sendTakeover(message, { kind: 'key', text: 'Enter' })
+}
+
+async function continueAfterTakeover(message: AgentMessage): Promise<void> {
+  stopTakeover(message)
+  inputValues[message.id] = '已完成登录，请继续'
+  await submitInput(message)
+}
+
 async function confirmApproval(message: AgentMessage): Promise<void> {
   if (!message.approval || message.submitting) return
   message.submitting = true
@@ -1352,6 +1643,34 @@ async function confirmApproval(message: AgentMessage): Promise<void> {
       const draft = buildScheduleDraft({ task: { task_id: message.taskId || '', source_type: 'chat', owner_user_id: '', status: 'waiting_approval' }, approval })
       const edited = composeEditedArguments(draft, { title: editor.title, dueDate: editor.dueDate })
       arguments_ = { ...approval.arguments, ...edited.arguments, title: editor.title }
+    }
+    if (approval.capability === 'form.apply') {
+      // Send back exactly what is on the card: the backend overwrites the Step
+      // arguments with this and re-fingerprints before writing.
+      const original = formDraft(message)
+      const originalFields = Array.isArray(original.fields) ? (original.fields as Array<Record<string, any>>) : []
+      const fields = formEditor(message).map((field, index) => {
+        const before: Record<string, any> = originalFields[index] || {}
+        const value = field.value.trim()
+        const untouched = field.value === String(before.value ?? '')
+        return {
+          ...before,
+          name: field.name || String(before.name ?? ''),
+          value: field.value,
+          // Keep the Agent's provenance while the owner has not touched it;
+          // an edited value is theirs, and a cleared one is missing again.
+          source: value ? (untouched ? field.source || 'instruction' : 'user') : 'empty',
+          confidence: value ? 1 : 0,
+        }
+      })
+      const draft: Record<string, any> = { ...original, fields }
+      draft.missing = fields.filter((field) => !String(field.value || '').trim()).map((field) => String(field.name || ''))
+      arguments_ = {
+        ...approval.arguments,
+        draft,
+        values: [fields.map((field) => String(field.value || ''))],
+        action: draft.write_model === 'live_document' ? 'write_cells' : approval.arguments?.action || 'write_cells',
+      }
     }
     await approveAgentApproval(approval.approval_id, approval.version, arguments_)
     message.approval = undefined
@@ -1440,6 +1759,7 @@ watch(
 )
 
 onBeforeUnmount(() => {
+  messages.value.forEach((message) => stopTakeover(message))
   conversationLoadSequence += 1
   activeController?.abort()
 })
@@ -1525,6 +1845,10 @@ onBeforeUnmount(() => {
 .agent-todo__title { display: flex; align-items: center; gap: 6px; color: var(--td-brand-color); font-size: 12px; }
 .agent-todo strong { font-size: 15px; }
 .agent-todo span { color: var(--td-text-color-secondary); font-size: 12px; }
+.agent-form-result { display: grid; gap: 4px; margin-top: 14px; padding: 12px 14px; border: 1px solid var(--td-success-color-3); border-radius: 9px; background: var(--td-success-color-1); }
+.agent-form-result__title { display: inline-flex; align-items: center; gap: 6px; font-weight: 600; }
+.agent-form-result span { color: var(--td-text-color-secondary); font-size: 12px; }
+.agent-form-result__undo { justify-self: start; min-height: 30px; padding: 0 12px; }
 .agent-approval, .agent-input-request { display: grid; gap: 11px; margin-top: 14px; padding: 14px; border: 1px solid var(--td-warning-color-3); border-radius: 9px; background: var(--td-warning-color-1); }
 .agent-approval__header, .agent-approval__actions { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 .agent-approval__header span { display: inline-flex; align-items: center; gap: 6px; font-weight: 600; }
@@ -1532,6 +1856,20 @@ onBeforeUnmount(() => {
 .agent-approval label, .agent-input-request label { display: grid; gap: 5px; color: var(--td-text-color-secondary); font-size: 12px; }
 .agent-approval input, .agent-input-request input { width: 100%; min-height: 34px; padding: 6px 9px; border: 1px solid var(--td-component-stroke); border-radius: 6px; color: var(--td-text-color-primary); background: var(--td-bg-color-container); }
 .agent-approval__arguments { max-height: 220px; overflow: auto; margin: 0; padding: 10px; border-radius: 6px; color: var(--td-text-color-secondary); background: var(--td-bg-color-container); font-size: 12px; }
+.agent-form { display: grid; gap: 8px; }
+.agent-form__title { margin: 0; font-weight: 600; }
+.agent-form__summary { margin: 0; color: var(--td-text-color-secondary); font-size: 12px; }
+.agent-form__warning { margin: 0; color: var(--td-warning-color-6, #e37318); font-size: 12px; }
+.agent-form__hint { margin: 0; color: var(--td-text-color-secondary); font-size: 12px; }
+.agent-form__fields { display: grid; gap: 8px; max-height: 260px; overflow: auto; }
+.agent-form__fields label { display: grid; gap: 4px; color: var(--td-text-color-secondary); font-size: 12px; }
+.agent-form__source { margin-left: 6px; padding: 0 6px; border-radius: 8px; color: var(--td-text-color-placeholder); background: var(--td-bg-color-component); font-size: 11px; }
+.agent-form__fields input { width: 100%; min-height: 32px; padding: 6px 9px; border: 1px solid var(--td-component-stroke); border-radius: 6px; color: var(--td-text-color-primary); background: var(--td-bg-color-container); }
+.agent-takeover { display: grid; gap: 10px; margin-top: 14px; padding: 14px; border: 1px solid var(--td-warning-color-3); border-radius: 9px; background: var(--td-warning-color-1); }
+.agent-takeover__hint { margin: 0; color: var(--td-text-color-secondary); font-size: 12px; line-height: 1.6; }
+.agent-takeover__screen { width: 100%; max-height: 420px; object-fit: contain; border: 1px solid var(--td-component-stroke); border-radius: 6px; background: #fff; cursor: crosshair; }
+.agent-takeover__controls { display: grid; grid-template-columns: 1fr auto auto; gap: 8px; }
+.agent-takeover__controls input { width: 100%; min-height: 34px; padding: 6px 9px; border: 1px solid var(--td-component-stroke); border-radius: 6px; color: var(--td-text-color-primary); background: var(--td-bg-color-container); }
 .agent-button { min-height: 34px; padding: 0 14px; border: 1px solid var(--td-component-stroke); border-radius: 7px; color: var(--td-text-color-primary); background: var(--td-bg-color-container); cursor: pointer; }
 .agent-button--primary { border-color: var(--td-brand-color); color: #fff; background: var(--td-brand-color); }
 .agent-button:disabled { cursor: not-allowed; opacity: .55; }

@@ -73,8 +73,29 @@ def planner_arguments_schema(descriptor: CapabilityDescriptor) -> dict[str, Any]
     for binding in descriptor.input_bindings:
         properties.pop(binding.runtime_argument, None)
         required.discard(binding.runtime_argument)
-        properties[binding.planner_argument] = StepOutputRef.model_json_schema()
-        required.add(binding.planner_argument)
+        # Say which step the reference has to point at. Without this the model
+        # only sees "step + output", and a plausible-looking plan that wires a
+        # reference to the wrong capability fails validation instead of
+        # passing -- form.preview feeding answer.compose.evidence_ref, say.
+        hint = (
+            f"必须引用更早的 {binding.source_capability} 步骤输出的 "
+            f"{binding.source_output}；其他能力不受理"
+        )
+        if binding.aggregate:
+            properties[binding.planner_argument] = {
+                "type": "array",
+                "items": StepOutputRef.model_json_schema(),
+                "minItems": 1,
+                "description": hint,
+            }
+        else:
+            reference_schema = StepOutputRef.model_json_schema()
+            reference_schema["description"] = hint
+            properties[binding.planner_argument] = reference_schema
+        if binding.required:
+            required.add(binding.planner_argument)
+        else:
+            required.discard(binding.planner_argument)
     if descriptor.task_text_argument:
         # The model is not asked for it, so it cannot get it wrong: a capability
         # that validates against the user's own words needs a value the model
