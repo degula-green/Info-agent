@@ -2,7 +2,7 @@
 
 ## 文档状态
 
-- 版本：v1.6
+- 版本：v1.7
 - 状态：Phase 1/2 已实现待评审，Phase 3+ 未开工
 - 作者：架构师（Claude）
 - 创建日期：2026-10-03
@@ -1126,9 +1126,9 @@ Response: {
     索引/命名空间、owner 过滤、导出和删除策略。
   - Phase 5 的批量管理、过期策略和全局记忆页面需要先确定产品保留策略
     与租户/企业权限边界，不能在 Phase 2 提前做一个空的管理入口。
-  - `pg_trgm` 权限验证不是 Phase 1/2 的阻塞项。当前检索已使用
-    keywords + `simple` FTS + `ILIKE`；只有实测召回不足时才需要申请扩展
-    权限并增加 trigram 索引。
+  - 开发库已确认支持 `pg_trgm 1.6`。Phase 2 迁移在扩展可用时增加
+    content/title trigram 索引；无权限或扩展不可用时只记录提示，
+    检索继续降级到 keywords + `simple` FTS + `ILIKE`，不阻塞启动。
 
 **记忆管理 API 与前端呈现**：
 
@@ -1195,7 +1195,7 @@ global/preference/跨会话记忆。
 - [x] 增加 `content_hash` / `memory_key` 去重
 - [x] 服务层拒绝 `memory_type='preference'`；偏好不在会话内记忆表中承载
 - [x] 实现必选的关键词 + PostgreSQL `simple` FTS 检索
-- [ ] 验证 pg_trgm 权限；可用时增加 trigram 索引，不可用时降级 ILIKE
+- [x] 验证 pg_trgm 权限；可用时增加 trigram 索引，不可用时降级 ILIKE
 - [x] 不接入任何向量检索路径；未来 Phase 4 实施时再引入显式开关
 - [x] 检索 query 使用“当前问题 + 最近消息 + summary”
 - [x] 实现最小 API：
@@ -1432,6 +1432,8 @@ Phase 1 上线后按实际 prompt 长度重新测量。
 ---
 
 **文档版本控制**：
+- v1.7 (2026-10-03)：确认开发库支持 `pg_trgm`，Phase 2 迁移增加可降级的
+  content/title trigram 索引；扩展不可用时保持 keywords + FTS + ILIKE。
 - v1.6 (2026-10-03)：写入 Phase 1/2 完成状态与 Phase 3+ 启动阻塞。
   明确本轮只交付后端记忆闭环，记忆管理 API 暂不配套独立页面；
   Phase 3 前补 extraction job，Phase 4 前拆分跨会话存储和向量命名空间；

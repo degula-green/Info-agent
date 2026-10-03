@@ -58,6 +58,28 @@ CREATE UNIQUE INDEX IF NOT EXISTS memory_active_dedup_idx
     )
     WHERE status = 'active';
 
+DO $$
+BEGIN
+    BEGIN
+        EXECUTE 'CREATE EXTENSION IF NOT EXISTS pg_trgm';
+    EXCEPTION
+        WHEN insufficient_privilege OR undefined_file OR feature_not_supported THEN
+        RAISE NOTICE 'pg_trgm unavailable; memory search falls back to FTS and ILIKE';
+    END;
+END
+$$;
+
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pg_trgm') THEN
+        EXECUTE 'CREATE INDEX IF NOT EXISTS memory_content_trgm_idx '
+            'ON agent.memory_records USING gin (content gin_trgm_ops)';
+        EXECUTE 'CREATE INDEX IF NOT EXISTS memory_title_trgm_idx '
+            'ON agent.memory_records USING gin (title gin_trgm_ops)';
+    END IF;
+END
+$$;
+
 CREATE TABLE IF NOT EXISTS agent.memory_sources (
     memory_id uuid NOT NULL
         REFERENCES agent.memory_records(memory_id) ON DELETE CASCADE,
