@@ -13,7 +13,8 @@
         type="button"
         :aria-label="`展开待办，${openCount} 条未完成`"
         title="展开待办"
-        @click="collapsed = false"
+        @pointerdown="startDrag"
+        @click="expandCollapsed"
       >
         <svg viewBox="0 0 24 24" aria-hidden="true">
           <path d="M7.5 4.75h9a2.75 2.75 0 0 1 2.75 2.75v9a2.75 2.75 0 0 1-2.75 2.75h-9A2.75 2.75 0 0 1 4.75 16.5v-9A2.75 2.75 0 0 1 7.5 4.75Z" />
@@ -23,7 +24,7 @@
       </button>
 
       <section v-else class="todo-float__shell">
-        <header ref="headerRef" class="todo-float__header" @pointerdown="startDrag">
+        <header class="todo-float__header" @pointerdown="startDrag">
           <button
             class="todo-float__switch"
             type="button"
@@ -40,7 +41,7 @@
             data-no-drag
             aria-label="收起待办"
             title="收起待办"
-            @click="collapsed = true"
+            @click="collapsePanel"
           >
             <svg viewBox="0 0 24 24" aria-hidden="true">
               <path d="M6 12h12" />
@@ -106,19 +107,26 @@
 </template>
 
 <script setup lang="ts">
+import { storeToRefs } from 'pinia'
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import {
   agentTodoSourceInitial,
   agentTodoSourceLabel,
   agentTodoTimeLabel,
-  completeAgentTodo,
-  listAgentTodos,
   sortAgentTodos,
-  updateAgentTodo,
   type AgentTodo,
 } from '../api/info-agent.ts'
+import { useTodoLedgerStore } from '../stores/todoLedger.ts'
+import {
+  clampTodoPanelAnchor,
+  defaultTodoPanelState,
+  loadTodoPanelState,
+  saveTodoPanelState,
+  todoPanelPlacement,
+  type TodoPanelAnchor,
+  type TodoPanelTab,
+} from '../utils/todo-panel-state.ts'
 
-type TodoTab = 'open' | 'done'
 type DragState = {
   pointerId: number
   startX: number
@@ -128,109 +136,91 @@ type DragState = {
   moved: boolean
 }
 
-const POLL_MS = 5000
-const DEFAULT_GAP = 24
-const EDGE_GAP = 12
 const PANEL_WIDTH = 344
-const COLLAPSED_WIDTH = 56
 
 const panelRef = ref<HTMLElement | null>(null)
-const headerRef = ref<HTMLElement | null>(null)
-const todos = ref<AgentTodo[]>([])
-const activeTab = ref<TodoTab>('open')
-const collapsed = ref(false)
-const loading = ref(false)
+const ledger = useTodoLedgerStore()
+const { items: todos, loading, loadError, busyIDs, itemErrors, openCount } = storeToRefs(ledger)
+const initialViewport = {
+  width: typeof window === 'undefined' ? 1280 : window.innerWidth,
+  height: typeof window === 'undefined' ? 720 : window.innerHeight,
+}
+const persistedPanelState = loadTodoPanelState()
+const initialState = persistedPanelState || defaultTodoPanelState(initialViewport)
+const activeTab = ref<TodoPanelTab>(initialState.activeTab)
+const collapsed = ref(initialState.collapsed)
 const dragging = ref(false)
-const loadError = ref('')
-const busyIDs = ref<string[]>([])
-const itemErrors = ref<Record<string, string>>({})
-const position = ref({ x: 0, y: DEFAULT_GAP })
+const position = ref<TodoPanelAnchor>({ x: initialState.x, y: initialState.y })
+const viewport = ref(initialViewport)
+const panelSize = ref({ width: PANEL_WIDTH, height: 420 })
 let dragState: DragState | null = null
-let suppressTabClick = false
-let pollTimer: number | undefined
+let suppressClickAfterDrag = false
+let panelResizeObserver: ResizeObserver | undefined
 
-const openCount = computed(() => todos.value.filter((todo) => todo.status === 'open').length)
 const visibleItems = computed(() => sortAgentTodos(todos.value, activeTab.value))
-const panelStyle = computed(() => ({
-  left: `${position.value.x}px`,
-  top: `${position.value.y}px`,
-}))
+const placement = computed(() =>
+  todoPanelPlacement(position.value, viewport.value, panelSize.value),
+)
+const panelStyle = computed(() =>
+  collapsed.value
+    ? {
+        left: `${position.value.x}px`,
+        top: `${position.value.y}px`,
+      }
+    : {
+        left: `${placement.value.x}px`,
+        top: `${placement.value.y}px`,
+      },
+)
 
-function mergePolledTodos(serverTodos: AgentTodo[]) {
-  const byID = new Map(serverTodos.map((todo) => [todo.todo_id, todo]))
-  for (const local of todos.value) {
-    if (busyIDs.value.includes(local.todo_id)) byID.set(local.todo_id, local)
-  }
-  todos.value = [...byID.values()]
-}
-
-async function load() {
-  if (loading.value) return
-  loading.value = true
-  try {
-    mergePolledTodos(await listAgentTodos(['open', 'done']))
-    loadError.value = ''
-  } catch (error) {
-    loadError.value = error instanceof Error ? error.message : '待办加载失败'
-  } finally {
-    loading.value = false
-  }
-}
-
-function replaceTodo(next: AgentTodo) {
-  todos.value = todos.value.map((todo) => (todo.todo_id === next.todo_id ? next : todo))
-}
-
-async function toggleTodo(todo: AgentTodo) {
-  if (busyIDs.value.includes(todo.todo_id)) return
-  const target: TodoTab = todo.status === 'done' ? 'open' : 'done'
-  const optimistic: AgentTodo = {
-    ...todo,
-    status: target,
-    completed_at: target === 'done' ? new Date().toISOString() : null,
-  }
-
-  busyIDs.value = [...busyIDs.value, todo.todo_id]
-  const remaining = { ...itemErrors.value }
-  delete remaining[todo.todo_id]
-  itemErrors.value = remaining
-  replaceTodo(optimistic)
-
-  try {
-    const updated =
-      target === 'done'
-        ? await completeAgentTodo(todo.todo_id)
-        : await updateAgentTodo(todo.todo_id, { status: 'open' })
-    replaceTodo(updated)
-  } catch (error) {
-    replaceTodo(todo)
-    itemErrors.value = {
-      ...itemErrors.value,
-      [todo.todo_id]: error instanceof Error ? error.message : '待办更新失败',
-    }
-  } finally {
-    busyIDs.value = busyIDs.value.filter((id) => id !== todo.todo_id)
-  }
+function toggleTodo(todo: AgentTodo) {
+  void ledger.toggleTodo(todo)
 }
 
 function switchTab() {
-  if (suppressTabClick) {
-    suppressTabClick = false
-    return
-  }
+  if (consumeSuppressedClick()) return
   activeTab.value = activeTab.value === 'open' ? 'done' : 'open'
+  persistPanelState()
+}
+
+function expandCollapsed() {
+  if (consumeSuppressedClick()) return
+  collapsed.value = false
+  persistPanelState()
+  requestAnimationFrame(syncPanelSize)
+}
+
+function collapsePanel() {
+  collapsed.value = true
+  persistPanelState()
+}
+
+function consumeSuppressedClick(): boolean {
+  if (!suppressClickAfterDrag) return false
+  suppressClickAfterDrag = false
+  return true
+}
+
+function persistPanelState() {
+  saveTodoPanelState({
+    version: 1,
+    x: position.value.x,
+    y: position.value.y,
+    collapsed: collapsed.value,
+    activeTab: activeTab.value,
+  })
 }
 
 function clampPosition() {
+  position.value = clampTodoPanelAnchor(position.value, viewport.value)
+}
+
+function syncPanelSize() {
   const panel = panelRef.value
-  if (!panel) return
-  const width = panel.offsetWidth || (collapsed.value ? COLLAPSED_WIDTH : PANEL_WIDTH)
-  const height = panel.offsetHeight || COLLAPSED_WIDTH
-  const maxX = Math.max(EDGE_GAP, window.innerWidth - width - EDGE_GAP)
-  const maxY = Math.max(EDGE_GAP, window.innerHeight - height - EDGE_GAP)
-  position.value = {
-    x: Math.min(Math.max(EDGE_GAP, position.value.x), maxX),
-    y: Math.min(Math.max(EDGE_GAP, position.value.y), maxY),
+  if (!panel || collapsed.value) return
+  panelSize.value = {
+    width: panel.offsetWidth || PANEL_WIDTH,
+    height: panel.offsetHeight || panelSize.value.height,
   }
 }
 
@@ -253,7 +243,7 @@ function moveDrag(event: PointerEvent) {
   if (!dragState.moved && Math.hypot(nextX - dragState.originX, nextY - dragState.originY) > 4) {
     dragState.moved = true
     dragging.value = true
-    headerRef.value?.setPointerCapture(event.pointerId)
+    panelRef.value?.setPointerCapture(event.pointerId)
     event.preventDefault()
   }
   if (!dragState.moved) return
@@ -262,42 +252,54 @@ function moveDrag(event: PointerEvent) {
 
 function endDrag(event: PointerEvent) {
   if (!dragState || dragState.pointerId !== event.pointerId) return
-  if (dragState.moved && headerRef.value?.hasPointerCapture(event.pointerId)) {
-    headerRef.value.releasePointerCapture(event.pointerId)
+  if (dragState.moved && panelRef.value?.hasPointerCapture(event.pointerId)) {
+    panelRef.value.releasePointerCapture(event.pointerId)
   }
   if (dragState.moved) {
-    suppressTabClick = true
+    suppressClickAfterDrag = true
     window.setTimeout(() => {
-      suppressTabClick = false
+      suppressClickAfterDrag = false
     }, 0)
   }
   dragState = null
   dragging.value = false
   clampPosition()
+  persistPanelState()
 }
 
 function onResize() {
+  viewport.value = {
+    width: window.innerWidth,
+    height: window.innerHeight,
+  }
   requestAnimationFrame(() => {
     clampPosition()
+    persistPanelState()
   })
 }
 
 function onVisibilityChange() {
-  if (!document.hidden) void load()
+  if (!document.hidden) void ledger.refresh()
 }
 
 onMounted(() => {
   requestAnimationFrame(() => {
-    position.value = {
-      x: Math.max(EDGE_GAP, window.innerWidth - PANEL_WIDTH - DEFAULT_GAP),
-      y: DEFAULT_GAP,
+    viewport.value = {
+      width: window.innerWidth,
+      height: window.innerHeight,
     }
     clampPosition()
+    syncPanelSize()
+    persistPanelState()
+    const panel = panelRef.value
+    if (panel && typeof ResizeObserver !== 'undefined') {
+      panelResizeObserver = new ResizeObserver(() => {
+        requestAnimationFrame(syncPanelSize)
+      })
+      panelResizeObserver.observe(panel)
+    }
   })
-  void load()
-  pollTimer = window.setInterval(() => {
-    if (!document.hidden) void load()
-  }, POLL_MS)
+  ledger.startPolling()
   window.addEventListener('pointermove', moveDrag)
   window.addEventListener('pointerup', endDrag)
   window.addEventListener('pointercancel', endDrag)
@@ -306,7 +308,8 @@ onMounted(() => {
 })
 
 onUnmounted(() => {
-  if (pollTimer) window.clearInterval(pollTimer)
+  ledger.stopPolling()
+  panelResizeObserver?.disconnect()
   window.removeEventListener('pointermove', moveDrag)
   window.removeEventListener('pointerup', endDrag)
   window.removeEventListener('pointercancel', endDrag)
@@ -340,6 +343,8 @@ onUnmounted(() => {
 .todo-float--collapsed {
   width: 56px;
   height: 56px;
+  cursor: grab;
+  touch-action: none;
 }
 
 .todo-float--dragging {
@@ -347,6 +352,11 @@ onUnmounted(() => {
   box-shadow:
     0 28px 68px rgba(0, 0, 0, 0.4),
     0 3px 10px rgba(0, 0, 0, 0.3);
+}
+
+.todo-float--collapsed.todo-float--dragging,
+.todo-float--collapsed.todo-float--dragging .todo-float__collapsed {
+  cursor: grabbing;
 }
 
 .todo-float__shell {
@@ -665,7 +675,8 @@ onUnmounted(() => {
   border-radius: inherit;
   background: transparent;
   color: #d0d0d0;
-  cursor: pointer;
+  cursor: grab;
+  touch-action: none;
 }
 
 .todo-float__collapsed:hover {

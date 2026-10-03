@@ -621,3 +621,83 @@ def test_one_value_fills_only_one_field() -> None:
     # The message names 手机号, so that is the column it lands in -- and it
     # lands in exactly one column, not all three phone columns.
     assert filled == {"手机号": "15325653689"}
+
+
+def test_preview_reports_what_it_did_in_the_owner_s_words() -> None:
+    """Three stages the chat renders under the step, not one opaque row."""
+
+    client = FakeClient()
+    retriever = FakeRetriever("性别: 男")
+    capability = FormPreviewCapability(client, retriever=retriever)
+    request = f"填写 {URL} 学号：1000023"
+    result = capability.execute(capability.validate({"request": request, "url": URL}))
+
+    stages = result["stages"]
+    assert len(stages) == 3
+    assert "班级通讯录" in stages[0] and "4 个字段" in stages[0]
+    assert "知识库" in stages[1]
+    assert "预填写完成" in stages[2] and "待补" in stages[2]
+
+
+CHAT_HEADERS = [
+    "学号",
+    "姓名",
+    "性别",
+    "联系电话",
+    "QQ号",
+    "手机号",
+    "家长姓名",
+    "家长电话",
+    "家庭住址",
+]
+
+
+def test_chat_messages_are_read_line_by_line_with_the_label_glued_on() -> None:
+    """Collected data is typed by a person: no separators, one message a line."""
+
+    text = (
+        "学号20251714205\n"
+        "qq号123456789\n"
+        "电话13800000001\n"
+        "家长电话13800000002\n"
+        "家长姓名李帅\n"
+        "男生\n"
+        "我叫小呆呆"
+    )
+    assert extract_values(CHAT_HEADERS, text, relaxed=True) == {
+        "学号": "20251714205",
+        "QQ号": "123456789",
+        "联系电话": "13800000001",
+        "家长电话": "13800000002",
+        "家长姓名": "李帅",
+        "姓名": "小呆呆",
+        "性别": "男",
+    }
+
+
+def test_a_labelled_value_never_leaks_into_a_shape_match() -> None:
+    """``电话13800000001`` belongs to 联系电话, not to 手机号."""
+
+    got = extract_values(
+        ["联系电话", "手机号", "家长电话"],
+        "电话13800000001\n家长电话13800000002",
+        relaxed=True,
+    )
+    assert got == {"联系电话": "13800000001", "家长电话": "13800000002"}
+
+
+def test_several_pairs_on_one_line_are_all_read() -> None:
+    assert extract_values(
+        ["学号", "姓名", "性别"], "姓名：张三 性别：男", relaxed=True
+    ) == {"姓名": "张三", "性别": "男"}
+
+
+def test_an_html_form_still_matches_its_own_column_names() -> None:
+    """A page's label ("Telephone:") is a label too, not just our aliases."""
+
+    got = extract_values(
+        ["Customer name:", "Telephone:"],
+        "Customer name: 测试 Telephone: 13800000000",
+        relaxed=True,
+    )
+    assert got == {"Customer name:": "测试", "Telephone:": "13800000000"}

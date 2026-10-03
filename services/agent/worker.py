@@ -34,6 +34,17 @@ def _handle_signal(signum, frame) -> None:  # noqa: ARG001 - signal handler sign
 def main() -> None:
     logging.basicConfig(level=getattr(logging, settings.log_level.upper(), logging.INFO))
     container = build_container(settings)
+    logger.info(
+        "registered capabilities: %s",
+        ", ".join(sorted(item.name for item in container.registry.list_descriptors())),
+    )
+    base_planner = getattr(container.planner, "base", container.planner)
+    logger.info(
+        "planner=%s llm_intents=%s form_browser_url=%s",
+        type(base_planner).__name__,
+        sorted(getattr(base_planner, "llm_intents", []) or []),
+        getattr(container.settings, "form_browser_url", ""),
+    )
     signal.signal(signal.SIGINT, _handle_signal)
     if hasattr(signal, "SIGTERM"):
         signal.signal(signal.SIGTERM, _handle_signal)

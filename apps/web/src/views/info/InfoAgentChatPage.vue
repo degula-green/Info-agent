@@ -69,7 +69,14 @@
               </button>
               <ol v-if="isTraceOpen(message)" class="agent-trace__steps" aria-label="执行步骤">
                 <li v-for="step in message.steps" :key="step.id" :class="`agent-step--${step.status}`">
-                  <span>{{ displayStepLabel(step.label) }}</span>
+                  <span class="agent-step__body">
+                    {{ displayStepLabel(step.label) }}
+                    <em
+                      v-for="(stage, index) in step.stages || []"
+                      :key="index"
+                      class="agent-step__stage"
+                    >{{ stage }}</em>
+                  </span>
                   <small>{{ stepStatusLabel(step.status) }}</small>
                 </li>
               </ol>
@@ -365,7 +372,7 @@ type Citation = {
   position?: Record<string, any> | null
 }
 type TodoResult = { todo_id: string; title?: string; due_at?: string | null; due_expression?: string | null }
-type Step = { id: string; label: string; status: string }
+type Step = { id: string; label: string; status: string; stages?: string[] }
 type SourceInfo = {
   resource_id: string
   resource_type: string
@@ -554,13 +561,18 @@ function addOrUpdateStep(message: AgentMessage, event: AgentTaskEvent): void {
   const stepID = String(event.payload?.step_id || event.payload?.step?.step_id || '')
   if (!stepID) return
   const label = String(event.payload?.capability || event.payload?.step?.capability || stepID)
+  // A capability may report what it did in the owner's words; those lines hang
+  // under the step so its internal work is not one opaque row.
+  const rawStages = event.payload?.result_preview?.stages
+  const stages = Array.isArray(rawStages) ? rawStages.map((item) => String(item)) : []
   const current = message.steps.find((step) => step.id === stepID)
   const status = event.event_type === 'step.succeeded' ? 'succeeded' : event.event_type === 'step.failed' ? 'failed' : 'running'
   if (current) {
     current.label = label
     current.status = status
+    if (stages.length) current.stages = stages
   } else {
-    message.steps.push({ id: stepID, label, status })
+    message.steps.push({ id: stepID, label, status, stages })
   }
 }
 
@@ -801,6 +813,8 @@ function toggleSources(message: AgentMessage): void {
 
 function displayStepLabel(label: string): string {
   return ({
+    'form.preview': '阅读表单并预填',
+    'form.apply': '写入表格',
     'knowledge.search_sources': '检索本地知识',
     'knowledge.search_content': '查找相关内容',
     'knowledge.answer': '整理回答',
@@ -813,6 +827,8 @@ function displayStepLabel(label: string): string {
 
 function stepStartText(capability: string): string {
   return ({
+    'form.preview': '正在打开并阅读表单',
+    'form.apply': '正在写入表格',
     'knowledge.search_sources': '正在检索本地知识',
     'knowledge.search_content': '正在查找相关内容',
     'knowledge.answer': '正在整理回答',
@@ -825,6 +841,8 @@ function stepStartText(capability: string): string {
 
 function stepSucceededText(capability: string): string {
   return ({
+    'form.preview': '表单已预填',
+    'form.apply': '写入完成',
     'knowledge.search_sources': '本地知识检索完成',
     'knowledge.search_content': '相关内容查找完成',
     'knowledge.answer': '回答已生成',
@@ -1139,6 +1157,12 @@ function applyRestoredApproval(message: AgentMessage, approval: AgentApproval): 
     dueDate: typeof args.due_at === 'string'
       ? dayOfISO(args.due_at, String(args.timezone || 'Asia/Shanghai'))
       : '',
+  }
+  // The field list is seeded here too: an approval restored from conversation
+  // history never passes through the live event path, and without this the
+  // card rendered "0 字段" with no inputs at all.
+  if (approval.capability === 'form.apply') {
+    formEditors[message.id] = formFieldsFrom(args.draft)
   }
 }
 
@@ -1809,6 +1833,8 @@ onBeforeUnmount(() => {
 .agent-trace__chevron--open { transform: rotate(90deg); }
 .agent-trace__steps { display: grid; gap: 6px; margin: 9px 0 0; padding: 0; list-style: none; color: var(--td-text-color-secondary); font-size: 12px; }
 .agent-trace__steps li { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 7px 9px; border-radius: 6px; background: var(--td-bg-color-secondarycontainer); }
+.agent-step__body { display: grid; gap: 3px; }
+.agent-step__stage { color: var(--td-text-color-placeholder); font-style: normal; font-size: 12px; }
 .agent-trace__steps small { color: var(--td-text-color-placeholder); }
 .agent-result-blocks { display: grid; gap: 14px; }
 .agent-result-heading { display: flex; align-items: center; gap: 7px; margin-bottom: 9px; color: var(--td-text-color-primary); font-size: 13px; font-weight: 600; }
