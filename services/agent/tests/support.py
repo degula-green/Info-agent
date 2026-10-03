@@ -17,7 +17,7 @@ from app.config import Settings
 from app.container import build_container
 from app.kernel.models import CapabilityDescriptor
 from app.kernel.registry import CapabilityRegistry
-from app.routers import conversations, health, tasks, todos
+from app.routers import conversations, health, memories, tasks, todos
 from app.testing.fake_capabilities import (
     FakeAskInputCapability,
     FakeReadCapability,
@@ -128,6 +128,7 @@ def make_app(container) -> FastAPI:
     tasks.set_container(container)
     todos.set_container(container)
     conversations.set_container(container)
+    memories.set_container(container)
     application = FastAPI()
     application.state.agent_authentication = TestAuthentication()
     install_authentication_error_handler(application)
@@ -135,6 +136,7 @@ def make_app(container) -> FastAPI:
     application.include_router(tasks.router)
     application.include_router(todos.router)
     application.include_router(conversations.router)
+    application.include_router(memories.router)
     return application
 
 

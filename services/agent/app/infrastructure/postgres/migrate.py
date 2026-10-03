@@ -26,8 +26,10 @@ BOOTSTRAP_MIGRATIONS = [
     REPO_ROOT / "db" / "migrations" / "20260927_agent_todo_ledger.sql",
     REPO_ROOT / "db" / "migrations" / "20261002_agent_conversation_history.up.sql",
     REPO_ROOT / "db" / "migrations" / "20261003_agent_conversation_memory_phase1.up.sql",
+    REPO_ROOT / "db" / "migrations" / "20261003_agent_conversation_memory_phase2.up.sql",
 ]
 BOOTSTRAP_ROLLBACKS = [
+    REPO_ROOT / "db" / "migrations" / "20261003_agent_conversation_memory_phase2.down.sql",
     REPO_ROOT / "db" / "migrations" / "20261003_agent_conversation_memory_phase1.down.sql",
     REPO_ROOT / "db" / "migrations" / "20261002_agent_conversation_history.down.sql",
     REPO_ROOT / "db" / "migrations" / "20260927_agent_todo_ledger.down.sql",
@@ -36,10 +38,10 @@ BOOTSTRAP_ROLLBACKS = [
     REPO_ROOT / "db" / "migrations" / "20260925_agent_runtime_rebuild.down.sql",
 ]
 DEFAULT_MIGRATION = (
-    REPO_ROOT / "db" / "migrations" / "20261003_agent_conversation_memory_phase1.up.sql"
+    REPO_ROOT / "db" / "migrations" / "20261003_agent_conversation_memory_phase2.up.sql"
 )
 DEFAULT_ROLLBACK = (
-    REPO_ROOT / "db" / "migrations" / "20261003_agent_conversation_memory_phase1.down.sql"
+    REPO_ROOT / "db" / "migrations" / "20261003_agent_conversation_memory_phase2.down.sql"
 )
 
 

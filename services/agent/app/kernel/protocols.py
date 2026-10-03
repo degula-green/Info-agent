@@ -13,6 +13,8 @@ from app.kernel.models import (
     ConversationSummaryJob,
     EvidenceRecord,
     MessageRecord,
+    MemoryRecord,
+    MemorySourceRecord,
     OutboxEvent,
     Plan,
     PlanStep,
@@ -434,6 +436,61 @@ class AgentStore(Protocol):
         summary_method: str,
         updated_at: datetime,
     ) -> bool:
+        ...
+
+    # -- conversation-scoped memory -----------------------------------------
+
+    def create_memory(self, memory: MemoryRecord) -> MemoryRecord:
+        ...
+
+    def get_memory(self, memory_id: str) -> MemoryRecord | None:
+        ...
+
+    def list_memories(
+        self,
+        owner_user_id: str,
+        *,
+        conversation_id: str,
+        statuses: list[str] | None = None,
+        memory_types: list[str] | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[MemoryRecord]:
+        ...
+
+    def count_memories(
+        self,
+        owner_user_id: str,
+        *,
+        conversation_id: str,
+        statuses: list[str] | None = None,
+        memory_types: list[str] | None = None,
+    ) -> int:
+        ...
+
+    def search_memories(
+        self,
+        owner_user_id: str,
+        *,
+        conversation_id: str,
+        query: str,
+        limit: int = 5,
+    ) -> list[MemoryRecord]:
+        ...
+
+    def delete_memory(
+        self,
+        memory_id: str,
+        *,
+        owner_user_id: str,
+        conversation_id: str,
+    ) -> bool:
+        ...
+
+    def add_memory_sources(self, sources: list[MemorySourceRecord]) -> None:
+        ...
+
+    def list_memory_sources(self, memory_id: str) -> list[MemorySourceRecord]:
         ...
 
 

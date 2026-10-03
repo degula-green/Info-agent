@@ -42,9 +42,15 @@ def estimate_tokens(text: str | None) -> int:
 
 
 class ConversationContextService:
-    def __init__(self, store: AgentStore, settings: Settings) -> None:
+    def __init__(
+        self,
+        store: AgentStore,
+        settings: Settings,
+        memory_service=None,
+    ) -> None:
         self.store = store
         self.settings = settings
+        self.memory_service = memory_service
 
     def load(self, task: TaskRecord) -> ConversationContext | None:
         if not self.settings.conversation_context_enabled:
@@ -87,11 +93,42 @@ class ConversationContextService:
         if summary and estimate_tokens(summary) > self.settings.conversation_context_summary_max_tokens:
             summary = summary[: max(1, self.settings.conversation_context_summary_max_tokens * 3)]
 
+        memories = []
+        if (
+            self.settings.conversation_memory_enabled
+            and self.memory_service is not None
+        ):
+            query = "\n".join(
+                [
+                    str(task.input.get("text") or ""),
+                    summary or "",
+                    *[item.content for item in recent[-6:]],
+                ]
+            ).strip()[:8000]
+            if query:
+                memories = self.memory_service.retrieve_for_context(
+                    owner_user_id=task.owner_user_id,
+                    conversation_id=conversation_id,
+                    query=query,
+                    limit=max(1, self.settings.conversation_memory_top_k),
+                )
+                memories = [
+                    item.model_copy(
+                        update={
+                            "content": item.content[
+                                : max(1, self.settings.conversation_memory_max_content_chars)
+                            ]
+                        }
+                    )
+                    for item in memories
+                ]
+
         return ConversationContext(
             conversation_id=conversation_id,
             summary=summary,
             summary_until_message_id=boundary,
             recent_messages=recent,
+            relevant_memories=memories,
         )
 
 

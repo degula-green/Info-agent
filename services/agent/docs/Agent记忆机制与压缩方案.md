@@ -2,8 +2,8 @@
 
 ## 文档状态
 
-- 版本：v1.5
-- 状态：Phase 1/2 实施基线
+- 版本：v1.6
+- 状态：Phase 1/2 已实现待评审，Phase 3+ 未开工
 - 作者：架构师（Claude）
 - 创建日期：2026-10-03
 - 目标：为 Agent 服务设计完整的记忆机制和记忆压缩方案
@@ -13,7 +13,8 @@
 
 ### 1.1 现有系统状况
 
-当前 Agent 服务已经实现了基础的对话历史功能（Phase 1 & Phase 2 已完成）：
+当前 Agent 服务已经实现了基础的对话历史功能（`Agent历史问答功能方案.md`
+Phase 1 & Phase 2 已完成）：
 
 **已有基础设施**：
 - `agent.conversations` 表：会话窗口，包含 `summary` 和 `summary_cursor` 字段（预留）
@@ -1104,6 +1105,41 @@ Response: {
 
 ## 8. 实施计划（当前版本）
 
+**本轮实施状态（2026-10-03）**：
+
+- 本轮范围只包含 Phase 1 和 Phase 2，Phase 3-5 不实施。
+- Phase 1/2 已落到 `codex/agent-memory-phase1-2` 分支：会话摘要边界、
+  `ConversationContext` 注入、conversation-scoped `memory_records`、
+  keywords + `simple` FTS + `ILIKE` 检索和最小管理 API 均已实现。
+- `AGENT_CONVERSATION_CONTEXT_ENABLED` 默认开启；
+  `AGENT_CONVERSATION_MEMORY_ENABLED` 默认关闭，需要显式开启后才会把
+  conversation memory 注入上下文或对外联调。
+- 本轮没有代码级阻塞。后续阶段启动前需要先完成下面的数据模型和产品决策，
+  不能直接在 Phase 2 表上继续叠加：
+  - Phase 3 缺少 `memory_extraction_jobs` 持久化状态机，无法可靠实现
+    候选记忆提炼、重试、幂等和完成/失败状态。启动前必须先补 job 表，
+    并以 `(conversation_id, extraction_job_id, memory_key)` 作为候选幂等键。
+  - Phase 4 的跨会话记忆不能复用当前 `memory_records`：当前表要求
+    `source_conversation_id NOT NULL` 且删除 conversation 会级联删除记忆，
+    这与跨会话记忆的生命周期冲突。启动前必须选择独立的
+    `global_memory_records` 表或经过验证的 scope 迁移，并补独立的向量
+    索引/命名空间、owner 过滤、导出和删除策略。
+  - Phase 5 的批量管理、过期策略和全局记忆页面需要先确定产品保留策略
+    与租户/企业权限边界，不能在 Phase 2 提前做一个空的管理入口。
+  - `pg_trgm` 权限验证不是 Phase 1/2 的阻塞项。当前检索已使用
+    keywords + `simple` FTS + `ILIKE`；只有实测召回不足时才需要申请扩展
+    权限并增加 trigram 索引。
+
+**记忆管理 API 与前端呈现**：
+
+- Phase 2 保留最小 API 是必要的：它是 owner 隔离、conversation 归属校验和
+  后续前端/运营排障的稳定契约，不代表现在必须建设完整的记忆管理页。
+- Phase 2 不新增独立导航或页面。前端在会话设置中增加低优先级的
+  “本会话记忆”入口，先展示记忆数量，展开后显示 active 记忆、来源和删除操作；
+  手动新增只作为明确的高级操作，不打断主聊天流程。
+- Phase 3 的候选记忆确认/拒绝应复用同一入口，用“已启用 / 待确认”分段展示；
+  只有 Phase 4 明确启用跨会话记忆后，才增加全局记忆中心和批量管理页面。
+
 ### Phase 1：会话内上下文与摘要（当前实施，2 周）
 
 **目标**：让同一 Conversation 内的指代、承接和追问成立，并建立稳定的
@@ -1112,27 +1148,27 @@ global/preference/跨会话记忆。
 
 **交付内容**：
 
-- [ ] migration 增加：
+- [x] migration 增加：
   `summary_until_message_id uuid`、`summary_version bigint`、
   `summary_updated_at timestamptz`、`summary_token_count int`；
   `summary_cursor` 保留但停止依赖
-- [ ] 新增 `conversation_summary_jobs` 持久化任务表和 worker 领取逻辑
-- [ ] 实现只读 `ConversationContext` 组装器：
+- [x] 新增 `conversation_summary_jobs` 持久化任务表和 worker 领取逻辑
+- [x] 实现只读 `ConversationContext` 组装器：
   `owner_user_id + conversation_id -> summary + recent_messages`
-- [ ] 按 `(created_at, message_id)` 稳定排序，摘要边界使用
+- [x] 按 `(created_at, message_id)` 稳定排序，摘要边界使用
   `summary_until_message_id`
-- [ ] 摘要更新使用 compare-and-set：
+- [x] 摘要更新使用 compare-and-set：
   只允许一个并发更新成功推进 `summary_version`
-- [ ] 摘要生成放在 Task 终态后的可重试链路中，失败不阻塞 Task
-- [ ] 把上下文注入 Understanding、Planner、Answer；Understanding 只注入
+- [x] 摘要生成放在 Task 终态后的可重试链路中，失败不阻塞 Task
+- [x] 把上下文注入 Understanding、Planner、Answer；Understanding 只注入
   有限指代上下文
-- [ ] 按 6.2.1 修改协议签名和 `ExecutionContext`，禁止把历史塞进 `TaskEnvelope.input`
-- [ ] 实现确定性预算：
+- [x] 按 6.2.1 修改协议签名和 `ExecutionContext`，禁止把历史塞进 `TaskEnvelope.input`
+- [x] 实现确定性预算：
   `当前问题 > 最近消息 > 会话摘要`
-- [ ] 增加开关：
+- [x] 增加开关：
   `AGENT_CONVERSATION_CONTEXT_ENABLED`
-- [ ] Phase 2 再启用 `AGENT_CONVERSATION_MEMORY_ENABLED`；Phase 1 保持关闭
-- [ ] 增加 conversation 删除后不再读取摘要的测试，以及并发摘要测试
+- [x] Phase 2 再启用 `AGENT_CONVERSATION_MEMORY_ENABLED`；默认关闭，按环境显式开启
+- [x] 增加 conversation 删除后不再读取摘要的测试，以及并发摘要测试
 
 **验收标准**：
 
@@ -1153,20 +1189,20 @@ global/preference/跨会话记忆。
 
 **交付内容**：
 
-- [ ] 创建 `memory_records` 和 `memory_sources`
-- [ ] `memory_records` 仅允许 `scope='conversation'`；
+- [x] 创建 `memory_records` 和 `memory_sources`
+- [x] `memory_records` 仅允许 `scope='conversation'`；
   `source_conversation_id` 使用 `NOT NULL + ON DELETE CASCADE`
-- [ ] 增加 `content_hash` / `memory_key` 去重
-- [ ] 服务层拒绝 `memory_type='preference'`；偏好不在会话内记忆表中承载
-- [ ] 实现必选的关键词 + PostgreSQL `simple` FTS 检索
+- [x] 增加 `content_hash` / `memory_key` 去重
+- [x] 服务层拒绝 `memory_type='preference'`；偏好不在会话内记忆表中承载
+- [x] 实现必选的关键词 + PostgreSQL `simple` FTS 检索
 - [ ] 验证 pg_trgm 权限；可用时增加 trigram 索引，不可用时降级 ILIKE
-- [ ] 向量检索保持关闭；`AGENT_MEMORY_VECTOR_ENABLED=false`
-- [ ] 检索 query 使用“当前问题 + 最近消息 + summary”
-- [ ] 实现最小 API：
+- [x] 不接入任何向量检索路径；未来 Phase 4 实施时再引入显式开关
+- [x] 检索 query 使用“当前问题 + 最近消息 + summary”
+- [x] 实现最小 API：
   `GET/POST /conversations/{id}/memories` 和
   `DELETE /conversations/{id}/memories/{memory_id}`
-- [ ] 记忆 API 走 Core JWT + owner 隔离，服务端强制 conversation 归属
-- [ ] 增加删除联动和跨用户隔离测试
+- [x] 记忆 API 走 Core JWT + owner 隔离，服务端强制 conversation 归属
+- [x] 增加删除联动和跨用户隔离测试
 
 **验收标准**：
 
@@ -1396,6 +1432,10 @@ Phase 1 上线后按实际 prompt 长度重新测量。
 ---
 
 **文档版本控制**：
+- v1.6 (2026-10-03)：写入 Phase 1/2 完成状态与 Phase 3+ 启动阻塞。
+  明确本轮只交付后端记忆闭环，记忆管理 API 暂不配套独立页面；
+  Phase 3 前补 extraction job，Phase 4 前拆分跨会话存储和向量命名空间；
+  pg_trgm 保持非阻塞增强项。
 - v1.5 (2026-10-03)：写入 Phase 1/2 开工决议。新增 conversation_summary_jobs；
   明确摘要模型、预算和近似 token 口径；Phase 2 收敛为 conversation-only
   最小 API；session/global/preference 暂不启用；keywords + simple FTS 为必选，

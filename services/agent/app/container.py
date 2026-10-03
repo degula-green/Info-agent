@@ -16,6 +16,7 @@ from app.application.conversation_memory import (
     LlmConversationSummaryProvider,
 )
 from app.application.knowledge_events import KnowledgeEventService
+from app.application.memory_service import MemoryService
 from app.application.task_service import TaskService
 from app.capabilities.answer import AnswerComposeCapability
 from app.capabilities.chat_reply import ChatReplyCapability
@@ -70,6 +71,7 @@ class AgentContainer:
     todo_store: TodoStore
     understanding_provider: object | None
     task_service: TaskService
+    memory_service: MemoryService
     execution_service: ExecutionService
     knowledge_ingress: KnowledgeEventIngress
     knowledge_client: KnowledgeClient
@@ -530,9 +532,11 @@ def build_container(
         platforms=resolved.knowledge_platform_allowlist
     )
     task_service = TaskService(resolved_store)
+    memory_service = MemoryService(resolved_store)
     conversation_context_service = ConversationContextService(
         resolved_store,
         resolved,
+        memory_service=memory_service,
     )
     summary_service = None
     if (
@@ -565,6 +569,7 @@ def build_container(
         todo_store=resolved_todo_store,
         understanding_provider=resolved_understanding,
         task_service=task_service,
+        memory_service=memory_service,
         execution_service=ExecutionService(
             store=resolved_store,
             registry=registry,

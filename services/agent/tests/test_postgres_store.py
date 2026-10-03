@@ -19,6 +19,8 @@ from app.kernel.models import (
     ConversationRecord,
     ConversationSummaryJob,
     MessageRecord,
+    MemoryRecord,
+    MemorySourceRecord,
     TaskEvent,
     TaskInput,
     TaskRecord,
@@ -238,6 +240,75 @@ def test_postgres_summary_job_and_cas_round_trip(store) -> None:
         finished_at=utcnow(),
     )
     assert store.delete_conversation(conversation_id, owner_user_id="user-1")
+
+
+def test_postgres_conversation_memory_round_trip(store) -> None:
+    import hashlib
+
+    moment = utcnow()
+    conversation_id = str(uuid.uuid4())
+    conversation = ConversationRecord(
+        conversation_id=conversation_id,
+        owner_user_id="user-1",
+        title="memory",
+        created_at=moment,
+        updated_at=moment,
+    )
+    store.create_conversation(conversation)
+    source_message = MessageRecord(
+        message_id=str(uuid.uuid4()),
+        conversation_id=conversation_id,
+        role="user",
+        content="青云官网部署在阿里云",
+        status="completed",
+        created_at=moment,
+        updated_at=moment,
+    )
+    store.add_message(source_message)
+    content = "青云官网部署在阿里云。"
+    memory = MemoryRecord(
+        memory_id=str(uuid.uuid4()),
+        owner_user_id="user-1",
+        memory_type="fact",
+        scope="conversation",
+        title="部署环境",
+        content=content,
+        content_hash=hashlib.sha256(content.encode("utf-8")).hexdigest(),
+        memory_key="deploy:qingyun",
+        keywords=["青云官网", "阿里云"],
+        source_conversation_id=conversation_id,
+        extraction_method="manual",
+        status="active",
+        created_at=moment,
+        updated_at=moment,
+    )
+    stored = store.create_memory(memory)
+    store.add_memory_sources(
+        [
+            MemorySourceRecord(
+                memory_id=stored.memory_id,
+                message_id=source_message.message_id,
+            )
+        ]
+    )
+
+    assert store.get_memory(stored.memory_id).title == "部署环境"
+    assert store.count_memories(
+        "user-1",
+        conversation_id=conversation_id,
+        statuses=["active"],
+    ) == 1
+    assert store.search_memories(
+        "user-1",
+        conversation_id=conversation_id,
+        query="青云官网",
+    )[0].memory_id == stored.memory_id
+    assert store.list_memory_sources(stored.memory_id)[0].message_id == (
+        source_message.message_id
+    )
+
+    assert store.delete_conversation(conversation_id, owner_user_id="user-1")
+    assert store.get_memory(stored.memory_id) is None
 
 
 def test_task_payload_survives_a_round_trip(store) -> None:

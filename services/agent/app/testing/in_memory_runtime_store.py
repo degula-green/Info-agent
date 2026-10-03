@@ -17,6 +17,8 @@ from app.kernel.models import (
     ConversationSummaryJob,
     EvidenceRecord,
     MessageRecord,
+    MemoryRecord,
+    MemorySourceRecord,
     Observation,
     OutboxEvent,
     Plan,
@@ -48,6 +50,8 @@ class InMemoryAgentStore:
         self.conversations: dict[str, ConversationRecord] = {}
         self.messages: dict[str, MessageRecord] = {}
         self.summary_jobs: dict[str, ConversationSummaryJob] = {}
+        self.memories: dict[str, MemoryRecord] = {}
+        self.memory_sources: dict[str, list[MemorySourceRecord]] = {}
 
     # -- tasks ------------------------------------------------------------
 
@@ -463,6 +467,13 @@ class InMemoryAgentStore:
                 if job.conversation_id == conversation_id
             ]:
                 del self.summary_jobs[job_id]
+            for memory_id in [
+                memory.memory_id
+                for memory in self.memories.values()
+                if memory.source_conversation_id == conversation_id
+            ]:
+                self.memories.pop(memory_id, None)
+                self.memory_sources.pop(memory_id, None)
             return True
 
     def add_message(self, message: MessageRecord) -> MessageRecord:
@@ -661,3 +672,143 @@ class InMemoryAgentStore:
             conversation.summary_token_count = max(0, int(summary_token_count))
             conversation.updated_at = updated_at
             return True
+
+    def create_memory(self, memory: MemoryRecord) -> MemoryRecord:
+        with self._lock:
+            if memory.status == "active":
+                for existing in self.memories.values():
+                    if (
+                        existing.owner_user_id == memory.owner_user_id
+                        and existing.source_conversation_id
+                        == memory.source_conversation_id
+                        and existing.memory_type == memory.memory_type
+                        and existing.memory_key == memory.memory_key
+                        and existing.status == "active"
+                    ):
+                        return existing.model_copy(deep=True)
+            stored = memory.model_copy(deep=True)
+            self.memories[stored.memory_id] = stored
+            self.memory_sources.setdefault(stored.memory_id, [])
+            return stored.model_copy(deep=True)
+
+    def get_memory(self, memory_id: str) -> MemoryRecord | None:
+        with self._lock:
+            memory = self.memories.get(memory_id)
+            return memory.model_copy(deep=True) if memory else None
+
+    def list_memories(
+        self,
+        owner_user_id: str,
+        *,
+        conversation_id: str,
+        statuses: list[str] | None = None,
+        memory_types: list[str] | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[MemoryRecord]:
+        with self._lock:
+            memories = [
+                memory
+                for memory in self.memories.values()
+                if memory.owner_user_id == owner_user_id
+                and memory.source_conversation_id == conversation_id
+                and (statuses is None or memory.status in statuses)
+                and (memory_types is None or memory.memory_type in memory_types)
+            ]
+            memories.sort(
+                key=lambda item: (item.importance, item.updated_at),
+                reverse=True,
+            )
+            start = max(0, int(offset))
+            return [
+                memory.model_copy(deep=True)
+                for memory in memories[start : start + max(1, int(limit))]
+            ]
+
+    def count_memories(
+        self,
+        owner_user_id: str,
+        *,
+        conversation_id: str,
+        statuses: list[str] | None = None,
+        memory_types: list[str] | None = None,
+    ) -> int:
+        with self._lock:
+            return sum(
+                1
+                for memory in self.memories.values()
+                if memory.owner_user_id == owner_user_id
+                and memory.source_conversation_id == conversation_id
+                and (statuses is None or memory.status in statuses)
+                and (memory_types is None or memory.memory_type in memory_types)
+            )
+
+    def search_memories(
+        self,
+        owner_user_id: str,
+        *,
+        conversation_id: str,
+        query: str,
+        limit: int = 5,
+    ) -> list[MemoryRecord]:
+        normalized = str(query or "").strip().lower()
+        tokens = [item for item in normalized.split() if item]
+        ranked: list[tuple[float, MemoryRecord]] = []
+        with self._lock:
+            for memory in self.memories.values():
+                if (
+                    memory.owner_user_id != owner_user_id
+                    or memory.source_conversation_id != conversation_id
+                    or memory.status != "active"
+                ):
+                    continue
+                haystack = f"{memory.title}\n{memory.content}".lower()
+                keyword_hit = any(
+                    keyword.lower() in normalized
+                    for keyword in memory.keywords
+                    if keyword
+                )
+                text_hit = normalized and normalized in haystack
+                token_hit = any(token in haystack for token in tokens)
+                if normalized and not (keyword_hit or text_hit or token_hit):
+                    continue
+                score = (
+                    float(memory.importance) * 0.6
+                    + float(memory.confidence) * 0.4
+                )
+                ranked.append((score, memory.model_copy(deep=True)))
+        ranked.sort(key=lambda item: item[0], reverse=True)
+        return [memory for _, memory in ranked[: max(0, int(limit))]]
+
+    def delete_memory(
+        self,
+        memory_id: str,
+        *,
+        owner_user_id: str,
+        conversation_id: str,
+    ) -> bool:
+        with self._lock:
+            memory = self.memories.get(memory_id)
+            if (
+                memory is None
+                or memory.owner_user_id != owner_user_id
+                or memory.source_conversation_id != conversation_id
+            ):
+                return False
+            del self.memories[memory_id]
+            self.memory_sources.pop(memory_id, None)
+            return True
+
+    def add_memory_sources(self, sources: list[MemorySourceRecord]) -> None:
+        with self._lock:
+            for source in sources:
+                bucket = self.memory_sources.setdefault(source.memory_id, [])
+                if not any(item.message_id == source.message_id for item in bucket):
+                    bucket.append(source.model_copy(deep=True))
+
+    def list_memory_sources(self, memory_id: str) -> list[MemorySourceRecord]:
+        with self._lock:
+            return [
+                item.model_copy(deep=True)
+                for item in self.memory_sources.get(memory_id, [])
+            ]

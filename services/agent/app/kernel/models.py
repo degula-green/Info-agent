@@ -412,6 +412,7 @@ class ConversationContext(BaseModel):
     summary: str | None = None
     summary_until_message_id: str | None = None
     recent_messages: list[MessageRecord] = Field(default_factory=list)
+    relevant_memories: list["MemoryRecord"] = Field(default_factory=list)
 
 
 class ConversationSummaryJob(BaseModel):
@@ -429,3 +430,52 @@ class ConversationSummaryJob(BaseModel):
     created_at: datetime
     updated_at: datetime
     finished_at: datetime | None = None
+
+
+class MemoryRecord(BaseModel):
+    """A structured memory owned by one conversation.
+
+    Phase 2 deliberately keeps this conversation-scoped. Cross-session memory
+    uses a separate future store.
+    """
+
+    memory_id: str
+    owner_user_id: str
+    organization_id: str | None = None
+    memory_type: Literal["fact", "decision", "relation", "context"]
+    scope: Literal["conversation"] = "conversation"
+    title: str = Field(min_length=1, max_length=200)
+    content: str = Field(min_length=1)
+    content_hash: str
+    memory_key: str = Field(min_length=1, max_length=128)
+    keywords: list[str] = Field(default_factory=list)
+    source_conversation_id: str
+    source_message_ids: list[str] = Field(default_factory=list)
+    extraction_method: str | None = None
+    extraction_job_id: str | None = None
+    confidence: float = Field(default=0.8, ge=0, le=1)
+    importance: float = Field(default=0.5, ge=0, le=1)
+    access_count: int = Field(default=0, ge=0)
+    last_accessed_at: datetime | None = None
+    status: Literal[
+        "candidate",
+        "active",
+        "archived",
+        "superseded",
+        "deleted",
+    ] = "candidate"
+    superseded_by_memory_id: str | None = None
+    expires_at: datetime | None = None
+    deleted_at: datetime | None = None
+    embedding_model: str | None = None
+    embedding_version: int | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class MemorySourceRecord(BaseModel):
+    memory_id: str
+    message_id: str
+
+
+ConversationContext.model_rebuild()

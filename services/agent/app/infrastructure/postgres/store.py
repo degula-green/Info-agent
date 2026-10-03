@@ -21,6 +21,8 @@ from app.kernel.models import (
     ConversationSummaryJob,
     EvidenceRecord,
     MessageRecord,
+    MemoryRecord,
+    MemorySourceRecord,
     Observation,
     OutboxEvent,
     Plan,
@@ -94,6 +96,14 @@ class PostgresAgentStore:
     @property
     def _summary_jobs(self) -> str:
         return f"{self.schema}.conversation_summary_jobs"
+
+    @property
+    def _memories(self) -> str:
+        return f"{self.schema}.memory_records"
+
+    @property
+    def _memory_sources(self) -> str:
+        return f"{self.schema}.memory_sources"
 
     @staticmethod
     def _task_model(row: dict[str, Any]) -> TaskRecord:
@@ -192,6 +202,47 @@ class PostgresAgentStore:
             created_at=row["created_at"],
             updated_at=row["updated_at"],
             finished_at=row.get("finished_at"),
+        )
+
+    @staticmethod
+    def _memory_model(row: dict[str, Any]) -> MemoryRecord:
+        return MemoryRecord(
+            memory_id=str(row["memory_id"]),
+            owner_user_id=row["owner_user_id"],
+            organization_id=row.get("organization_id"),
+            memory_type=row["memory_type"],
+            scope=row.get("scope") or "conversation",
+            title=row["title"],
+            content=row["content"],
+            content_hash=row["content_hash"],
+            memory_key=row["memory_key"],
+            keywords=row.get("keywords") or [],
+            source_conversation_id=str(row["source_conversation_id"]),
+            source_message_ids=[
+                str(item) for item in (row.get("source_message_ids") or [])
+            ],
+            extraction_method=row.get("extraction_method"),
+            extraction_job_id=(
+                str(row["extraction_job_id"])
+                if row.get("extraction_job_id")
+                else None
+            ),
+            confidence=float(row.get("confidence") or 0),
+            importance=float(row.get("importance") or 0),
+            access_count=int(row.get("access_count") or 0),
+            last_accessed_at=row.get("last_accessed_at"),
+            status=row["status"],
+            superseded_by_memory_id=(
+                str(row["superseded_by_memory_id"])
+                if row.get("superseded_by_memory_id")
+                else None
+            ),
+            expires_at=row.get("expires_at"),
+            deleted_at=row.get("deleted_at"),
+            embedding_model=row.get("embedding_model"),
+            embedding_version=row.get("embedding_version"),
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
         )
 
     @staticmethod
@@ -1469,6 +1520,228 @@ class PostgresAgentStore:
                 updated = cursor.fetchone() is not None
             connection.commit()
         return updated
+
+    def create_memory(self, memory: MemoryRecord) -> MemoryRecord:
+        with self.pool.connection() as connection:
+            with connection.cursor(row_factory=dict_row) as cursor:
+                cursor.execute(
+                    f"""INSERT INTO {self._memories} (
+                            memory_id, owner_user_id, organization_id, memory_type,
+                            scope, title, content, content_hash, memory_key, keywords,
+                            source_conversation_id, source_message_ids, extraction_method,
+                            extraction_job_id, confidence, importance, access_count,
+                            last_accessed_at, status, superseded_by_memory_id, expires_at,
+                            deleted_at, embedding_model, embedding_version,
+                            created_at, updated_at
+                        ) VALUES (
+                            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::text[],
+                            %s, %s::uuid[], %s, %s::uuid, %s, %s, %s, %s, %s, %s,
+                            %s, %s, %s, %s, %s, %s
+                        )
+                        ON CONFLICT (
+                            owner_user_id, source_conversation_id, memory_type, memory_key
+                        ) WHERE status = 'active'
+                        DO NOTHING
+                        RETURNING *""",
+                    (
+                        memory.memory_id,
+                        memory.owner_user_id,
+                        memory.organization_id,
+                        memory.memory_type,
+                        memory.scope,
+                        memory.title,
+                        memory.content,
+                        memory.content_hash,
+                        memory.memory_key,
+                        memory.keywords,
+                        memory.source_conversation_id,
+                        memory.source_message_ids,
+                        memory.extraction_method,
+                        memory.extraction_job_id,
+                        memory.confidence,
+                        memory.importance,
+                        memory.access_count,
+                        memory.last_accessed_at,
+                        memory.status,
+                        memory.superseded_by_memory_id,
+                        memory.expires_at,
+                        memory.deleted_at,
+                        memory.embedding_model,
+                        memory.embedding_version,
+                        memory.created_at,
+                        memory.updated_at,
+                    ),
+                )
+                row = cursor.fetchone()
+                if row is None and memory.status == "active":
+                    cursor.execute(
+                        f"""SELECT * FROM {self._memories}
+                            WHERE owner_user_id = %s
+                              AND source_conversation_id = %s
+                              AND memory_type = %s
+                              AND memory_key = %s
+                              AND status = 'active'""",
+                        (
+                            memory.owner_user_id,
+                            memory.source_conversation_id,
+                            memory.memory_type,
+                            memory.memory_key,
+                        ),
+                    )
+                    row = cursor.fetchone()
+            connection.commit()
+        if row is None:
+            raise RuntimeError("memory was not persisted")
+        return self._memory_model(row)
+
+    def get_memory(self, memory_id: str) -> MemoryRecord | None:
+        with self.pool.connection() as connection:
+            with connection.cursor(row_factory=dict_row) as cursor:
+                cursor.execute(
+                    f"SELECT * FROM {self._memories} WHERE memory_id = %s",
+                    (memory_id,),
+                )
+                row = cursor.fetchone()
+        return self._memory_model(row) if row else None
+
+    def list_memories(
+        self,
+        owner_user_id: str,
+        *,
+        conversation_id: str,
+        statuses: list[str] | None = None,
+        memory_types: list[str] | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[MemoryRecord]:
+        sql = (
+            f"SELECT * FROM {self._memories} "
+            "WHERE owner_user_id = %s AND source_conversation_id = %s"
+        )
+        params: list[Any] = [owner_user_id, conversation_id]
+        if statuses:
+            sql += " AND status = ANY(%s)"
+            params.append(list(statuses))
+        if memory_types:
+            sql += " AND memory_type = ANY(%s)"
+            params.append(list(memory_types))
+        sql += " ORDER BY importance DESC, updated_at DESC LIMIT %s OFFSET %s"
+        params.extend([max(1, int(limit)), max(0, int(offset))])
+        with self.pool.connection() as connection:
+            with connection.cursor(row_factory=dict_row) as cursor:
+                cursor.execute(sql, tuple(params))
+                rows = cursor.fetchall()
+        return [self._memory_model(row) for row in rows]
+
+    def count_memories(
+        self,
+        owner_user_id: str,
+        *,
+        conversation_id: str,
+        statuses: list[str] | None = None,
+        memory_types: list[str] | None = None,
+    ) -> int:
+        sql = (
+            f"SELECT COUNT(*) FROM {self._memories} "
+            "WHERE owner_user_id = %s AND source_conversation_id = %s"
+        )
+        params: list[Any] = [owner_user_id, conversation_id]
+        if statuses:
+            sql += " AND status = ANY(%s)"
+            params.append(list(statuses))
+        if memory_types:
+            sql += " AND memory_type = ANY(%s)"
+            params.append(list(memory_types))
+        with self.pool.connection() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(sql, tuple(params))
+                row = cursor.fetchone()
+        return int(row[0]) if row else 0
+
+    def search_memories(
+        self,
+        owner_user_id: str,
+        *,
+        conversation_id: str,
+        query: str,
+        limit: int = 5,
+    ) -> list[MemoryRecord]:
+        normalized = str(query or "").strip()
+        keywords = [item for item in normalized.split() if item]
+        sql = (
+            f"SELECT * FROM {self._memories} "
+            "WHERE owner_user_id = %s AND source_conversation_id = %s "
+            "AND status = 'active'"
+        )
+        params: list[Any] = [owner_user_id, conversation_id]
+        if normalized:
+            conditions = [
+                "content ILIKE %s",
+                "title ILIKE %s",
+                "to_tsvector('simple', content) @@ plainto_tsquery('simple', %s)",
+            ]
+            pattern = f"%{normalized}%"
+            params.extend([pattern, pattern, normalized])
+            if keywords:
+                conditions.append("keywords && %s::text[]")
+                params.append(keywords)
+            sql += " AND (" + " OR ".join(conditions) + ")"
+        sql += " ORDER BY importance DESC, confidence DESC, updated_at DESC LIMIT %s"
+        params.append(max(1, int(limit)))
+        with self.pool.connection() as connection:
+            with connection.cursor(row_factory=dict_row) as cursor:
+                cursor.execute(sql, tuple(params))
+                rows = cursor.fetchall()
+        return [self._memory_model(row) for row in rows]
+
+    def delete_memory(
+        self,
+        memory_id: str,
+        *,
+        owner_user_id: str,
+        conversation_id: str,
+    ) -> bool:
+        with self.pool.connection() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    f"""DELETE FROM {self._memories}
+                        WHERE memory_id = %s
+                          AND owner_user_id = %s
+                          AND source_conversation_id = %s""",
+                    (memory_id, owner_user_id, conversation_id),
+                )
+                deleted = cursor.rowcount > 0
+            connection.commit()
+        return deleted
+
+    def add_memory_sources(self, sources: list[MemorySourceRecord]) -> None:
+        if not sources:
+            return
+        with self.pool.connection() as connection:
+            with connection.cursor() as cursor:
+                for source in sources:
+                    cursor.execute(
+                        f"""INSERT INTO {self._memory_sources} (memory_id, message_id)
+                            VALUES (%s, %s)
+                            ON CONFLICT DO NOTHING""",
+                        (source.memory_id, source.message_id),
+                    )
+            connection.commit()
+
+    def list_memory_sources(self, memory_id: str) -> list[MemorySourceRecord]:
+        with self.pool.connection() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    f"""SELECT memory_id::text, message_id::text
+                        FROM {self._memory_sources}
+                        WHERE memory_id = %s
+                        ORDER BY message_id""",
+                    (memory_id,),
+                )
+                rows = cursor.fetchall()
+        return [
+            MemorySourceRecord(memory_id=row[0], message_id=row[1]) for row in rows
+        ]
 
 
 class PostgresTodoStore:
