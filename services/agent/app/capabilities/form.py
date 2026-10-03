@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+from dataclasses import dataclass
 from typing import Any, Literal
 from uuid import uuid4
 
@@ -40,6 +41,83 @@ FormAction = Literal["fill_only", "fill_and_submit", "write_cells"]
 
 _SEPARATORS = ":：=,，;；、\t "
 _TRAILING = "。.,，;；"
+# A field value is a value, not a paragraph. Retrieval in particular returns
+# whole messages, and a document must not receive a sentence in a phone-number
+# column just because the sentence happened to follow the field's name.
+MAX_FIELD_VALUE_CHARS = 60
+_SENTENCE_MARKERS = "。！？!?\n"
+# One lookup per field, so a wide form does not turn into a search storm.
+MAX_RETRIEVAL_FIELDS = 8
+
+@dataclass(frozen=True)
+class _FieldRule:
+    """How to recognise one field's value when it arrives without a label.
+
+    Collected data is usually just the fact itself ("15325653689" on its own
+    line), so requiring ``字段名: 值`` loses almost everything. The trade is
+    that the shape has to identify the field, and the match must be the only
+    one in the text.
+    """
+
+    pattern: str
+    confidence: float
+    # Reject a match sitting right after one of these, which is what stops
+    # "密码123456" from becoming a student id.
+    reject_before: tuple[str, ...] = ()
+    # Reject a match whose *value* looks like this. A student id that is
+    # phone-shaped is almost certainly somebody's mobile number.
+    reject_value: str = ""
+    # Field names this rule must not apply to: "我叫李雷" is the owner's name,
+    # not their parent's.
+    exclude_names: tuple[str, ...] = ()
+
+
+# Order matters: a phone-shaped number should land in a phone column rather
+# than be claimed by the looser id pattern.
+_RELAXED_RULES: tuple[tuple[str, _FieldRule], ...] = (
+    ("性别", _FieldRule(r"([男女])", 0.8)),
+    ("手机号", _FieldRule(r"(1[3-9]\d{9})", 0.85)),
+    ("联系电话", _FieldRule(r"(1[3-9]\d{9})", 0.85)),
+    ("家长电话", _FieldRule(r"(1[3-9]\d{9})", 0.7)),
+    ("电话", _FieldRule(r"(1[3-9]\d{9})", 0.7)),
+    (
+        "QQ号",
+        _FieldRule(
+            r"(?<!\d)([1-9]\d{4,11})(?!\d)",
+            0.7,
+            ("密码", "口令", "验证码"),
+        ),
+    ),
+    (
+        "学号",
+        _FieldRule(
+            r"(?<!\d)([A-Za-z]{0,4}\d{6,18})(?!\d)",
+            0.6,
+            reject_before=("密码", "口令", "验证码", "账号密码"),
+            reject_value=r"1[3-9]\d{9}",
+        ),
+    ),
+    (
+        "姓名",
+        _FieldRule(
+            r"(?:我叫|我姓|名字叫|姓名是|姓名[:：])\s*([\u4e00-\u9fa5]{2,4})",
+            0.6,
+            exclude_names=("家长", "父亲", "母亲", "监护人", "紧急"),
+        ),
+    ),
+    (
+        # Matched with ``in``, so this also covers 家庭住址 / 联系地址.
+        # An administrative marker is required: without it any phrase ending
+        # in 号 ("你发个手机号") reads as an address.
+        "住址",
+        _FieldRule(
+            r"([\u4e00-\u9fa5A-Za-z0-9]{2,20}"
+            r"(?:省|市|区|县|镇|村|街|路|道|巷|小区)"
+            r"[\u4e00-\u9fa5A-Za-z0-9]{0,20}(?:号|栋|室|楼|单元)?)",
+            0.6,
+        ),
+    ),
+)
 
 
 class FormField(BaseModel):
@@ -152,7 +230,9 @@ def fingerprint_headers(headers: list[str]) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
-def extract_values(headers: list[str], request: str) -> dict[str, str]:
+def extract_values(
+    headers: list[str], request: str, *, relaxed: bool = False
+) -> dict[str, str]:
     """Pull ``header: value`` pairs out of the owner's own sentence.
 
     Longest header first so ``家长姓名`` wins over ``姓名``. Values end where
@@ -173,9 +253,71 @@ def extract_values(headers: list[str], request: str) -> dict[str, str]:
         end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
         raw = text[start:end].strip()
         value = raw.lstrip(_SEPARATORS).strip().strip(_TRAILING).strip()
-        if value and name not in found:
+        if value and name not in found and _looks_like_a_value(value):
             found[name] = value
+    if relaxed:
+        _fill_bare_values(headers, text, found)
     return found
+
+
+def _fill_bare_values(
+    names: list[str], text: str, found: dict[str, str]
+) -> None:
+    """Accept a label-less value when its shape identifies the field.
+
+    Only used on retrieved text: the owner's instruction keeps the stricter
+    reading, because a stray number in a sentence should not become a value.
+    A shape is taken only when the text offers exactly one candidate for it,
+    and never when another field already claimed that value.
+    """
+
+    used = set(found.values())
+    # Walk the rules, not the columns. Rule order encodes which shape is the
+    # more specific one, so a phone-shaped number is claimed by a phone column
+    # before the looser student-id rule ever sees it.
+    for key, rule in _RELAXED_RULES:
+        target = next(
+            (
+                name
+                for name in names
+                if name not in found
+                and key in name
+                and not any(bad in name for bad in rule.exclude_names)
+            ),
+            None,
+        )
+        if target is None:
+            continue
+        hits: set[str] = set()
+        for match in re.finditer(rule.pattern, text):
+            value = match.group(1) if match.groups() else match.group(0)
+            before = text[max(0, match.start() - 6) : match.start()]
+            if any(marker in before for marker in rule.reject_before):
+                continue
+            if rule.reject_value and re.fullmatch(rule.reject_value, value):
+                continue
+            if not _looks_like_a_value(value):
+                continue
+            hits.add(value)
+        hits -= used
+        if len(hits) == 1:
+            value = hits.pop()
+            found[target] = value
+            used.add(value)
+
+
+def _looks_like_a_value(value: str) -> bool:
+    """Whether a candidate reads as a single field value.
+
+    ``extract_values`` works on the owner's terse instruction and on retrieved
+    messages, and the latter are prose. Anything that long, or that ends a
+    sentence, is not something to put in a cell.
+    """
+
+    text = str(value or "").strip()
+    if not text or len(text) > MAX_FIELD_VALUE_CHARS:
+        return False
+    return not any(marker in text for marker in _SENTENCE_MARKERS)
 
 
 def build_fields(
@@ -295,12 +437,30 @@ class FormPreviewCapability:
         missing = [name for name in names if name and name not in values]
         if not missing:
             return {}
-        query = " ".join(missing[:10])
-        text = self.retriever.search(f"{query} {request}".strip())
-        if not text:
-            return {}
-        found = extract_values(names, text)
-        return {name: value for name, value in found.items() if name not in values}
+        # One query per field rather than one query for all of them: a combined
+        # string of nine field names dilutes relevance until the message that
+        # actually holds a value drops out of the top hits. Asking "手机号" on
+        # its own is also what a person would do.
+        found: dict[str, str] = {}
+        # One piece of retrieved text fills at most one field. Without this a
+        # single mobile number landed in 联系电话, 手机号 *and* 家长电话 at once,
+        # which is how a draft stops being trustworthy.
+        used: set[str] = set()
+        for name in missing[:MAX_RETRIEVAL_FIELDS]:
+            text = self.retriever.search(name)
+            if not text:
+                continue
+            # Read with the whole header list: a labelled value ends where the
+            # next known field begins, and asking about one field alone would
+            # swallow everything after its label.
+            # Retrieved text is message-shaped, so a bare value is allowed when
+            # its shape identifies the field; the instruction stays strict.
+            hits = extract_values(names, text, relaxed=True)
+            value = hits.get(name)
+            if value and value not in used:
+                found[name] = value
+                used.add(value)
+        return found
 
     def execute(self, arguments: FormPreviewInput) -> dict[str, Any]:
         url = _trusted(arguments.url, arguments.request)
@@ -507,7 +667,11 @@ class FormApplyCapability:
     ) -> dict[str, Any]:
         """Write the confirmed row into a collaborative sheet."""
 
-        values = arguments.values or [[field.value for field in draft.fields]]
+        # The draft is the single source of truth for what gets written: it is
+        # what the owner reviewed and edited. A planner that tries to hand over
+        # its own ``values`` (raw retrieval chunks, say) is ignored rather than
+        # trusted, because only the approved draft carries consent.
+        values = [[field.value for field in draft.fields]]
         # A live document has no submit control, so the write *is* the action.
         # The draft knows the page kind; the planner's guess does not.
         action: str = (
@@ -550,11 +714,7 @@ class FormApplyCapability:
             for field in draft.fields
             if field.ref
         }
-        # An explicit ``values`` row wins; otherwise the draft is authoritative.
-        if arguments.values and arguments.values[0]:
-            for index, field in enumerate(draft.fields):
-                if field.ref and index < len(arguments.values[0]):
-                    by_ref[str(field.ref)] = str(arguments.values[0][index])
+        # Same rule as the sheet path: only the reviewed draft may supply values.
         by_ref = {ref: value for ref, value in by_ref.items() if value != ""}
 
         filled = self.client.fill_form(session_id, by_ref)

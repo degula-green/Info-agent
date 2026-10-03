@@ -543,6 +543,24 @@ class KnowledgeRoutingPlanner:
         if _is_knowledge_plan(current_plan):
             self._last_call_count = 0
             return _decide_knowledge_plan(current_plan, observations)
+        latest = observations[-1] if observations else None
+        if (
+            latest is not None
+            and latest.status == "succeeded"
+            and _is_composite_source_plan(current_plan)
+            and any(
+                step.status in {"pending", "ready", "running"}
+                for step in current_plan.steps
+            )
+        ):
+            # The initial plan already contains all required source and answer
+            # steps. A model replan after the first success must not silently
+            # discard the remaining source or the final composition step.
+            self._last_call_count = 0
+            return PlannerDecision(
+                action="continue",
+                reason="当前计划仍有可执行的后续步骤",
+            )
         decision = self.base.decide_after_observation(
             task,
             current_plan,
@@ -581,8 +599,6 @@ def augment_personal_knowledge_sources(
     registered = {descriptor.name for descriptor in capabilities}
     if SEARCH_CONTENT_NAME not in registered:
         return plan
-    if any(step.capability == SEARCH_CONTENT_NAME for step in plan.steps):
-        return plan
 
     web_step = next(
         (step for step in plan.steps if step.capability == WEB_RESEARCH_NAME),
@@ -595,33 +611,51 @@ def augment_personal_knowledge_sources(
     if web_step is None or answer_step is None:
         return plan
 
-    original = [step.model_copy(deep=True) for step in sorted(plan.steps, key=lambda item: item.order)]
-    knowledge_step = PlanStep(
-        step_id=f"{plan.plan_id}-step-1",
-        plan_id=plan.plan_id,
-        order=1,
-        capability=SEARCH_CONTENT_NAME,
-        arguments={
-            "query": _personal_context_query(text),
-            "include_personal": True,
-        },
-    )
-    shifted: list[PlanStep] = [knowledge_step]
-    for step in original:
-        step.order += 1
-        step.step_id = f"{plan.plan_id}-step-{step.order}"
-        step.arguments = _shift_reference_steps(step.arguments)
-        shifted.append(step)
-
-    shifted_answer = next(
-        (step for step in shifted if step.capability == ANSWER_COMPOSE_NAME),
+    knowledge_step = next(
+        (step for step in plan.steps if step.capability == SEARCH_CONTENT_NAME),
         None,
     )
-    if shifted_answer is not None:
-        shifted_answer.arguments["knowledge_evidence_refs"] = [
-            {"step": 1, "output": "evidence"}
+    if knowledge_step is None:
+        original = [
+            step.model_copy(deep=True)
+            for step in sorted(plan.steps, key=lambda item: item.order)
         ]
-    plan.steps = shifted
+        knowledge_step = PlanStep(
+            step_id=f"{plan.plan_id}-step-1",
+            plan_id=plan.plan_id,
+            order=1,
+            capability=SEARCH_CONTENT_NAME,
+            arguments={
+                "query": _personal_context_query(text),
+                "include_personal": True,
+            },
+        )
+        shifted: list[PlanStep] = [knowledge_step]
+        for step in original:
+            step.order += 1
+            step.step_id = f"{plan.plan_id}-step-{step.order}"
+            step.arguments = _shift_reference_steps(step.arguments)
+            shifted.append(step)
+        plan.steps = shifted
+        answer_step = next(
+            (step for step in shifted if step.capability == ANSWER_COMPOSE_NAME),
+            None,
+        )
+    else:
+        # A model-authored knowledge step often repeats the user's question
+        # verbatim ("我的公司是否符合标准"). That query has little lexical
+        # overlap with the factual document it needs to retrieve, so replace it
+        # with the same deterministic attribute query used when adding a step.
+        knowledge_step.arguments["query"] = _personal_context_query(text)
+        knowledge_step.arguments["include_personal"] = True
+
+    if answer_step is not None:
+        # The model may have written an empty literal list here. Removing it is
+        # required because the runtime rejects mixing a value and its ref.
+        answer_step.arguments.pop("knowledge_evidence", None)
+        answer_step.arguments["knowledge_evidence_refs"] = [
+            {"step": knowledge_step.order, "output": "evidence"}
+        ]
     return plan
 
 
@@ -664,6 +698,15 @@ def _is_knowledge_plan(plan: Plan) -> bool:
         return False
     knowledge = {SEARCH_SOURCES_NAME, SEARCH_CONTENT_NAME, KNOWLEDGE_ANSWER_NAME}
     return all(step.capability in knowledge for step in plan.steps)
+
+
+def _is_composite_source_plan(plan: Plan) -> bool:
+    capabilities = {step.capability for step in plan.steps}
+    return (
+        SEARCH_CONTENT_NAME in capabilities
+        and WEB_RESEARCH_NAME in capabilities
+        and ANSWER_COMPOSE_NAME in capabilities
+    )
 
 
 def _contains_any(text: str, values: tuple[str, ...]) -> bool:

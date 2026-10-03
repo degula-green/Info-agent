@@ -104,6 +104,9 @@
                   <p v-if="formDraft(message).missing?.length" class="agent-form__warning">
                     缺少：{{ formDraft(message).missing.join('、') }}
                   </p>
+                  <p v-if="formHasRetrieved(message)" class="agent-form__hint">
+                    部分字段来自知识库语义检索，可能取错上下文，请核对后再确认
+                  </p>
                   <div class="agent-form__fields">
                     <label v-for="(field, index) in formEditor(message)" :key="`${field.name}-${index}`">
                       <span>
@@ -1158,6 +1161,17 @@ function formSummary(message: AgentMessage) {
   return { total: fields.length, filled, empty: fields.length - filled }
 }
 
+/**
+ * Whether any value came from retrieval.
+ *
+ * Semantic search has no notion of context or ordering, so a retrieved value
+ * can be the wrong one for the field. The card is the safety net, and it only
+ * works if it says so.
+ */
+function formHasRetrieved(message: AgentMessage): boolean {
+  return formEditor(message).some((field) => field.source === 'knowledge')
+}
+
 /** The sidecar captures at this viewport, so clicks map back through it. */
 const TAKEOVER_VIEWPORT = { width: 1440, height: 900 }
 const takeoverFrames = reactive<Record<string, string>>({})
@@ -1480,6 +1494,7 @@ onBeforeUnmount(() => {
 .agent-form__title { margin: 0; font-weight: 600; }
 .agent-form__summary { margin: 0; color: var(--td-text-color-secondary); font-size: 12px; }
 .agent-form__warning { margin: 0; color: var(--td-warning-color-6, #e37318); font-size: 12px; }
+.agent-form__hint { margin: 0; color: var(--td-text-color-secondary); font-size: 12px; }
 .agent-form__fields { display: grid; gap: 8px; max-height: 260px; overflow: auto; }
 .agent-form__fields label { display: grid; gap: 4px; color: var(--td-text-color-secondary); font-size: 12px; }
 .agent-form__source { margin-left: 6px; padding: 0 6px; border-radius: 8px; color: var(--td-text-color-placeholder); background: var(--td-bg-color-component); font-size: 11px; }

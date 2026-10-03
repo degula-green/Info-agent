@@ -374,6 +374,24 @@ def test_answer_compose_merges_document_and_web_evidence() -> None:
     ]
 
 
+def test_answer_compose_flattens_observation_backed_evidence() -> None:
+    capability = AnswerComposeCapability(FakeAnswerProvider())
+
+    arguments = capability.validate(
+        {
+            "question": "比较",
+            "knowledge_evidence": [
+                [{"evidence_id": "doc-1", "quote": "公司资料"}]
+            ],
+            "evidence": [{"evidence_id": "web-1", "quote": "公开标准"}],
+        }
+    )
+
+    assert arguments.knowledge_evidence == [
+        {"evidence_id": "doc-1", "quote": "公司资料"}
+    ]
+
+
 def test_answer_compose_reports_its_model_spend() -> None:
     capability = AnswerComposeCapability(FakeAnswerProvider(model_calls=2))
     result = capability.execute(

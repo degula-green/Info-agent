@@ -14,12 +14,14 @@ from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 from urllib.parse import quote, urlsplit, urlunsplit
 
-# Only characters a URL may legally contain. Chinese text is very often glued
-# straight onto a link with no space (".../网址内容是什么？"), and a loose
-# negated class swallowed it: the URL became ".../网址内容是什么？" and the HTTP
-# client then died encoding the request line as ASCII. Brackets and parentheses
-# are left out as well so markdown link syntax does not leak into the match.
-_URL_PATTERN = re.compile(r"https?://[A-Za-z0-9\-._~:/?#@!$&'*+,;=%]+")
+# URLs are normally ASCII, but pages with unencoded Chinese paths are common.
+# Allow those when the URL starts at a clear boundary. A URL glued to Chinese
+# prose falls back to the ASCII form so a trailing question is not swallowed.
+_UNICODE_URL_PATTERN = re.compile(
+    r"""https?://[^\s<>"'()\[\]{}，。；：！？、（）【】《》]+""",
+    re.IGNORECASE,
+)
+_ASCII_URL_PATTERN = re.compile(r"https?://[A-Za-z0-9\-._~:/?#@!$&'*+,;=%]+")
 _TRAILING_JUNK = "。，、；：！？.,;:!?）)】]》\"'"
 _PATH_SAFE = "/%:@!$&'()*+,;=-._~"
 _QUERY_SAFE = "=&%?:@!$'()*+,;/-._~"
@@ -33,9 +35,17 @@ DEFAULT_ALIASES_PATH = (
 def extract_http_urls(text: str) -> list[str]:
     """Every http/https URL the user wrote, in order, without duplicates."""
 
+    source = str(text or "")
     found: list[str] = []
-    for match in _URL_PATTERN.finditer(str(text or "")):
-        url = match.group(0).rstrip(_TRAILING_JUNK)
+    for match in _UNICODE_URL_PATTERN.finditer(source):
+        previous = source[match.start() - 1] if match.start() else ""
+        if previous and (previous.isalnum() or previous == "_"):
+            ascii_match = _ASCII_URL_PATTERN.match(source, match.start())
+            if ascii_match is None:
+                continue
+            url = ascii_match.group(0).rstrip(_TRAILING_JUNK)
+        else:
+            url = match.group(0).rstrip(_TRAILING_JUNK)
         if url and url not in found:
             found.append(url)
     return found

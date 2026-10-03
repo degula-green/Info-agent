@@ -580,3 +580,44 @@ def test_bound_reference_schema_names_the_source_capability() -> None:
     hint = schema["properties"]["draft_ref"]["description"]
     assert "form.preview" in hint
     assert "form" in hint
+
+
+def test_relaxed_extraction_takes_a_bare_phone_number() -> None:
+    """Retrieved text is message-shaped: the value often has no label."""
+
+    text = "你发个手机号\n15325653689\n点击"
+    assert extract_values(["手机号"], text, relaxed=True) == {"手机号": "15325653689"}
+    # Without the relaxation the same text yields nothing.
+    assert extract_values(["手机号"], text) == {}
+
+
+def test_relaxed_extraction_ignores_ambiguous_and_prose() -> None:
+    # Two different numbers: which one is the mobile? Not for us to guess.
+    assert extract_values(["手机号"], "13800000000 或 13900000000", relaxed=True) == {}
+    # A sentence is never a value.
+    assert extract_values(["性别"], "就把寝室长名字标红加粗就行了", relaxed=True) == {}
+
+
+def test_a_password_is_not_mistaken_for_a_student_id() -> None:
+    """``123456`` has a student-id shape but appears as "密码123456"."""
+
+    assert extract_values(["学号"], "密码123456", relaxed=True) == {}
+    assert extract_values(["学号"], "学号: 20240012", relaxed=True) == {"学号": "20240012"}
+
+
+def test_one_value_fills_only_one_field() -> None:
+    """A single mobile must not be cloned into every phone column."""
+
+    class OneNumberRetriever:
+        def search(self, query: str) -> str:
+            return "你发个手机号\n15325653689"
+
+    client = FakeClient()
+    client.grid = {"headers": ["联系电话", "手机号", "家长电话"], "rows": []}
+    capability = FormPreviewCapability(client, retriever=OneNumberRetriever())
+    request = f"填写 {URL}"
+    draft = capability.execute(capability.validate({"request": request, "url": URL}))["form"]
+    filled = {f["name"]: f["value"] for f in draft["fields"] if f["value"]}
+    # The message names 手机号, so that is the column it lands in -- and it
+    # lands in exactly one column, not all three phone columns.
+    assert filled == {"手机号": "15325653689"}

@@ -347,6 +347,14 @@ class OpenAICompatiblePlanner:
         constraints: PlanningConstraints,
         understanding: TaskUnderstanding | None = None,
     ) -> PlannerDecision:
+        # A form draft is reviewed field by field on the approval card. Leaving
+        # this to the model let it divert into ``request_input`` -- a single
+        # "please supply information" box -- which is exactly *not* that review.
+        # The write step is already approval-gated, so the card is one step
+        # away; run it instead of asking.
+        forced = _form_flow_decision(current_plan, observations)
+        if forced is not None:
+            return forced
         # Same reason as create_plan: a re-plan also mints step ids, and the
         # model has to be able to name them when a later step reads an earlier one.
         plan_id = str(uuid4())
@@ -434,6 +442,15 @@ class OpenAICompatiblePlanner:
                 else []
             )
             if not still:
+                # Arguments that carry the owner's own words are filled in by
+                # the planner, never by the model, so a re-plan that omits them
+                # (form.preview's `request`, web.research's `request`) must get
+                # them here too -- otherwise the capability schema check below
+                # rejects a perfectly good replan for a field the model was
+                # never allowed to supply.
+                decision.plan = _inject_task_text(
+                    decision.plan, self._capabilities, task
+                )
                 still = unresolved_references(decision.plan, observations)
             if not still:
                 # The plan path validates step arguments against the capability
@@ -545,6 +562,52 @@ def _unusable_steps(plan: Plan, validators: dict[str, Any]) -> list[str]:
         except Exception as exc:
             problems.append(f"{step.capability}: {exc}")
     return problems
+
+
+def _form_flow_decision(
+    plan: Plan | None, observations: list[Observation]
+) -> PlannerDecision | None:
+    """Decide the two form steps without asking the model.
+
+    * After a draft, run the write step: it is approval-gated, so continuing
+      writes nothing and simply raises the card the owner reviews field by
+      field. Diverting into ``request_input`` would replace that review with
+      one "please supply information" box.
+    * After the write, the Task is done. The draft the owner confirmed is the
+      whole truth of what they wanted written; asking about fields they chose
+      to leave blank would reopen a decision they already made.
+    """
+
+    latest = observations[-1] if observations else None
+    if latest is None or latest.status != "succeeded":
+        return None
+    if not isinstance(latest.output, dict):
+        return None
+    if latest.capability == "form.apply":
+        # Only when nothing else is queued: a plan that writes and then does
+        # more work must not be closed here.
+        if plan is not None and any(
+            step.status in {"pending", "ready"} for step in plan.steps
+        ):
+            return None
+        return PlannerDecision(
+            action="complete",
+            reason="表单已按确认的草稿写入",
+        )
+    if latest.capability != "form.preview" or not latest.output.get("form"):
+        return None
+    if plan is None:
+        return None
+    pending_write = any(
+        step.capability == "form.apply" and step.status in {"pending", "ready"}
+        for step in plan.steps
+    )
+    if not pending_write:
+        return None
+    return PlannerDecision(
+        action="continue",
+        reason="表单草稿已生成，交给审批卡片逐项确认",
+    )
 
 
 def _has_pending_steps(plan: Plan) -> bool:
@@ -798,13 +861,18 @@ def _plan_messages(
                 "只要结果是要直接给用户看的（读链接、搜索、总结、比较等），就必须在 "
                 "获取证据后追加 answer.compose；只有后续步骤要消费这些证据、"
                 "不需要直接回复用户时才可以不追加。"
-                "表单填写是这条规则的例外：form.preview 读取表单并产出草稿，"
-                "form.apply 用 draft_ref 指向 form.preview 的 form 输出把草稿写入，"
-                "写完后系统会直接给用户回执，不要再追加 answer.compose；"
-                "answer.compose 的 evidence_ref / evidence_refs 只接受 web.research "
-                "的 evidence，指向 form.preview 会被拒绝。"
-                "用户只要求填写、没有提供任何字段值时，仍然照常规划 "
-                "form.preview + form.apply：缺的字段由用户在草稿卡片上补。"
+                "表单填写（form.complete）是以上规则的例外，本节优先，与前面冲突时以本节为准："
+                "form.preview 自己会打开链接、读取表单并在内部检索知识库补齐字段值，"
+                "所以不要为填表单独规划 knowledge.search_sources 或 knowledge.search_content，"
+                "也不要在 form.preview 之前插入任何检索步骤；"
+                "计划固定为两步：第一步 form.preview，第二步 form.apply，"
+                "并且 form.apply 只能写 "
+                "draft_ref = {\"step\": 1, \"output\": \"form\"} 指向第一步的 form 输出。"
+                "draft_ref 只接受 form.preview 的输出，指向 knowledge.* 或 web.research "
+                "都会被拒绝，任务会直接失败。"
+                "写完由系统直接给用户回执，不要追加 answer.compose；"
+                "answer.compose 的 evidence_ref / evidence_refs 只接受 web.research 的 evidence。"
+                "用户没有提供任何字段值时也照这两步规划：缺的字段由用户在草稿卡片上补。"
                 "调用 web.research 时：用户给出的链接放 urls，检索词放 queries（最多 3 条），"
                 "两者可以同时给；不要只填参数以外的字段。"
                 "step 只能指向本计划中比当前步更早的步骤，output 只能用来源 capability 的 "

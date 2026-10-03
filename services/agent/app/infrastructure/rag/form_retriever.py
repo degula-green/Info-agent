@@ -50,7 +50,11 @@ class KnowledgeFormRetriever:
         if not text:
             return ""
         try:
-            arguments = self.capability.validate({"query": text, "top_k": self.top_k})
+            # Filling a form is about the owner's own facts, so the personal
+            # scope is the right one to ask for — not the whole organization's.
+            arguments = self.capability.validate(
+                {"query": text, "top_k": self.top_k, "include_personal": True}
+            )
             output = self.capability.execute(arguments)
         except Exception:  # noqa: BLE001 - retrieval is best effort by design
             return ""

@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.kernel.models import (
     CapabilityDescriptor,
@@ -37,6 +37,26 @@ class AnswerComposeInput(BaseModel):
     knowledge_evidence: list[dict[str, Any]] = Field(
         default_factory=list, max_length=MAX_EVIDENCE_ITEMS
     )
+
+    @field_validator("evidence", "knowledge_evidence", mode="before")
+    @classmethod
+    def _flatten_evidence(cls, value: Any) -> Any:
+        """Accept one list of evidence per referenced source.
+
+        Planner references can resolve to nested lists when several outputs are
+        merged. Flattening here keeps the contract stable across both bound and
+        observation-backed plans.
+        """
+
+        if not isinstance(value, list):
+            return value
+        flattened: list[Any] = []
+        for item in value:
+            if isinstance(item, list):
+                flattened.extend(item)
+            elif item is not None:
+                flattened.append(item)
+        return flattened
 
 
 class AnswerComposePlanInput(BaseModel):
