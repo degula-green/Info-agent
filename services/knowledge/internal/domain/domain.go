@@ -122,6 +122,17 @@ type AgentDevice struct {
 	CreatedAt    time.Time  `json:"created_at"`
 }
 
+type AgentDeviceAssignment struct {
+	ID               string     `json:"assignment_id"`
+	DeviceID         string     `json:"device_id"`
+	ConnectorID      string     `json:"connector_id"`
+	Status           string     `json:"status"`
+	AssignedByUserID string     `json:"assigned_by_user_id,omitempty"`
+	AssignedAt       time.Time  `json:"assigned_at"`
+	RevokedByUserID  string     `json:"revoked_by_user_id,omitempty"`
+	RevokedAt        *time.Time `json:"revoked_at,omitempty"`
+}
+
 type AvailableConversation struct {
 	ExternalID             string            `json:"external_id"`
 	Name                   string            `json:"name"`

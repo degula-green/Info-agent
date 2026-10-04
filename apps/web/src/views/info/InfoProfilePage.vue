@@ -121,11 +121,46 @@
         </div>
       </div>
     </t-dialog>
-    <t-dialog v-model:visible="wechatDialogVisible" header="绑定个人微信" confirm-btn="确认绑定" cancel-btn="取消" :confirm-loading="wechatBinding" :close-on-overlay-click="!wechatBinding" @confirm="confirmWechatBind">
-      <t-form :data="wechatForm" label-align="top">
-        <t-form-item label="微信 ID"><t-input v-model="wechatForm.wxid" placeholder="例如 wxid_xxx" /></t-form-item>
-        <t-form-item label="本机微信数据目录"><t-input v-model="wechatForm.db_dir" placeholder="例如 C:\\Users\\..." /></t-form-item>
-      </t-form>
+    <t-dialog v-model:visible="wechatDialogVisible" header="绑定个人微信" :confirm-btn="wechatConfirmButton" cancel-btn="取消" :confirm-loading="wechatBinding" :close-on-overlay-click="!wechatBinding" @confirm="confirmWechatBind">
+      <div class="wechat-pairing">
+        <template v-if="!wechatManualMode">
+          <p>{{ wechatAccounts.length ? '检测到本机微信账号，请选择一个用于采集。' : '正在检测本机微信账号…' }}</p>
+          <div v-if="wechatAccounts.length" class="wechat-pairing__accounts">
+            <button
+              v-for="account in wechatAccounts"
+              :key="account.wxid"
+              type="button"
+              class="wechat-pairing__account"
+              :class="{ 'wechat-pairing__account--active': selectedWechatWXID === account.wxid }"
+              @click="selectedWechatWXID = account.wxid"
+            >
+              <span class="wechat-pairing__account-icon"><t-icon name="user" /></span>
+              <span class="wechat-pairing__account-body">
+                <strong>{{ maskedWechatID(account.wxid) }}</strong>
+                <small>{{ account.db_dir }}</small>
+              </span>
+              <t-icon :name="selectedWechatWXID === account.wxid ? 'check-circle-filled' : 'circle'" />
+            </button>
+          </div>
+          <t-alert v-else-if="wechatAgentError" theme="warning" :message="wechatAgentError" :close="false" />
+        </template>
+        <template v-else>
+          <t-alert theme="warning" :message="wechatAgentError || '未检测到本机微信 Agent。'" :close="false" />
+          <p>请启动本机 Agent，或把下面的配对信息提交给本机 Agent。</p>
+          <div class="wechat-pairing__field">
+            <span>配对 ID</span>
+            <strong>{{ wechatPairingID || '正在生成…' }}</strong>
+          </div>
+          <div class="wechat-pairing__field">
+            <span>配对码</span>
+            <strong>{{ wechatPairingCode || '正在生成…' }}</strong>
+          </div>
+          <t-button variant="text" :disabled="wechatBinding" @click="beginWechatPairing">重新生成并检测</t-button>
+        </template>
+        <div v-if="wechatAccounts.length && selectedWechatAccount" class="wechat-pairing__selection">
+          当前选择：{{ maskedWechatID(selectedWechatAccount.wxid) }}
+        </div>
+      </div>
     </t-dialog>
     <t-dialog v-model:visible="restoreDialogVisible" header="恢复演示数据" :confirm-btn="{ content: '恢复数据', theme: 'danger' }" cancel-btn="取消" @confirm="restoreDemo">
       <p class="restore-dialog__copy">将恢复默认资料、连接器、会话和问答历史，当前本地修改会被覆盖。</p>
@@ -146,12 +181,13 @@ import { MessagePlugin } from 'tdesign-vue-next'
 import { sourceColor } from '@/mock'
 import { useInfoMockStore } from '@/stores/infoMock'
 import { useAuthStore } from '@/stores/auth'
-import { bindWechat, connectorCatalog, getConnectors, getFeishuAuthorizeURL, type Connector, type ConnectorPlatform, type Profile, unbindConnector } from '@/api/info-profile'
+import { connectorCatalog, getConnectors, getFeishuAuthorizeURL, type Connector, type ConnectorPlatform, type Profile, unbindConnector } from '@/api/info-profile'
 import { oauthCallbackNotice } from '@/knowledge-mapping'
 import { downloadAvatar, getCurrentUser, updateCurrentUser, uploadAvatar as uploadCoreAvatar } from '@/api/core-auth'
 import { acceptOrganizationInvitation, approveAccessRequest, createOrganization, getCurrentOrganization, listAccessRequests, rejectAccessRequest, type CoreAccessRequest, type CoreOrganizationResponse } from '@/api/core-organization'
 import { CoreAuthError } from '@/api/core-auth'
-import { approvePrivateAccessRequest, listPrivateAccessRequests, rejectPrivateAccessRequest, type PrivateAccessRequestDTO } from '@/api/info-knowledge'
+import { approvePrivateAccessRequest, createWechatPairing, getWechatPairingStatus, listPrivateAccessRequests, rejectPrivateAccessRequest, type PrivateAccessRequestDTO } from '@/api/info-knowledge'
+import { listLocalWechatAccounts, pairLocalWechatAccount, type LocalWechatAccount } from '@/api/wechat-local-agent'
 
 const store = useInfoMockStore()
 const authStore = useAuthStore()
@@ -187,16 +223,39 @@ type UnifiedAccessRequest = {
 const accessRequests = ref<UnifiedAccessRequest[]>([])
 const accessLoading = ref(false)
 let accessRequestSequence = 0
-const wechatRebind = ref(false)
-const wechatForm = reactive({ wxid: '', db_dir: '' })
+const wechatPairingID = ref('')
+const wechatPairingCode = ref('')
+const wechatAccounts = ref<LocalWechatAccount[]>([])
+const selectedWechatWXID = ref('')
+const wechatManualMode = ref(false)
+const wechatAgentError = ref('')
 const connectorPending = reactive<Record<ConnectorPlatform, boolean>>({ feishu: false, wecom: false, wechat: false })
 const feishuBinding = ref(false)
 const wechatBinding = ref(false)
 const avatarLabel = computed(() => (form.nickname.trim().slice(0, 1) || '我'))
+const selectedWechatAccount = computed(() => (
+  wechatAccounts.value.find((item) => item.wxid === selectedWechatWXID.value) || null
+))
+const wechatConfirmButton = computed(() => {
+  if (selectedWechatAccount.value) {
+    return { content: '绑定选中的微信', loading: wechatBinding.value, disabled: wechatBinding.value }
+  }
+  if (wechatManualMode.value) {
+    return { content: '检查绑定状态', loading: wechatBinding.value, disabled: wechatBinding.value }
+  }
+  return { content: '重新检测', loading: wechatBinding.value, disabled: wechatBinding.value }
+})
+
+function maskedWechatID(value: string) {
+  const text = String(value || '').trim()
+  if (text.length <= 12) return text || '未知微信账号'
+  return `${text.slice(0, 8)}...${text.slice(-4)}`
+}
 
 function errorMessage(cause: any, fallback: string) {
   const code = cause?.code || cause?.error?.code
   if (code === 'connector_already_bound') return '该微信账号已被其他账号绑定'
+  if (code === 'rebind_required') return '请先解绑当前微信，再绑定新的微信账号'
   if (code === 'wechat_cleanup_pending') return '微信采集器尚未停止，请重试解绑'
   return cause?.message || cause?.error?.message || fallback
 }
@@ -445,7 +504,10 @@ async function handleConnector(connector: Connector) {
     return
   }
   if (connector.platform === 'feishu') feishuDialogVisible.value = true
-  if (connector.platform === 'wechat') { wechatRebind.value = false; wechatForm.wxid = ''; wechatForm.db_dir = ''; wechatDialogVisible.value = true }
+  if (connector.platform === 'wechat') {
+    wechatDialogVisible.value = true
+    await beginWechatPairing()
+  }
 }
 async function confirmFeishuBind() {
   if (feishuBinding.value) return
@@ -459,15 +521,91 @@ async function confirmFeishuBind() {
 }
 async function confirmWechatBind() {
   if (wechatBinding.value) return
-  if (!wechatForm.wxid.trim() || !wechatForm.db_dir.trim()) { MessagePlugin.warning('请填写微信 ID 和本机微信数据目录'); return }
+  if (selectedWechatAccount.value) {
+    await bindSelectedWechatAccount()
+    return
+  }
+  if (!wechatManualMode.value) {
+    await beginWechatPairing()
+    return
+  }
+  await checkWechatPairingStatus()
+}
+async function bindSelectedWechatAccount() {
+  const account = selectedWechatAccount.value
+  if (!account || !wechatPairingID.value || !wechatPairingCode.value) {
+    MessagePlugin.error('本机微信账号或配对信息不完整')
+    return
+  }
   wechatBinding.value = true
   try {
-    await bindWechat(wechatForm.wxid.trim(), wechatForm.db_dir.trim(), wechatRebind.value)
-    wechatDialogVisible.value = false
-    await refreshConnectors()
-    MessagePlugin.success('个人微信已绑定，采集器已启动')
-  } catch (cause) { MessagePlugin.error(errorMessage(cause, '个人微信绑定失败')) }
+    await pairLocalWechatAccount(wechatPairingID.value, wechatPairingCode.value, account.wxid)
+    const result = await getWechatPairingStatus(wechatPairingID.value)
+    if (result.connector_id) {
+      wechatDialogVisible.value = false
+      await refreshConnectors()
+      MessagePlugin.success('个人微信已绑定到当前设备')
+      return
+    }
+    MessagePlugin.info('本机 Agent 已提交配对，正在等待服务端确认')
+  } catch (cause) {
+    MessagePlugin.error(errorMessage(cause, '绑定个人微信失败'))
+  } finally {
+    wechatBinding.value = false
+  }
+}
+async function checkWechatPairingStatus() {
+  if (!wechatPairingID.value) {
+    await beginWechatPairing()
+    return
+  }
+  wechatBinding.value = true
+  try {
+    const result = await getWechatPairingStatus(wechatPairingID.value)
+    if (result.status === 'consumed' && result.connector_id) {
+      wechatDialogVisible.value = false
+      await refreshConnectors()
+      MessagePlugin.success('个人微信已绑定到当前设备')
+    } else if (result.status === 'failed') {
+      MessagePlugin.error('本机 Agent 配对失败，请重新检测')
+    } else {
+      MessagePlugin.info('配对尚未完成，请确认本机 Agent 已提交配对信息')
+    }
+  } catch (cause) {
+    MessagePlugin.error(errorMessage(cause, '检查微信绑定状态失败'))
+  }
   finally { wechatBinding.value = false }
+}
+async function beginWechatPairing() {
+  if (wechatBinding.value) return
+  wechatBinding.value = true
+  wechatAccounts.value = []
+  selectedWechatWXID.value = ''
+  wechatManualMode.value = false
+  wechatAgentError.value = ''
+  try {
+    const pairing = await createWechatPairing()
+    wechatPairingID.value = pairing.pairing_id
+    wechatPairingCode.value = pairing.pairing_code
+    try {
+      const local = await listLocalWechatAccounts(pairing.pairing_id, pairing.pairing_code)
+      wechatAccounts.value = local.items || []
+      selectedWechatWXID.value = wechatAccounts.value.length === 1 ? wechatAccounts.value[0].wxid : ''
+      if (!wechatAccounts.value.length) {
+        wechatAgentError.value = '未发现可绑定的本机微信账号，请先登录微信。'
+      }
+    } catch (cause) {
+      wechatManualMode.value = true
+      wechatAgentError.value = errorMessage(cause, '未检测到本机微信 Agent。')
+    }
+  } catch (cause) {
+    wechatPairingID.value = ''
+    wechatPairingCode.value = ''
+    wechatAgentError.value = errorMessage(cause, '生成微信配对信息失败')
+    MessagePlugin.error(wechatAgentError.value)
+  } finally {
+    wechatBinding.value = false
+  }
 }
 async function handleOAuthCallback() {
   const notice = oauthCallbackNotice(route.query)
@@ -879,6 +1017,104 @@ onMounted(async () => {
 .auth-dialog__scope span :deep(svg) {
   width: 14px;
   color: var(--td-brand-color);
+}
+
+.wechat-pairing {
+  display: grid;
+  gap: 12px;
+}
+
+.wechat-pairing p {
+  margin: 0;
+  color: var(--td-text-color-secondary);
+}
+
+.wechat-pairing__accounts {
+  display: grid;
+  gap: 8px;
+  max-height: 260px;
+  overflow-y: auto;
+}
+
+.wechat-pairing__account {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  min-width: 0;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--td-component-stroke);
+  border-radius: 8px;
+  color: var(--td-text-color-primary);
+  background: var(--td-bg-color-container);
+  text-align: left;
+  cursor: pointer;
+}
+
+.wechat-pairing__account:hover,
+.wechat-pairing__account--active {
+  border-color: var(--td-brand-color);
+  background: var(--td-brand-color-1);
+}
+
+.wechat-pairing__account-icon {
+  display: inline-grid;
+  flex: 0 0 32px;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  color: var(--td-brand-color);
+  background: var(--td-brand-color-1);
+}
+
+.wechat-pairing__account-body {
+  display: grid;
+  min-width: 0;
+  flex: 1 1 auto;
+  gap: 3px;
+}
+
+.wechat-pairing__account-body strong,
+.wechat-pairing__account-body small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.wechat-pairing__account-body small {
+  color: var(--td-text-color-placeholder);
+  font-size: 11px;
+}
+
+.wechat-pairing__account > :deep(svg) {
+  flex: 0 0 auto;
+  color: var(--td-brand-color);
+}
+
+.wechat-pairing__selection {
+  color: var(--td-text-color-secondary);
+  font-size: 12px;
+}
+
+.wechat-pairing__field {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 10px 12px;
+  background: var(--td-bg-color-container-hover);
+  border-radius: 6px;
+}
+
+.wechat-pairing__field span {
+  color: var(--td-text-color-secondary);
+}
+
+.wechat-pairing__field strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
 }
 
 @media (max-width: 700px) {

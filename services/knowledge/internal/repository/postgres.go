@@ -410,6 +410,15 @@ func (s *PostgresStore) RevokeConnector(ctx context.Context, userID, platformNam
 	}
 	_, err = tx.Exec(ctx, `UPDATE knowledge.wechat_collector_runtime SET status='stopped',stopped_at=now(),updated_at=now() WHERE connector_account_id=$1`, id)
 	if err == nil {
+		_, err = tx.Exec(ctx, `UPDATE knowledge.agent_device_assignments SET status='revoked',revoked_by_user_id=$2::uuid,revoked_at=now() WHERE connector_id=$1::uuid AND status='active' AND revoked_at IS NULL`, id, nilString(userID))
+	}
+	if err == nil {
+		_, err = tx.Exec(ctx, `UPDATE knowledge.agent_devices SET revoked_at=COALESCE(revoked_at,now()) WHERE connector_id=$1 AND revoked_at IS NULL`, id)
+	}
+	if err == nil {
+		_, err = tx.Exec(ctx, `UPDATE knowledge.external_identities AS identity SET mapped_user_id=NULL,mapping_status='unmapped',mapped_at=NULL,updated_at=now() WHERE identity.platform=$2 AND identity.mapped_user_id=$1::uuid AND EXISTS (SELECT 1 FROM knowledge.connector_accounts AS connector WHERE connector.id=$3::uuid AND connector.external_account_id=identity.external_user_id)`, userID, platformName, id)
+	}
+	if err == nil {
 		_, err = tx.Exec(ctx, `UPDATE knowledge.conversation_collectors SET status='unavailable',last_error='connector_revoked',updated_at=now() WHERE connector_account_id=$1 AND status<>'removed'`, id)
 	}
 	if err != nil {
@@ -449,7 +458,47 @@ func (s *PostgresStore) FailPairing(ctx context.Context, id, codeHash, failureCo
 	return nil
 }
 func (s *PostgresStore) CreateDevice(ctx context.Context, d domain.AgentDevice) error {
-	_, err := s.pool.Exec(ctx, `INSERT INTO knowledge.agent_devices (id,connector_id,owner_user_id,key_hash,expires_at,agent_version,created_at) VALUES ($1,$2,$3,$4,$5,$6,$7)`, d.ID, d.ConnectorID, d.OwnerUserID, d.KeyHash, d.ExpiresAt, nilString(d.AgentVersion), d.CreatedAt)
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return dbError(err)
+	}
+	defer tx.Rollback(ctx)
+	if _, err = tx.Exec(ctx, `INSERT INTO knowledge.agent_devices (id,connector_id,owner_user_id,key_hash,expires_at,agent_version,created_at) VALUES ($1,$2,$3,$4,$5,$6,$7)`, d.ID, d.ConnectorID, d.OwnerUserID, d.KeyHash, d.ExpiresAt, nilString(d.AgentVersion), d.CreatedAt); err != nil {
+		return dbError(err)
+	}
+	if d.ConnectorID != "" {
+		if _, err = tx.Exec(ctx, `INSERT INTO knowledge.agent_device_assignments (device_id,connector_id,status,assigned_by_user_id,assigned_at) VALUES ($1,$2,'active',$3,$4)`, d.ID, d.ConnectorID, nilString(d.OwnerUserID), d.CreatedAt); err != nil {
+			return dbError(err)
+		}
+	}
+	return dbError(tx.Commit(ctx))
+}
+
+func (s *PostgresStore) CreateDeviceAssignment(ctx context.Context, assignment domain.AgentDeviceAssignment) error {
+	if assignment.ID == "" {
+		assignment.ID = uuid.NewString()
+	}
+	if assignment.Status == "" {
+		assignment.Status = "active"
+	}
+	_, err := s.pool.Exec(ctx, `INSERT INTO knowledge.agent_device_assignments (id,device_id,connector_id,status,assigned_by_user_id,assigned_at,revoked_by_user_id,revoked_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`, assignment.ID, assignment.DeviceID, assignment.ConnectorID, assignment.Status, nilString(assignment.AssignedByUserID), assignment.AssignedAt, nilString(assignment.RevokedByUserID), assignment.RevokedAt)
+	return dbError(err)
+}
+
+func (s *PostgresStore) GetActiveDeviceAssignment(ctx context.Context, deviceID string) (*domain.AgentDeviceAssignment, error) {
+	var assignment domain.AgentDeviceAssignment
+	err := s.pool.QueryRow(ctx, `SELECT id::text,device_id::text,connector_id::text,status,COALESCE(assigned_by_user_id::text,''),assigned_at,COALESCE(revoked_by_user_id::text,''),revoked_at FROM knowledge.agent_device_assignments WHERE device_id=$1 AND status='active' AND revoked_at IS NULL ORDER BY assigned_at DESC LIMIT 1`, deviceID).Scan(&assignment.ID, &assignment.DeviceID, &assignment.ConnectorID, &assignment.Status, &assignment.AssignedByUserID, &assignment.AssignedAt, &assignment.RevokedByUserID, &assignment.RevokedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, apperror.New("device_assignment_not_found", "device has no active connector assignment", 404, false)
+	}
+	if err != nil {
+		return nil, dbError(err)
+	}
+	return &assignment, nil
+}
+
+func (s *PostgresStore) RevokeDeviceAssignments(ctx context.Context, connectorID, actorUserID string, now time.Time) error {
+	_, err := s.pool.Exec(ctx, `UPDATE knowledge.agent_device_assignments SET status='revoked',revoked_by_user_id=$2::uuid,revoked_at=$3 WHERE connector_id=$1::uuid AND status='active' AND revoked_at IS NULL`, connectorID, nilString(actorUserID), now.UTC())
 	return dbError(err)
 }
 func (s *PostgresStore) CompletePairing(ctx context.Context, pairingID, deviceID, connectorID string) error {
@@ -489,7 +538,13 @@ func (s *PostgresStore) CompleteAgentPairing(ctx context.Context, input AgentPai
 	if errors.Is(findErr, pgx.ErrNoRows) {
 		connector = &domain.ConnectorAccount{ID: uuid.NewString(), OwnerUserID: pairing.OwnerUserID, Platform: domain.PlatformWechat, Status: domain.ConnectorActive, CreatedAt: now}
 	} else {
+		if !strings.EqualFold(connector.ExternalAccountID, input.WXID) {
+			return nil, apperror.New("rebind_required", "unbind the current WeChat account before binding another", 409, false)
+		}
 		if _, err = tx.Exec(ctx, `UPDATE knowledge.agent_devices SET revoked_at=$2 WHERE connector_id=$1 AND revoked_at IS NULL`, connector.ID, now); err != nil {
+			return nil, dbError(err)
+		}
+		if _, err = tx.Exec(ctx, `UPDATE knowledge.agent_device_assignments SET status='revoked',revoked_by_user_id=$2::uuid,revoked_at=$3 WHERE connector_id=$1::uuid AND status='active' AND revoked_at IS NULL`, connector.ID, nilString(pairing.OwnerUserID), now); err != nil {
 			return nil, dbError(err)
 		}
 		if _, err = tx.Exec(ctx, `UPDATE knowledge.conversation_collectors SET status='unavailable',last_error='connector_revoked',updated_at=$2 WHERE connector_account_id=$1 AND status<>'removed'`, connector.ID, now); err != nil {
@@ -507,7 +562,7 @@ func (s *PostgresStore) CompleteAgentPairing(ctx context.Context, input AgentPai
 	connector.UpdatedAt = now
 	row := tx.QueryRow(ctx, `INSERT INTO knowledge.connector_accounts (id,owner_user_id,platform,platform_workspace_key,external_account_id,display_name,credential_ref,token_expires_at,default_organization_id,status,last_error,created_at,updated_at)
 		VALUES ($1,$2,$3,$4,$5,$6,$7,NULL,$8,$9,NULL,$10,$11)
-		ON CONFLICT (id) DO UPDATE SET platform_workspace_key=EXCLUDED.platform_workspace_key,external_account_id=EXCLUDED.external_account_id,display_name=EXCLUDED.display_name,credential_ref='',token_expires_at=NULL,default_organization_id=EXCLUDED.default_organization_id,status=EXCLUDED.status,last_error=NULL,updated_at=EXCLUDED.updated_at
+		ON CONFLICT (id) DO UPDATE SET platform_workspace_key=EXCLUDED.platform_workspace_key,external_account_id=EXCLUDED.external_account_id,display_name=EXCLUDED.display_name,credential_ref='',database_ref=NULL,token_expires_at=NULL,default_organization_id=EXCLUDED.default_organization_id,status=EXCLUDED.status,last_error=NULL,updated_at=EXCLUDED.updated_at
 		RETURNING `+connectorColumns, connector.ID, connector.OwnerUserID, connector.Platform, connector.WorkspaceKey, connector.ExternalAccountID, connector.DisplayName, connector.CredentialRef, nilString(connector.DefaultOrganizationID), connector.Status, connector.CreatedAt, now)
 	saved, err := scanConnector(row)
 	if err != nil && isUnique(err) {
@@ -516,9 +571,18 @@ func (s *PostgresStore) CompleteAgentPairing(ctx context.Context, input AgentPai
 	if err != nil {
 		return nil, dbError(err)
 	}
+	if _, err = tx.Exec(ctx, `INSERT INTO knowledge.wechat_collection_configs (connector_account_id,selected_conversations,enabled,listen_mode,created_at,updated_at) VALUES ($1,'[]'::jsonb,TRUE,'whitelist',$2,$2) ON CONFLICT (connector_account_id) DO NOTHING`, saved.ID, now); err != nil {
+		return nil, dbError(err)
+	}
+	if _, err = tx.Exec(ctx, `INSERT INTO knowledge.wechat_collector_runtime (connector_account_id,status,created_at,updated_at) VALUES ($1,'running',$2,$2) ON CONFLICT (connector_account_id) DO UPDATE SET status='running',last_error=NULL,stopped_at=NULL,updated_at=EXCLUDED.updated_at`, saved.ID, now); err != nil {
+		return nil, dbError(err)
+	}
 	device := domain.AgentDevice{ID: input.DeviceID, ConnectorID: saved.ID, OwnerUserID: pairing.OwnerUserID, KeyHash: input.DeviceKeyHash, ExpiresAt: input.DeviceExpiresAt.UTC(), AgentVersion: input.AgentVersion, CreatedAt: now}
 	if _, err = tx.Exec(ctx, `INSERT INTO knowledge.agent_devices (id,connector_id,owner_user_id,key_hash,expires_at,agent_version,created_at) VALUES ($1,$2,$3,$4,$5,$6,$7)`, device.ID, device.ConnectorID, device.OwnerUserID, device.KeyHash, device.ExpiresAt, nilString(device.AgentVersion), device.CreatedAt); err != nil {
 		return nil, apperror.Wrap("device_store_failed", "cannot store agent device", 503, true, err)
+	}
+	if _, err = tx.Exec(ctx, `INSERT INTO knowledge.agent_device_assignments (device_id,connector_id,status,assigned_by_user_id,assigned_at) VALUES ($1,$2,'active',$3,$4)`, device.ID, saved.ID, nilString(pairing.OwnerUserID), now); err != nil {
+		return nil, apperror.Wrap("device_assignment_failed", "cannot store agent device assignment", 503, true, err)
 	}
 	consumedAt := now
 	_, err = tx.Exec(ctx, `UPDATE knowledge.wechat_pairings SET status='consumed',consumed_at=$2,wxid=$3,database_ref=$4,device_id=$5,connector_id=$6 WHERE id=$1`, pairing.ID, consumedAt, input.WXID, nilString(input.DatabaseRef), device.ID, saved.ID)
@@ -545,20 +609,41 @@ func (s *PostgresStore) GetDeviceByHash(ctx context.Context, keyHash string) (*d
 	return &d, dbError(err)
 }
 func (s *PostgresStore) RevokeDevices(ctx context.Context, connectorID string) error {
-	_, err := s.pool.Exec(ctx, `UPDATE knowledge.agent_devices SET revoked_at=now() WHERE connector_id=$1 AND revoked_at IS NULL`, connectorID)
-	return dbError(err)
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return dbError(err)
+	}
+	defer tx.Rollback(ctx)
+	now := time.Now().UTC()
+	if _, err = tx.Exec(ctx, `UPDATE knowledge.agent_devices SET revoked_at=$2 WHERE connector_id=$1 AND revoked_at IS NULL`, connectorID, now); err != nil {
+		return dbError(err)
+	}
+	if _, err = tx.Exec(ctx, `UPDATE knowledge.agent_device_assignments SET status='revoked',revoked_at=$2 WHERE connector_id=$1::uuid AND status='active' AND revoked_at IS NULL`, connectorID, now); err != nil {
+		return dbError(err)
+	}
+	return dbError(tx.Commit(ctx))
 }
 
 func (s *PostgresStore) RevokeDevice(ctx context.Context, connectorID, deviceID string) error {
-	tag, err := s.pool.Exec(ctx, `UPDATE knowledge.agent_devices SET revoked_at=COALESCE(revoked_at,now()) WHERE id=$1 AND connector_id=$2`, deviceID, connectorID)
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return dbError(err)
+	}
+	defer tx.Rollback(ctx)
+	now := time.Now().UTC()
+	tag, err := tx.Exec(ctx, `UPDATE knowledge.agent_devices SET revoked_at=COALESCE(revoked_at,$3) WHERE id=$1 AND connector_id=$2`, deviceID, connectorID, now)
 	if err != nil {
 		return dbError(err)
 	}
 	if tag.RowsAffected() == 0 {
 		return apperror.New("device_not_found", "agent device not found", 404, false)
 	}
-	return nil
+	if _, err = tx.Exec(ctx, `UPDATE knowledge.agent_device_assignments SET status='revoked',revoked_at=COALESCE(revoked_at,$2) WHERE device_id=$1::uuid AND connector_id=$3::uuid AND status='active' AND revoked_at IS NULL`, deviceID, now, connectorID); err != nil {
+		return dbError(err)
+	}
+	return dbError(tx.Commit(ctx))
 }
+
 func (s *PostgresStore) TouchDevice(ctx context.Context, deviceID, version string, now time.Time) error {
 	_, err := s.pool.Exec(ctx, `UPDATE knowledge.agent_devices SET last_seen_at=$2,agent_version=$3 WHERE id=$1`, deviceID, now, nilString(version))
 	return dbError(err)

@@ -202,7 +202,8 @@ services:
         psql --dbname="$${KNOWLEDGE_DATABASE_URL}" --set=ON_ERROR_STOP=1 --file=/migrations/20260927_knowledge_rag_source_audit.sql &&
         psql --dbname="$${KNOWLEDGE_DATABASE_URL}" --set=ON_ERROR_STOP=1 --file=/migrations/20260927_knowledge_private_classification.up.sql &&
         psql --dbname="$${KNOWLEDGE_DATABASE_URL}" --set=ON_ERROR_STOP=1 --file=/migrations/20260927_knowledge_rag_mvp_status.sql &&
-        psql --dbname="$${KNOWLEDGE_DATABASE_URL}" --set=ON_ERROR_STOP=1 --file=/migrations/20260925_contact_profiles.sql
+        psql --dbname="$${KNOWLEDGE_DATABASE_URL}" --set=ON_ERROR_STOP=1 --file=/migrations/20260925_contact_profiles.sql &&
+        psql --dbname="$${KNOWLEDGE_DATABASE_URL}" --set=ON_ERROR_STOP=1 --file=/migrations/20261004_wechat_device_assignments.up.sql
     depends_on:
       postgres:
         condition: service_healthy
@@ -227,6 +228,8 @@ services:
       - ../db/migrations/20260927_knowledge_private_classification.down.sql:/migrations/20260927_knowledge_private_classification.down.sql:ro
       - ../db/migrations/20260927_knowledge_rag_mvp_status.sql:/migrations/20260927_knowledge_rag_mvp_status.sql:ro
       - ../db/migrations/20260925_contact_profiles.sql:/migrations/20260925_contact_profiles.sql:ro
+      - ../db/migrations/20261004_wechat_device_assignments.up.sql:/migrations/20261004_wechat_device_assignments.up.sql:ro
+      - ../db/migrations/20261004_wechat_device_assignments.down.sql:/migrations/20261004_wechat_device_assignments.down.sql:ro
     restart: "no"
 
   redis:

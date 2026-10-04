@@ -273,8 +273,11 @@ export async function getFeishuAuthorizeURL(intent: 'bind' | 'rebind' = 'bind') 
   return body.authorize_url
 }
 
-export async function bindWechat(wxid: string, dbDir: string, rebind = false) {
-  return knowledgeRequest<Record<string, any>>(`/connectors/wechat/${rebind ? 'rebind' : 'bind'}`, { method: 'POST', body: JSON.stringify({ wxid, db_dir: dbDir }) })
+export async function createWechatPairing() {
+  return knowledgeRequest<{ pairing_id: string; pairing_code: string; expires_at: string; status: string }>('/connectors/wechat/pair', { method: 'POST' })
+}
+export async function getWechatPairingStatus(pairingID: string) {
+  return knowledgeRequest<{ pairing_id: string; status: string; device_id?: string; connector_id?: string; failure_code?: string }>(`/connectors/wechat/pair/${encodeURIComponent(pairingID)}`)
 }
 export async function getWechatStatus() { return knowledgeRequest<Record<string, any>>('/connectors/wechat/status') }
 export async function stopWechat() { return knowledgeRequest<{ status: string }>('/connectors/wechat/stop', { method: 'POST' }) }
