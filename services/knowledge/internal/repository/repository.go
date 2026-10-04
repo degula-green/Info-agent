@@ -635,8 +635,10 @@ type Repository interface {
 
 	IngestMessage(ctx context.Context, input IngestMessageInput) (*IngestResult, error)
 	ListPendingMessages(ctx context.Context, limit int) ([]PendingMessage, error)
+	ListPrivacyReprocessingMessages(ctx context.Context, policyVersion string, limit int) ([]PendingMessage, error)
 	ListPendingContactFactMessages(ctx context.Context, limit int) ([]domain.Message, error)
 	CompleteMessageClassification(ctx context.Context, messageID, displayContent string, sensitive bool) error
+	ReprocessMessageClassification(ctx context.Context, messageID, displayContent string, sensitive bool, policyVersion string) (bool, error)
 	CompleteContactFactExtraction(ctx context.Context, messageID string, facts []ContactFactInput, status string) error
 	ListContactFacts(ctx context.Context, senderIdentityIDs []string) ([]domain.ContactFact, error)
 	ListContactMessages(ctx context.Context, userID, organizationID string, senderIdentityIDs []string, limit int) ([]domain.Message, error)

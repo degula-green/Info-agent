@@ -1576,6 +1576,33 @@ func (s *MemoryStore) ListPendingMessages(_ context.Context, limit int) ([]Pendi
 	return out, nil
 }
 
+func (s *MemoryStore) ListPrivacyReprocessingMessages(_ context.Context, policyVersion string, limit int) ([]PendingMessage, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := []PendingMessage{}
+	for _, message := range s.messages {
+		conversation := s.conversations[message.ConversationID]
+		if conversation.IngestionScope != "organization" || conversation.ConversationType != "group" {
+			continue
+		}
+		item := s.knowledgeItemByMessageLocked(message.ID)
+		if item != nil && item.SecurityPolicyVersion == policyVersion {
+			continue
+		}
+		out = append(out, PendingMessage{
+			Message:          cloneMessage(message),
+			OriginalContent:  s.privateContent[message.ID],
+			KnowledgeScope:   conversation.IngestionScope,
+			ConversationType: conversation.ConversationType,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Message.CreatedAt.Before(out[j].Message.CreatedAt) })
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
+}
+
 func (s *MemoryStore) ListPendingContactFactMessages(_ context.Context, limit int) ([]domain.Message, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -1623,6 +1650,7 @@ func (s *MemoryStore) CompleteMessageClassification(ctx context.Context, id, dis
 				item.ContentAccessRequired = sensitive
 				item.ContentVisibility = "original"
 				item.Sensitivity = "internal"
+				item.SecurityPolicyVersion = privacy.PolicyVersion
 				if sensitive {
 					item.ContentVisibility = "masked"
 					item.Sensitivity = "restricted"
@@ -1634,6 +1662,49 @@ func (s *MemoryStore) CompleteMessageClassification(ctx context.Context, id, dis
 		}
 	}
 	return apperror.New("message_not_found", "message not found", 404, false)
+}
+
+func (s *MemoryStore) ReprocessMessageClassification(_ context.Context, id, displayContent string, sensitive bool, policyVersion string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for key, message := range s.messages {
+		if message.ID != id {
+			continue
+		}
+		changed := message.Content != displayContent || message.Sensitive != sensitive
+		if changed {
+			message.ContentVersion++
+		}
+		message.Content, message.Sensitive, message.ClassificationStatus = displayContent, sensitive, "succeeded"
+		message.ContactFactsStatus = "pending"
+		s.messages[key] = message
+		for itemID, item := range s.knowledgeItems {
+			if item.SourceMessageID != id || item.SourceAttachmentID != "" {
+				continue
+			}
+			item.SecurityReady = true
+			item.SecurityStatus = "classified"
+			item.OriginalAccessRequired = sensitive
+			item.ContentAccessRequired = sensitive
+			item.ContentVisibility = "original"
+			item.Sensitivity = "internal"
+			if sensitive {
+				item.ContentVisibility = "masked"
+				item.Sensitivity = "restricted"
+			}
+			item.SecurityPolicyVersion = policyVersion
+			item.ContentVersion = message.ContentVersion
+			item.PermissionReady = false
+			item.ACLSyncStatus = "pending"
+			item.ProcessingStatus = "pending"
+			item.RAGStatus = "pending"
+			item.RAGLastError = ""
+			item.UpdatedAt = time.Now().UTC()
+			s.knowledgeItems[itemID] = item
+		}
+		return changed, nil
+	}
+	return false, apperror.New("message_not_found", "message not found", 404, false)
 }
 
 func (s *MemoryStore) CompleteContactFactExtraction(_ context.Context, messageID string, inputs []ContactFactInput, status string) error {
@@ -2626,6 +2697,16 @@ func (s *MemoryStore) GetKnowledgeItemByMessage(ctx context.Context, messageID s
 		return nil, apperror.New("knowledge_not_found", "knowledge item not found", 404, false)
 	}
 	return s.GetKnowledgeItem(ctx, id)
+}
+
+func (s *MemoryStore) knowledgeItemByMessageLocked(messageID string) *domain.KnowledgeItem {
+	for _, item := range s.knowledgeItems {
+		if item.SourceMessageID == messageID && item.SourceAttachmentID == "" && item.SourceType != "shared_private_item" {
+			copy := item
+			return &copy
+		}
+	}
+	return nil
 }
 
 func (s *MemoryStore) GetKnowledgeItemByAttachment(ctx context.Context, attachmentID string) (*domain.KnowledgeItem, error) {

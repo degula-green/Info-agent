@@ -1195,6 +1195,19 @@ func registerInternalRoutes(r *gin.Engine, app *App, prefix string) {
 		}
 		c.JSON(http.StatusOK, gin.H{"allowed": allowed})
 	})
+	g.POST("/knowledge/privacy/reprocess", func(c *gin.Context) {
+		if !serviceAuthorized(c) {
+			writeError(c, apperror.Clone(apperror.ErrForbidden))
+			return
+		}
+		limit, _ := strconv.Atoi(c.DefaultQuery("limit", "100"))
+		changed, err := app.Service.ReprocessPrivacy(c, limit)
+		if err != nil {
+			writeError(c, err)
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"changed": changed})
+	})
 	g.GET("/knowledge/:knowledge_item_id", func(c *gin.Context) {
 		if !ragAuthorized(c) {
 			writeError(c, apperror.Clone(apperror.ErrForbidden))

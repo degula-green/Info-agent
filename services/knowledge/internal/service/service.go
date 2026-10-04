@@ -2676,6 +2676,31 @@ func (s *Service) ProcessPrivacy(ctx context.Context) error {
 	return nil
 }
 
+// ReprocessPrivacy reapplies the current privacy policy to existing
+// organization group messages whose stored policy version is stale.
+func (s *Service) ReprocessPrivacy(ctx context.Context, limit int) (int, error) {
+	items, err := s.Repo.ListPrivacyReprocessingMessages(ctx, privacy.PolicyVersion, limit)
+	if err != nil {
+		return 0, err
+	}
+	changedCount := 0
+	for _, item := range items {
+		decision := privacy.Analyze(item.OriginalContent)
+		sensitive, display := decision.Sensitive, decision.Redacted
+		if isMediaMessageEnvelope(item.Message.MessageType, item.OriginalContent) {
+			sensitive, display = false, ""
+		}
+		changed, err := s.Repo.ReprocessMessageClassification(ctx, item.Message.ID, display, sensitive, privacy.PolicyVersion)
+		if err != nil {
+			return changedCount, err
+		}
+		if changed {
+			changedCount++
+		}
+	}
+	return changedCount, nil
+}
+
 func (s *Service) ProcessContactFacts(ctx context.Context) error {
 	pending, err := s.Repo.ListPendingContactFactMessages(ctx, 100)
 	if err != nil {

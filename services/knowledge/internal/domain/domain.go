@@ -403,6 +403,7 @@ type KnowledgeItem struct {
 	OriginalAccessRequired bool           `json:"original_access_required"`
 	SecurityStatus         string         `json:"security_status"`
 	Sensitivity            string         `json:"sensitivity,omitempty"`
+	SecurityPolicyVersion  string         `json:"security_policy_version,omitempty"`
 	ContentSaved           bool           `json:"content_saved"`
 	OwnershipReady         bool           `json:"ownership_ready"`
 	SecurityReady          bool           `json:"security_ready"`
