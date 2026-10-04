@@ -113,6 +113,15 @@ def _step_variants(capabilities: list[CapabilityDescriptor]) -> list[dict[str, A
             "properties": {
                 "capability": {"type": "string", "enum": [descriptor.name]},
                 "arguments": planner_arguments_schema(descriptor),
+                "depends_on": {
+                    "anyOf": [
+                        {
+                            "type": "array",
+                            "items": {"type": "integer", "minimum": 1},
+                        },
+                        {"type": "null"},
+                    ]
+                },
             },
             "required": ["capability", "arguments"],
             "additionalProperties": False,

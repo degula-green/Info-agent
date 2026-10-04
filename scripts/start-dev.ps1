@@ -119,7 +119,7 @@ function Stop-AgentServiceChain([string]$AgentDirectory, [string]$AgentInterpret
         $commandLine = [string]$process.CommandLine
         $executable = [string]$process.ExecutablePath
         $ownsInterpreter = $executable.Equals($interpreterMarker, [StringComparison]::OrdinalIgnoreCase)
-        $isAgentEntry = $commandLine -match '(?i)(^|[\s\\/])(worker|knowledge_worker)\.py'
+        $isAgentEntry = $commandLine -match '(?i)(^|[\s\\/])(worker|worker_supervisor|knowledge_worker)\.py'
         if ($ownsInterpreter -and ($isAgentEntry -or $commandLine.IndexOf($agentRoot, [StringComparison]::OrdinalIgnoreCase) -ge 0)) {
             [void]$targetIDs.Add([int]$process.ProcessId)
         }
@@ -355,7 +355,7 @@ if ($intentEnabled) {
 Start-ServiceWindow "info-agent agent :$agentHttpPort" $agentPath "& '$agentPython' -m uvicorn app.main:app --host 0.0.0.0 --port $agentHttpPort"
 if ($env:agent_REDIS_URL -or $env:AGENT_REDIS_URL) {
     Start-ServiceWindow 'info-agent agent-knowledge-worker' $agentPath "& '$agentPython' knowledge_worker.py"
-    Start-ServiceWindow 'info-agent agent-task-worker' $agentPath "& '$agentPython' worker.py"
+    Start-ServiceWindow 'info-agent agent-task-workers' $agentPath "& '$agentPython' worker_supervisor.py"
 } else {
     Write-Warning 'Agent Redis URL missing. The Agent API was started, but the two Agent workers were skipped.'
 }

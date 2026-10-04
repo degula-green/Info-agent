@@ -1,0 +1,78 @@
+<template>
+  <span class="agent-mark" :class="{ 'agent-mark--active': active }" aria-hidden="true">
+    <svg viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <path d="M10 3L10.8 6.2C10.9 6.7 11.3 7.1 11.8 7.2L15 8L11.8 8.8C11.3 8.9 10.9 9.3 10.8 9.8L10 13L9.2 9.8C9.1 9.3 8.7 8.9 8.2 8.8L5 8L8.2 7.2C8.7 7.1 9.1 6.7 9.2 6.2L10 3Z" />
+      <path d="M15.5 4L15.8 5.2C15.85 5.45 16.05 5.65 16.3 5.7L17.5 6L16.3 6.3C16.05 6.35 15.85 6.55 15.8 6.8L15.5 8L15.2 6.8C15.15 6.55 14.95 6.35 14.7 6.3L13.5 6L14.7 5.7C14.95 5.65 15.15 5.45 15.2 5.2L15.5 4Z" />
+      <path d="M4.5 13L4.8 14.2C4.85 14.45 5.05 14.65 5.3 14.7L6.5 15L5.3 15.3C5.05 15.35 4.85 15.55 4.8 15.8L4.5 17L4.2 15.8C4.15 15.55 3.95 15.35 3.7 15.3L2.5 15L3.7 14.7C3.95 14.65 4.15 14.45 4.2 14.2L4.5 13Z" />
+    </svg>
+  </span>
+</template>
+
+<script setup lang="ts">
+defineProps<{
+  active?: boolean
+}>()
+</script>
+
+<style scoped>
+.agent-mark {
+  display: inline-grid;
+  width: 100%;
+  height: 100%;
+  place-items: center;
+  color: var(--td-brand-color);
+}
+
+.agent-mark svg {
+  width: 18px;
+  height: 18px;
+  fill: currentColor;
+  transform-origin: center;
+}
+
+.agent-mark--active svg {
+  animation: agent-mark-breathe 2.2s ease-in-out infinite;
+}
+
+.agent-mark--active path:nth-child(2),
+.agent-mark--active path:nth-child(3) {
+  animation: agent-mark-spark 1.45s ease-in-out infinite;
+}
+
+.agent-mark--active path:nth-child(3) {
+  animation-delay: 240ms;
+}
+
+@keyframes agent-mark-breathe {
+  0%,
+  100% {
+    opacity: 0.82;
+    transform: scale(0.96) rotate(0deg);
+  }
+
+  50% {
+    opacity: 1;
+    transform: scale(1.08) rotate(8deg);
+  }
+}
+
+@keyframes agent-mark-spark {
+  0%,
+  100% {
+    opacity: 0.45;
+    transform: scale(0.82);
+  }
+
+  50% {
+    opacity: 1;
+    transform: scale(1.12);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .agent-mark--active svg,
+  .agent-mark--active path {
+    animation: none;
+  }
+}
+</style>

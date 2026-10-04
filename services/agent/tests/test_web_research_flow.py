@@ -10,7 +10,10 @@ from __future__ import annotations
 
 from app.capabilities.answer import AnswerComposeCapability
 from app.capabilities.todo import TodoCreateCapability
-from app.capabilities.web_research import WebResearchCapability
+from app.capabilities.web_research import (
+    WebResearchCapability,
+    WebResearchUrlUnreadable,
+)
 from app.container import build_container
 from app.infrastructure.web.content_reader import ContentReader
 from app.kernel.models import (
@@ -69,6 +72,17 @@ class RecordingResearch(WebResearchCapability):
             ],
             "warnings": [],
         }
+
+
+class UnreadableResearch(RecordingResearch):
+    """Raises the same typed failure as a login-walled user URL."""
+
+    def execute(self, arguments):  # type: ignore[override]
+        raise WebResearchUrlUnreadable(
+            "无法读取用户给出的网址，可能因为页面需要登录、依赖 JavaScript "
+            f"或有人机验证：{URL}: 没有抽出可用正文",
+            code="explicit_url_unreadable",
+        )
 
 
 class ScriptedWebPlanner:
@@ -145,17 +159,21 @@ def build(
     llm=None,
     snapshots=None,
     allow_side_effects: bool = False,
+    research=None,
+    answer_provider=None,
 ):
     # Understanding is opt-in at the Runtime level, so the routing tests have to
     # turn it on explicitly.
     settings = make_settings(understanding_mode="enforce")
     todo_store = InMemoryTodoStore()
-    research = RecordingResearch()
+    research = research or RecordingResearch()
     registry = CapabilityRegistry(
         [
             TodoCreateCapability(todo_store, default_timezone=settings.default_timezone),
             research,
-            AnswerComposeCapability(FakeAnswerProvider("证据整理的回答")),
+            AnswerComposeCapability(
+                answer_provider or FakeAnswerProvider("证据整理的回答")
+            ),
         ]
     )
     store = InMemoryAgentStore()
@@ -252,6 +270,51 @@ def test_a_chat_turn_that_wants_an_answer_composes_one_on_top_of_evidence() -> N
         "web.research",
         "answer.compose",
     ]
+
+
+def test_an_unreadable_explicit_url_fails_without_search_replan() -> None:
+    container, store, _research = build(
+        web_intent="web.research",
+        research=UnreadableResearch(),
+    )
+    task = create_task(container, text=f"读一下 {URL} 这个网址在讲什么？")
+
+    assert container.execution_service.run_task(task.task_id) == "failed"
+    error = store.get_task(task.task_id).last_error
+    assert error["code"] == "explicit_url_unreadable"
+    assert URL in error["message"]
+
+
+def test_an_unanswered_url_answer_is_not_marked_success() -> None:
+    provider = FakeAnswerProvider(
+        f"提供的 evidence 中未提及网址 {URL} 的相关内容。",
+        citations=[],
+    )
+    container, store, _research = build(
+        web_intent="web.research",
+        answer_provider=provider,
+    )
+    task = create_task(container, text=f"{URL} 这个网址在讲什么？")
+
+    assert container.execution_service.run_task(task.task_id) == "failed"
+    error = store.get_task(task.task_id).last_error
+    assert error["code"] == "requested_url_unanswered"
+    assert URL in error["message"]
+
+
+def test_an_uncited_web_answer_is_not_marked_success() -> None:
+    provider = FakeAnswerProvider("这是整理后的回答", citations=[])
+    container, store, _research = build(
+        web_intent="web.research",
+        answer_provider=provider,
+    )
+    task = create_task(container, text="搜索一下公开资料并总结")
+
+    assert container.execution_service.run_task(task.task_id) == "failed"
+    assert (
+        store.get_task(task.task_id).last_error["code"]
+        == "uncited_web_answer"
+    )
 
 
 def test_a_to_do_that_mentions_a_link_does_not_run_research() -> None:

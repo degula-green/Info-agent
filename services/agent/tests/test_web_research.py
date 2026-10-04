@@ -14,6 +14,7 @@ from app.capabilities.web_research import (
     WebResearchCapability,
     WebResearchError,
     WebResearchInput,
+    WebResearchUrlUnreadable,
 )
 from app.infrastructure.search.client import SearchResult, SearchUnavailable
 from app.infrastructure.web.content_reader import ContentReader
@@ -243,6 +244,29 @@ def test_user_link_and_search_hits_are_merged_within_the_page_budget() -> None:
     )
 
     assert [item["url"] for item in result["evidence"]] == [USER_URL, OTHER_URL]
+
+
+def test_an_unreadable_user_url_is_not_replaced_by_search_evidence() -> None:
+    search = FakeSearchProvider([OTHER_URL])
+    capability = build_capability(
+        pages={OTHER_URL: {"content": PAGE}},
+        search=search,
+    )
+
+    with pytest.raises(WebResearchUrlUnreadable) as excinfo:
+        capability.execute(
+            capability.validate(
+                {
+                    "request": f"读一下 {USER_URL}，再搜索公开资料",
+                    "urls": [USER_URL],
+                    "queries": ["公开资料"],
+                }
+            )
+        )
+
+    assert excinfo.value.code == "explicit_url_unreadable"
+    assert USER_URL in str(excinfo.value)
+    assert "登录" in str(excinfo.value)
 
 
 def test_queries_are_capped_and_deduplicated() -> None:

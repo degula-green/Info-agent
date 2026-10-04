@@ -326,6 +326,10 @@ class AgentStore(Protocol):
     def pending_outbox(self, limit: int = 50) -> list[OutboxEvent]:
         ...
 
+    def claim_outbox(self, limit: int = 50, *, lease_seconds: float = 60.0) -> list[OutboxEvent]:
+        """Atomically claim deliverable Outbox rows for one dispatcher."""
+        ...
+
     def mark_outbox_sent(self, event_id: str) -> None:
         ...
 

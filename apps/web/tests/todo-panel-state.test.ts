@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
   TODO_PANEL_COLLAPSED_SIZE,
+  TODO_PANEL_DEFAULT_OPACITY,
   TODO_PANEL_STORAGE_KEY,
   clampTodoPanelAnchor,
   loadTodoPanelState,
@@ -51,7 +52,7 @@ test('panel state survives a storage round trip and rejects bad data', () => {
   }
 
   saveTodoPanelState(
-    { version: 1, x: 640, y: 120, collapsed: true, activeTab: 'done' },
+    { version: 1, x: 640, y: 120, collapsed: true, activeTab: 'done', opacity: 0.65 },
     storage,
   )
 
@@ -61,7 +62,16 @@ test('panel state survives a storage round trip and rejects bad data', () => {
     y: 120,
     collapsed: true,
     activeTab: 'done',
+    opacity: 0.65,
   })
+  assert.equal(
+    parseTodoPanelState('{"version":1,"x":1,"y":2,"collapsed":false,"activeTab":"open"}')?.opacity,
+    TODO_PANEL_DEFAULT_OPACITY,
+  )
+  assert.equal(
+    parseTodoPanelState('{"version":1,"x":1,"y":2,"opacity":0.1}')?.opacity,
+    0.5,
+  )
   assert.equal(values.has(TODO_PANEL_STORAGE_KEY), true)
   assert.equal(parseTodoPanelState('{bad json'), null)
   assert.equal(parseTodoPanelState('{"version":2,"x":1,"y":2}'), null)

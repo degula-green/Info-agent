@@ -519,11 +519,33 @@ class Settings:
         120.0, "AGENT_TASK_LEASE_SECONDS", "agent_TASK_LEASE_SECONDS"
     )
 
+    # Deprecated alias. The Task Worker count is owned by the supervisor process
+    # because one Python worker still executes exactly one Task at a time.
     worker_concurrency: int = _int(
         4, "AGENT_WORKER_CONCURRENCY", "agent_WORKER_CONCURRENCY"
     )
+    task_worker_processes: int = _int(
+        0,
+        "AGENT_TASK_WORKER_PROCESSES",
+        "agent_TASK_WORKER_PROCESSES",
+    )
+    task_step_concurrency: int = _int(
+        4,
+        "AGENT_TASK_STEP_CONCURRENCY",
+        "agent_TASK_STEP_CONCURRENCY",
+    )
+    task_parallel_enabled: bool = _bool(
+        False,
+        "AGENT_TASK_PARALLEL_ENABLED",
+        "agent_TASK_PARALLEL_ENABLED",
+    )
     outbox_batch_size: int = _int(
         50, "AGENT_OUTBOX_BATCH_SIZE", "agent_OUTBOX_BATCH_SIZE"
+    )
+    outbox_claim_lease_seconds: float = _float(
+        60.0,
+        "AGENT_OUTBOX_CLAIM_LEASE_SECONDS",
+        "agent_OUTBOX_CLAIM_LEASE_SECONDS",
     )
 
     # Multimodal attachment support (temporary storage)
@@ -588,6 +610,13 @@ class Settings:
 
         values = [item.strip().lower() for item in self.knowledge_platforms.split(",")]
         return tuple(item for item in values if item) or DEFAULT_KNOWLEDGE_PLATFORMS
+
+    @property
+    def resolved_task_worker_processes(self) -> int:
+        """Task Worker process count with the deprecated alias applied."""
+
+        count = self.task_worker_processes or self.worker_concurrency
+        return max(1, int(count))
 
 
 settings = Settings()

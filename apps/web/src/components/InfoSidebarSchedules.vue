@@ -31,7 +31,12 @@
           class="sidebar-schedules__item"
           :class="{ 'sidebar-schedules__item--expanded': expandedId === draft.taskId, 'sidebar-schedules__item--muted': draft.state === 'created' }"
         >
-          <button class="sidebar-schedules__summary" type="button" @click="toggle(draft.taskId)">
+          <button
+            v-if="expandedId !== draft.taskId || draft.state === 'created'"
+            class="sidebar-schedules__summary"
+            type="button"
+            @click="toggle(draft.taskId)"
+          >
             <span class="sidebar-schedules__summary-title">{{ draft.title }}</span>
             <span class="sidebar-schedules__summary-time">{{ draft.timeLabel }}</span>
           </button>
@@ -61,13 +66,10 @@
                 size="small"
                 @clear="clearDueDate(draft)"
               />
-              <p class="sidebar-schedules__fix-hint">
-                点开日历选具体某一天即可，截止时间为当天 23:59。点叉可清空，清空后这条待办就没有截止时间。
-              </p>
             </div>
 
             <dl v-else class="sidebar-schedules__facts">
-              <dt>时间</dt>
+              <dt>截止</dt>
               <dd>{{ draft.timeLabel }}</dd>
               <dt>时区</dt>
               <dd>{{ draft.timezone || '—' }}</dd>
@@ -530,7 +532,12 @@ onUnmounted(() => {
 
 <style lang="less" scoped>
 .sidebar-schedules {
+  display: flex;
   flex: 0 0 auto;
+  flex-direction: column;
+  max-height: 36vh;
+  min-height: 0;
+  overflow: hidden;
   margin: 0 6px 6px;
   padding: 6px;
   border-radius: 10px;
@@ -539,6 +546,7 @@ onUnmounted(() => {
 }
 
 .sidebar-schedules--collapsed {
+  max-height: none;
   margin: 0 0 6px;
   padding: 2px;
   background: transparent;
@@ -623,8 +631,11 @@ onUnmounted(() => {
 }
 
 .sidebar-schedules__body {
-  max-height: 42vh;
+  flex: 1 1 auto;
+  min-height: 0;
   overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
 }
 
 .sidebar-schedules__hint {
@@ -688,7 +699,7 @@ onUnmounted(() => {
 }
 
 .sidebar-schedules__summary-time {
-  color: var(--td-brand-color, #08c46a);
+  color: var(--td-text-color-placeholder, #999);
   font-size: 11.5px;
 }
 

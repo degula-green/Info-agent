@@ -28,3 +28,26 @@ test('escapes untrusted HTML in answers', () => {
   assert.equal(html.includes('<script>'), false)
   assert.equal(html.includes('&lt;script&gt;'), true)
 })
+
+test('renders safe links and tables', () => {
+  const html = renderChatMarkdown([
+    '查看 [文档](https://example.com/report?q=1&lang=zh)。',
+    '',
+    '| 名称 | 状态 |',
+    '| --- | --- |',
+    '| 登录模块 | 已完成 |',
+    '| 搜索模块 | 进行中 |',
+  ].join('\n'))
+
+  assert.equal(
+    html.includes('<a href="https://example.com/report?q=1&amp;lang=zh" target="_blank" rel="noopener noreferrer">文档</a>'),
+    true,
+  )
+  assert.equal(html.includes('<div class="chat-table-scroll"><table><thead><tr><th>名称</th><th>状态</th></tr></thead><tbody><tr><td>登录模块</td><td>已完成</td></tr><tr><td>搜索模块</td><td>进行中</td></tr></tbody></table></div>'), true)
+})
+
+test('does not render non-http markdown links', () => {
+  const html = renderChatMarkdown('[危险链接](javascript:alert(1))')
+  assert.equal(html.includes('<a '), false)
+  assert.equal(html.includes('javascript:alert(1)'), true)
+})

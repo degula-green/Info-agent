@@ -5,19 +5,22 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"info-agent/knowledge/internal/config"
 	"info-agent/knowledge/internal/domain"
 	"info-agent/knowledge/internal/ragclient"
 	"info-agent/knowledge/internal/repository"
 )
 
-func TestProcessContactProfilesCachesByVisibleMaterialFingerprint(t *testing.T) {
+func TestProcessContactProfilesRefreshesEveryIntervalAndForce(t *testing.T) {
 	var mu sync.Mutex
 	calls := 0
 	fail := false
+	var lastLines []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/v1/contact-profile/summarize" {
 			t.Fatalf("unexpected path: %s", r.URL.Path)
@@ -25,9 +28,16 @@ func TestProcessContactProfilesCachesByVisibleMaterialFingerprint(t *testing.T) 
 		if r.Header.Get("X-Caller-Service") != "knowledge" || r.Header.Get("Authorization") != "Bearer rag-token" {
 			t.Fatalf("knowledge caller identity was not propagated")
 		}
+		var body struct {
+			Lines []string `json:"lines"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
 		mu.Lock()
 		defer mu.Unlock()
 		calls++
+		lastLines = append([]string(nil), body.Lines...)
 		if fail {
 			w.WriteHeader(http.StatusServiceUnavailable)
 			return
@@ -79,8 +89,11 @@ func TestProcessContactProfilesCachesByVisibleMaterialFingerprint(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
+	current := now
 	service := &Service{
-		Repo: repo, RAG: ragclient.New(server.URL, "rag-token"), Now: func() time.Time { return now },
+		Repo: repo, RAG: ragclient.New(server.URL, "rag-token"),
+		Config: config.Config{ContactProfileRefreshInterval: 72 * time.Hour},
+		Now:    func() time.Time { return current },
 	}
 	if err := service.ProcessContactFacts(ctx); err != nil {
 		t.Fatal(err)
@@ -100,6 +113,12 @@ func TestProcessContactProfilesCachesByVisibleMaterialFingerprint(t *testing.T) 
 	mu.Unlock()
 	if firstCalls != 1 {
 		t.Fatalf("unexpected initial provider calls: %d", firstCalls)
+	}
+	mu.Lock()
+	firstLines := append([]string(nil), lastLines...)
+	mu.Unlock()
+	if len(firstLines) == 0 || !strings.Contains(firstLines[0], "私聊") || !strings.Contains(firstLines[0], "喜欢打篮球和摄影") {
+		t.Fatalf("profile evidence did not contain conversation context: %+v", firstLines)
 	}
 
 	if err := service.ProcessContactProfiles(ctx); err != nil {
@@ -136,13 +155,45 @@ func TestProcessContactProfilesCachesByVisibleMaterialFingerprint(t *testing.T) 
 	mu.Lock()
 	changedCalls := calls
 	mu.Unlock()
-	if changedCalls != firstCalls+1 {
-		t.Fatalf("changed profile fingerprint did not refresh: %d", changedCalls)
+	if changedCalls != firstCalls {
+		t.Fatalf("profile refreshed before the 72-hour interval: %d", changedCalls)
+	}
+
+	if _, err := service.RefreshContactProfile(ctx, "owner", relation.ID, ""); err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	forcedCalls := calls
+	mu.Unlock()
+	if forcedCalls != firstCalls+1 {
+		t.Fatalf("manual refresh did not force a provider call: %d", forcedCalls)
+	}
+
+	if err := service.ProcessContactProfiles(ctx); err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	afterForceCalls := calls
+	mu.Unlock()
+	if afterForceCalls != forcedCalls {
+		t.Fatalf("manual refresh did not reset the 72-hour interval: %d", afterForceCalls)
+	}
+
+	current = current.Add(72 * time.Hour)
+	if err := service.ProcessContactProfiles(ctx); err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	intervalCalls := calls
+	mu.Unlock()
+	if intervalCalls != forcedCalls+1 {
+		t.Fatalf("unchanged profile did not refresh after 72 hours: %d", intervalCalls)
 	}
 
 	mu.Lock()
 	fail = true
 	mu.Unlock()
+	current = current.Add(72 * time.Hour)
 	ingest("message-4", "常驻杭州")
 	if err := service.ProcessContactFacts(ctx); err != nil {
 		t.Fatal(err)

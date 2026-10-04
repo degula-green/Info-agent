@@ -11,6 +11,7 @@ from app.infrastructure.http import HttpClient, IntegrationError, join_url
 
 
 router = APIRouter(prefix="/api/v1", tags=["contact-profile"])
+NO_USEFUL_PROFILE = "__NO_USEFUL_PROFILE__"
 
 
 class ContactProfileRequest(BaseModel):
@@ -63,24 +64,40 @@ def summarize_contact_profile(
 ) -> dict[str, str]:
     _authorize(authorization, x_caller_service)
     if not body.lines:
-        return {"summary": "暂无足够信息"}
+        return {"summary": ""}
     if not settings.qa_api_base_url or not settings.qa_api_key or not settings.qa_model:
         raise HTTPException(status_code=503, detail="profile provider is not configured")
     context = "\n".join(f"- {line}" for line in body.lines)
-    context = context[: max(1000, settings.qa_max_context_tokens * 4)]
+    max_context_chars = max(1000, settings.qa_max_context_tokens * 4)
+    if len(context) > max_context_chars:
+        # Keep the newest evidence when the contact has accumulated a long
+        # message history.
+        context = context[-max_context_chars:]
     payload = {
         "model": settings.qa_model,
         "stream": False,
         "temperature": 0.2,
-        "max_tokens": min(500, max(100, settings.qa_max_output_tokens)),
+        # Reasoning-backed models can consume most of the response budget before
+        # emitting visible content. Keep enough room for both.
+        "max_tokens": min(2000, max(1200, settings.qa_max_output_tokens)),
         "messages": [
             {
                 "role": "system",
-                "content": "仅根据提供的联系人消息生成一段简洁、客观的中文画像。不得编造，不得补充外部信息。",
+                "content": (
+                    "你只根据提供的联系人消息生成一段客观的中文活动叙述。"
+                    "优先概括联系人参与过哪些项目、业务事项或长期工作，在其中的角色、职责、"
+                    "主要贡献、协作对象和近期重要进展。合并同一项目的多次提及，按重要性组织，"
+                    "不要输出性格、爱好、泛化标签或没有证据的推断。不得编造，不得补充外部信息。"
+                    "只输出最终叙述，不要输出分析过程。如果证据不足以形成至少一项项目、"
+                    f"职责或核心活动，只返回 {NO_USEFUL_PROFILE}，不要输出任何解释。"
+                ),
             },
             {
                 "role": "user",
-                "content": f"联系人消息：\n{context}\n\n请生成画像简介：",
+                "content": (
+                    f"联系人发送的消息（已标注时间、会话类型和会话名称）：\n{context}\n\n"
+                    "请生成一段以项目经历、职责角色和核心活动为主的中文叙述："
+                ),
             },
         ],
     }
@@ -95,6 +112,8 @@ def summarize_contact_profile(
     except IntegrationError as exc:
         raise HTTPException(status_code=503, detail="profile provider unavailable") from exc
     summary = _extract_answer(result)
+    if summary.strip().strip("`").upper() == NO_USEFUL_PROFILE:
+        return {"summary": ""}
     if not summary:
         raise HTTPException(status_code=503, detail="profile provider returned an empty summary")
     return {"summary": summary}

@@ -111,6 +111,7 @@ class InputDrivenFakePlanner:
                         {
                             "capability": str(item["capability"]),
                             "arguments": dict(item.get("arguments") or {}),
+                            "depends_on": item.get("depends_on"),
                         }
                     )
         if not steps:
@@ -133,6 +134,7 @@ class InputDrivenFakePlanner:
                     order=index,
                     capability=step["capability"],
                     arguments=step["arguments"],
+                    depends_on=step.get("depends_on"),
                 )
                 for index, step in enumerate(steps, start=1)
             ],
