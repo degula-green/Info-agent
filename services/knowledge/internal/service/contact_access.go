@@ -163,15 +163,42 @@ func (s *Service) attachmentContentAllowed(ctx context.Context, userID, attachme
 	return len(decisions) == 1 && decisions[0].Allowed, nil
 }
 
+type contactProfileMessage struct {
+	Message      domain.Message
+	Conversation *domain.ConversationIngestion
+}
+
 func (s *Service) visibleContactMessagesForProfile(ctx context.Context, userID, organizationID string, messages []domain.Message) ([]domain.Message, error) {
+	visible, err := s.visibleContactProfileMessages(ctx, userID, organizationID, messages)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]domain.Message, 0, len(visible))
+	for _, item := range visible {
+		out = append(out, item.Message)
+	}
+	return out, nil
+}
+
+func (s *Service) visibleContactProfileMessages(ctx context.Context, userID, organizationID string, messages []domain.Message) ([]contactProfileMessage, error) {
 	evaluator, err := newContactAccessEvaluator(ctx, s, userID, organizationID)
 	if err != nil {
 		return nil, err
 	}
 	direct := make(map[string]struct{}, len(messages))
+	conversations := make(map[string]*domain.ConversationIngestion)
 	for index := range messages {
-		conversation, loadErr := s.Repo.GetConversation(ctx, messages[index].ConversationID)
-		if loadErr != nil {
+		conversation, cached := conversations[messages[index].ConversationID]
+		if !cached {
+			loaded, loadErr := s.Repo.GetConversation(ctx, messages[index].ConversationID)
+			if loadErr != nil {
+				conversations[messages[index].ConversationID] = nil
+				continue
+			}
+			conversation = loaded
+			conversations[messages[index].ConversationID] = loaded
+		}
+		if conversation == nil {
 			continue
 		}
 		if canManageConversation(conversation, userID) {
@@ -200,14 +227,14 @@ func (s *Service) visibleContactMessagesForProfile(ctx context.Context, userID, 
 		slog.WarnContext(ctx, "contact profile authorization check failed; using direct messages only", "user_id", userID, "error", resolveErr)
 		access = map[string]domain.ContactAccess{}
 	}
-	out := make([]domain.Message, 0, len(messages))
+	out := make([]contactProfileMessage, 0, len(messages))
 	for _, message := range messages {
 		if _, ok := direct[message.ID]; ok {
-			out = append(out, message)
+			out = append(out, contactProfileMessage{Message: message, Conversation: conversations[message.ConversationID]})
 			continue
 		}
 		if entry, ok := access["profile-message:"+message.ID]; ok && entry.Status == "granted" {
-			out = append(out, message)
+			out = append(out, contactProfileMessage{Message: message, Conversation: conversations[message.ConversationID]})
 		}
 	}
 	return out, nil

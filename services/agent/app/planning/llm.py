@@ -61,6 +61,8 @@ class PlannedStepDraft(BaseModel):
     step_id: str | None = None
     capability: str
     arguments: dict[str, Any] = Field(default_factory=dict)
+    # One-based step numbers. None preserves the legacy sequential contract.
+    depends_on: list[int] | None = None
 
 
 class PlanDraft(BaseModel):
@@ -244,7 +246,11 @@ class OpenAICompatiblePlanner:
                     {
                         "objective": plan.objective,
                         "steps": [
-                            {"capability": step.capability, "arguments": step.arguments}
+                            {
+                                "capability": step.capability,
+                                "arguments": step.arguments,
+                                "depends_on": step.depends_on,
+                            }
                             for step in plan.steps
                         ],
                     },
@@ -323,7 +329,11 @@ class OpenAICompatiblePlanner:
                     {
                         "objective": plan.objective,
                         "steps": [
-                            {"capability": step.capability, "arguments": step.arguments}
+                            {
+                                "capability": step.capability,
+                                "arguments": step.arguments,
+                                "depends_on": step.depends_on,
+                            }
                             for step in plan.steps
                         ],
                     },
@@ -730,16 +740,37 @@ def _bind_decision_plan(
 
 
 def _draft_steps(steps: list[PlannedStepDraft], plan_id: str) -> list[PlanStep]:
-    return [
-        PlanStep(
-            step_id=f"{plan_id}-step-{index}",
-            plan_id=plan_id,
-            order=index,
-            capability=item.capability,
-            arguments=dict(item.arguments),
+    resolved: list[PlanStep] = []
+    for index, item in enumerate(steps, start=1):
+        depends_on = None
+        if item.depends_on is not None:
+            invalid = sorted(
+                {
+                    dependency
+                    for dependency in item.depends_on
+                    if dependency < 1 or dependency >= index
+                }
+            )
+            if invalid:
+                raise PlannerValidationError(
+                    f"{plan_id}-step-{index}.depends_on references "
+                    f"non-earlier steps: {invalid}"
+                )
+            depends_on = [
+                f"{plan_id}-step-{dependency}"
+                for dependency in dict.fromkeys(item.depends_on)
+            ]
+        resolved.append(
+            PlanStep(
+                step_id=f"{plan_id}-step-{index}",
+                plan_id=plan_id,
+                order=index,
+                capability=item.capability,
+                arguments=dict(item.arguments),
+                depends_on=depends_on,
+            )
         )
-        for index, item in enumerate(steps, start=1)
-    ]
+    return resolved
 
 
 def _decision_echo(draft: DecisionDraft) -> dict[str, Any]:
@@ -750,7 +781,11 @@ def _decision_echo(draft: DecisionDraft) -> dict[str, Any]:
         "reason": draft.reason,
         "required_input": list(draft.required_input),
         "steps": [
-            {"capability": item.capability, "arguments": item.arguments}
+            {
+                "capability": item.capability,
+                "arguments": item.arguments,
+                "depends_on": item.depends_on,
+            }
             for item in draft.steps
         ],
     }
@@ -880,7 +915,9 @@ def _plan_messages(
                 "步骤按顺序执行，你给出的顺序就是执行顺序。"
                 f"本计划的 plan_id 是 \"{plan_id}\"，本计划所有 step_id 形如 \"{plan_id}-step-<n>\"，"
                 f"第 k 步就是 \"{plan_id}-step-k\"。"
-                "steps 里每个对象只能有 capability 与 arguments 两个字段，不要写 step_id。"
+                "steps 里每个对象只能有 capability、arguments 和可选 depends_on 三个字段，不要写 step_id。"
+                "如果多个步骤可以并行，可在步骤里增加 depends_on 数组，用一基步骤序号"
+                "声明它必须等待的前置步骤；[] 表示显式无依赖。省略该字段表示按原有顺序串行。"
                 "跨步骤引用：capability 的 planner_input_schema 里以 _ref 结尾的参数接收一个"
                 "对象 {\"step\": <更早步骤的序号>, \"output\": \"<那个步骤输出的字段名>\"}。"
                 "以 _refs 结尾的参数接收一个数组，用于合并多个来源的同类证据。"
@@ -966,7 +1003,7 @@ def _decision_messages(
                 "action 只能是 continue、replan、request_input、complete、fail、unsupported。"
                 "replan 时可以输出 steps，steps 只能使用当前 capabilities。"
                 f"如果你带 steps，这些新步骤的 plan_id 是 \"{plan_id}\"，第 k 步的 step_id 是 "
-                f"\"{plan_id}-step-k\"，steps 里每个对象只能有 capability 与 arguments 两个字段；"
+                f"\"{plan_id}-step-k\"，steps 里每个对象只能有 capability、arguments 和可选 depends_on 三个字段；"
                 "步骤之间引用更早步骤的输出，把 *_ref 参数写成 "
                 "{\"step\": <更早步骤的序号>, \"output\": \"<字段名>\"}，只能指向本计划更早的步骤；"
                 "引用历史结果写 \"$observations.<observation_id>.output.<field>\"。"

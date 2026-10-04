@@ -35,6 +35,28 @@
             <span class="todo-float__scope">{{ activeTab === 'open' ? '未完成' : '已完成' }}</span>
             <span class="todo-float__count">{{ visibleItems.length }}</span>
           </button>
+          <label
+            class="todo-float__opacity"
+            data-no-drag
+            :style="{ '--todo-opacity-percent': opacityPercent }"
+            :title="`透明度 ${Math.round(opacity * 100)}%`"
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <circle cx="12" cy="12" r="8" />
+              <path d="M12 4a8 8 0 0 0 0 16Z" fill="currentColor" stroke="none" />
+            </svg>
+            <input
+              type="range"
+              :min="TODO_PANEL_MIN_OPACITY * 100"
+              :max="TODO_PANEL_MAX_OPACITY * 100"
+              step="1"
+              :value="Math.round(opacity * 100)"
+              aria-label="调整待办面板透明度"
+              @input="updateOpacity"
+              @pointerdown.stop
+              @click.stop
+            />
+          </label>
           <button
             class="todo-float__collapse"
             type="button"
@@ -123,6 +145,8 @@ import {
   loadTodoPanelState,
   saveTodoPanelState,
   todoPanelPlacement,
+  TODO_PANEL_MAX_OPACITY,
+  TODO_PANEL_MIN_OPACITY,
   type TodoPanelAnchor,
   type TodoPanelTab,
 } from '../utils/todo-panel-state.ts'
@@ -149,6 +173,7 @@ const persistedPanelState = loadTodoPanelState()
 const initialState = persistedPanelState || defaultTodoPanelState(initialViewport)
 const activeTab = ref<TodoPanelTab>(initialState.activeTab)
 const collapsed = ref(initialState.collapsed)
+const opacity = ref(initialState.opacity)
 const dragging = ref(false)
 const position = ref<TodoPanelAnchor>({ x: initialState.x, y: initialState.y })
 const viewport = ref(initialViewport)
@@ -161,17 +186,12 @@ const visibleItems = computed(() => sortAgentTodos(todos.value, activeTab.value)
 const placement = computed(() =>
   todoPanelPlacement(position.value, viewport.value, panelSize.value),
 )
-const panelStyle = computed(() =>
-  collapsed.value
-    ? {
-        left: `${position.value.x}px`,
-        top: `${position.value.y}px`,
-      }
-    : {
-        left: `${placement.value.x}px`,
-        top: `${placement.value.y}px`,
-      },
-)
+const panelStyle = computed(() => ({
+  left: `${collapsed.value ? position.value.x : placement.value.x}px`,
+  top: `${collapsed.value ? position.value.y : placement.value.y}px`,
+  '--todo-panel-opacity': String(opacity.value),
+}))
+const opacityPercent = computed(() => `${Math.round(opacity.value * 100)}%`)
 
 function toggleTodo(todo: AgentTodo) {
   void ledger.toggleTodo(todo)
@@ -180,6 +200,12 @@ function toggleTodo(todo: AgentTodo) {
 function switchTab() {
   if (consumeSuppressedClick()) return
   activeTab.value = activeTab.value === 'open' ? 'done' : 'open'
+  persistPanelState()
+}
+
+function updateOpacity(event: Event) {
+  const next = Number((event.target as HTMLInputElement).value) / 100
+  opacity.value = Math.min(Math.max(next, TODO_PANEL_MIN_OPACITY), TODO_PANEL_MAX_OPACITY)
   persistPanelState()
 }
 
@@ -208,6 +234,7 @@ function persistPanelState() {
     y: position.value.y,
     collapsed: collapsed.value,
     activeTab: activeTab.value,
+    opacity: opacity.value,
   })
 }
 
@@ -324,19 +351,24 @@ onUnmounted(() => {
   z-index: 90;
   width: min(344px, calc(100vw - 24px));
   overflow: hidden;
-  border: 1px solid #2a2a2a;
+  border: 1px solid rgba(255, 255, 255, 0.72);
   border-radius: 18px;
-  background: #141414;
+  background: rgba(255, 255, 255, 0.62);
+  backdrop-filter: blur(18px) saturate(140%);
+  -webkit-backdrop-filter: blur(18px) saturate(140%);
   box-shadow:
-    0 22px 54px rgba(0, 0, 0, 0.3),
-    0 2px 8px rgba(0, 0, 0, 0.26);
-  color: #f4f4f4;
+    0 18px 42px rgba(31, 35, 41, 0.14),
+    0 2px 8px rgba(31, 35, 41, 0.08),
+    inset 0 1px 0 rgba(255, 255, 255, 0.72);
+  color: #25303a;
+  opacity: var(--todo-panel-opacity, 1);
   font-family: inherit;
   transition:
     width 220ms cubic-bezier(0.22, 1, 0.36, 1),
     height 220ms cubic-bezier(0.22, 1, 0.36, 1),
     border-radius 220ms ease,
-    box-shadow 160ms ease;
+    box-shadow 160ms ease,
+    opacity 160ms ease;
   will-change: left, top;
 }
 
@@ -350,8 +382,8 @@ onUnmounted(() => {
 .todo-float--dragging {
   user-select: none;
   box-shadow:
-    0 28px 68px rgba(0, 0, 0, 0.4),
-    0 3px 10px rgba(0, 0, 0, 0.3);
+    0 24px 58px rgba(31, 35, 41, 0.18),
+    0 3px 10px rgba(31, 35, 41, 0.12);
 }
 
 .todo-float--collapsed.todo-float--dragging,
@@ -368,7 +400,7 @@ onUnmounted(() => {
   align-items: center;
   min-height: 56px;
   padding: 8px 8px 8px 16px;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  border-bottom: 1px solid rgba(31, 35, 41, 0.08);
   cursor: grab;
   touch-action: none;
 }
@@ -395,14 +427,14 @@ onUnmounted(() => {
 
 .todo-float__title {
   flex: 0 0 auto;
-  color: #f4f4f4;
+  color: #25303a;
   font-size: 19px;
   font-weight: 700;
 }
 
 .todo-float__scope {
   overflow: hidden;
-  color: #777;
+  color: #7b8492;
   font-size: 12px;
   font-weight: 500;
   text-overflow: ellipsis;
@@ -416,10 +448,92 @@ onUnmounted(() => {
   place-items: center;
   padding: 0 7px;
   border-radius: 11px;
-  background: #242424;
-  color: #aaa;
+  background: rgba(31, 35, 41, 0.06);
+  color: #566171;
   font-size: 12px;
   font-variant-numeric: tabular-nums;
+}
+
+.todo-float__opacity {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+  gap: 6px;
+  height: 34px;
+  margin-right: 4px;
+  padding: 0 2px;
+  border-radius: 9px;
+  color: #8c959f;
+  cursor: default;
+  opacity: 0.72;
+  transition: color 150ms ease, opacity 150ms ease;
+}
+
+.todo-float__opacity:hover,
+.todo-float__opacity:focus-within {
+  color: #65707d;
+  opacity: 1;
+}
+
+.todo-float__opacity svg {
+  width: 13px;
+  height: 13px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.7;
+}
+
+.todo-float__opacity input {
+  width: 58px;
+  height: 16px;
+  margin: 0;
+  appearance: none;
+  background: transparent;
+  cursor: pointer;
+}
+
+.todo-float__opacity input::-webkit-slider-runnable-track {
+  height: 3px;
+  border-radius: 999px;
+  background: linear-gradient(
+    to right,
+    #6fbf8d 0,
+    #6fbf8d var(--todo-opacity-percent),
+    rgba(31, 35, 41, 0.14) var(--todo-opacity-percent),
+    rgba(31, 35, 41, 0.14) 100%
+  );
+}
+
+.todo-float__opacity input::-webkit-slider-thumb {
+  width: 12px;
+  height: 12px;
+  margin-top: -4.5px;
+  border: 1px solid rgba(31, 35, 41, 0.18);
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 3px rgba(31, 35, 41, 0.18);
+  appearance: none;
+}
+
+.todo-float__opacity input::-moz-range-track {
+  height: 3px;
+  border-radius: 999px;
+  background: rgba(31, 35, 41, 0.14);
+}
+
+.todo-float__opacity input::-moz-range-progress {
+  height: 3px;
+  border-radius: 999px;
+  background: #6fbf8d;
+}
+
+.todo-float__opacity input::-moz-range-thumb {
+  width: 12px;
+  height: 12px;
+  border: 1px solid rgba(31, 35, 41, 0.18);
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 3px rgba(31, 35, 41, 0.18);
 }
 
 .todo-float__collapse {
@@ -432,13 +546,13 @@ onUnmounted(() => {
   border: 0;
   border-radius: 9px;
   background: transparent;
-  color: #8d8d8d;
+  color: #7a8491;
   cursor: pointer;
 }
 
 .todo-float__collapse:hover {
-  background: #242424;
-  color: #e8e8e8;
+  background: rgba(31, 35, 41, 0.06);
+  color: #26303a;
 }
 
 .todo-float__collapse svg {
@@ -456,7 +570,7 @@ onUnmounted(() => {
   overflow-x: hidden;
   overflow-y: auto;
   overscroll-behavior: contain;
-  scrollbar-color: #454545 transparent;
+  scrollbar-color: #c8cdd4 transparent;
   scrollbar-width: thin;
 }
 
@@ -474,17 +588,17 @@ onUnmounted(() => {
   gap: 11px;
   min-height: 126px;
   padding: 15px 15px 14px 13px;
-  border: 1px solid #2c2c2c;
+  border: 1px solid rgba(255, 255, 255, 0.68);
   border-radius: 13px;
-  background: #1c1c1c;
+  background: rgba(255, 255, 255, 0.44);
   transition:
     border-color 150ms ease,
     background 150ms ease;
 }
 
 .todo-float__card:hover {
-  border-color: #454545;
-  background: #222;
+  border-color: rgba(31, 35, 41, 0.14);
+  background: rgba(255, 255, 255, 0.68);
 }
 
 .todo-float__check {
@@ -495,16 +609,16 @@ onUnmounted(() => {
   align-self: start;
   margin-top: 1px;
   padding: 0;
-  border: 1.5px solid #5c5c5c;
+  border: 1.5px solid #9aa3ad;
   border-radius: 50%;
   background: transparent;
-  color: #fff;
+  color: #3b4552;
   cursor: pointer;
 }
 
 .todo-float__check:hover {
-  border-color: #adadad;
-  background: rgba(255, 255, 255, 0.07);
+  border-color: #68727f;
+  background: rgba(31, 35, 41, 0.06);
 }
 
 .todo-float__check:disabled {
@@ -524,8 +638,8 @@ onUnmounted(() => {
 }
 
 .todo-float__card--done .todo-float__check {
-  border-color: #777;
-  background: #303030;
+  border-color: #adb5bf;
+  background: #cfd5dc;
 }
 
 .todo-float__card--done .todo-float__check svg {
@@ -543,7 +657,7 @@ onUnmounted(() => {
   gap: 7px;
   margin-bottom: 9px;
   overflow: hidden;
-  color: #888;
+  color: #7b8492;
   font-size: 12px;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -554,7 +668,7 @@ onUnmounted(() => {
   height: 6px;
   flex: 0 0 6px;
   border-radius: 50%;
-  background: #6b6b6b;
+  background: #9aa3ad;
 }
 
 .todo-float__card-title {
@@ -562,7 +676,7 @@ onUnmounted(() => {
   min-height: 44px;
   margin: 0;
   overflow: hidden;
-  color: #f0f0f0;
+  color: #25303a;
   font-size: 16px;
   font-weight: 600;
   line-height: 1.42;
@@ -574,8 +688,8 @@ onUnmounted(() => {
 }
 
 .todo-float__card--done .todo-float__card-title {
-  color: #8d8d8d;
-  text-decoration-color: #8d8d8d;
+  color: #98a1ab;
+  text-decoration-color: #98a1ab;
 }
 
 .todo-float__footer {
@@ -594,8 +708,8 @@ onUnmounted(() => {
   padding: 4px 11px;
   overflow: hidden;
   border-radius: 14px;
-  background: #262626;
-  color: #a8a8a8;
+  background: rgba(31, 35, 41, 0.06);
+  color: #65707d;
   font-size: 12px;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -608,8 +722,8 @@ onUnmounted(() => {
   flex: 0 0 30px;
   place-items: center;
   border-radius: 50%;
-  background: #2b2b2b;
-  color: #a3a3a3;
+  background: rgba(31, 35, 41, 0.08);
+  color: #5b6673;
   font-size: 12px;
   font-weight: 700;
 }
@@ -625,7 +739,7 @@ onUnmounted(() => {
 .todo-float__empty p,
 .todo-float__hint {
   margin: 0;
-  color: #777;
+  color: #78828e;
   font-size: 12px;
   line-height: 1.5;
 }
@@ -636,9 +750,9 @@ onUnmounted(() => {
   height: 42px;
   place-items: center;
   margin-bottom: 10px;
-  border: 1px solid #303030;
+  border: 1px solid rgba(31, 35, 41, 0.1);
   border-radius: 12px;
-  color: #666;
+  color: #a0a8b2;
 }
 
 .todo-float__empty-icon svg {
@@ -656,7 +770,7 @@ onUnmounted(() => {
 }
 
 .todo-float__hint--error {
-  color: #c98c8c;
+  color: #c14d4d;
 }
 
 .todo-float__card .todo-float__hint {
@@ -674,13 +788,13 @@ onUnmounted(() => {
   border: 0;
   border-radius: inherit;
   background: transparent;
-  color: #d0d0d0;
+  color: #566171;
   cursor: grab;
   touch-action: none;
 }
 
 .todo-float__collapsed:hover {
-  background: #1c1c1c;
+  background: rgba(255, 255, 255, 0.55);
 }
 
 .todo-float__collapsed svg {
@@ -702,10 +816,10 @@ onUnmounted(() => {
   height: 17px;
   place-items: center;
   padding: 0 4px;
-  border: 2px solid #141414;
+  border: 2px solid rgba(255, 255, 255, 0.82);
   border-radius: 9px;
-  background: #e7e7e7;
-  color: #111;
+  background: #1f9b66;
+  color: #fff;
   font-size: 9px;
   font-weight: 700;
 }

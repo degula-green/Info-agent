@@ -305,6 +305,43 @@ def test_planner_answers_document_question_from_attachment():
     assert step.arguments["evidence"][0]["title"] == "常见问题.docx"
 
 
+def test_planner_answers_compliance_question_from_attachment():
+    from app.kernel.models import TaskUnderstanding, UnderstandingIntent
+    from app.planning.deterministic import DeterministicPlanner
+
+    understanding = TaskUnderstanding(
+        is_task=True,
+        goal="判断公司是否符合独角兽定义",
+        task_kind="answer",
+        intent_candidates=[
+            UnderstandingIntent(name="compliance.assess", confidence=0.95)
+        ],
+        confidence=0.95,
+        reason="test",
+    )
+    plan = DeterministicPlanner().create_plan(
+        _task(
+            {
+                "text": "我的公司符合“独角兽”公司的定义吗？\n\n--- 附件内容 ---\n公司成立于2023年",
+                "_original_text": "我的公司符合“独角兽”公司的定义吗？",
+                "_attachment_referenced": False,
+                "attachment_ids": ["test-123"],
+                "_attachment_excerpt": "公司成立于2023年，未引入外部融资。",
+                "_attachment_file_names": ["公司简介.docx"],
+            }
+        ),
+        _answer_capabilities(),
+        [],
+        None,
+        understanding,
+    )
+
+    step = plan.steps[0]
+    assert step.capability == "answer.compose"
+    assert step.arguments["question"] == "我的公司符合“独角兽”公司的定义吗？"
+    assert "未引入外部融资" in step.arguments["evidence"][0]["text"]
+
+
 def test_planner_keeps_document_question_unsupported_without_attachment():
     from app.planning.deterministic import DeterministicPlanner
 

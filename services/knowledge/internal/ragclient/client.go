@@ -73,8 +73,5 @@ func (c *Client) SummarizeContactProfile(ctx context.Context, ownerUserID, conta
 		return "", err
 	}
 	result.Summary = strings.TrimSpace(result.Summary)
-	if result.Summary == "" {
-		return "", errors.New("rag profile response is incomplete")
-	}
 	return result.Summary, nil
 }

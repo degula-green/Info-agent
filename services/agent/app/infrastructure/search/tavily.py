@@ -139,6 +139,7 @@ class TavilySearchProvider:
                     # Search content is a ranked excerpt; only a fetched body
                     # may become evidence, so it is carried as a snippet here.
                     snippet=str(item.get("content") or item.get("snippet") or ""),
+                    raw_content=str(item.get("raw_content") or ""),
                     rank=index,
                     provider="tavily",
                     published_at=item.get("published_date") or item.get("publishedDate"),

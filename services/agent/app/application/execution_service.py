@@ -64,7 +64,10 @@ class ExecutionService:
             conversation_context_loader=conversation_context_loader,
         )
         self.dispatcher = OutboxDispatcher(
-            store, publisher, batch_size=settings.outbox_batch_size
+            store,
+            publisher,
+            batch_size=settings.outbox_batch_size,
+            claim_lease_seconds=settings.outbox_claim_lease_seconds,
         )
 
     def run_task(self, task_id: str) -> str:

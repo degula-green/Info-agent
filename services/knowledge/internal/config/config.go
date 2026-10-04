@@ -39,24 +39,25 @@ type Config struct {
 	DevUserID            string
 	DevOrganizationID    string
 
-	FeishuClientID         string
-	FeishuClientSecret     string
-	FeishuRedirectURI      string
-	FeishuAuthURL          string
-	FeishuAPIURL           string
-	FeishuScopes           string
-	WorkerInterval         time.Duration
-	OAuthStateTTL          time.Duration
-	PairingTTL             time.Duration
-	DeviceTTL              time.Duration
-	AgentClockSkew         time.Duration
-	MaxAttachmentBytes     int64
-	FrontendURL            string
-	EncryptionKeyVersion   string
-	EncryptionKeys         string
-	WechatCollectorURL     string
-	CollectorInternalToken string
-	FixtureReplayEnabled   bool
+	FeishuClientID                string
+	FeishuClientSecret            string
+	FeishuRedirectURI             string
+	FeishuAuthURL                 string
+	FeishuAPIURL                  string
+	FeishuScopes                  string
+	WorkerInterval                time.Duration
+	ContactProfileRefreshInterval time.Duration
+	OAuthStateTTL                 time.Duration
+	PairingTTL                    time.Duration
+	DeviceTTL                     time.Duration
+	AgentClockSkew                time.Duration
+	MaxAttachmentBytes            int64
+	FrontendURL                   string
+	EncryptionKeyVersion          string
+	EncryptionKeys                string
+	WechatCollectorURL            string
+	CollectorInternalToken        string
+	FixtureReplayEnabled          bool
 }
 
 func Load() Config {
@@ -100,19 +101,20 @@ func Load() Config {
 		// offline_access is what makes Feishu return a refresh_token at all; the
 		// user access token itself only lives two hours, so without this scope
 		// every collection stops two hours after each reauthorization.
-		FeishuScopes:           env("KNOWLEDGE_FEISHU_SCOPES", "contact:user.id:readonly im:message im:message.p2p_msg:get_as_user im:chat drive:drive search:message offline_access"),
-		WorkerInterval:         envDuration("KNOWLEDGE_WORKER_INTERVAL", 30*time.Second),
-		OAuthStateTTL:          envDuration("KNOWLEDGE_OAUTH_STATE_TTL", 10*time.Minute),
-		PairingTTL:             envDuration("KNOWLEDGE_PAIRING_TTL", 10*time.Minute),
-		DeviceTTL:              envDuration("KNOWLEDGE_DEVICE_TTL", 365*24*time.Hour),
-		AgentClockSkew:         envDuration("KNOWLEDGE_AGENT_CLOCK_SKEW", 2*time.Minute),
-		MaxAttachmentBytes:     envInt64("KNOWLEDGE_MAX_ATTACHMENT_BYTES", 512*1024*1024),
-		FrontendURL:            env("KNOWLEDGE_FRONTEND_URL", ""),
-		EncryptionKeyVersion:   env("KNOWLEDGE_ENCRYPTION_KEY_VERSION", "v1"),
-		EncryptionKeys:         env("KNOWLEDGE_ENCRYPTION_KEYS", env("KNOWLEDGE_ENCRYPTION_KEY", "")),
-		WechatCollectorURL:     env("KNOWLEDGE_WECHAT_COLLECTOR_URL", "http://127.0.0.1:8091"),
-		CollectorInternalToken: env("KNOWLEDGE_COLLECTOR_INTERNAL_TOKEN", "local-development-only"),
-		FixtureReplayEnabled:   envBool("KNOWLEDGE_FIXTURE_REPLAY_ENABLED", false),
+		FeishuScopes:                  env("KNOWLEDGE_FEISHU_SCOPES", "contact:user.id:readonly im:message im:message.p2p_msg:get_as_user im:chat drive:drive search:message offline_access"),
+		WorkerInterval:                envDuration("KNOWLEDGE_WORKER_INTERVAL", 30*time.Second),
+		ContactProfileRefreshInterval: envDuration("KNOWLEDGE_CONTACT_PROFILE_REFRESH_INTERVAL", 72*time.Hour),
+		OAuthStateTTL:                 envDuration("KNOWLEDGE_OAUTH_STATE_TTL", 10*time.Minute),
+		PairingTTL:                    envDuration("KNOWLEDGE_PAIRING_TTL", 10*time.Minute),
+		DeviceTTL:                     envDuration("KNOWLEDGE_DEVICE_TTL", 365*24*time.Hour),
+		AgentClockSkew:                envDuration("KNOWLEDGE_AGENT_CLOCK_SKEW", 2*time.Minute),
+		MaxAttachmentBytes:            envInt64("KNOWLEDGE_MAX_ATTACHMENT_BYTES", 512*1024*1024),
+		FrontendURL:                   env("KNOWLEDGE_FRONTEND_URL", ""),
+		EncryptionKeyVersion:          env("KNOWLEDGE_ENCRYPTION_KEY_VERSION", "v1"),
+		EncryptionKeys:                env("KNOWLEDGE_ENCRYPTION_KEYS", env("KNOWLEDGE_ENCRYPTION_KEY", "")),
+		WechatCollectorURL:            env("KNOWLEDGE_WECHAT_COLLECTOR_URL", "http://127.0.0.1:8091"),
+		CollectorInternalToken:        env("KNOWLEDGE_COLLECTOR_INTERNAL_TOKEN", "local-development-only"),
+		FixtureReplayEnabled:          envBool("KNOWLEDGE_FIXTURE_REPLAY_ENABLED", false),
 	}
 }
 

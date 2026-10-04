@@ -7,6 +7,7 @@ Task from PostgreSQL, and resumes from the first unfinished step.
 
 from __future__ import annotations
 
+import argparse
 import logging
 import signal
 import time
@@ -31,7 +32,23 @@ def _handle_signal(signum, frame) -> None:  # noqa: ARG001 - signal handler sign
     _stop = True
 
 
-def main() -> None:
+def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Run one Agent task worker")
+    parser.add_argument(
+        "--consumer-name",
+        default="",
+        help="Redis consumer name; defaults to hostname-pid",
+    )
+    parser.add_argument(
+        "--skip-recovery",
+        action="store_true",
+        help="Do not re-queue unfinished tasks on startup; the supervisor owns it.",
+    )
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> None:
+    args = _parse_args(argv)
     logging.basicConfig(level=getattr(logging, settings.log_level.upper(), logging.INFO))
     container = build_container(settings)
     logger.info(
@@ -57,12 +74,16 @@ def main() -> None:
         container.execution_service.handle_wakeup,
         client=build_redis(settings),
         settings=settings,
+        consumer_name=args.consumer_name,
     )
 
     # Re-issue wake-up signals for tasks left unfinished by a previous run.
-    recovered = container.execution_service.resume_unfinished_tasks()
-    if recovered:
-        logger.info("re-queued %s unfinished tasks", recovered)
+    # With a supervisor, only the supervisor runs this once; otherwise every
+    # child would duplicate the whole recovery queue.
+    if not args.skip_recovery:
+        recovered = container.execution_service.resume_unfinished_tasks()
+        if recovered:
+            logger.info("re-queued %s unfinished tasks", recovered)
 
     while not _stop:
         try:

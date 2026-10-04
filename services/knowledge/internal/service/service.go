@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -43,7 +44,11 @@ type Service struct {
 	RAG     *ragclient.Client
 	Config  config.Config
 	Now     func() time.Time
+
+	profileLocks sync.Map
 }
+
+const defaultContactProfileRefreshInterval = 72 * time.Hour
 
 // WechatCollector returns the configured server-managed collector client.
 func (s *Service) WechatCollector() *wechatclient.Client {
@@ -2695,7 +2700,18 @@ func (s *Service) ProcessContactProfiles(ctx context.Context) error {
 		return err
 	}
 	var firstErr error
+	now := s.now()
 	for _, candidate := range candidates {
+		existing, profileErr := s.Repo.GetContactProfile(ctx, candidate.OwnerUserID, candidate.ContactKey)
+		if profileErr != nil {
+			if firstErr == nil {
+				firstErr = profileErr
+			}
+			continue
+		}
+		if !s.contactProfileDue(existing, now) {
+			continue
+		}
 		organizationID := ""
 		if s.Core != nil {
 			current, resolveErr := s.Core.CurrentOrganization(ctx, candidate.OwnerUserID)
@@ -2705,7 +2721,7 @@ func (s *Service) ProcessContactProfiles(ctx context.Context) error {
 				organizationID = current
 			}
 		}
-		if _, refreshErr := s.refreshContactProfile(ctx, candidate, organizationID); refreshErr != nil && firstErr == nil {
+		if _, refreshErr := s.refreshContactProfile(ctx, candidate, organizationID, false); refreshErr != nil && firstErr == nil {
 			firstErr = refreshErr
 		}
 	}
@@ -2749,15 +2765,27 @@ func (s *Service) RefreshContactProfile(ctx context.Context, userID, relationID,
 	}
 	return s.refreshContactProfile(ctx, repository.ContactProfileCandidate{
 		OwnerUserID: userID, ContactKey: contactKeyFromView(*matched), IdentityIDs: identityIDs,
-	}, organizationID)
+	}, organizationID, true)
 }
 
-func (s *Service) refreshContactProfile(ctx context.Context, candidate repository.ContactProfileCandidate, organizationID string) (*domain.ContactProfile, error) {
+func (s *Service) refreshContactProfile(ctx context.Context, candidate repository.ContactProfileCandidate, organizationID string, force bool) (*domain.ContactProfile, error) {
+	unlock := s.lockContactProfile(candidate.OwnerUserID, candidate.ContactKey)
+	defer unlock()
+
+	now := s.now()
+	existing, err := s.Repo.GetContactProfile(ctx, candidate.OwnerUserID, candidate.ContactKey)
+	if err != nil {
+		return nil, err
+	}
+	if !force && !s.contactProfileDue(existing, now) {
+		return existing, nil
+	}
+
 	messages, err := s.Repo.ListContactMessages(ctx, candidate.OwnerUserID, organizationID, candidate.IdentityIDs, 200)
 	if err != nil {
 		return nil, err
 	}
-	messages, err = s.visibleContactMessagesForProfile(ctx, candidate.OwnerUserID, organizationID, messages)
+	visibleMessages, err := s.visibleContactProfileMessages(ctx, candidate.OwnerUserID, organizationID, messages)
 	if err != nil {
 		return nil, err
 	}
@@ -2770,13 +2798,15 @@ func (s *Service) refreshContactProfile(ctx context.Context, candidate repositor
 		messagesWithFacts[fact.MessageID] = struct{}{}
 	}
 	type materialMessage struct {
-		id     string
-		hash   string
-		text   string
-		sentAt time.Time
+		id           string
+		hash         string
+		text         string
+		sentAt       time.Time
+		conversation *domain.ConversationIngestion
 	}
-	materials := make([]materialMessage, 0, len(messages))
-	for _, message := range messages {
+	materials := make([]materialMessage, 0, len(visibleMessages))
+	for _, visible := range visibleMessages {
+		message := visible.Message
 		if message.ContactFactsStatus != "succeeded" {
 			continue
 		}
@@ -2790,7 +2820,10 @@ func (s *Service) refreshContactProfile(ctx context.Context, candidate repositor
 		if text == "" {
 			continue
 		}
-		materials = append(materials, materialMessage{id: message.ID, hash: message.ContentHash, text: text, sentAt: message.SentAt})
+		materials = append(materials, materialMessage{
+			id: message.ID, hash: message.ContentHash, text: text, sentAt: message.SentAt,
+			conversation: visible.Conversation,
+		})
 	}
 	sort.Slice(materials, func(i, j int) bool {
 		if materials[i].sentAt.Equal(materials[j].sentAt) {
@@ -2802,22 +2835,11 @@ func (s *Service) refreshContactProfile(ctx context.Context, candidate repositor
 	lines := make([]string, 0, len(materials))
 	for _, material := range materials {
 		fingerprintParts = append(fingerprintParts, material.id+"\x00"+material.hash)
-		lines = append(lines, material.text)
+		lines = append(lines, contactProfileEvidenceLine(material.conversation, material.sentAt, material.text))
 	}
 	sort.Strings(fingerprintParts)
 	fingerprintSum := sha256.Sum256([]byte(strings.Join(fingerprintParts, "\n")))
 	fingerprint := hex.EncodeToString(fingerprintSum[:])
-	existing, err := s.Repo.GetContactProfile(ctx, candidate.OwnerUserID, candidate.ContactKey)
-	if err != nil {
-		return nil, err
-	}
-	if existing != nil && existing.Status == "ready" && existing.SourceFingerprint == fingerprint {
-		return existing, nil
-	}
-	now := time.Now().UTC()
-	if s.Now != nil {
-		now = s.Now().UTC()
-	}
 	profile := domain.ContactProfile{
 		OwnerUserID: candidate.OwnerUserID, ContactKey: candidate.ContactKey,
 		SourceFingerprint: fingerprint, UpdatedAt: now,
@@ -2828,7 +2850,7 @@ func (s *Service) refreshContactProfile(ctx context.Context, candidate repositor
 		profile.GeneratedAt = existing.GeneratedAt
 	}
 	if len(lines) == 0 {
-		profile.Summary, profile.Status, profile.LastError, profile.GeneratedAt = "暂无足够信息", "ready", "", &now
+		profile.Summary, profile.Status, profile.LastError, profile.GeneratedAt = "", "ready", "", &now
 		if err := s.Repo.UpsertContactProfile(ctx, profile); err != nil {
 			return nil, err
 		}
@@ -2854,6 +2876,49 @@ func (s *Service) refreshContactProfile(ctx context.Context, candidate repositor
 		return nil, err
 	}
 	return &profile, nil
+}
+
+func (s *Service) now() time.Time {
+	if s.Now != nil {
+		return s.Now().UTC()
+	}
+	return time.Now().UTC()
+}
+
+func (s *Service) contactProfileRefreshInterval() time.Duration {
+	if interval := s.Config.ContactProfileRefreshInterval; interval > 0 {
+		return interval
+	}
+	return defaultContactProfileRefreshInterval
+}
+
+func (s *Service) contactProfileDue(profile *domain.ContactProfile, now time.Time) bool {
+	if profile == nil || profile.Status != "ready" || profile.GeneratedAt == nil {
+		return true
+	}
+	return !now.Before(profile.GeneratedAt.Add(s.contactProfileRefreshInterval()))
+}
+
+func (s *Service) lockContactProfile(ownerUserID, contactKey string) func() {
+	value, _ := s.profileLocks.LoadOrStore(ownerUserID+"\x00"+contactKey, &sync.Mutex{})
+	mutex := value.(*sync.Mutex)
+	mutex.Lock()
+	return mutex.Unlock
+}
+
+func contactProfileEvidenceLine(conversation *domain.ConversationIngestion, sentAt time.Time, content string) string {
+	conversationType := "私聊"
+	conversationName := "未命名会话"
+	if conversation != nil {
+		if strings.EqualFold(strings.TrimSpace(conversation.ConversationType), "group") {
+			conversationType = "群聊"
+		}
+		if name := strings.TrimSpace(conversation.Name); name != "" {
+			conversationName = name
+		}
+	}
+	content = strings.Join(strings.Fields(content), " ")
+	return fmt.Sprintf("[%s | %s | %s] %s", sentAt.UTC().Format("2006-01-02 15:04"), conversationType, conversationName, content)
 }
 
 func isMediaMessageEnvelope(messageType, content string) bool {

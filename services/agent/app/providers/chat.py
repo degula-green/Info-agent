@@ -9,6 +9,7 @@ which is exactly why it must not pretend to be a sourced answer.
 from __future__ import annotations
 
 import json
+from contextvars import ContextVar
 from typing import Any, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
@@ -71,8 +72,18 @@ class LlmChatReplyProvider:
     def __init__(self, client) -> None:
         self.client = client
         self.model = str(getattr(client, "model", ""))
-        self.last_call_count = 0
+        self._call_count: ContextVar[int] = ContextVar(
+            f"agent_chat_calls_{id(self)}", default=0
+        )
         self._last_error = ""
+
+    @property
+    def last_call_count(self) -> int:
+        return max(int(self._call_count.get()), 0)
+
+    @last_call_count.setter
+    def last_call_count(self, value: int) -> None:
+        self._call_count.set(max(int(value), 0))
 
     def reply(
         self,

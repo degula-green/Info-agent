@@ -546,8 +546,26 @@ def build_container(
     understanding_provider=None,
 ) -> AgentContainer:
     resolved = settings or default_settings
-    resolved_store = store or build_store(resolved)
-    resolved_todo_store = todo_store or build_todo_store(resolved)
+    if store is None and todo_store is None and resolved.database_url:
+        # One worker process should own one database pool, not one per store.
+        # The stores have separate lifetimes, but they share the same process
+        # and therefore the same connection budget.
+        from app.infrastructure.postgres.connection import build_pool
+        from app.infrastructure.postgres.store import (
+            PostgresAgentStore,
+            PostgresTodoStore,
+        )
+
+        shared_pool = build_pool(resolved)
+        resolved_store = PostgresAgentStore(
+            shared_pool, schema=resolved.database_schema
+        )
+        resolved_todo_store = PostgresTodoStore(
+            shared_pool, schema=resolved.database_schema
+        )
+    else:
+        resolved_store = store or build_store(resolved)
+        resolved_todo_store = todo_store or build_todo_store(resolved)
     resolved_knowledge = knowledge or build_knowledge_client(resolved)
     resolved_rag_client = rag_client or build_rag_client(resolved)
     resolved_form_client: FormBrowserClient | None = None

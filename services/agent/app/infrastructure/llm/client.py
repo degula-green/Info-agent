@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+from contextvars import ContextVar
 from typing import Any, Mapping
 
 from app.infrastructure.http import HttpClient, IntegrationError, join_url
@@ -49,10 +50,22 @@ class OpenAIChatClient:
         self.response_format = response_format
         self.json_schema_fallback = json_schema_fallback
         self.http = http or HttpClient()
-        self.last_call_count = 0
+        # Concurrent read-only Steps may share this client. Each worker thread
+        # gets its own context, so call accounting belongs there.
+        self._call_count: ContextVar[int] = ContextVar(
+            f"agent_llm_calls_{id(self)}", default=0
+        )
         # Remembered after the first rejection so every later call goes
         # straight to the supported mode instead of paying for the failure.
         self._json_schema_disabled = False
+
+    @property
+    def last_call_count(self) -> int:
+        return max(int(self._call_count.get()), 0)
+
+    @last_call_count.setter
+    def last_call_count(self, value: int) -> None:
+        self._call_count.set(max(int(value), 0))
 
     def complete(self, messages: list[dict[str, str]]) -> str:
         return self._complete(messages, response_format=self._plain_response_format())

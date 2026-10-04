@@ -46,6 +46,7 @@ DEFAULT_CAPABILITY_NAME = "todo.create"
 # A question about an attached document is answered from the parsed body the
 # Runtime already injected; it never reaches a retriever.
 KNOWLEDGE_ANSWER_INTENT = "knowledge.answer"
+COMPLIANCE_ASSESS_INTENT = "compliance.assess"
 ANSWER_CAPABILITY_NAME = "answer.compose"
 # Non-task messages are answered, not ignored. The capability is optional: when
 # it is not registered the old behaviour (no step, no action) stands.
@@ -157,7 +158,10 @@ class DeterministicPlanner:
                 if item.confidence >= self.min_confidence
             ]
             best = accepted[0].name if accepted else None
-            if understanding.is_task and best == KNOWLEDGE_ANSWER_INTENT:
+            if understanding.is_task and best in {
+                KNOWLEDGE_ANSWER_INTENT,
+                COMPLIANCE_ASSESS_INTENT,
+            }:
                 answer_plan = self._answer_from_attachment(
                     task, registered, plan_id, instruction_text
                 )

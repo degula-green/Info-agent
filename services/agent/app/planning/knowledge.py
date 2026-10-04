@@ -237,6 +237,7 @@ def classify_knowledge_question(
     clock: Callable[[], datetime] | None = None,
 ) -> KnowledgeRoute | None:
     question = " ".join(str(text or "").split()).strip()
+    query = question[:500]
     normalized = question.lower().strip(" \t\r\n，。,.!！?？、:：;；")
     if not normalized or normalized in _CHITCHAT:
         return None
@@ -289,7 +290,7 @@ def classify_knowledge_question(
         "attachment_types": attachment_types,
         "resource_types": resource_types,
     }
-    content_arguments: dict[str, Any] = {"query": question}
+    content_arguments: dict[str, Any] = {"query": query}
 
     mode: KnowledgeMode
     if has_internal_status:
@@ -326,7 +327,7 @@ def classify_knowledge_question(
     }[mode]
     return KnowledgeRoute(
         mode=mode,
-        query=question,
+        query=query,
         source_query=source_query,
         source_arguments={key: value for key, value in source_arguments.items() if value not in (None, "", [], False)},
         content_arguments=content_arguments,
@@ -516,7 +517,7 @@ class KnowledgeRoutingPlanner:
             self._last_call_count = 0
             return memory_plan
         route = classify_knowledge_question(
-            str(task.input.get("text") or ""),
+            _task_instruction_text(task),
             timezone_name=self.default_timezone,
             clock=self.clock,
         )
@@ -624,7 +625,7 @@ def augment_personal_knowledge_sources(
     retrieval step. It is not tied to any domain intent.
     """
 
-    text = str(task.input.get("text") or "").strip()
+    text = _task_instruction_text(task)
     normalized = text.lower()
     if not _contains_any(normalized, _PERSONAL_CONTEXT_MARKERS):
         return plan
@@ -700,6 +701,15 @@ def _personal_context_query(text: str) -> str:
     if _contains_any(query.lower(), ("公司", "企业", "估值", "融资", "上市")):
         return f"{query} 公司简介 成立时间 估值 融资 上市状态"[:500]
     return f"{query} 个人知识库 相关事实 数据"[:500]
+
+
+def _task_instruction_text(task: TaskEnvelope) -> str:
+    """The user's own sentence, never the merged attachment body."""
+
+    original = str(task.input.get("_original_text") or "").strip()
+    if original:
+        return original
+    return str(task.input.get("text") or "").strip()
 
 
 def _shift_reference_steps(value: Any) -> Any:
