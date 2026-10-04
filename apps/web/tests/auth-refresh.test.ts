@@ -59,3 +59,21 @@ test('shared local access token wins over stale tab session token', async () => 
   assert.equal(calls, 1)
   assert.equal(result.access_token, 'access-2')
 })
+
+test('refresh request times out instead of hanging indefinitely', async () => {
+  Object.defineProperty(globalThis, 'sessionStorage', { configurable: true, value: { getItem: () => null, setItem: () => {}, removeItem: () => {} } })
+  Object.defineProperty(globalThis, 'localStorage', { configurable: true, value: { getItem: () => null, setItem: () => {}, removeItem: () => {} } })
+  Object.defineProperty(globalThis, 'window', { configurable: true, value: undefined })
+  Object.defineProperty(globalThis, 'navigator', { configurable: true, value: undefined })
+  globalThis.fetch = async (_input, init = {}) => new Promise<Response>((_resolve, reject) => {
+    init.signal?.addEventListener('abort', () => {
+      const error = new Error('aborted')
+      error.name = 'AbortError'
+      reject(error)
+    }, { once: true })
+  })
+  await assert.rejects(
+    refresh(),
+    (error: any) => error?.code === 'request_timeout',
+  )
+})

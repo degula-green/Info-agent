@@ -25,7 +25,9 @@ const refreshChannelName = 'info-agent:core-auth-refresh'
 const refreshLockKey = 'info-agent:core-auth-refresh-lock'
 const refreshResultKey = 'info-agent:core-auth-refresh-result'
 const refreshLockTTL = 10_000
-const refreshWaitTTL = 12_000
+const refreshWaitTTL = 4_000
+const routineRequestTimeoutMs = 10_000
+const refreshRequestTimeoutMs = 4_000
 let refreshChannel: BroadcastChannel | null = null
 let refreshTabID = ''
 
@@ -85,6 +87,19 @@ function parseFreshRefreshResult(raw: string): RefreshEnvelope | null {
 }
 
 function requestID() { return globalThis.crypto?.randomUUID?.() || `web-${Date.now()}-${Math.random().toString(16).slice(2)}` }
+function boundedSignal(signal: AbortSignal | null | undefined, timeoutMs: number) {
+  const controller = new AbortController()
+  const abort = () => controller.abort()
+  signal?.addEventListener('abort', abort, { once: true })
+  const timer = setTimeout(abort, timeoutMs)
+  return {
+    signal: controller.signal,
+    cleanup: () => {
+      clearTimeout(timer)
+      signal?.removeEventListener('abort', abort)
+    },
+  }
+}
 export function getAccessToken() {
   let local = ''
   let session = ''
@@ -101,7 +116,7 @@ export function saveAccessToken(token: string, expiresAt?: string) {
   }
 }
 export function clearAccessToken() { try { sessionStorage.removeItem('access_token') } catch { /* unavailable */ } try { localStorage.removeItem('access_token') } catch { /* unavailable */ } }
-async function request<T>(path: string, init: RequestInit = {}, retried = false): Promise<T> {
+async function request<T>(path: string, init: RequestInit = {}, retried = false, timeoutMs = routineRequestTimeoutMs): Promise<T> {
   const headers = new Headers(init.headers); headers.set('Accept', 'application/json'); headers.set('Content-Type', 'application/json'); headers.set('X-Request-ID', requestID()); headers.set('X-Trace-ID', requestID())
   // Core's authenticated endpoints use the access token persisted after login.
   // Keep this in the shared request path so /auth/me and all subsequent Core
@@ -112,7 +127,18 @@ async function request<T>(path: string, init: RequestInit = {}, retried = false)
   } catch {
     // Storage may be unavailable in non-browser/test environments.
   }
-  const response = await fetch(`${baseURL}${path}`, { ...init, credentials: 'include', headers })
+  const bounded = boundedSignal(init.signal, timeoutMs)
+  let response: Response
+  try {
+    response = await fetch(`${baseURL}${path}`, { ...init, credentials: 'include', headers, signal: bounded.signal })
+  } catch (error) {
+    if (error instanceof Error && error.name === 'AbortError') {
+      throw new CoreAuthError('authentication request timed out', 'request_timeout', 504, true)
+    }
+    throw error
+  } finally {
+    bounded.cleanup()
+  }
   const raw = await response.text(); let body: any = null; if (raw) { try { body = JSON.parse(raw) } catch { body = raw } }
   if (response.status === 401 && !retried && path !== '/auth/refresh' && path !== '/auth/login' && path !== '/auth/register') { try { const token = await refresh(); if (token?.access_token) return request<T>(path, init, true) } catch { /* fall through with the original auth error */ } }
   if (!response.ok) {
@@ -135,7 +161,7 @@ async function waitForPeerRefresh(owner: string): Promise<CoreTokenResponse> {
 }
 async function performOwnedRefresh(owner: string): Promise<CoreTokenResponse> {
   try {
-    const result = await request<CoreTokenResponse>('/auth/refresh', { method: 'POST' })
+    const result = await request<CoreTokenResponse>('/auth/refresh', { method: 'POST' }, false, refreshRequestTimeoutMs)
     saveAccessToken(result.access_token, result.expires_at)
     publishRefresh({ type: 'success', owner, result })
     return result
@@ -150,7 +176,7 @@ async function refreshWithCrossTabCoordination(): Promise<CoreTokenResponse> {
   // SSR, tests, and embedded non-browser consumers have no shared storage;
   // the process-local promise still protects those callers.
   if (typeof window === 'undefined' || typeof localStorage === 'undefined' || typeof navigator === 'undefined') {
-    const result = await request<CoreTokenResponse>('/auth/refresh', { method: 'POST' })
+    const result = await request<CoreTokenResponse>('/auth/refresh', { method: 'POST' }, false, refreshRequestTimeoutMs)
     saveAccessToken(result.access_token, result.expires_at)
     return result
   }
@@ -189,7 +215,7 @@ async function refreshWithCrossTabCoordination(): Promise<CoreTokenResponse> {
               if (result) { saveAccessToken(result.access_token, result.expires_at); return result }
             }
           }
-          const result = await request<CoreTokenResponse>('/auth/refresh', { method: 'POST' })
+          const result = await request<CoreTokenResponse>('/auth/refresh', { method: 'POST' }, false, refreshRequestTimeoutMs)
           saveAccessToken(result.access_token, result.expires_at)
           publishRefresh({ type: 'success', owner, result })
           return result
