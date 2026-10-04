@@ -47,6 +47,35 @@
       </div>
     </section>
 
+    <section v-if="canReviewAccess" class="access-review-section" aria-labelledby="access-review-title">
+      <div class="members-toolbar">
+        <div>
+          <h2 id="access-review-title">原文访问申请</h2>
+          <p>审批通过后立即同步原文查看或下载权限</p>
+        </div>
+      </div>
+      <div v-if="accessLoading" class="member-loading"><t-loading size="small" text="正在加载访问申请..." /></div>
+      <div v-else-if="accessRequests.length" class="access-review-list">
+        <article v-for="request in accessRequests" :key="request.id" class="access-review-row">
+          <div>
+            <strong>{{ request.requester_user_id }}</strong>
+            <span>{{ request.resource_type === 'knowledge_original' ? '消息原文' : '附件内容' }} · {{ request.action === 'download' ? '下载' : '查看' }}</span>
+            <small v-if="request.reason">{{ request.reason }}</small>
+          </div>
+          <time>{{ formatRequestTime(request.created_at) }}</time>
+          <div class="access-review-actions">
+            <t-button size="small" variant="outline" :loading="reviewingID === request.id" @click="reviewAccess(request, false)">拒绝</t-button>
+            <t-button size="small" theme="primary" :loading="reviewingID === request.id" @click="reviewAccess(request, true)">批准</t-button>
+          </div>
+        </article>
+      </div>
+      <div v-else class="member-empty">
+        <t-icon name="check-circle" />
+        <strong>暂无待审批申请</strong>
+        <span>新的原文查看或下载申请会出现在这里</span>
+      </div>
+    </section>
+
     <section class="members-section" aria-labelledby="members-title">
       <div class="members-toolbar">
         <div>
@@ -139,7 +168,7 @@ import { computed, onMounted, ref } from 'vue'
 import { MessagePlugin } from 'tdesign-vue-next'
 import { useRouter } from 'vue-router'
 import { CoreAuthError, getCurrentUser } from '@/api/core-auth'
-import { createOrganizationInvitation, getCurrentOrganization, grantOrganizationRole, listOrganizationMembers, revokeOrganizationInvitation, revokeOrganizationRole, type CoreOrganizationMember, type CoreOrganizationResponse } from '@/api/core-organization'
+import { approveAccessRequest, createOrganizationInvitation, getCurrentOrganization, grantOrganizationRole, listAccessRequests, listOrganizationMembers, rejectAccessRequest, revokeOrganizationInvitation, revokeOrganizationRole, type CoreAccessRequest, type CoreOrganizationMember, type CoreOrganizationResponse } from '@/api/core-organization'
 
 type ManagementRole = 'owner' | 'information_admin' | 'membership_approver'
 type DisplayRole = ManagementRole | 'member'
@@ -167,12 +196,16 @@ const invitationDialogVisible = ref(false)
 const revokeDialogVisible = ref(false)
 const invitation = ref<Invitation | null>(null)
 const invitationDraft = ref<Invitation | null>(null)
+const accessRequests = ref<CoreAccessRequest[]>([])
+const accessLoading = ref(false)
+const reviewingID = ref('')
 
 const selectedMember = computed(() => members.value.find((item) => item.id === selectedMemberID.value) || null)
 const managementMemberCount = computed(() => members.value.filter((item) => item.roles.length > 0).length)
 const currentRoles = computed(() => organization.value?.membership.roles.map((role) => role.role_code || role.RoleCode || '').filter(Boolean) || [])
 const canManageRoles = computed(() => currentRoles.value.includes('owner'))
 const canInvite = computed(() => currentRoles.value.includes('owner') || currentRoles.value.includes('membership_approver'))
+const canReviewAccess = computed(() => currentRoles.value.includes('owner') || currentRoles.value.includes('information_admin'))
 const currentIdentity = computed(() => currentRoles.value.includes('owner') ? '管理员' : currentRoles.value.includes('information_admin') ? '信息管理员' : currentRoles.value.includes('membership_approver') ? '成员审批员' : '成员')
 const organizationStatusLabel = computed(() => organization.value?.organization.status === 'active' ? '正常' : organization.value?.organization.status || '')
 const filteredMembers = computed(() => {
@@ -187,6 +220,7 @@ const filteredMembers = computed(() => {
 function visibleRoles(member: Member): DisplayRole[] { return member.roles.length ? member.roles.map((role) => role as ManagementRole) : ['member'] }
 function formatDate(value: string) { return new Intl.DateTimeFormat('zh-CN', { year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(value)) }
 function formatDateTime(value: Date) { return new Intl.DateTimeFormat('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false }).format(value) }
+function formatRequestTime(value: string) { return new Intl.DateTimeFormat('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false }).format(new Date(value)) }
 function openRoleDrawer(member: Member) { selectedMemberID.value = member.id; roleDrawerVisible.value = true }
 function roleDisabled(role: ManagementRole) { return role === 'owner' && Boolean(selectedMember.value?.roles.includes('owner')) && members.value.filter((item) => item.roles.includes('owner')).length === 1 }
 async function setRole(role: ManagementRole, enabled: boolean) {
@@ -235,11 +269,40 @@ async function loadMembers() {
   const result = await listOrganizationMembers(organization.value.organization.id)
   members.value = result.members.map((member) => ({ ...member, id: member.user_id, color: memberColor(member.user_id), current: member.user_id === currentUserID.value }))
 }
+async function loadAccessRequests() {
+  if (!organization.value || !canReviewAccess.value) {
+    accessRequests.value = []
+    return
+  }
+  accessLoading.value = true
+  try {
+    const result = await listAccessRequests('review', organization.value.organization.id)
+    accessRequests.value = result.items || []
+  } catch (cause) {
+    MessagePlugin.error(errorMessage(cause, '访问申请加载失败'))
+  } finally {
+    accessLoading.value = false
+  }
+}
+async function reviewAccess(request: CoreAccessRequest, approve: boolean) {
+  if (reviewingID.value) return
+  reviewingID.value = request.id
+  try {
+    if (approve) await approveAccessRequest(request.id)
+    else await rejectAccessRequest(request.id)
+    MessagePlugin.success(approve ? '原文权限已批准' : '访问申请已拒绝')
+    await loadAccessRequests()
+  } catch (cause) {
+    MessagePlugin.error(errorMessage(cause, '访问申请审批失败'))
+  } finally {
+    reviewingID.value = ''
+  }
+}
 async function loadOrganization() {
   pageLoading.value = true
   try {
     const [current, user] = await Promise.all([getCurrentOrganization(), getCurrentUser()])
-    organization.value = current; currentUserID.value = user.id; await loadMembers()
+    organization.value = current; currentUserID.value = user.id; await loadMembers(); await loadAccessRequests()
   } catch (cause) {
     if (cause instanceof CoreAuthError && cause.code === 'ORG_MEMBERSHIP_REQUIRED') MessagePlugin.info('你尚未加入组织')
     else MessagePlugin.error(errorMessage(cause, '组织信息加载失败'))
@@ -274,6 +337,15 @@ onMounted(() => { void loadOrganization() })
 .invitation-strip__body strong { font-size: 13px; }.invitation-strip__body small { color: var(--td-text-color-secondary); font-size: 11px; }
 .invitation-strip__actions { display: flex; align-items: center; gap: 5px; }
 .members-section { margin-top: 28px; }
+.access-review-section { margin-top: 28px; }
+.access-review-list { display: grid; overflow: hidden; border: 1px solid var(--td-component-stroke); border-radius: 8px; background: var(--td-bg-color-container); }
+.access-review-row { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: 18px; padding: 14px 16px; border-bottom: 1px solid var(--td-component-stroke); }
+.access-review-row:last-child { border-bottom: 0; }
+.access-review-row > div:first-child { display: grid; min-width: 0; gap: 3px; }
+.access-review-row strong, .access-review-row span, .access-review-row small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.access-review-row strong { font-size: 13px; }
+.access-review-row span, .access-review-row small, .access-review-row time { color: var(--td-text-color-secondary); font-size: 12px; }
+.access-review-actions { display: flex; gap: 8px; }
 .members-toolbar { display: flex; align-items: flex-end; justify-content: space-between; gap: 24px; margin-bottom: 14px; }
 .members-toolbar h2 { margin: 0; font-size: 19px; font-weight: 650; }.members-toolbar p { margin: 5px 0 0; color: var(--td-text-color-secondary); font-size: 12px; }
 .members-filters { display: flex; align-items: center; gap: 9px; }.members-filters .t-input { width: 240px; }
@@ -296,5 +368,5 @@ onMounted(() => { void loadOrganization() })
 .base-role, .role-option { display: flex; align-items: center; justify-content: space-between; gap: 18px; padding: 16px 2px; border-bottom: 1px solid var(--td-component-stroke); }.base-role > span, .role-option > span { display: grid; gap: 4px; }.base-role strong, .role-option strong { font-size: 13px; }.base-role small, .role-option small { color: var(--td-text-color-secondary); font-size: 11px; line-height: 1.5; }.role-option { cursor: pointer; }.role-option--disabled { cursor: not-allowed; }.role-option em { color: var(--td-warning-color); font-size: 10px; font-style: normal; }
 .drawer-note { display: flex; align-items: flex-start; gap: 7px; margin: 18px 0 0; padding: 11px; border-radius: 6px; color: var(--td-text-color-secondary); background: var(--td-bg-color-secondarycontainer); font-size: 11px; line-height: 1.55; }.drawer-note svg { flex: 0 0 15px; width: 15px; margin-top: 1px; color: var(--td-brand-color); }
 @media (max-width: 900px) { .organization-overview { align-items: flex-start; flex-direction: column; }.organization-facts { width: 100%; }.organization-facts div:first-child { border-left: 0; padding-left: 0; }.members-toolbar { align-items: stretch; flex-direction: column; }.members-filters .t-input { flex: 1; width: auto; }.member-row { grid-template-columns: minmax(190px, 1.3fr) minmax(185px, 1fr) 100px 36px; }.member-row > :nth-child(4) { display: none; } }
-@media (max-width: 700px) { .organization-page { padding: 24px 16px 44px; }.organization-heading { align-items: stretch; flex-direction: column; }.organization-heading .t-button { align-self: flex-start; }.organization-overview { padding: 18px; }.organization-facts div { padding: 0 12px; }.organization-facts dd { font-size: 14px; }.invitation-strip { align-items: flex-start; flex-wrap: wrap; }.invitation-strip__actions { width: 100%; padding-left: 44px; }.members-filters { align-items: stretch; flex-direction: column; }.role-filter { width: 100%; }.member-table { border-radius: 7px; }.member-row--header { display: none; }.member-row { grid-template-columns: 1fr auto; gap: 11px 14px; padding: 15px; }.member-person { grid-column: 1; }.member-more { grid-column: 2; grid-row: 1; }.member-roles { grid-column: 1 / -1; }.member-meta { grid-column: 1 / -1; margin: 0; }.member-meta::before { content: attr(data-label) '：'; color: var(--td-text-color-placeholder); }.member-row > :nth-child(4) { display: block; }.dialog-actions { flex-direction: row; }.dialog-actions .t-button { flex: 1; } }
+@media (max-width: 700px) { .organization-page { padding: 24px 16px 44px; }.organization-heading { align-items: stretch; flex-direction: column; }.organization-heading .t-button { align-self: flex-start; }.organization-overview { padding: 18px; }.organization-facts div { padding: 0 12px; }.organization-facts dd { font-size: 14px; }.invitation-strip { align-items: flex-start; flex-wrap: wrap; }.invitation-strip__actions { width: 100%; padding-left: 44px; }.members-filters { align-items: stretch; flex-direction: column; }.role-filter { width: 100%; }.member-table { border-radius: 7px; }.member-row--header { display: none; }.member-row { grid-template-columns: 1fr auto; gap: 11px 14px; padding: 15px; }.member-person { grid-column: 1; }.member-more { grid-column: 2; grid-row: 1; }.member-roles { grid-column: 1 / -1; }.member-meta { grid-column: 1 / -1; margin: 0; }.member-meta::before { content: attr(data-label) '：'; color: var(--td-text-color-placeholder); }.member-row > :nth-child(4) { display: block; }.access-review-row { grid-template-columns: 1fr; align-items: start; }.access-review-actions { justify-content: flex-end; }.dialog-actions { flex-direction: row; }.dialog-actions .t-button { flex: 1; } }
 </style>
