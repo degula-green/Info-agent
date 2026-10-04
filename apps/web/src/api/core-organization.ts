@@ -16,6 +16,20 @@ export interface CoreOrganizationMember {
 }
 export interface CoreOrganizationMembersResponse { members: CoreOrganizationMember[] }
 export interface CoreInvitationResponse { invitation_id: string; organization_id: string; token: string; expires_at: string }
+export interface CoreOrganizationCapabilities {
+  can_invite: boolean
+  can_manage_roles: boolean
+  can_manage_members: boolean
+  can_transfer_owner: boolean
+  can_read_audit: boolean
+  can_leave: boolean
+  leave_blocked_reason?: string
+}
+export interface CoreOrganizationExitPreflight {
+  allowed: boolean
+  blockers: string[]
+  warnings: string[]
+}
 export interface CoreAccessRequest {
   id: string
   organization_id: string
@@ -64,6 +78,8 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
 }
 
 export const getCurrentOrganization = () => request<CoreOrganizationResponse>('/organizations/current')
+export const getOrganizationCapabilities = (organizationID: string) => request<CoreOrganizationCapabilities>(`/organizations/${encodeURIComponent(organizationID)}/capabilities`)
+export const getOrganizationExitPreflight = (organizationID: string) => request<CoreOrganizationExitPreflight>(`/organizations/${encodeURIComponent(organizationID)}/membership/exit-preflight`)
 export const listOrganizationMembers = (organizationID: string) => request<CoreOrganizationMembersResponse>(`/organizations/${encodeURIComponent(organizationID)}/members`)
 export const createOrganizationInvitation = (organizationID: string) => request<CoreInvitationResponse>(`/organizations/${encodeURIComponent(organizationID)}/invitations`, { method: 'POST', body: '{}' })
 export const revokeOrganizationInvitation = (organizationID: string, invitationID: string) => request<void>(`/organizations/${encodeURIComponent(organizationID)}/invitations/${encodeURIComponent(invitationID)}/revoke`, { method: 'POST' })
@@ -71,6 +87,11 @@ export const grantOrganizationRole = (organizationID: string, userID: string, ro
 export const revokeOrganizationRole = (organizationID: string, userID: string, roleCode: string) => request<void>(`/organizations/${encodeURIComponent(organizationID)}/members/${encodeURIComponent(userID)}/roles/${encodeURIComponent(roleCode)}`, { method: 'DELETE' })
 export const createOrganization = (name: string) => request<CoreOrganizationResponse>('/organizations', { method: 'POST', body: JSON.stringify({ name }) })
 export const acceptOrganizationInvitation = (token: string) => request<CoreOrganizationResponse>(`/organization-invitations/${encodeURIComponent(token)}/accept`, { method: 'POST', body: '{}' })
+export const leaveOrganization = (organizationID: string, reason = '') => request<void>(`/organizations/${encodeURIComponent(organizationID)}/leave`, { method: 'POST', body: JSON.stringify({ reason }) })
+export const suspendOrganizationMember = (organizationID: string, userID: string, reason = '') => request<void>(`/organizations/${encodeURIComponent(organizationID)}/members/${encodeURIComponent(userID)}/suspend`, { method: 'POST', body: JSON.stringify({ reason }) })
+export const reactivateOrganizationMember = (organizationID: string, userID: string) => request<void>(`/organizations/${encodeURIComponent(organizationID)}/members/${encodeURIComponent(userID)}/reactivate`, { method: 'POST', body: '{}' })
+export const removeOrganizationMember = (organizationID: string, userID: string, reason = '') => request<void>(`/organizations/${encodeURIComponent(organizationID)}/members/${encodeURIComponent(userID)}`, { method: 'DELETE', body: JSON.stringify({ reason }) })
+export const transferOrganizationOwner = (organizationID: string, targetUserID: string) => request<void>(`/organizations/${encodeURIComponent(organizationID)}/transfer-owner`, { method: 'POST', body: JSON.stringify({ target_user_id: targetUserID }) })
 
 export const createAccessRequest = (input: {
   organizationID: string
