@@ -2765,6 +2765,45 @@ func (s *PostgresStore) ListKnowledgePermissionSubjects(ctx context.Context, id 
 	return out, dbError(rows.Err())
 }
 
+func (s *PostgresStore) CanUserReviewAccess(ctx context.Context, userID, resourceType, resourceID string) (bool, error) {
+	userID, resourceType, resourceID = strings.TrimSpace(userID), strings.TrimSpace(resourceType), strings.TrimSpace(resourceID)
+	if userID == "" || resourceID == "" {
+		return false, nil
+	}
+	var query string
+	switch resourceType {
+	case "knowledge_original":
+		query = `SELECT EXISTS (
+			SELECT 1 FROM knowledge.knowledge_items ki
+			JOIN knowledge.conversation_ingestions ci ON ci.id=ki.conversation_ingestion_id
+			WHERE ki.id=$1::uuid AND (
+				ci.owner_user_id=$2::uuid OR ci.created_by_user_id=$2::uuid OR EXISTS (
+					SELECT 1 FROM knowledge.conversation_collectors cc
+					WHERE cc.conversation_ingestion_id=ci.id AND cc.collector_user_id=$2::uuid AND cc.status='active'
+				)
+			)
+		)`
+	case "attachment_content":
+		query = `SELECT EXISTS (
+			SELECT 1 FROM knowledge.knowledge_items ki
+			JOIN knowledge.conversation_ingestions ci ON ci.id=ki.conversation_ingestion_id
+			WHERE ki.source_attachment_id=$1::uuid AND (
+				ci.owner_user_id=$2::uuid OR ci.created_by_user_id=$2::uuid OR EXISTS (
+					SELECT 1 FROM knowledge.conversation_collectors cc
+					WHERE cc.conversation_ingestion_id=ci.id AND cc.collector_user_id=$2::uuid AND cc.status='active'
+				)
+			)
+		)`
+	default:
+		return false, nil
+	}
+	var allowed bool
+	if err := s.pool.QueryRow(ctx, query, resourceID, userID).Scan(&allowed); err != nil {
+		return false, dbError(err)
+	}
+	return allowed, nil
+}
+
 func (s *PostgresStore) MarkKnowledgePermissionSynced(ctx context.Context, id string, aclVersion int64) error {
 	if aclVersion < 1 {
 		return apperror.New("invalid_acl_version", "acl_version must be positive", 400, false)

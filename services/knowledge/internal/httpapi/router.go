@@ -1174,6 +1174,18 @@ func registerInternalRoutes(r *gin.Engine, app *App, prefix string) {
 		c.JSON(http.StatusOK, out)
 	})
 	g.Use(internalMiddleware(app))
+	g.GET("/knowledge/access-review-eligibility", func(c *gin.Context) {
+		if !serviceAuthorized(c) || !strings.EqualFold(strings.TrimSpace(c.GetHeader("X-Caller-Service")), "core") {
+			writeError(c, apperror.Clone(apperror.ErrForbidden))
+			return
+		}
+		allowed, err := app.Service.CanReviewAccessRequest(c, c.Query("user_id"), c.Query("resource_type"), c.Query("resource_id"))
+		if err != nil {
+			writeError(c, err)
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"allowed": allowed})
+	})
 	g.GET("/knowledge/:knowledge_item_id", func(c *gin.Context) {
 		if !ragAuthorized(c) {
 			writeError(c, apperror.Clone(apperror.ErrForbidden))

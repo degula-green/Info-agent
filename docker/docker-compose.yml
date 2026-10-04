@@ -21,6 +21,7 @@ services:
       CORE_OPENFGA_MODEL_ID: ${CORE_OPENFGA_MODEL_ID:-}
       CORE_RAG_AUTHZ_TOKEN: ${CORE_RAG_AUTHZ_TOKEN:-local-development-only}
       CORE_KNOWLEDGE_AUTHZ_TOKEN: ${KNOWLEDGE_CORE_SERVICE_TOKEN:-local-development-only}
+      CORE_KNOWLEDGE_URL: ${CORE_KNOWLEDGE_URL:-http://knowledge-service:8090}
     depends_on:
       - postgres
       - redis

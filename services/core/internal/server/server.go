@@ -15,6 +15,7 @@ import (
 	"info-agent/core/internal/application"
 	"info-agent/core/internal/config"
 	"info-agent/core/internal/httpapi"
+	"info-agent/core/internal/infrastructure/knowledgeclient"
 	"info-agent/core/internal/infrastructure/objectstore"
 	"info-agent/core/internal/infrastructure/openfga"
 	"info-agent/core/internal/infrastructure/postgres"
@@ -126,8 +127,15 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Server, 
 	}
 	authorizationClient := openfga.NewClient(cfg)
 	permissionSync := application.NewPermissionSyncService(authorizationClient, postgres.NewAuthorizationVersionRepository(pool))
+	accessRequestService := application.NewAccessRequestService(
+		postgres.NewAccessRequestRepository(pool),
+		authorizationClient,
+		organizationService,
+		knowledgeclient.New(cfg.KnowledgeURL, cfg.KnowledgeAuthorizationToken),
+		clock.Now,
+	)
 	return &Server{
-		Engine: httpapi.NewRouterWithRegistration(authService, cookies, logger, registrationService, organizationService, &httpapi.AuthorizationConfig{Provider: authorizationClient, Token: cfg.RAGAuthorizationToken, KnowledgeToken: cfg.KnowledgeAuthorizationToken, PermissionSync: permissionSync}),
+		Engine: httpapi.NewRouterWithRegistration(authService, cookies, logger, registrationService, organizationService, &httpapi.AuthorizationConfig{Provider: authorizationClient, Token: cfg.RAGAuthorizationToken, KnowledgeToken: cfg.KnowledgeAuthorizationToken, PermissionSync: permissionSync}, accessRequestService),
 		pool:   pool,
 		redis:  redisClient,
 	}, nil

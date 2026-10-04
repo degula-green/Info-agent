@@ -655,6 +655,7 @@ type Repository interface {
 	MarkKnowledgePermissionSynced(ctx context.Context, knowledgeItemID string, aclVersion int64) error
 	MarkKnowledgePermissionFailed(ctx context.Context, knowledgeItemID, failure string) error
 	TryMarkKnowledgeReady(ctx context.Context, knowledgeItemID, traceID string) (bool, error)
+	CanUserReviewAccess(ctx context.Context, userID, resourceType, resourceID string) (bool, error)
 	GetKnowledgeItem(ctx context.Context, knowledgeItemID string) (*domain.KnowledgeItem, error)
 	GetKnowledgeItemByMessage(ctx context.Context, messageID string) (*domain.KnowledgeItem, error)
 	GetKnowledgeItemByAttachment(ctx context.Context, attachmentID string) (*domain.KnowledgeItem, error)

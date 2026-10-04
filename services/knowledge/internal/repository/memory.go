@@ -2380,6 +2380,44 @@ func (s *MemoryStore) ListKnowledgePermissionSubjects(_ context.Context, id stri
 	return out, nil
 }
 
+func (s *MemoryStore) CanUserReviewAccess(_ context.Context, userID, resourceType, resourceID string) (bool, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var item domain.KnowledgeItem
+	found := false
+	for _, candidate := range s.knowledgeItems {
+		switch resourceType {
+		case "knowledge_original":
+			if candidate.ID == resourceID && candidate.SourceAttachmentID == "" {
+				item, found = candidate, true
+			}
+		case "attachment_content":
+			if candidate.SourceAttachmentID == resourceID {
+				item, found = candidate, true
+			}
+		}
+		if found {
+			break
+		}
+	}
+	if !found {
+		return false, nil
+	}
+	conversation, ok := s.conversations[item.ConversationID]
+	if !ok {
+		return false, nil
+	}
+	if conversation.OwnerUserID == userID || conversation.CreatedByUserID == userID {
+		return true, nil
+	}
+	for _, collector := range s.collectors {
+		if collector.ConversationID == conversation.ID && collector.CollectorUserID == userID && collector.Status == "active" {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 func (s *MemoryStore) MarkKnowledgePermissionSynced(_ context.Context, id string, aclVersion int64) error {
 	if aclVersion < 1 {
 		return apperror.New("invalid_acl_version", "acl_version must be positive", 400, false)

@@ -3059,6 +3059,10 @@ func (s *Service) GetKnowledgeOriginal(ctx context.Context, userID, knowledgeIte
 	return content, nil
 }
 
+func (s *Service) CanReviewAccessRequest(ctx context.Context, userID, resourceType, resourceID string) (bool, error) {
+	return s.Repo.CanUserReviewAccess(ctx, strings.TrimSpace(userID), strings.TrimSpace(resourceType), strings.TrimSpace(resourceID))
+}
+
 // ApplyRAGResult is an additive callback contract for service three. Version
 // and terminal-state protection is implemented by the repository transaction.
 func (s *Service) ApplyRAGResult(ctx context.Context, id string, input repository.RAGResultInput) (*repository.RAGResultApply, error) {
