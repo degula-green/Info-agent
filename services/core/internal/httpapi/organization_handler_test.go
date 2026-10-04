@@ -45,6 +45,24 @@ func (s *organizationCheckStub) GrantRole(context.Context, string, string, strin
 func (s *organizationCheckStub) RevokeRole(context.Context, string, string, string, string) error {
 	return nil
 }
+func (s *organizationCheckStub) Capabilities(context.Context, string, string) (domain.OrganizationCapabilities, error) {
+	return domain.OrganizationCapabilities{}, nil
+}
+func (s *organizationCheckStub) SuspendMember(context.Context, string, string, string, string) error {
+	return nil
+}
+func (s *organizationCheckStub) ReactivateMember(context.Context, string, string, string) error {
+	return nil
+}
+func (s *organizationCheckStub) RemoveMember(context.Context, string, string, string, string) error {
+	return nil
+}
+func (s *organizationCheckStub) LeaveOrganization(context.Context, string, string, string) error {
+	return nil
+}
+func (s *organizationCheckStub) TransferOwner(context.Context, string, string, string) error {
+	return nil
+}
 
 func TestInternalOrganizationMemberCheckRestrictsCaller(t *testing.T) {
 	gin.SetMode(gin.TestMode)

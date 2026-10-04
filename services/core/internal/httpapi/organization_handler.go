@@ -23,6 +23,12 @@ type OrganizationApplication interface {
 	ListMembers(context.Context, string, string) ([]domain.OrganizationMember, error)
 	GrantRole(context.Context, string, string, string, string) error
 	RevokeRole(context.Context, string, string, string, string) error
+	Capabilities(context.Context, string, string) (domain.OrganizationCapabilities, error)
+	SuspendMember(context.Context, string, string, string, string) error
+	ReactivateMember(context.Context, string, string, string) error
+	RemoveMember(context.Context, string, string, string, string) error
+	LeaveOrganization(context.Context, string, string, string) error
+	TransferOwner(context.Context, string, string, string) error
 }
 type OrganizationHandler struct{ service OrganizationApplication }
 
@@ -78,6 +84,12 @@ type createOrganizationRequest struct {
 type roleRequest struct {
 	RoleCode string `json:"role_code"`
 }
+type memberReasonRequest struct {
+	Reason string `json:"reason"`
+}
+type transferOwnerRequest struct {
+	TargetUserID string `json:"target_user_id"`
+}
 
 func (h *OrganizationHandler) Create(c *gin.Context) {
 	var req createOrganizationRequest
@@ -105,6 +117,25 @@ func (h *OrganizationHandler) Current(c *gin.Context) {
 		return
 	}
 	c.JSON(200, organizationResponse(o, m))
+}
+func (h *OrganizationHandler) Capabilities(c *gin.Context) {
+	p, _ := PrincipalFromContext(c.Request.Context())
+	capabilities, err := h.service.Capabilities(c.Request.Context(), p.UserID, c.Param("organization_id"))
+	if err != nil {
+		h.write(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, capabilitiesResponse(capabilities))
+}
+func (h *OrganizationHandler) Leave(c *gin.Context) {
+	var req memberReasonRequest
+	_ = decodeJSON(c, &req)
+	p, _ := PrincipalFromContext(c.Request.Context())
+	if err := h.service.LeaveOrganization(c.Request.Context(), p.UserID, c.Param("organization_id"), req.Reason); err != nil {
+		h.write(c, err)
+		return
+	}
+	c.Status(http.StatusNoContent)
 }
 func (h *OrganizationHandler) CreateInvitation(c *gin.Context) {
 	p, _ := PrincipalFromContext(c.Request.Context())
@@ -179,8 +210,60 @@ func (h *OrganizationHandler) RevokeRole(c *gin.Context) {
 	}
 	c.Status(http.StatusNoContent)
 }
+func (h *OrganizationHandler) SuspendMember(c *gin.Context) {
+	var req memberReasonRequest
+	_ = decodeJSON(c, &req)
+	p, _ := PrincipalFromContext(c.Request.Context())
+	if err := h.service.SuspendMember(c.Request.Context(), p.UserID, c.Param("organization_id"), c.Param("user_id"), req.Reason); err != nil {
+		h.write(c, err)
+		return
+	}
+	c.Status(http.StatusNoContent)
+}
+func (h *OrganizationHandler) ReactivateMember(c *gin.Context) {
+	p, _ := PrincipalFromContext(c.Request.Context())
+	if err := h.service.ReactivateMember(c.Request.Context(), p.UserID, c.Param("organization_id"), c.Param("user_id")); err != nil {
+		h.write(c, err)
+		return
+	}
+	c.Status(http.StatusNoContent)
+}
+func (h *OrganizationHandler) RemoveMember(c *gin.Context) {
+	var req memberReasonRequest
+	_ = decodeJSON(c, &req)
+	p, _ := PrincipalFromContext(c.Request.Context())
+	if err := h.service.RemoveMember(c.Request.Context(), p.UserID, c.Param("organization_id"), c.Param("user_id"), req.Reason); err != nil {
+		h.write(c, err)
+		return
+	}
+	c.Status(http.StatusNoContent)
+}
+func (h *OrganizationHandler) TransferOwner(c *gin.Context) {
+	var req transferOwnerRequest
+	if decodeJSON(c, &req) != nil || strings.TrimSpace(req.TargetUserID) == "" {
+		writeError(c, http.StatusBadRequest, "INVALID_REQUEST", "target_user_id is required", false)
+		return
+	}
+	p, _ := PrincipalFromContext(c.Request.Context())
+	if err := h.service.TransferOwner(c.Request.Context(), p.UserID, c.Param("organization_id"), req.TargetUserID); err != nil {
+		h.write(c, err)
+		return
+	}
+	c.Status(http.StatusNoContent)
+}
 func organizationResponse(o domain.Organization, m domain.OrganizationMember) gin.H {
 	return gin.H{"organization": gin.H{"id": o.ID, "name": o.Name, "slug": o.Slug, "status": o.Status, "created_at": o.CreatedAt.UTC().Format("2006-01-02T15:04:05Z07:00")}, "membership": gin.H{"id": m.Membership.ID, "user_id": m.Membership.UserID, "status": m.Membership.Status, "joined_via": m.Membership.JoinedVia, "roles": m.Roles}}
+}
+func capabilitiesResponse(capabilities domain.OrganizationCapabilities) gin.H {
+	return gin.H{
+		"can_invite":           capabilities.CanInvite,
+		"can_manage_roles":     capabilities.CanManageRoles,
+		"can_manage_members":   capabilities.CanManageMembers,
+		"can_transfer_owner":   capabilities.CanTransferOwner,
+		"can_read_audit":       capabilities.CanReadAudit,
+		"can_leave":            capabilities.CanLeave,
+		"leave_blocked_reason": capabilities.LeaveBlockedReason,
+	}
 }
 func (h *OrganizationHandler) write(c *gin.Context, err error) {
 	switch {
@@ -196,6 +279,12 @@ func (h *OrganizationHandler) write(c *gin.Context, err error) {
 		writeError(c, 409, "INVITATION_INVALID", "invitation is invalid", false)
 	case errors.Is(err, application.ErrInvalidRole):
 		writeError(c, 400, "INVALID_ROLE", "invalid role", false)
+	case errors.Is(err, application.ErrMemberStateInvalid):
+		writeError(c, http.StatusConflict, "ORG_MEMBER_STATE_INVALID", "member state does not allow this operation", false)
+	case errors.Is(err, application.ErrSelfAction):
+		writeError(c, http.StatusConflict, "ORG_SELF_ACTION_INVALID", "operation cannot target the current user", false)
+	case errors.Is(err, application.ErrInvalidMemberReason):
+		writeError(c, http.StatusBadRequest, "INVALID_REQUEST", "member action reason is too long", false)
 	case errors.Is(err, application.ErrLastOwner):
 		writeError(c, 409, "LAST_OWNER_REQUIRED", "organization must retain an owner", false)
 	case errors.Is(err, application.ErrInvalidOrganizationName):

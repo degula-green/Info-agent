@@ -41,13 +41,20 @@ type Organization struct {
 }
 
 type Membership struct {
-	ID             string
-	OrganizationID string
-	UserID         string
-	Status         string
-	JoinedVia      string
-	InvitationID   *string
-	JoinedAt       time.Time
+	ID              string
+	OrganizationID  string
+	UserID          string
+	Status          string
+	JoinedVia       string
+	InvitationID    *string
+	JoinedAt        time.Time
+	ExitReason      string
+	ExitReviewNote  string
+	ExitReviewedBy  *string
+	ExitRequestedAt *time.Time
+	ExitReviewedAt  *time.Time
+	LeftAt          *time.Time
+	SuspendedAt     *time.Time
 }
 
 type MembershipRole struct {
@@ -68,6 +75,16 @@ type Invitation struct {
 	Status         string
 	ExpiresAt      time.Time
 	CreatedAt      time.Time
+}
+
+type OrganizationCapabilities struct {
+	CanInvite          bool
+	CanManageRoles     bool
+	CanManageMembers   bool
+	CanTransferOwner   bool
+	CanReadAudit       bool
+	CanLeave           bool
+	LeaveBlockedReason string
 }
 
 func IsValidRole(role string) bool { _, ok := FixedRoleCodes[role]; return ok }

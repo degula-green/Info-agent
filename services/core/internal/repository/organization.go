@@ -17,7 +17,19 @@ var (
 	ErrRoleAlreadyGranted        = errors.New("repository: role already granted")
 	ErrRoleNotFound              = errors.New("repository: role not found")
 	ErrLastOwner                 = errors.New("repository: last owner")
+	ErrMembershipStateInvalid    = errors.New("repository: membership state invalid")
+	ErrTargetIsLastOwner         = errors.New("repository: target is last owner")
 )
+
+type MembershipStatusChange struct {
+	ActorID        string
+	OrganizationID string
+	UserID         string
+	Status         string
+	AuditAction    string
+	Reason         string
+	Now            time.Time
+}
 
 // RBACRepository exposes the system role/permission catalog without changing
 // the existing organization repository contract used by older callers.
@@ -41,4 +53,7 @@ type OrganizationRepository interface {
 	ListMembers(ctx context.Context, organizationID string) ([]domain.OrganizationMember, error)
 	GrantRole(ctx context.Context, actorID, organizationID, userID, roleCode string) error
 	RevokeRole(ctx context.Context, actorID, organizationID, userID, roleCode string, now time.Time) error
+	ChangeMembershipStatus(ctx context.Context, input MembershipStatusChange) (domain.Membership, error)
+	TransferOwner(ctx context.Context, actorID, organizationID, targetUserID string, now time.Time) error
+	CountActiveOwners(ctx context.Context, organizationID string) (int, error)
 }

@@ -10,11 +10,14 @@ import (
 )
 
 type organizationRepositoryStub struct {
-	membership domain.Membership
-	roles      []domain.MembershipRole
-	members    []domain.OrganizationMember
-	invitation domain.Invitation
-	grantCalls int
+	membership    domain.Membership
+	roles         []domain.MembershipRole
+	members       []domain.OrganizationMember
+	invitation    domain.Invitation
+	grantCalls    int
+	ownerCount    int
+	statusChanges []repository.MembershipStatusChange
+	transferCalls int
 }
 
 func (r *organizationRepositoryStub) CreateOrganization(context.Context, string, string, string) (domain.Organization, domain.OrganizationMember, error) {
@@ -44,6 +47,18 @@ func (r *organizationRepositoryStub) GrantRole(context.Context, string, string, 
 }
 func (r *organizationRepositoryStub) RevokeRole(context.Context, string, string, string, string, time.Time) error {
 	return nil
+}
+func (r *organizationRepositoryStub) ChangeMembershipStatus(_ context.Context, input repository.MembershipStatusChange) (domain.Membership, error) {
+	r.statusChanges = append(r.statusChanges, input)
+	r.membership.Status = input.Status
+	return r.membership, nil
+}
+func (r *organizationRepositoryStub) TransferOwner(context.Context, string, string, string, time.Time) error {
+	r.transferCalls++
+	return nil
+}
+func (r *organizationRepositoryStub) CountActiveOwners(context.Context, string) (int, error) {
+	return r.ownerCount, nil
 }
 
 type rbacRepositoryStub struct {
@@ -118,5 +133,72 @@ func TestMemberRoleCannotBeGranted(t *testing.T) {
 	}
 	if repo.grantCalls != 0 {
 		t.Fatalf("grant calls = %d", repo.grantCalls)
+	}
+}
+
+func TestLeaveOrganizationRejectsLastOwner(t *testing.T) {
+	repo := &organizationRepositoryStub{
+		membership: domain.Membership{Status: domain.MembershipStatusActive},
+		roles:      []domain.MembershipRole{{RoleCode: domain.RoleOwner}},
+		ownerCount: 1,
+	}
+	service := NewOrganizationService(repo, nil)
+	if err := service.LeaveOrganization(context.Background(), "owner", "organization", ""); err != ErrLastOwner {
+		t.Fatalf("last owner leave error = %v", err)
+	}
+	if len(repo.statusChanges) != 0 {
+		t.Fatalf("last owner unexpectedly changed status: %#v", repo.statusChanges)
+	}
+}
+
+func TestLeaveOrganizationChangesStatusWhenOwnerCanTransfer(t *testing.T) {
+	repo := &organizationRepositoryStub{
+		membership: domain.Membership{Status: domain.MembershipStatusActive},
+		roles:      []domain.MembershipRole{{RoleCode: domain.RoleOwner}},
+		ownerCount: 2,
+	}
+	service := NewOrganizationService(repo, nil)
+	if err := service.LeaveOrganization(context.Background(), "owner", "organization", "new role"); err != nil {
+		t.Fatal(err)
+	}
+	if len(repo.statusChanges) != 1 || repo.statusChanges[0].Status != domain.MembershipStatusLeft {
+		t.Fatalf("status changes = %#v", repo.statusChanges)
+	}
+}
+
+func TestTransferOwnerRequiresPermission(t *testing.T) {
+	repo := &rbacRepositoryStub{
+		organizationRepositoryStub: &organizationRepositoryStub{
+			membership: domain.Membership{Status: domain.MembershipStatusActive},
+			roles:      []domain.MembershipRole{{RoleCode: domain.RoleOwner}},
+			ownerCount: 2,
+		},
+		permissions: map[string]struct{}{domain.PermissionOrganizationOwnerTransfer: {}},
+	}
+	service := NewOrganizationService(repo, nil)
+	if err := service.TransferOwner(context.Background(), "owner", "organization", "target"); err != nil {
+		t.Fatal(err)
+	}
+	if repo.transferCalls != 1 {
+		t.Fatalf("transfer calls = %d", repo.transferCalls)
+	}
+}
+
+func TestCapabilitiesForOwner(t *testing.T) {
+	repo := &rbacRepositoryStub{
+		organizationRepositoryStub: &organizationRepositoryStub{
+			membership: domain.Membership{Status: domain.MembershipStatusActive},
+			roles:      []domain.MembershipRole{{RoleCode: domain.RoleOwner}},
+			ownerCount: 2,
+		},
+		permissions: map[string]struct{}{},
+	}
+	service := NewOrganizationService(repo, nil)
+	capabilities, err := service.Capabilities(context.Background(), "owner", "organization")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !capabilities.CanManageMembers || !capabilities.CanTransferOwner || !capabilities.CanLeave {
+		t.Fatalf("unexpected owner capabilities: %#v", capabilities)
 	}
 }

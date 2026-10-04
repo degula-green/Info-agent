@@ -79,6 +79,30 @@ func (s organizationApplicationStub) RevokeRole(context.Context, string, string,
 	return nil
 }
 
+func (s organizationApplicationStub) Capabilities(context.Context, string, string) (domain.OrganizationCapabilities, error) {
+	return domain.OrganizationCapabilities{}, nil
+}
+
+func (s organizationApplicationStub) SuspendMember(context.Context, string, string, string, string) error {
+	return nil
+}
+
+func (s organizationApplicationStub) ReactivateMember(context.Context, string, string, string) error {
+	return nil
+}
+
+func (s organizationApplicationStub) RemoveMember(context.Context, string, string, string, string) error {
+	return nil
+}
+
+func (s organizationApplicationStub) LeaveOrganization(context.Context, string, string, string) error {
+	return nil
+}
+
+func (s organizationApplicationStub) TransferOwner(context.Context, string, string, string) error {
+	return nil
+}
+
 func authorizationTestRouter(provider application.AuthorizationProvider, member bool) *gin.Engine {
 	gin.SetMode(gin.TestMode)
 	handler := NewAuthorizationHandler(provider, "rag-token", organizationApplicationStub{member: member}, "knowledge-token")
