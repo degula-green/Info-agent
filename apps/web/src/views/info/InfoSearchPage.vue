@@ -5,31 +5,35 @@
     <div class="search-toolbar"><span class="search-mode-hint">全库检索 · BM25 + 向量</span><t-select v-model="platform" :options="platformOptions" class="platform-filter" @change="applyPlatformFilter" /></div>
     <div v-if="!query.trim()" class="search-start"><div class="search-start__title"><t-icon name="search" size="20px" /><span>从一个关键词开始</span></div><p>你可以搜索“数据库迁移方案”“版本发布”或“产品讨论组”。结果会按群聊、消息和文件分组。</p><div class="search-recent"><button v-for="item in store.recentSearches" :key="item" @click="query = item; runSearch()"><t-icon name="history" />{{ item }}</button></div></div>
     <template v-else><div class="search-summary"><strong>{{ loading ? '正在搜索…' : total ? `找到 ${total} 条结果` : '没有找到相关内容' }}</strong><span>全库检索 · {{ platformLabel }}</span></div><div v-if="error" class="search-empty"><h3>{{ error }}</h3><p>请稍后重试。</p></div><div v-else-if="results.length" class="result-groups"><ResultGroup v-for="group in resultGroups.filter((group) => group.kind !== 'qa')" :key="group.kind" :label="group.label" :count="group.items.length"><ResultItem v-for="(item, index) in group.items" :key="item.id" :index="index" :selected="false" :icon-name="iconFor(item.kind)" :badge="badgeFor(item.kind)" :badge-variant="item.kind === 'file' ? 'keyword' : 'default'" :score="item.score" @primary="selectResult(item)"><template #title><span>{{ item.title }}</span></template><template #subtitle><span>{{ item.subtitle }}</span></template></ResultItem></ResultGroup><div v-if="total > page * pageSize || page > 1" class="search-pagination"><t-button variant="outline" :disabled="page <= 1 || loading" @click="runSearch(page - 1)">上一页</t-button><span>第 {{ page }} 页</span><t-button variant="outline" :disabled="total <= page * pageSize || loading" @click="runSearch(page + 1)">下一页</t-button></div></div><div v-else-if="!loading" class="search-empty"><t-icon name="search" size="34px" /><h3>没有匹配结果</h3><p>{{ emptyHint }}</p></div></template>
-    <InfoResultDrawer v-model:visible="drawerVisible" :result="selectedResult" @toast="toast" />
+    <InfoSearchPreviewDialog
+      v-model:visible="previewVisible"
+      :result="previewResult"
+      :file="previewFile"
+      :downloading="previewDownloading"
+      @open-source="openPreviewSource"
+      @download="downloadPreviewFile"
+    />
   </section>
 </template>
 
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
-import { MessagePlugin } from 'tdesign-vue-next'
 import { type SearchResult, type SourceKey } from '@/mock'
 import { useInfoMockStore } from '@/stores/infoMock'
 import ResultGroup from '@/components/GlobalCommandPalette/ResultGroup.vue'
 import ResultItem from '@/components/GlobalCommandPalette/ResultItem.vue'
-import InfoResultDrawer from '@/components/InfoResultDrawer.vue'
-import { useRouter } from 'vue-router'
+import InfoSearchPreviewDialog from '@/components/InfoSearchPreviewDialog.vue'
+import { useSearchResultNavigation } from '@/composables/useSearchResultNavigation'
 import { searchGlobal } from '@/api/rag'
 import { resolveGlobalSearchScope, searchEmptyHint } from '@/utils/info-search-scope'
 import { isAbortError, mapRagSearchItems } from '@/utils/info-search-result'
 
 const store = useInfoMockStore()
-const router = useRouter()
+const { previewVisible, previewResult, previewFile, previewDownloading, openSearchResult, openPreviewSource, downloadPreviewFile } = useSearchResultNavigation()
 const query = ref('')
 const platform = ref<SourceKey | 'all'>('all')
 const allResults = ref<SearchResult[]>([])
 const results = ref<SearchResult[]>([])
-const drawerVisible = ref(false)
-const selectedResult = ref<SearchResult | null>(null)
 const inputRef = ref<HTMLInputElement | null>(null)
 const loading = ref(false)
 const error = ref('')
@@ -109,15 +113,8 @@ async function runSearch(nextPage: number | Event = 1) {
 function iconFor(kind: SearchResult['kind']) { return kind === 'chat' ? 'chat' : kind === 'file' ? 'file' : kind === 'qa' ? 'chat-bubble-help' : 'chat-bubble' }
 function badgeFor(kind: SearchResult['kind']) { return kind === 'chat' ? '群聊' : kind === 'file' ? '文件' : kind === 'qa' ? '问答' : '消息' }
 function selectResult(result: SearchResult) {
-  if (result.kind === 'chat' && result.chatId) {
-    const platformKey = result.platform === 'all' ? 'feishu' : result.platform
-    router.push(`/knowledge/${platformKey}/conversations/${result.chatId}`)
-    return
-  }
-  selectedResult.value = result
-  drawerVisible.value = true
+  void openSearchResult(result)
 }
-function toast(text: string) { MessagePlugin.success(text) }
 nextTick(() => inputRef.value?.focus())
 onBeforeUnmount(() => searchAbort?.abort())
 </script>
