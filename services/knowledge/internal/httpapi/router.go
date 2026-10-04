@@ -1192,6 +1192,22 @@ func registerInternalRoutes(r *gin.Engine, app *App, prefix string) {
 		}
 		c.JSON(http.StatusOK, gin.H{"items": items})
 	})
+	g.POST("/knowledge/organization-membership-events", func(c *gin.Context) {
+		if !serviceAuthorized(c) || !strings.EqualFold(strings.TrimSpace(c.GetHeader("X-Caller-Service")), "core") {
+			writeError(c, apperror.Clone(apperror.ErrForbidden))
+			return
+		}
+		var input repository.OrganizationMembershipEventInput
+		if err := c.ShouldBindJSON(&input); err != nil {
+			writeError(c, apperror.New("invalid_request", "invalid organization membership event", 400, false))
+			return
+		}
+		if err := app.Service.ApplyOrganizationMembershipEvent(c, input); err != nil {
+			writeError(c, err)
+			return
+		}
+		c.JSON(http.StatusAccepted, gin.H{"status": "accepted"})
+	})
 	g.POST("/knowledge/privacy/reprocess", func(c *gin.Context) {
 		if !serviceAuthorized(c) {
 			writeError(c, apperror.Clone(apperror.ErrForbidden))

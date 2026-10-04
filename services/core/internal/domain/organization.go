@@ -87,6 +87,17 @@ type OrganizationCapabilities struct {
 	LeaveBlockedReason string
 }
 
+type OrganizationEvent struct {
+	ID             string
+	EventType      string
+	OrganizationID string
+	UserID         string
+	MembershipID   string
+	Status         string
+	Reason         string
+	CreatedAt      time.Time
+}
+
 func IsValidRole(role string) bool { _, ok := FixedRoleCodes[role]; return ok }
 
 func (m Membership) IsActive() bool { return m.Status == MembershipStatusActive }

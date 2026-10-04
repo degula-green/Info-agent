@@ -83,6 +83,48 @@ func completeMemoryPrivateReady(t *testing.T, repo *MemoryStore, ctx context.Con
 	}
 }
 
+func TestApplyOrganizationMembershipEventOffboardsAndRequeuesPermissions(t *testing.T) {
+	repo := NewMemoryStore()
+	now := time.Now().UTC()
+	repo.conversations["conversation-1"] = domain.ConversationIngestion{
+		ID: "conversation-1", OrganizationID: "organization-1", Status: domain.ConversationActive, UpdatedAt: now,
+	}
+	repo.collectors["collector-1"] = domain.Collector{
+		ID: "collector-1", ConversationID: "conversation-1", CollectorUserID: "user-1", Status: domain.CollectorActive,
+	}
+	repo.knowledgeItems["item-1"] = domain.KnowledgeItem{
+		ID: "item-1", OrganizationID: "organization-1", LifecycleStatus: "active", ACLSyncStatus: "synced", PermissionReady: true, ContentVersion: 3,
+	}
+
+	err := repo.ApplyOrganizationMembershipEvent(context.Background(), OrganizationMembershipEventInput{
+		EventID:        "event-1",
+		EventType:      "organization.membership.deactivated",
+		OrganizationID: "organization-1",
+		UserID:         "user-1",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if repo.collectors["collector-1"].Status != domain.CollectorRemoved {
+		t.Fatalf("collector was not removed: %#v", repo.collectors["collector-1"])
+	}
+	if repo.conversations["conversation-1"].Status != domain.ConversationPaused {
+		t.Fatalf("conversation was not paused: %#v", repo.conversations["conversation-1"])
+	}
+	if repo.knowledgeItems["item-1"].ACLSyncStatus != "pending" || repo.knowledgeItems["item-1"].PermissionReady {
+		t.Fatalf("knowledge permissions were not requeued: %#v", repo.knowledgeItems["item-1"])
+	}
+	found := false
+	for _, event := range repo.outbox {
+		if event.EventType == "permission.sync.requested" && event.Payload["knowledge_item_id"] == "item-1" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("permission sync event was not created")
+	}
+}
+
 func TestIngestMessageInputUsesSnakeCaseProtocolFields(t *testing.T) {
 	var input IngestMessageInput
 	if err := json.Unmarshal([]byte(`{"collector_id":"collector-1","external_conversation_id":"chat-1","external_message_id":"message-1","payload_hash":"payload-hash","sender_external_id":"sender-1","sender_display_name":"Sender","message_type":"text","content":"hello","content_hash":"content-hash","sent_at":"2026-09-05T00:00:00Z","cursor":"3","attachments":[{"external_attachment_id":"attachment-1","file_name":"note.txt","mime_type":"text/plain","size_bytes":12,"content_hash":"attachment-hash"}]}`), &input); err != nil {

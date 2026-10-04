@@ -56,4 +56,7 @@ type OrganizationRepository interface {
 	ChangeMembershipStatus(ctx context.Context, input MembershipStatusChange) (domain.Membership, error)
 	TransferOwner(ctx context.Context, actorID, organizationID, targetUserID string, now time.Time) error
 	CountActiveOwners(ctx context.Context, organizationID string) (int, error)
+	ListPendingOrganizationEvents(ctx context.Context, limit int) ([]domain.OrganizationEvent, error)
+	MarkOrganizationEventPublished(ctx context.Context, eventID string, now time.Time) error
+	MarkOrganizationEventFailed(ctx context.Context, eventID, reason string, availableAt, now time.Time) error
 }

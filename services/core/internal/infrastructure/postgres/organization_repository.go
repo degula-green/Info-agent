@@ -165,6 +165,9 @@ func (r *OrganizationRepository) AcceptInvitation(ctx context.Context, userID, h
 	if _, err = tx.Exec(ctx, `INSERT INTO iam.audit_logs(actor_user_id,organization_id,action,resource_type,resource_id) VALUES($1::uuid,$2::uuid,'organization.invitation_accepted','organization_invitation',$3::uuid)`, userID, o.ID, i.ID); err != nil {
 		return domain.Organization{}, domain.OrganizationMember{}, err
 	}
+	if err = enqueueOrganizationEvent(ctx, tx, "organization.membership.activated", o.ID, userID, m.ID, domain.MembershipStatusActive, ""); err != nil {
+		return domain.Organization{}, domain.OrganizationMember{}, err
+	}
 	if err = tx.Commit(ctx); err != nil {
 		return domain.Organization{}, domain.OrganizationMember{}, err
 	}
@@ -402,6 +405,21 @@ func (r *OrganizationRepository) ChangeMembershipStatus(
 		}
 	}
 
+	eventType := ""
+	switch input.Status {
+	case domain.MembershipStatusSuspended:
+		eventType = "organization.membership.suspended"
+	case domain.MembershipStatusActive:
+		eventType = "organization.membership.reactivated"
+	case domain.MembershipStatusLeft:
+		eventType = "organization.membership.deactivated"
+	}
+	if eventType != "" {
+		if err = enqueueOrganizationEvent(ctx, tx, eventType, input.OrganizationID, input.UserID, m.ID, input.Status, input.Reason); err != nil {
+			return domain.Membership{}, err
+		}
+	}
+
 	if _, err = tx.Exec(ctx, `
 		INSERT INTO iam.audit_logs(actor_user_id,organization_id,action,resource_type,resource_id,detail)
 		VALUES($1::uuid,$2::uuid,$3,'membership',$4::uuid,jsonb_build_object('reason',$5::text))`,
@@ -484,6 +502,9 @@ func (r *OrganizationRepository) TransferOwner(ctx context.Context, actorID, org
 		actorID, orgID, targetMembershipID, targetUserID); err != nil {
 		return err
 	}
+	if err = enqueueOrganizationEvent(ctx, tx, "organization.membership.role_changed", orgID, targetUserID, targetMembershipID, domain.MembershipStatusActive, "owner_transferred"); err != nil {
+		return err
+	}
 	return tx.Commit(ctx)
 }
 
@@ -499,6 +520,71 @@ func (r *OrganizationRepository) CountActiveOwners(ctx context.Context, organiza
 		  AND mr.revoked_at IS NULL`,
 		organizationID).Scan(&count)
 	return count, err
+}
+
+func (r *OrganizationRepository) ListPendingOrganizationEvents(ctx context.Context, limit int) ([]domain.OrganizationEvent, error) {
+	if limit <= 0 || limit > 200 {
+		limit = 100
+	}
+	rows, err := r.pool.Query(ctx, `
+		SELECT id::text,event_type,organization_id::text,user_id::text,
+		       COALESCE(payload->>'membership_id',''),COALESCE(payload->>'status',''),
+		       COALESCE(payload->>'reason',''),created_at
+		FROM iam.outbox_events
+		WHERE status IN ('pending','failed') AND available_at <= now()
+		ORDER BY created_at
+		LIMIT $1`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var events []domain.OrganizationEvent
+	for rows.Next() {
+		var event domain.OrganizationEvent
+		if err := rows.Scan(
+			&event.ID, &event.EventType, &event.OrganizationID, &event.UserID,
+			&event.MembershipID, &event.Status, &event.Reason, &event.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		events = append(events, event)
+	}
+	return events, rows.Err()
+}
+
+func (r *OrganizationRepository) MarkOrganizationEventPublished(ctx context.Context, eventID string, now time.Time) error {
+	_, err := r.pool.Exec(ctx, `
+		UPDATE iam.outbox_events
+		SET status='published',published_at=$2,last_error=NULL
+		WHERE id=$1::uuid`,
+		eventID, now)
+	return err
+}
+
+func (r *OrganizationRepository) MarkOrganizationEventFailed(ctx context.Context, eventID, reason string, availableAt, now time.Time) error {
+	_, err := r.pool.Exec(ctx, `
+		UPDATE iam.outbox_events
+		SET status='failed',publish_attempts=publish_attempts+1,last_error=$2,available_at=$3
+		WHERE id=$1::uuid`,
+		eventID, strings.TrimSpace(reason), availableAt)
+	return err
+}
+
+func enqueueOrganizationEvent(
+	ctx context.Context,
+	tx pgx.Tx,
+	eventType, organizationID, userID, membershipID, status, reason string,
+) error {
+	_, err := tx.Exec(ctx, `
+		INSERT INTO iam.outbox_events(event_type,aggregate_type,aggregate_id,organization_id,user_id,payload)
+		VALUES($1,'organization_membership',$2::uuid,$3::uuid,$4::uuid,
+		       jsonb_build_object(
+		           'membership_id',$2::text,
+		           'status',$5::text,
+		           'reason',$6::text
+		       ))`,
+		eventType, membershipID, organizationID, userID, status, reason)
+	return err
 }
 
 func (r *OrganizationRepository) PermissionsForRoles(ctx context.Context, roleCodes []string) (map[string]struct{}, error) {
