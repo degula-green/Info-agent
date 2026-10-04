@@ -447,6 +447,21 @@ class Settings:
         "AGENT_CONVERSATION_CONTEXT_MAX_MESSAGES",
         "agent_CONVERSATION_CONTEXT_MAX_MESSAGES",
     )
+    conversation_title_enabled: bool = _bool(
+        True,
+        "AGENT_CONVERSATION_TITLE_ENABLED",
+        "agent_CONVERSATION_TITLE_ENABLED",
+    )
+    conversation_title_max_chars: int = _int(
+        24,
+        "AGENT_CONVERSATION_TITLE_MAX_CHARS",
+        "agent_CONVERSATION_TITLE_MAX_CHARS",
+    )
+    conversation_title_max_output_tokens: int = _int(
+        80,
+        "AGENT_CONVERSATION_TITLE_MAX_OUTPUT_TOKENS",
+        "agent_CONVERSATION_TITLE_MAX_OUTPUT_TOKENS",
+    )
     conversation_summary_enabled: bool = _bool(
         True,
         "AGENT_CONVERSATION_SUMMARY_ENABLED",

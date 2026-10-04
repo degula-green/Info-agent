@@ -15,6 +15,10 @@ from app.application.conversation_memory import (
     ConversationSummaryService,
     LlmConversationSummaryProvider,
 )
+from app.application.conversation_title import (
+    ConversationTitleService,
+    LlmConversationTitleProvider,
+)
 from app.application.conversation_memory_extraction import (
     ConversationMemoryExtractionService,
 )
@@ -633,6 +637,26 @@ def build_container(
                 )
             ),
         )
+    title_service = None
+    if (
+        resolved.conversation_title_enabled
+        and resolved.llm_base_url
+        and resolved.llm_model
+    ):
+        title_service = ConversationTitleService(
+            resolved_store,
+            resolved,
+            LlmConversationTitleProvider(
+                OpenAIChatClient(
+                    base_url=resolved.llm_base_url,
+                    api_key=resolved.llm_api_key,
+                    model=resolved.llm_model,
+                    timeout_seconds=resolved.llm_timeout_seconds,
+                    max_output_tokens=resolved.conversation_title_max_output_tokens,
+                    response_format="json_object",
+                )
+            ),
+        )
 
     return AgentContainer(
         settings=resolved,
@@ -656,6 +680,7 @@ def build_container(
             message_sync=task_service.sync_task_messages,
             conversation_context_loader=conversation_context_service.load,
             summary_service=summary_service,
+            title_service=title_service,
             memory_extraction_service=memory_extraction_service,
         ),
         knowledge_ingress=resolved_ingress,
