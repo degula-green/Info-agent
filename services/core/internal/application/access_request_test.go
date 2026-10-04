@@ -86,6 +86,22 @@ func (s collectorReviewerStub) CanReviewAccessRequest(context.Context, string, s
 	return s.allowed, nil
 }
 
+type accessRequesterReaderStub struct {
+	users map[string]domain.User
+}
+
+func (s accessRequesterReaderStub) FindUsersByIDs(context.Context, []string) (map[string]domain.User, error) {
+	return s.users, nil
+}
+
+type accessContextReaderStub struct {
+	items []AccessRequestContext
+}
+
+func (s accessContextReaderStub) LoadAccessRequestContexts(context.Context, []AccessRequestResource) ([]AccessRequestContext, error) {
+	return s.items, nil
+}
+
 func TestAccessRequestApprovalWritesViewerTuple(t *testing.T) {
 	repo := &accessRequestRepoStub{}
 	writer := &recordingRelationWriter{}
@@ -140,5 +156,40 @@ func TestAccessRequestCollectorApprovalWritesDownloaderTuple(t *testing.T) {
 	}
 	if len(writer.tuples) != 1 || writer.tuples[0].Relation != "downloader" || writer.tuples[0].Object != "attachment_content:00000000-0000-0000-0000-000000000002" {
 		t.Fatalf("unexpected collector approval tuple: %+v", writer.tuples)
+	}
+}
+
+func TestAccessRequestListIncludesRequesterAndSafeContext(t *testing.T) {
+	repo := &accessRequestRepoStub{request: domain.AccessRequest{
+		ID: "request-1", OrganizationID: "org-1", RequesterUserID: "requester-1",
+		ResourceType: "knowledge_original", ResourceID: "00000000-0000-0000-0000-000000000003",
+		Action: "view", Status: "pending", CreatedAt: time.Now(),
+	}}
+	service := NewAccessRequestService(
+		repo, &recordingRelationWriter{}, accessReviewerStub{member: true}, collectorReviewerStub{},
+		accessRequesterReaderStub{users: map[string]domain.User{
+			"requester-1": {ID: "requester-1", Nickname: "张三", Email: "zhangsan@example.com"},
+		}},
+		accessContextReaderStub{items: []AccessRequestContext{{
+			ResourceType: "knowledge_original", ResourceID: "00000000-0000-0000-0000-000000000003",
+			SourceConversationID: "conversation-1", SourceConversationName: "aims群", SourcePlatform: "feishu",
+			SourceMessageID: "message-1", SenderDisplayName: "degula", MaskedExcerpt: "密码[已脱敏]",
+			ContentVisibility: "masked", OriginalAccessRequired: true,
+		}}},
+		time.Now,
+	)
+	items, err := service.ListMine(context.Background(), "requester-1", "org-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("unexpected items: %+v", items)
+	}
+	item := items[0]
+	if item.RequesterNickname != "张三" || item.RequesterEmail != "zhangsan@example.com" {
+		t.Fatalf("requester was not enriched: %+v", item)
+	}
+	if item.SourceConversationName != "aims群" || item.MaskedExcerpt != "密码[已脱敏]" || !item.OriginalAccessRequired {
+		t.Fatalf("safe context was not enriched: %+v", item)
 	}
 }
