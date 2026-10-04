@@ -181,10 +181,6 @@ class KnowledgeAnswerPlanInput(BaseModel):
         default=None,
         description="引用更早 knowledge.search_sources 步骤输出的 sources",
     )
-    metadata_coverage_ref: StepOutputRef | None = Field(
-        default=None,
-        description="引用 knowledge.search_content 步骤输出的 metadata_coverage",
-    )
 
 
 class KnowledgeAnswerOutput(BaseModel):
@@ -354,12 +350,6 @@ class KnowledgeAnswerCapability:
                 runtime_argument="results",
                 source_capability=SEARCH_CONTENT_NAME,
                 source_output="results",
-            ),
-            CapabilityInputBinding(
-                planner_argument="metadata_coverage_ref",
-                runtime_argument="metadata_coverage",
-                source_capability=SEARCH_CONTENT_NAME,
-                source_output="metadata_coverage",
             ),
         ],
         output_schema=KnowledgeAnswerOutput.model_json_schema(),
