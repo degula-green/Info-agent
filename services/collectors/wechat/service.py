@@ -212,10 +212,6 @@ last_discovery_at = 0.0
 worker_thread: threading.Thread | None = None
 discovery_thread: threading.Thread | None = None
 
-class BindRequest(BaseModel):
-    wxid: str = Field(min_length=3)
-    db_dir: str = Field(min_length=3)
-
 class PairDeviceRequest(BaseModel):
     pairing_id: str = Field(min_length=1)
     pairing_code: str = Field(min_length=1)
@@ -226,6 +222,7 @@ class BrowserPairRequest(BaseModel):
     pairing_id: str = Field(min_length=1)
     pairing_code: str = Field(min_length=1)
     wxid: str = ""
+    db_dir: str = ""
     agent_version: str = "local-wechat-agent"
 
 def auth(token: str | None) -> None:
@@ -1118,6 +1115,41 @@ def local_account_for_wxid(wxid: str) -> dict[str, str] | None:
     ]
     return matches[0] if len(matches) == 1 else None
 
+def local_account_from_db_dir(path_value: str, wxid: str) -> dict[str, str]:
+    path = Path(path_value).expanduser()
+    if not path.is_absolute() or not path.exists():
+        raise ValueError("db_dir must be an existing local absolute path")
+    if path.is_file():
+        storage = next((parent for parent in path.parents if parent.name == "db_storage"), None)
+        if storage is None:
+            raise ValueError("database file must be located below an account db_storage directory")
+        path = storage.parent
+
+    normalized = str(wxid).strip()
+    if (path / "db_storage").is_dir():
+        root = path.parent
+        account_dir = path
+    else:
+        root = path
+        candidates = [item for item in root.iterdir() if item.is_dir() and (item / "db_storage").is_dir()]
+        matches = [
+            item for item in candidates
+            if not normalized or same_wechat_account(item.name, normalized)
+        ]
+        if len(matches) != 1:
+            raise ValueError("db_dir must contain exactly one matching WeChat account directory")
+        account_dir = matches[0]
+
+    if not normalized:
+        raise ValueError("wxid is required")
+    if not same_wechat_account(account_dir.name, normalized):
+        raise ValueError("wxid does not match the WeChat account directory")
+    return {
+        "wxid": account_dir.name,
+        "db_dir": str(account_dir.resolve()),
+        "root": str(root.resolve()),
+    }
+
 def validate_browser_pairing(pairing_id: str, pairing_code: str) -> None:
     knowledge(
         "/api/knowledge/v1/internal/wechat/pair/validate",
@@ -1125,8 +1157,14 @@ def validate_browser_pairing(pairing_id: str, pairing_code: str) -> None:
         {"pairing_id": pairing_id, "pairing_code": pairing_code},
     )
 
-def pair_local_device(pairing_id: str, pairing_code: str, wxid: str, agent_version: str) -> dict[str, Any]:
-    account = local_account_for_wxid(wxid)
+def pair_local_device(
+    pairing_id: str,
+    pairing_code: str,
+    wxid: str,
+    agent_version: str,
+    account: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    account = account or local_account_for_wxid(wxid)
     if account is None:
         raise ValueError("wxid was not found under the configured local WeChat data roots")
     fingerprint = hashlib.sha256(account["db_dir"].encode("utf-8")).hexdigest()
@@ -1195,15 +1233,18 @@ def browser_accounts(req: BrowserPairRequest) -> dict[str, Any]:
 def browser_pair(req: BrowserPairRequest) -> dict[str, Any]:
     try:
         validate_browser_pairing(req.pairing_id, req.pairing_code)
-        accounts = scan_local_accounts()
-        if req.wxid.strip():
-            account = local_account_for_wxid(req.wxid)
-        elif len(accounts) == 1:
-            account = accounts[0]
-        elif not accounts:
-            raise HTTPException(404, "no local WeChat account was found")
+        if req.db_dir.strip():
+            account = local_account_from_db_dir(req.db_dir, req.wxid)
+        elif not req.wxid.strip():
+            accounts = scan_local_accounts()
+            if len(accounts) == 1:
+                account = accounts[0]
+            elif not accounts:
+                raise HTTPException(404, "no local WeChat account was found")
+            else:
+                raise HTTPException(409, "multiple local WeChat accounts require explicit selection")
         else:
-            raise HTTPException(409, "multiple local WeChat accounts require explicit selection")
+            account = local_account_for_wxid(req.wxid)
         if account is None:
             raise HTTPException(404, "the selected WeChat account was not found")
         result = pair_local_device(
@@ -1211,6 +1252,7 @@ def browser_pair(req: BrowserPairRequest) -> dict[str, Any]:
             req.pairing_code,
             account["wxid"],
             req.agent_version,
+            account=account,
         )
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")
@@ -1242,17 +1284,6 @@ def bootstrap_device(x_collector_token: str | None = Header(default=None)) -> di
     auth(x_collector_token)
     bootstrap_from_knowledge()
     return {"status": binding.get("status") or "unbound", "bound": bool(binding), "bootstrap_error": bootstrap_error}
-@app.post("/bind")
-def bind(req: BindRequest, x_collector_token: str | None = Header(default=None)) -> dict[str, Any]:
-    auth(x_collector_token); global db, media, worker_thread
-    try: opened = open_db(req.db_dir, req.wxid)
-    except ValueError as exc: raise HTTPException(422, str(exc)) from exc
-    with lock: db = opened; media = MediaDownloader(opened); binding.update(wxid=req.wxid, db_dir=str(Path(req.db_dir).resolve()), status="running", last_error=None); save_state()
-    refresh_discovery()
-    if worker_thread is None or not worker_thread.is_alive(): worker_thread = threading.Thread(target=collector_worker, name="wechat-collector-worker", daemon=True); worker_thread.start()
-    return {"status": "running", **binding}
-@app.post("/rebind")
-def rebind(req: BindRequest, x_collector_token: str | None = Header(default=None)) -> dict[str, Any]: return bind(req, x_collector_token)
 @app.get("/status")
 def status(x_collector_token: str | None = Header(default=None)) -> dict[str, Any]: auth(x_collector_token); return {"status": binding.get("status", "stopped"), **binding}
 @app.post("/stop")

@@ -66,15 +66,6 @@ func (c *Client) do(ctx context.Context, method, path string, in, out any) error
 	return nil
 }
 
-func (c *Client) Bind(ctx context.Context, wxid, dbDir string, rebind bool) (map[string]any, error) {
-	path := "/bind"
-	if rebind {
-		path = "/rebind"
-	}
-	var out map[string]any
-	err := c.do(ctx, http.MethodPost, path, map[string]string{"wxid": wxid, "db_dir": dbDir}, &out)
-	return out, err
-}
 func (c *Client) Status(ctx context.Context) (map[string]any, error) {
 	var out map[string]any
 	err := c.do(ctx, http.MethodGet, "/status", nil, &out)

@@ -11,7 +11,6 @@ import (
 	"io"
 	"log/slog"
 	"mime"
-	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
@@ -57,62 +56,6 @@ func (s *Service) WechatCollector() *wechatclient.Client {
 	return wechatclient.New(s.Config.WechatCollectorURL, s.Config.CollectorInternalToken)
 }
 
-func (s *Service) BindWechat(ctx context.Context, userID, wxid, dbDir, organizationID string, rebind bool) (map[string]any, error) {
-	if strings.TrimSpace(dbDir) != "" {
-		return nil, apperror.New(
-			"device_pairing_required",
-			"use device pairing instead of submitting a local path",
-			http.StatusGone,
-			false,
-		)
-	}
-	if strings.TrimSpace(wxid) == "" || strings.TrimSpace(dbDir) == "" {
-		return nil, apperror.New("invalid_request", "wxid and db_dir are required", 400, false)
-	}
-	wxid, dbDir = strings.TrimSpace(wxid), strings.TrimSpace(dbDir)
-	previous, previousErr := s.Repo.GetConnectorForOAuth(ctx, userID, domain.PlatformWechat)
-	if previousErr != nil && apperror.From(previousErr).Code != "connector_not_found" {
-		return nil, previousErr
-	}
-	if previous != nil && previous.LastError == "wechat_stop_failed" {
-		return nil, apperror.New("wechat_cleanup_pending", "微信采集器尚未停止，请先重试解绑", 409, true)
-	}
-	if existing, findErr := s.Repo.FindConnectorByExternal(ctx, domain.PlatformWechat, "", wxid); findErr == nil && (previous == nil || existing.ID != previous.ID) {
-		return nil, apperror.New("connector_already_bound", "该微信账号已被其他账号绑定", 409, false)
-	} else if findErr != nil && apperror.From(findErr).Code != "connector_not_found" {
-		return nil, findErr
-	}
-	if previous != nil && previous.Status != domain.ConnectorRevoked && !strings.EqualFold(previous.ExternalAccountID, wxid) && !rebind {
-		return nil, apperror.New("connector_already_bound", "个人微信平台已经绑定其他账号，请先解绑", 409, false)
-	}
-	out, err := s.WechatCollector().Bind(ctx, wxid, dbDir, rebind)
-	if err != nil {
-		return nil, apperror.Wrap("wechat_collector_unavailable", "wechat collector binding failed", 502, true, err)
-	}
-	now := s.Now()
-	account := domain.ConnectorAccount{OwnerUserID: userID, Platform: domain.PlatformWechat, ExternalAccountID: wxid, DisplayName: wxid, DatabaseRef: dbDir, DefaultOrganizationID: strings.TrimSpace(organizationID), Status: domain.ConnectorActive, CreatedAt: now, UpdatedAt: now}
-	if previous != nil && strings.EqualFold(previous.ExternalAccountID, wxid) {
-		account.ID, account.CreatedAt = previous.ID, previous.CreatedAt
-		if organizationID == "" {
-			account.DefaultOrganizationID = previous.DefaultOrganizationID
-		}
-	}
-	saved, saveErr := s.Repo.SaveConnector(ctx, account)
-	if saveErr != nil {
-		return nil, saveErr
-	}
-	out["connector_id"] = saved.ID
-	if previous != nil && previous.ID == saved.ID {
-		if err := s.Repo.RestoreAuthorizationCollectors(ctx, saved.ID, now); err != nil {
-			return nil, err
-		}
-	} else {
-		_, _ = s.Repo.SaveWechatConfig(ctx, domain.WechatCollectionConfig{ConnectorID: saved.ID, SelectedConversations: []string{}, Enabled: true, ListenMode: "whitelist"})
-	}
-	_, _ = s.Repo.UpsertWechatRuntime(ctx, domain.WechatCollectorRuntime{ConnectorID: saved.ID, Status: "running"})
-	_, _ = s.WechatCollector().SaveConfig(ctx, map[string]any{"connector_id": saved.ID})
-	return out, nil
-}
 func (s *Service) WechatStatus(ctx context.Context, userID string) (map[string]any, error) {
 	account, err := s.Repo.GetConnector(ctx, userID, domain.PlatformWechat)
 	if err != nil {
@@ -695,7 +638,7 @@ func (s *Service) PairAgent(ctx context.Context, id, code, wxid, databaseRef, ag
 	}
 	plainKey := randomToken(32)
 	now := s.Now()
-	result, err := s.Repo.CompleteAgentPairing(ctx, repository.AgentPairingInput{PairingID: id, CodeHash: hash(code), WXID: strings.TrimSpace(wxid), DatabaseRef: "", AgentVersion: strings.TrimSpace(agentVersion), DeviceID: uuid.NewString(), DeviceKeyHash: hash(plainKey), DeviceExpiresAt: now.Add(s.Config.DeviceTTL), Now: now})
+	result, err := s.Repo.CompleteAgentPairing(ctx, repository.AgentPairingInput{PairingID: id, CodeHash: hash(code), WXID: strings.TrimSpace(wxid), DatabaseRef: safeDatabaseRef(databaseRef), AgentVersion: strings.TrimSpace(agentVersion), DeviceID: uuid.NewString(), DeviceKeyHash: hash(plainKey), DeviceExpiresAt: now.Add(s.Config.DeviceTTL), Now: now})
 	if err != nil {
 		return PairExchange{}, err
 	}

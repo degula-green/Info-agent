@@ -60,13 +60,14 @@ export async function listLocalWechatAccounts(pairingID: string, pairingCode: st
   })
 }
 
-export async function pairLocalWechatAccount(pairingID: string, pairingCode: string, wxid: string) {
+export async function pairLocalWechatAccount(pairingID: string, pairingCode: string, wxid: string, dbDir = '') {
   return localAgentRequest<LocalWechatPairResult>('/local/browser/pair', {
     method: 'POST',
     body: JSON.stringify({
       pairing_id: pairingID,
       pairing_code: pairingCode,
       wxid,
+      ...(dbDir ? { db_dir: dbDir } : {}),
       agent_version: 'desktop-wechat-agent',
     }),
   })

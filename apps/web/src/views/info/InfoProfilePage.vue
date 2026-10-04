@@ -123,7 +123,7 @@
     </t-dialog>
     <t-dialog v-model:visible="wechatDialogVisible" header="绑定个人微信" :confirm-btn="wechatConfirmButton" cancel-btn="取消" :confirm-loading="wechatBinding" :close-on-overlay-click="!wechatBinding" @confirm="confirmWechatBind">
       <div class="wechat-pairing">
-        <template v-if="!wechatManualMode">
+        <template v-if="!wechatManualMode && !wechatPathMode">
           <p>{{ wechatAccounts.length ? '检测到本机微信账号，请选择一个用于采集。' : '正在检测本机微信账号…' }}</p>
           <div v-if="wechatAccounts.length" class="wechat-pairing__accounts">
             <button
@@ -143,6 +143,19 @@
             </button>
           </div>
           <t-alert v-else-if="wechatAgentError" theme="warning" :message="wechatAgentError" :close="false" />
+          <t-button variant="text" :disabled="wechatBinding" @click="enableWechatPathMode">找不到？手动指定微信目录</t-button>
+        </template>
+        <template v-else-if="wechatPathMode">
+          <p>请输入本机微信账号和数据目录，仍然使用当前配对信息完成绑定。</p>
+          <t-form :data="wechatPathForm" label-align="top">
+            <t-form-item label="微信 ID">
+              <t-input v-model="wechatPathForm.wxid" placeholder="例如 wxid_xxx" />
+            </t-form-item>
+            <t-form-item label="本机微信数据目录">
+              <t-input v-model="wechatPathForm.db_dir" placeholder="例如 C:\\Users\\...\\xwechat_files\\wxid_xxx_abcd" />
+            </t-form-item>
+          </t-form>
+          <t-button variant="text" :disabled="wechatBinding" @click="disableWechatPathMode">返回自动检测</t-button>
         </template>
         <template v-else>
           <t-alert theme="warning" :message="wechatAgentError || '未检测到本机微信 Agent。'" :close="false" />
@@ -228,6 +241,8 @@ const wechatPairingCode = ref('')
 const wechatAccounts = ref<LocalWechatAccount[]>([])
 const selectedWechatWXID = ref('')
 const wechatManualMode = ref(false)
+const wechatPathMode = ref(false)
+const wechatPathForm = reactive({ wxid: '', db_dir: '' })
 const wechatAgentError = ref('')
 const connectorPending = reactive<Record<ConnectorPlatform, boolean>>({ feishu: false, wecom: false, wechat: false })
 const feishuBinding = ref(false)
@@ -237,6 +252,10 @@ const selectedWechatAccount = computed(() => (
   wechatAccounts.value.find((item) => item.wxid === selectedWechatWXID.value) || null
 ))
 const wechatConfirmButton = computed(() => {
+  if (wechatPathMode.value) {
+    const ready = Boolean(wechatPathForm.wxid.trim() && wechatPathForm.db_dir.trim())
+    return { content: '绑定指定目录', loading: wechatBinding.value, disabled: wechatBinding.value || !ready }
+  }
   if (selectedWechatAccount.value) {
     return { content: '绑定选中的微信', loading: wechatBinding.value, disabled: wechatBinding.value }
   }
@@ -521,6 +540,10 @@ async function confirmFeishuBind() {
 }
 async function confirmWechatBind() {
   if (wechatBinding.value) return
+  if (wechatPathMode.value) {
+    await bindManualWechatAccount()
+    return
+  }
   if (selectedWechatAccount.value) {
     await bindSelectedWechatAccount()
     return
@@ -530,6 +553,44 @@ async function confirmWechatBind() {
     return
   }
   await checkWechatPairingStatus()
+}
+function enableWechatPathMode() {
+  wechatPathMode.value = true
+  wechatPathForm.wxid = selectedWechatAccount.value?.wxid || ''
+  wechatPathForm.db_dir = selectedWechatAccount.value?.db_dir || ''
+  wechatAgentError.value = ''
+}
+function disableWechatPathMode() {
+  wechatPathMode.value = false
+  wechatAgentError.value = ''
+}
+async function bindManualWechatAccount() {
+  const wxid = wechatPathForm.wxid.trim()
+  const dbDir = wechatPathForm.db_dir.trim()
+  if (!wxid || !dbDir) {
+    MessagePlugin.warning('请填写微信 ID 和本机微信数据目录')
+    return
+  }
+  if (!wechatPairingID.value || !wechatPairingCode.value) {
+    MessagePlugin.error('配对信息不完整，请重新检测')
+    return
+  }
+  wechatBinding.value = true
+  try {
+    await pairLocalWechatAccount(wechatPairingID.value, wechatPairingCode.value, wxid, dbDir)
+    const result = await getWechatPairingStatus(wechatPairingID.value)
+    if (result.connector_id) {
+      wechatDialogVisible.value = false
+      await refreshConnectors()
+      MessagePlugin.success('个人微信已绑定到当前设备')
+      return
+    }
+    MessagePlugin.info('本机 Agent 已提交配对，正在等待服务端确认')
+  } catch (cause) {
+    MessagePlugin.error(errorMessage(cause, '手动绑定微信失败'))
+  } finally {
+    wechatBinding.value = false
+  }
 }
 async function bindSelectedWechatAccount() {
   const account = selectedWechatAccount.value
@@ -582,6 +643,7 @@ async function beginWechatPairing() {
   wechatAccounts.value = []
   selectedWechatWXID.value = ''
   wechatManualMode.value = false
+  wechatPathMode.value = false
   wechatAgentError.value = ''
   try {
     const pairing = await createWechatPairing()
