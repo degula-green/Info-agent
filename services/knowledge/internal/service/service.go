@@ -3048,7 +3048,15 @@ func (s *Service) GetKnowledgeOriginal(ctx context.Context, userID, knowledgeIte
 	}
 	if !allowed {
 		if item.OriginalAccessRequired {
-			return nil, apperror.New("original_access_required", "original content requires approval", 403, false)
+			return nil, apperror.WithDetails(
+				apperror.New("original_access_required", "original content requires approval", 403, false),
+				map[string]any{
+					"knowledge_item_id": item.ID,
+					"resource_type":     "knowledge_original",
+					"resource_id":       item.ID,
+					"action":            "view",
+				},
+			)
 		}
 		return nil, apperror.Clone(apperror.ErrForbidden)
 	}
@@ -3057,6 +3065,14 @@ func (s *Service) GetKnowledgeOriginal(ctx context.Context, userID, knowledgeIte
 		return nil, err
 	}
 	return content, nil
+}
+
+func (s *Service) GetKnowledgeOriginalByMessage(ctx context.Context, userID, messageID string) (*domain.KnowledgeContent, error) {
+	item, err := s.Repo.GetKnowledgeItemByMessage(ctx, strings.TrimSpace(messageID))
+	if err != nil {
+		return nil, err
+	}
+	return s.GetKnowledgeOriginal(ctx, userID, item.ID)
 }
 
 func (s *Service) CanReviewAccessRequest(ctx context.Context, userID, resourceType, resourceID string) (bool, error) {
