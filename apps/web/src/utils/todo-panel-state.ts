@@ -21,6 +21,7 @@ export interface TodoPanelState extends TodoPanelAnchor {
   version: 1
   collapsed: boolean
   activeTab: TodoPanelTab
+  opacity: number
 }
 
 export interface TodoPanelPlacement extends TodoPanelAnchor {
@@ -34,6 +35,9 @@ export const TODO_PANEL_STORAGE_KEY = 'info-agent.todo-panel.v1'
 export const TODO_PANEL_COLLAPSED_SIZE = 56
 export const TODO_PANEL_DEFAULT_GAP = 24
 export const TODO_PANEL_EDGE_GAP = 12
+export const TODO_PANEL_DEFAULT_OPACITY = 1
+export const TODO_PANEL_MIN_OPACITY = 0.5
+export const TODO_PANEL_MAX_OPACITY = 1
 
 function browserStorage(): TodoPanelStorage | null {
   if (typeof window === 'undefined') return null
@@ -65,6 +69,7 @@ export function defaultTodoPanelState(viewport: TodoPanelViewport): TodoPanelSta
     ...defaultTodoPanelAnchor(viewport),
     collapsed: false,
     activeTab: 'open',
+    opacity: TODO_PANEL_DEFAULT_OPACITY,
   }
 }
 
@@ -136,6 +141,11 @@ export function parseTodoPanelState(raw: string | null): TodoPanelState | null {
       y,
       collapsed: Boolean(value.collapsed),
       activeTab: value.activeTab === 'done' ? 'done' : 'open',
+      opacity: clamp(
+        finiteNumber(value.opacity, TODO_PANEL_DEFAULT_OPACITY),
+        TODO_PANEL_MIN_OPACITY,
+        TODO_PANEL_MAX_OPACITY,
+      ),
     }
   } catch {
     return null

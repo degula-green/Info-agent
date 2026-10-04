@@ -33,6 +33,7 @@ services:
     build: ../services/knowledge
     environment:
       KNOWLEDGE_HTTP_PORT: 8090
+      KNOWLEDGE_CONTACT_PROFILE_REFRESH_INTERVAL: ${KNOWLEDGE_CONTACT_PROFILE_REFRESH_INTERVAL:-72h}
       KNOWLEDGE_DATABASE_URL: ${KNOWLEDGE_DATABASE_URL:-postgresql://postgres:postgres@postgres:5432/info_agent}
       KNOWLEDGE_DATABASE_SCHEMA: ${KNOWLEDGE_DATABASE_SCHEMA:-knowledge}
       KNOWLEDGE_REDIS_URL: ${KNOWLEDGE_REDIS_URL:-redis://redis:6379/1}

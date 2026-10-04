@@ -65,7 +65,12 @@ def test_search_parses_results_and_names_the_provider() -> None:
     payload = {
         "query": "回调",
         "results": [
-            {"url": "https://a.example.com/1", "title": "A", "content": "片段 A"},
+            {
+                "url": "https://a.example.com/1",
+                "title": "A",
+                "content": "片段 A",
+                "raw_content": "完整正文 A",
+            },
             {"url": "https://b.example.com/2", "title": "B", "content": "片段 B"},
             {"url": "https://a.example.com/1", "title": "dup", "content": "重复"},
         ],
@@ -93,6 +98,7 @@ def test_search_parses_results_and_names_the_provider() -> None:
         ("https://a.example.com/1", 1, "tavily"),
         ("https://b.example.com/2", 2, "tavily"),
     ]
+    assert results[0].raw_content == "完整正文 A"
 
 
 def test_search_without_a_key_uses_the_documented_keyless_header() -> None:

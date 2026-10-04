@@ -13,74 +13,45 @@
 
       <div v-else class="agent-transcript">
         <div v-for="message in messages" :key="message.id" :class="['agent-message', `agent-message--${message.role}`]">
-          <div v-if="message.role === 'user'" class="agent-user-message">
-            <div class="agent-user-bubble">{{ message.text }}</div>
-            <div class="agent-user-actions" aria-label="问题操作">
-              <button type="button" title="复制问题" aria-label="复制问题" @click="copyText(message.text || '', '问题已复制')"><t-icon name="file-copy" /></button>
-              <button type="button" title="编辑问题" aria-label="编辑问题" @click="editQuestion(message.text || '')"><t-icon name="edit-1" /></button>
-            </div>
-          </div>
-          <div v-else class="agent-answer">
-            <div class="agent-status" :class="`agent-status--${message.status || 'running'}`">
-              <span class="agent-status__dot" />
-              <span>{{ message.statusText || statusLabel(message.status) }}</span>
-            </div>
-
-            <div v-if="primaryAnswer(message)" class="agent-answer__content" v-html="renderChatMarkdown(primaryAnswer(message))" />
-            <div v-else-if="showsEmptyKnowledgeResult(message)" class="agent-empty-result">
-              <strong>没有找到满足条件的内容。</strong>
-            </div>
-
-            <section v-if="visibleSourceItems(message).length" class="agent-sources" aria-label="回答来源">
-              <button
-                type="button"
-                class="agent-sources__toggle"
-                :aria-expanded="isSourcesExpanded(message)"
-                @click="toggleSources(message)"
-              >
-                <span>
-                  <t-icon name="file" />
-                  来源 {{ visibleSourceItems(message).length }}
-                </span>
-                <t-icon :name="isSourcesExpanded(message) ? 'chevron-up' : 'chevron-down'" />
-              </button>
-              <div v-if="isSourcesExpanded(message)" class="agent-sources__list">
-                <article v-for="source in visibleSourceItems(message)" :key="source.key" class="agent-source-card" @click="openSourceItem(source)">
-                  <div class="agent-source-card__body">
-                    <strong>{{ source.title }}</strong>
-                    <span>{{ source.meta }}</span>
-                    <p v-if="source.preview">{{ source.preview }}</p>
-                  </div>
-                  <div class="agent-source-card__actions">
-                    <button v-if="source.kind === 'attachment'" type="button" @click.stop="openSourceItem(source)">预览</button>
-                    <button v-if="source.kind === 'attachment' && (source.conversation_id || source.conversation_name)" type="button" @click.stop="jumpToSourceItem(source)">
-                      <t-icon :name="source.kind === 'attachment' ? 'file' : 'chat'" />
-                      跳转到对应位置
-                    </button>
-                  </div>
-                </article>
+          <AgentUserMessage
+            v-if="message.role === 'user'"
+            :text="message.text || ''"
+            @copy="copyText(message.text || '', '问题已复制')"
+            @edit="editQuestion(message.text || '')"
+          />
+          <article v-else class="agent-response">
+            <header class="agent-response__header">
+              <span class="agent-response__mark"><AgentMark :active="isAgentActive(message.status)" /></span>
+              <div class="agent-response__identity">
+                <strong>Agent</strong>
+                <AgentStatusIndicator
+                  :status="message.status"
+                  :text="message.statusText || statusLabel(message.status)"
+                />
               </div>
-            </section>
+            </header>
+            <div class="agent-answer">
 
-            <div v-if="message.steps.length" class="agent-trace">
-              <button type="button" class="agent-trace__toggle" @click="toggleTrace(message)">
-                <t-icon name="chevron-right" :class="{ 'agent-trace__chevron--open': isTraceOpen(message) }" />
-                查看执行过程
-              </button>
-              <ol v-if="isTraceOpen(message)" class="agent-trace__steps" aria-label="执行步骤">
-                <li v-for="step in message.steps" :key="step.id" :class="`agent-step--${step.status}`">
-                  <span class="agent-step__body">
-                    {{ displayStepLabel(step.label) }}
-                    <em
-                      v-for="(stage, index) in step.stages || []"
-                      :key="index"
-                      class="agent-step__stage"
-                    >{{ stage }}</em>
-                  </span>
-                  <small>{{ stepStatusLabel(step.status) }}</small>
-                </li>
-              </ol>
-            </div>
+              <AgentAnswerContent v-if="primaryAnswer(message)" :content="primaryAnswer(message)" />
+              <div v-else-if="showsEmptyKnowledgeResult(message)" class="agent-empty-result">
+                <strong>没有找到满足条件的内容。</strong>
+              </div>
+
+              <AgentSourceList
+                v-if="visibleSourceItems(message).length"
+                :sources="visibleSourceItems(message)"
+                :expanded="isSourcesExpanded(message)"
+                @toggle="toggleSources(message)"
+                @open="openSourceItem"
+                @jump="jumpToSourceItem"
+              />
+
+              <AgentStepsTimeline
+                v-if="message.steps.length"
+                :steps="message.steps"
+                :open="isTraceOpen(message)"
+                @toggle="toggleTrace(message)"
+              />
 
             <div v-if="message.todo" class="agent-todo">
               <div class="agent-todo__title"><t-icon name="task-checked" />待办已创建</div>
@@ -210,6 +181,7 @@
               <button type="button" title="复制回答" aria-label="复制回答" @click="copyText(primaryAnswer(message), '回答已复制')"><t-icon name="file-copy" /></button>
             </div>
           </div>
+          </article>
         </div>
       </div>
     </div>
@@ -237,7 +209,7 @@
               aria-label="添加附件"
               @click="openFilePicker"
             >
-              <t-icon name="upload" />
+              <t-icon name="attach" />
             </button>
             <input
               ref="fileInputRef"
@@ -318,9 +290,14 @@
 import { nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { MessagePlugin } from 'tdesign-vue-next'
 import { useRoute, useRouter } from 'vue-router'
-import { renderChatMarkdown } from '@/utils/chatMarkdownRenderer'
 import { getKnowledgeAttachmentContent, listKnowledgeConversationAttachments } from '@/api/info-knowledge'
 import InfoAttachmentPreview from '@/components/InfoAttachmentPreview.vue'
+import AgentAnswerContent from '@/components/agent-chat/AgentAnswerContent.vue'
+import AgentMark from '@/components/agent-chat/AgentMark.vue'
+import AgentSourceList from '@/components/agent-chat/AgentSourceList.vue'
+import AgentStatusIndicator from '@/components/agent-chat/AgentStatusIndicator.vue'
+import AgentStepsTimeline from '@/components/agent-chat/AgentStepsTimeline.vue'
+import AgentUserMessage from '@/components/agent-chat/AgentUserMessage.vue'
 import type { InfoFile } from '@/mock'
 import { useInfoKnowledgeStore } from '@/stores/infoKnowledge'
 import { navigateToKnowledgeSource } from '@/utils/knowledge-source-navigation'
@@ -499,6 +476,10 @@ function statusLabel(status?: string): string {
     unknown: '外部结果未知',
     cancelled: '任务已取消',
   } as Record<string, string>)[status || ''] || '正在处理'
+}
+
+function isAgentActive(status?: string): boolean {
+  return ['received', 'planning', 'ready', 'executing', 'waiting_approval', 'waiting_input'].includes(status || '')
 }
 
 function statusFromHistoryMessage(status: string): string {
@@ -851,18 +832,6 @@ function stepSucceededText(capability: string): string {
     'answer.compose': '回答已生成',
     'todo.create': '待办已创建',
   } as Record<string, string>)[capability] || `${displayStepLabel(capability || '步骤')}完成`
-}
-
-function stepStatusLabel(status: string): string {
-  return ({
-    pending: '等待执行',
-    ready: '准备执行',
-    running: '进行中',
-    waiting_approval: '等待确认',
-    succeeded: '已完成',
-    failed: '失败',
-    skipped: '已跳过',
-  } as Record<string, string>)[status] || status
 }
 
 function stepsFromPlan(plan: AgentPlan | null): Step[] {
@@ -1795,16 +1764,21 @@ onBeforeUnmount(() => {
 .agent-welcome { display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 100%; padding-bottom: 120px; text-align: center; }
 .agent-welcome h1 { margin: 0 0 12px; color: var(--td-text-color-primary); font-size: 36px; font-weight: 600; }
 .agent-welcome p { margin: 0; color: var(--td-text-color-secondary); font-size: 16px; }
-.agent-transcript { width: min(960px, 100%); margin: 0 auto; padding-bottom: 20px; }
-.agent-message { display: flex; width: 100%; margin-bottom: 28px; }
+.agent-transcript { width: min(920px, 100%); margin: 0 auto; padding-bottom: 24px; }
+.agent-message { display: flex; width: 100%; margin-bottom: 38px; }
 .agent-message--user { justify-content: flex-end; }
-.agent-user-message { display: flex; max-width: min(620px, 75%); flex-direction: column; align-items: flex-end; gap: 6px; }
-.agent-user-bubble { max-width: 100%; padding: 11px 15px; border-radius: 14px; color: var(--td-text-color-primary); background: var(--td-bg-color-secondarycontainer); font-size: 14px; line-height: 1.6; }
-.agent-answer { width: min(760px, 100%); padding-left: 2px; }
+.agent-response { position: relative; display: grid; width: 100%; gap: 12px; }
+.agent-response__header { display: flex; align-items: center; gap: 10px; }
+.agent-response__mark { display: grid; width: 28px; height: 28px; flex: 0 0 28px; place-items: center; color: var(--td-brand-color); background: transparent; }
+.agent-response__mark svg { width: 15px; height: 15px; }
+.agent-response__identity { display: flex; align-items: baseline; gap: 9px; min-width: 0; }
+.agent-response__identity strong { color: var(--td-text-color-primary); font-size: 13px; font-weight: 600; }
+.agent-answer { display: grid; width: min(820px, calc(100% - 38px)); gap: 14px; margin-left: 38px; }
 .agent-user-actions, .agent-answer__actions { display: flex; align-items: center; gap: 7px; margin-top: 12px; opacity: 0; pointer-events: none; transition: opacity .15s ease; }
+.agent-answer__actions { justify-content: flex-end; margin-top: 4px; }
 .agent-user-actions { justify-content: flex-end; margin-top: 0; gap: 4px; }
 .agent-user-message:hover .agent-user-actions, .agent-user-message:focus-within .agent-user-actions,
-.agent-answer:hover .agent-answer__actions, .agent-answer:focus-within .agent-answer__actions { opacity: 1; pointer-events: auto; }
+.agent-response:hover .agent-answer__actions, .agent-response:focus-within .agent-answer__actions { opacity: 1; pointer-events: auto; }
 .agent-user-actions button, .agent-answer__actions button { display: inline-grid; place-items: center; width: 28px; height: 28px; padding: 0; border: 0; border-radius: 6px; color: var(--td-text-color-placeholder); background: transparent; cursor: pointer; }
 .agent-user-actions button:hover, .agent-answer__actions button:hover { color: var(--td-text-color-secondary); background: var(--td-bg-color-secondarycontainer); }
 .agent-user-actions svg, .agent-answer__actions svg { width: 16px; height: 16px; }
@@ -1818,7 +1792,7 @@ onBeforeUnmount(() => {
 .agent-steps li::before { content: ''; width: 6px; height: 6px; border-radius: 50%; background: var(--td-brand-color-disabled); }
 .agent-step--succeeded::before { background: var(--td-success-color) !important; }
 .agent-step--failed::before { background: var(--td-error-color) !important; }
-.agent-empty-result { display: grid; gap: 5px; margin-top: 4px; padding: 12px 13px; border: 1px dashed var(--td-component-stroke); border-radius: 8px; color: var(--td-text-color-secondary); font-size: 13px; line-height: 1.6; }
+.agent-empty-result { display: grid; gap: 5px; margin-top: 0; padding: 14px 15px; border: 1px dashed var(--td-component-stroke); border-radius: 12px; color: var(--td-text-color-secondary); background: var(--td-bg-color-secondarycontainer); font-size: 13px; line-height: 1.6; }
 .agent-empty-result strong { color: var(--td-text-color-primary); font-size: 13px; font-weight: 500; }
 .agent-empty-result span { color: var(--td-text-color-secondary); font-size: 12px; }
 .agent-sources { display: grid; gap: 8px; margin-top: 16px; }
@@ -1852,7 +1826,7 @@ onBeforeUnmount(() => {
 .agent-source-card__actions span { display: inline-block; min-height: 24px; margin: 0; padding: 0 8px; border: 1px solid var(--td-component-stroke); border-radius: 6px; color: var(--td-brand-color); background: var(--td-bg-color-container); font-size: 12px; line-height: 22px; }
 .agent-source-card__actions button, .agent-citation__actions button, .agent-citation__actions a { min-height: 28px; padding: 0 9px; border: 1px solid var(--td-component-stroke); border-radius: 6px; color: var(--td-brand-color); background: var(--td-bg-color-container); font-size: 12px; line-height: 26px; text-decoration: none; cursor: pointer; }
 .agent-content-card { display: block; }
-.agent-content-card blockquote { margin: 9px 0 0; padding: 9px 10px; border-left: 3px solid var(--td-brand-color-focus); border-radius: 0 6px 6px 0; color: var(--td-text-color-secondary); background: var(--td-bg-color-secondarycontainer); font-size: 12px; line-height: 1.6; }
+.agent-content-card blockquote { margin: 9px 0 0; padding: 9px 10px; border-left: 1px solid var(--td-brand-color-focus); border-radius: 0 6px 6px 0; color: var(--td-text-color-secondary); background: var(--td-bg-color-secondarycontainer); font-size: 12px; line-height: 1.6; }
 .agent-content-card .agent-source-card__actions { margin-top: 9px; }
 .agent-coverage-note { margin: 2px 0 0; color: var(--td-warning-color); font-size: 12px; line-height: 1.5; }
 .agent-answer-block { display: grid; gap: 14px; }
@@ -1867,15 +1841,15 @@ onBeforeUnmount(() => {
 .agent-citation small { display: block; margin-top: 4px; color: var(--td-text-color-placeholder); font-size: 11px; }
 .agent-citation a { display: block; overflow: hidden; margin-top: 4px; color: var(--td-brand-color); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
 .agent-citation__actions { margin-top: 7px; }
-.agent-todo { display: grid; gap: 5px; margin-top: 14px; padding: 13px; border: 1px solid var(--td-brand-color-focus); border-radius: 9px; background: var(--td-brand-color-1); }
+.agent-todo { display: grid; gap: 5px; margin-top: 2px; padding: 14px 16px; border: 1px solid var(--td-brand-color-focus); border-radius: 12px; background: var(--td-brand-color-1); }
 .agent-todo__title { display: flex; align-items: center; gap: 6px; color: var(--td-brand-color); font-size: 12px; }
 .agent-todo strong { font-size: 15px; }
 .agent-todo span { color: var(--td-text-color-secondary); font-size: 12px; }
-.agent-form-result { display: grid; gap: 4px; margin-top: 14px; padding: 12px 14px; border: 1px solid var(--td-success-color-3); border-radius: 9px; background: var(--td-success-color-1); }
+.agent-form-result { display: grid; gap: 4px; margin-top: 2px; padding: 14px 16px; border: 1px solid var(--td-success-color-3); border-radius: 12px; background: var(--td-success-color-1); }
 .agent-form-result__title { display: inline-flex; align-items: center; gap: 6px; font-weight: 600; }
 .agent-form-result span { color: var(--td-text-color-secondary); font-size: 12px; }
 .agent-form-result__undo { justify-self: start; min-height: 30px; padding: 0 12px; }
-.agent-approval, .agent-input-request { display: grid; gap: 11px; margin-top: 14px; padding: 14px; border: 1px solid var(--td-warning-color-3); border-radius: 9px; background: var(--td-warning-color-1); }
+.agent-approval, .agent-input-request { display: grid; gap: 11px; margin-top: 2px; padding: 16px; border: 1px solid var(--td-warning-color-3); border-radius: 12px; background: var(--td-warning-color-1); }
 .agent-approval__header, .agent-approval__actions { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 .agent-approval__header span { display: inline-flex; align-items: center; gap: 6px; font-weight: 600; }
 .agent-approval__header small { color: var(--td-text-color-secondary); }
@@ -1891,18 +1865,19 @@ onBeforeUnmount(() => {
 .agent-form__fields label { display: grid; gap: 4px; color: var(--td-text-color-secondary); font-size: 12px; }
 .agent-form__source { margin-left: 6px; padding: 0 6px; border-radius: 8px; color: var(--td-text-color-placeholder); background: var(--td-bg-color-component); font-size: 11px; }
 .agent-form__fields input { width: 100%; min-height: 32px; padding: 6px 9px; border: 1px solid var(--td-component-stroke); border-radius: 6px; color: var(--td-text-color-primary); background: var(--td-bg-color-container); }
-.agent-takeover { display: grid; gap: 10px; margin-top: 14px; padding: 14px; border: 1px solid var(--td-warning-color-3); border-radius: 9px; background: var(--td-warning-color-1); }
+.agent-takeover { display: grid; gap: 10px; margin-top: 2px; padding: 16px; border: 1px solid var(--td-warning-color-3); border-radius: 12px; background: var(--td-warning-color-1); }
 .agent-takeover__hint { margin: 0; color: var(--td-text-color-secondary); font-size: 12px; line-height: 1.6; }
 .agent-takeover__screen { width: 100%; max-height: 420px; object-fit: contain; border: 1px solid var(--td-component-stroke); border-radius: 6px; background: #fff; cursor: crosshair; }
 .agent-takeover__controls { display: grid; grid-template-columns: 1fr auto auto; gap: 8px; }
 .agent-takeover__controls input { width: 100%; min-height: 34px; padding: 6px 9px; border: 1px solid var(--td-component-stroke); border-radius: 6px; color: var(--td-text-color-primary); background: var(--td-bg-color-container); }
-.agent-button { min-height: 34px; padding: 0 14px; border: 1px solid var(--td-component-stroke); border-radius: 7px; color: var(--td-text-color-primary); background: var(--td-bg-color-container); cursor: pointer; }
+.agent-button { min-height: 34px; padding: 0 14px; border: 1px solid var(--td-component-stroke); border-radius: 8px; color: var(--td-text-color-primary); background: var(--td-bg-color-container); cursor: pointer; transition: border-color 150ms ease, background 150ms ease, color 150ms ease; }
+.agent-button:hover:not(:disabled) { border-color: var(--td-brand-color-focus); background: var(--td-bg-color-container-hover); }
 .agent-button--primary { border-color: var(--td-brand-color); color: #fff; background: var(--td-brand-color); }
 .agent-button:disabled { cursor: not-allowed; opacity: .55; }
 .agent-input-request { grid-template-columns: 1fr auto; align-items: end; }
 .agent-input-request label { grid-column: 1; }
 .agent-input-request button { grid-column: 2; align-self: end; }
-.agent-error { margin: 12px 0 0; color: var(--td-error-color); font-size: 13px; line-height: 1.6; }
+.agent-error { margin: 2px 0 0; padding: 11px 13px; border: 1px solid var(--td-error-color-3); border-radius: 10px; color: var(--td-error-color); background: var(--td-error-color-1); font-size: 13px; line-height: 1.6; }
 .agent-composer-area { position: absolute; z-index: 5; right: 0; bottom: 0; left: 0; display: flex; flex-direction: column; align-items: center; padding: 0 24px 22px; background: linear-gradient(to top, var(--td-bg-color-container) 62%, transparent); }
 .agent-composer { position: relative; width: min(960px, 100%); border: 1px solid var(--td-component-stroke); border-radius: 14px; background: var(--td-bg-color-container); box-shadow: 0 2px 8px rgba(0, 0, 0, .04), 0 8px 16px -4px rgba(0, 0, 0, .06); transition: border-color .15s, box-shadow .15s; }
 .agent-composer--focused { border-color: var(--td-brand-color); box-shadow: 0 0 0 3px var(--td-brand-color-focus), 0 8px 18px -8px rgba(0, 0, 0, .18); }
@@ -1930,6 +1905,6 @@ onBeforeUnmount(() => {
 .agent-source-preview footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding-top: 10px; border-top: 1px solid var(--td-component-stroke); color: var(--td-text-color-secondary); font-size: 12px; }
 .agent-source-preview__actions { display: inline-flex; align-items: center; gap: 8px; }
 .agent-source-preview-dialog .t-dialog__body { padding: 0; }
-@media (max-width: 760px) { .agent-chat-page { min-height: 560px; } .agent-chat-scroll { padding: 24px 16px 185px; } .agent-welcome { padding-bottom: 80px; } .agent-welcome h1 { font-size: 28px; } .agent-user-bubble { max-width: 88%; font-size: 13px; } .agent-source-card { display: grid; } .agent-source-card__actions { justify-content: flex-start; } .agent-composer-area { padding: 0 12px 14px; } .agent-textarea :deep(.t-textarea__inner) { min-height: 100px; padding: 13px 14px 58px; font-size: 14px; } .agent-input-request { grid-template-columns: 1fr; } .agent-input-request button { grid-column: 1; } }
+@media (max-width: 760px) { .agent-chat-page { min-height: 560px; } .agent-chat-scroll { padding: 24px 16px 185px; } .agent-welcome { padding-bottom: 80px; } .agent-welcome h1 { font-size: 28px; } .agent-message { margin-bottom: 30px; } .agent-response { gap: 10px; } .agent-response__mark { width: 26px; height: 26px; flex-basis: 26px; } .agent-answer { width: 100%; margin-left: 0; } .agent-source-card { display: grid; } .agent-source-card__actions { justify-content: flex-start; } .agent-composer-area { padding: 0 12px 14px; } .agent-textarea :deep(.t-textarea__inner) { min-height: 100px; padding: 13px 14px 58px; font-size: 14px; } .agent-input-request { grid-template-columns: 1fr; } .agent-input-request button { grid-column: 1; } }
 @media (hover: none) { .agent-user-actions, .agent-answer__actions { opacity: 1; pointer-events: auto; } }
 </style>

@@ -366,6 +366,27 @@ class InMemoryAgentStore:
             items.sort(key=lambda item: item.created_at)
             return [item.model_copy(deep=True) for item in items[:limit]]
 
+    def claim_outbox(
+        self, limit: int = 50, *, lease_seconds: float = 60.0
+    ) -> list[OutboxEvent]:
+        with self._lock:
+            now = utcnow()
+            items = [
+                item
+                for item in self.outbox.values()
+                if item.status in {"pending", "publishing"}
+                and (item.available_at is None or item.available_at <= now)
+            ]
+            items.sort(key=lambda item: item.created_at)
+            claimed = items[: max(1, int(limit))]
+            if not claimed:
+                return []
+            lease_until = now + timedelta(seconds=max(1.0, float(lease_seconds)))
+            for item in claimed:
+                item.status = "publishing"
+                item.available_at = lease_until
+            return [item.model_copy(deep=True) for item in claimed]
+
     def mark_outbox_sent(self, event_id: str) -> None:
         with self._lock:
             item = self.outbox.get(event_id)

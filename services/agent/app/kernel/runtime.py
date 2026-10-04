@@ -6,6 +6,7 @@ import json
 import inspect
 import logging
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from typing import Any, Callable
 
@@ -18,6 +19,7 @@ from app.kernel.execution_context import (
     current_conversation_context,
 )
 from app.kernel.executor import CapabilityExecutor
+from app.kernel.graph import normalize_plan_dependencies, ready_steps
 from app.kernel.limits import ExecutionLimits
 from app.kernel.models import (
     EvidenceRecord,
@@ -64,8 +66,38 @@ from app.kernel.states import (
 )
 from app.kernel.validator import PlanValidator
 from app.kernel.approval import approval_matches_arguments
+from app.infrastructure.web.url_tools import extract_http_urls
 
 logger = logging.getLogger("agent.runtime")
+
+_EXPLICIT_URL_UNREADABLE_ERROR = "WebResearchUrlUnreadable"
+_UNANSWERED_URL_MARKERS = (
+    "未提及",
+    "没有提及",
+    "并未提及",
+    "未找到",
+    "没有找到",
+    "无法确认",
+    "无法读取",
+    "不能确认",
+    "not mention",
+    "no mention",
+    "does not mention",
+    "could not find",
+    "couldn't find",
+)
+_FAST_COMPLETE_CAPABILITIES = frozenset(
+    {"answer.compose", "knowledge.answer", "chat.reply"}
+)
+_FAST_CONTINUE_PAIRS = frozenset(
+    {
+        ("web.research", "answer.compose"),
+        ("knowledge.search_sources", "knowledge.search_content"),
+        ("knowledge.search_content", "knowledge.answer"),
+        ("knowledge.search_sources", "knowledge.answer"),
+        ("form.preview", "form.apply"),
+    }
+)
 
 
 def _call_with_optional_kwargs(call, *args, **kwargs):
@@ -217,6 +249,20 @@ class AgentRuntime:
                     return planned
                 continue
 
+            try:
+                plan = self._normalize_active_plan(plan)
+            except ContractValidationError as exc:
+                return self._fail(
+                    task,
+                    {
+                        "classification": "validation_error",
+                        "message": str(exc),
+                        "errors": exc.errors,
+                    },
+                    executed=executed,
+                    plan=plan,
+                )
+
             understanding = self._load_understanding(task)
             if plan.requires_user_confirmation:
                 return self._pause_for_input(
@@ -240,7 +286,13 @@ class AgentRuntime:
             # A Step left "running" by a crashed worker is unfinished work, not
             # finished work: falling through to next_pending_step would skip its
             # external effect entirely.
-            step = resume_step(steps)
+            running_steps = [item for item in steps if item.status == "running"]
+            if self._parallel_enabled():
+                ready = ready_steps(steps)
+                step = running_steps[0] if running_steps else (ready[0] if ready else None)
+            else:
+                ready = []
+                step = resume_step(steps)
             observations = self.store.list_observations(task.task_id)
 
             if step is None:
@@ -261,6 +313,26 @@ class AgentRuntime:
                 if recovered is not None:
                     return recovered
                 continue
+
+            if self._parallel_enabled() and ready:
+                capabilities = {
+                    item.step_id: self.registry.find(item.capability)
+                    for item in ready
+                }
+                if all(
+                    capability is not None
+                    and not capability.descriptor.side_effect
+                    for capability in capabilities.values()
+                ):
+                    parallel = self._run_parallel_batch(
+                        task, plan, ready, understanding, executed
+                    )
+                    if parallel is False:
+                        pass
+                    elif parallel is not None:
+                        return parallel
+                    else:
+                        continue
 
             try:
                 resolved_arguments = resolve_arguments(step.arguments, observations)
@@ -813,6 +885,7 @@ class AgentRuntime:
             # gets the same normalization here, so the Runtime never has to
             # interpret a planner-facing reference object as an argument.
             plan = bind_plan_references(plan, self.registry.list_descriptors())
+            plan = normalize_plan_dependencies(plan)
             self.validator.validate(plan, task.to_envelope())
         except ContractValidationError as exc:
             return self._fail(
@@ -862,6 +935,15 @@ class AgentRuntime:
             max_step_attempts=self.limits.max_step_attempts,
             max_same_capability_calls=self.limits.max_same_capability_calls,
         )
+
+    def _normalize_active_plan(self, plan: Plan) -> Plan:
+        normalized = normalize_plan_dependencies(plan)
+        original = {step.step_id: step for step in plan.steps}
+        for step in normalized.steps:
+            previous = original.get(step.step_id)
+            if previous is None or previous.depends_on != step.depends_on:
+                self.store.update_step(step)
+        return normalized
 
     def _planner_max_calls(self) -> int:
         return 2 if getattr(self.planner, "name", "") == "llm" else 1
@@ -917,6 +999,25 @@ class AgentRuntime:
             # "continue" with no pending Step used to fail the Task instead of
             # finishing it. A Plan with no steps still goes to the planner, which
             # owns the unsupported / not-a-task verdict.
+            return self._complete(
+                task,
+                plan,
+                self.store.list_steps(plan.plan_id),
+                executed,
+                warnings=list(plan.warnings),
+            )
+        shortcut = self._fast_planner_shortcut(plan, observations)
+        if shortcut == "continue":
+            return None
+        explicit_url_failure = self._explicit_url_failure(observations)
+        if explicit_url_failure is not None:
+            return self._fail(
+                task,
+                explicit_url_failure,
+                executed=executed,
+                plan=plan,
+            )
+        if shortcut == "complete":
             return self._complete(
                 task,
                 plan,
@@ -1105,6 +1206,129 @@ class AgentRuntime:
             terminal_status="unknown" if unknown_terminal else "failed",
         )
 
+    @staticmethod
+    def _fast_planner_shortcut(
+        plan: Plan,
+        observations: list[Observation],
+    ) -> str | None:
+        """Skip a model decision only on unambiguous terminal pipelines."""
+
+        latest = observations[-1] if observations else None
+        if latest is None or latest.status != "succeeded":
+            return None
+        output = latest.output or {}
+        if output.get("requires_user_input"):
+            return None
+
+        pending = [
+            step
+            for step in plan.steps
+            if step.status in {"pending", "ready"}
+        ]
+        if not pending:
+            if latest.capability in _FAST_COMPLETE_CAPABILITIES:
+                return "complete"
+            return None
+
+        next_step = min(pending, key=lambda item: item.order)
+        if (latest.capability, next_step.capability) in _FAST_CONTINUE_PAIRS:
+            return "continue"
+        return None
+
+    @staticmethod
+    def _explicit_url_failure(
+        observations: list[Observation],
+    ) -> dict[str, Any] | None:
+        """Stop immediately when a user-provided URL cannot be read.
+
+        A keyword-search fallback may find related material, but it cannot
+        satisfy a request whose subject is the exact page the user supplied.
+        Replanning here would replace the original requirement silently.
+        """
+
+        latest = observations[-1] if observations else None
+        if (
+            latest is None
+            or latest.status != "failed"
+            or latest.capability != "web.research"
+        ):
+            return None
+        error = latest.error or {}
+        if error.get("type") != _EXPLICIT_URL_UNREADABLE_ERROR:
+            return None
+        return {
+            "classification": "permanent_error",
+            "type": _EXPLICIT_URL_UNREADABLE_ERROR,
+            "code": "explicit_url_unreadable",
+            "message": error.get("message")
+            or "无法读取用户给出的网址，可能是页面需要登录或依赖 JavaScript。",
+        }
+
+    def _web_answer_quality_error(
+        self,
+        task: TaskRecord,
+        steps: list[PlanStep],
+    ) -> dict[str, Any] | None:
+        """Reject a web answer that does not answer with cited evidence."""
+
+        researched = any(
+            step.capability == "web.research" and step.status == "succeeded"
+            for step in steps
+        )
+        answered = any(
+            step.capability == "answer.compose" and step.status == "succeeded"
+            for step in steps
+        )
+        if not researched or not answered:
+            return None
+
+        observations = self.store.list_observations(task.task_id)
+        answer_observation = next(
+            (
+                observation
+                for observation in reversed(observations)
+                if observation.capability == "answer.compose"
+                and observation.status == "succeeded"
+            ),
+            None,
+        )
+        if answer_observation is None:
+            return None
+        output = answer_observation.output or {}
+        answer = str(output.get("answer") or "").strip()
+        citations = output.get("citations")
+        citation_count = len(citations) if isinstance(citations, list) else 0
+        requested_urls = extract_http_urls(str(task.input.get("text") or ""))
+        lowered = answer.lower()
+
+        if requested_urls and any(
+            marker in lowered for marker in _UNANSWERED_URL_MARKERS
+        ):
+            return {
+                "classification": "permanent_error",
+                "type": "AnswerQualityError",
+                "code": "requested_url_unanswered",
+                "message": (
+                    "公网研究没有回答用户给出的网址："
+                    + "，".join(requested_urls)
+                ),
+            }
+        if not answer:
+            return {
+                "classification": "permanent_error",
+                "type": "AnswerQualityError",
+                "code": "empty_web_answer",
+                "message": "公网研究已完成，但回答步骤没有生成有效答案。",
+            }
+        if citation_count == 0:
+            return {
+                "classification": "permanent_error",
+                "type": "AnswerQualityError",
+                "code": "uncited_web_answer",
+                "message": "公网研究没有产出可引用的网页证据，无法确认回答内容。",
+            }
+        return None
+
     def _activate_replan(
         self,
         task: TaskRecord,
@@ -1175,6 +1399,7 @@ class AgentRuntime:
             new_plan = bind_plan_references(
                 new_plan, self.registry.list_descriptors()
             )
+            new_plan = normalize_plan_dependencies(new_plan)
             self.validator.validate(new_plan, task.to_envelope())
         except ContractValidationError as exc:
             return self._fail(
@@ -1426,6 +1651,181 @@ class AgentRuntime:
             task.task_id,
             previous,
             reason,
+        )
+
+    def _parallel_enabled(self) -> bool:
+        return bool(getattr(self.settings, "task_parallel_enabled", False))
+
+    def _parallel_limit(self) -> int:
+        return max(1, int(getattr(self.settings, "task_step_concurrency", 1)))
+
+    def _run_parallel_batch(
+        self,
+        task: TaskRecord,
+        plan: Plan,
+        ready: list[PlanStep],
+        understanding: TaskUnderstanding | None,
+        executed: list[str],
+    ) -> TaskRunResult | bool | None:
+        """Execute a batch of independent read-only Steps.
+
+        The scheduler performs all state commits; worker threads only call the
+        Capability. A single Step keeps the existing serial path so approval,
+        preflight and repair behavior remain unchanged.
+        """
+
+        selected = ready[: self._parallel_limit()]
+        if len(selected) < 2:
+            return False
+
+        observations = self.store.list_observations(task.task_id)
+        for step in selected:
+            capability = self.registry.get(step.capability)
+            if self._repeated_capability_run(step, observations) >= self.limits.max_same_capability_calls:
+                return False
+            policy = self.policy.evaluate(
+                task.to_envelope(), step, capability.descriptor
+            )
+            if policy.action != "allow":
+                return False
+            preflight = getattr(capability, "preflight", None)
+            if callable(preflight):
+                try:
+                    output = preflight(step.arguments)
+                except Exception:  # noqa: BLE001 - serial path normalizes this
+                    return False
+                if isinstance(output, dict) and output.get("requires_user_input"):
+                    return False
+            if step.attempt_count + 1 > self.limits.max_step_attempts:
+                return False
+
+        task = self.store.get_task(task.task_id)
+        if task is None:
+            raise TaskNotFoundError(f"unknown task: {task.task_id}")
+        ensure_task_transition(task.status, "executing")
+        task.status = "executing"
+        task.step_count += len(selected)
+        task.updated_at = utcnow()
+
+        attempts: dict[str, int] = {}
+        start_events = []
+        for step in sorted(selected, key=lambda item: item.order):
+            attempt = step.attempt_count + 1
+            attempts[step.step_id] = attempt
+            if step.status == "pending":
+                step.status = "ready"
+            ensure_step_transition(step.status, "running")
+            step.status = "running"
+            step.attempt_count = attempt
+            self.store.update_step(step, attempt_count=attempt)
+            start_events.append(
+                new_task_event(
+                    task.task_id,
+                    EVENT_STEP_STARTED,
+                    {
+                        "step_id": step.step_id,
+                        "capability": step.capability,
+                        "attempt": attempt,
+                    },
+                )
+            )
+        self.store.commit(task, events=start_events)
+
+        def execute_one(step: PlanStep):
+            attempt = attempts[step.step_id]
+            while True:
+                call = self.executor.execute(task, plan, step, attempt)
+                error = call.error or {}
+                if (
+                    call.status == "failed"
+                    and error.get("classification") == "retryable_error"
+                    and attempt < self.limits.max_step_attempts
+                ):
+                    time.sleep(self.limits.backoff_for(attempt))
+                    attempt += 1
+                    continue
+                return step, call, attempt
+
+        with ThreadPoolExecutor(
+            max_workers=min(self._parallel_limit(), len(selected))
+        ) as pool:
+            results = list(pool.map(execute_one, selected))
+
+        result_events = []
+        model_calls = 0
+        for step, call, attempt in sorted(
+            results, key=lambda item: item[0].order
+        ):
+            observation = self.executor.to_observation(call)
+            if call.status == "succeeded" and call.attempt == attempt:
+                model_calls += self._capture_evidence(observation)
+            self.store.save_observation(observation)
+            step.attempt_count = attempt
+            if call.status == "succeeded":
+                output = call.result or {}
+                if output.get("requires_user_input"):
+                    step.status = "ready"
+                else:
+                    step.status = "succeeded"
+                    executed.append(step.step_id)
+                self.store.update_step(step, attempt_count=attempt)
+                result_events.append(
+                    new_task_event(
+                        task.task_id,
+                        EVENT_STEP_SUCCEEDED,
+                        {
+                            "step_id": step.step_id,
+                            "capability": step.capability,
+                            "observation_id": observation.observation_id,
+                            "requires_user_input": bool(
+                                output.get("requires_user_input")
+                            ),
+                            "result_preview": self._result_preview(observation),
+                        },
+                    )
+                )
+            else:
+                error = call.error or {
+                    "classification": "permanent_error",
+                    "message": "capability failed",
+                }
+                target = (
+                    "unknown"
+                    if error.get("classification") == "unknown_external_result"
+                    else "failed"
+                )
+                ensure_step_transition(step.status, target)
+                step.status = target
+                self.store.update_step(step, attempt_count=attempt, last_error=error)
+                result_events.append(
+                    new_task_event(
+                        task.task_id,
+                        EVENT_STEP_FAILED,
+                        {
+                            "step_id": step.step_id,
+                            "capability": step.capability,
+                            "observation_id": observation.observation_id,
+                            "error": error,
+                        },
+                    )
+                )
+
+        if model_calls:
+            self._charge_model_calls(task.task_id, model_calls)
+
+        task = self.store.get_task(task.task_id)
+        steps = self.store.list_steps(plan.plan_id)
+        task.checkpoint = build_checkpoint(task, plan, steps).model_dump(mode="json")
+        ensure_task_transition(task.status, "ready")
+        task.status = "ready"
+        task.updated_at = utcnow()
+        self.store.commit(task, events=result_events)
+        return self._decide_and_apply(
+            self.store.get_task(task.task_id),
+            self.store.get_plan(plan.plan_id) or plan,
+            self.store.list_observations(task.task_id),
+            understanding,
+            executed,
         )
 
     def _preflight(
@@ -1764,6 +2164,15 @@ class AgentRuntime:
             warnings = list(warnings or [])
             warnings.extend(
                 f"skipped unfinished step: {step_id}" for step_id in unfinished
+            )
+        quality_error = self._web_answer_quality_error(task, steps)
+        if quality_error is not None:
+            return self._fail(
+                task,
+                quality_error,
+                executed=executed,
+                plan=plan,
+                steps=steps,
             )
         if plan.status in {"draft", "validated", "running"}:
             ensure_plan_transition(plan.status, "completed")

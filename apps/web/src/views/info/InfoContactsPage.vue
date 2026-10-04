@@ -16,8 +16,8 @@
         <div v-if="detailLoading" class="contact-detail__loading"><t-icon name="loading" />正在加载联系人画像…</div>
         <template v-else>
           <section class="contact-detail__section">
-            <div class="contact-detail__heading"><h3>画像简介</h3><t-button variant="text" size="small" :loading="profileRefreshing" @click="refreshProfile">刷新</t-button></div>
-            <p class="contact-profile__summary">{{ detail.profile.summary || '暂无足够信息' }}</p>
+            <div class="contact-detail__heading"><h3>画像简介 <small v-if="detail.profile.generated_at">上次更新于 {{ formatDate(detail.profile.generated_at) }}</small></h3><t-button variant="text" size="small" :loading="profileRefreshing" @click="refreshProfile">刷新</t-button></div>
+            <p class="contact-profile__summary">{{ hasProfileSummary ? detail.profile.summary : '因信息太少，暂无法生成画像。' }}</p>
             <small v-if="detail.profile.status === 'failed'" class="contact-detail__empty">画像生成失败，后台会自动重试</small>
           </section>
           <section class="contact-detail__section">
@@ -72,6 +72,7 @@ const connectors = ref<ConnectorDTO[]>([])
 const visibleContactCount = ref(100)
 const visibleAvailable = computed(() => available.value.slice(0, visibleContactCount.value))
 const feishuBound = computed(() => connectors.value.some((item) => item.platform === 'feishu' && item.bound && item.status === 'active'))
+const hasProfileSummary = computed(() => Boolean(detail.value?.profile.summary?.trim()))
 const platformOptions = [{ label: '微信', value: 'wechat' }, { label: '飞书', value: 'feishu' }]
 async function load() { loading.value = true; error.value = ''; try { contacts.value = await listContacts(platform.value) } catch (e: any) { error.value = e?.message || '联系人加载失败' } finally { loading.value = false } }
 async function refreshDetail(contactID: string, showLoading = false) {

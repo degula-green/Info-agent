@@ -37,6 +37,9 @@ class PlanStep(BaseModel):
     order: int = Field(ge=1)
     capability: str
     arguments: dict[str, Any] = Field(default_factory=dict)
+    # None means the legacy sequential contract: depend on the previous step.
+    # An explicit empty list is an independent root and may run in parallel.
+    depends_on: list[str] | None = None
     status: str = "pending"
     attempt_count: int = Field(default=0, ge=0)
     replaced_by_step_id: str | None = None
@@ -317,6 +320,8 @@ class Checkpoint(BaseModel):
     plan_id: str
     plan_version: int = Field(ge=1)
     completed_step_ids: list[str] = Field(default_factory=list)
+    ready_step_ids: list[str] = Field(default_factory=list)
+    running_step_ids: list[str] = Field(default_factory=list)
     next_step_id: str | None = None
     task_status: str
     updated_at: datetime

@@ -10,6 +10,8 @@ read the page we are about to quote" a property of a single, testable unit.
 from __future__ import annotations
 
 import re
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -92,6 +94,12 @@ class WebResearchUnavailable(WebResearchError):
 
     classification = "retryable_error"
     code = "web_research_unavailable"
+
+
+class WebResearchUrlUnreadable(WebResearchError):
+    """A URL the user explicitly asked us to read could not be extracted."""
+
+    code = "explicit_url_unreadable"
 
 
 class WebResearchInput(BaseModel):
@@ -208,15 +216,15 @@ class WebResearchCapability:
             # failing the whole task.
             queries = normalize_queries([request], limit=1)
 
-        candidates: list[str] = []
+        candidate_results = []
         search_unavailable = False
         search_attempted = False
         if queries:
-            candidates, search_warnings, search_unavailable, search_attempted = self._search(
+            candidate_results, search_warnings, search_unavailable, search_attempted = self._search(
                 queries, domains, max_results
             )
             warnings.extend(search_warnings)
-        if not urls and not candidates:
+        if not urls and not candidate_results:
             if search_unavailable:
                 # The search provider was the only planned source and it failed
                 # transiently; that is worth another attempt, not a dead end.
@@ -237,32 +245,67 @@ class WebResearchCapability:
                 code="no_research_source",
             )
 
-        targets = self._targets(urls, candidates, max_pages)
-        evidence: list[dict[str, Any]] = []
-        for url in targets:
+        targets = self._targets(urls, candidate_results, max_pages)
+        def read_target(target: tuple[str, str, str]):
+            url, title, raw_content = target
+            if raw_content.strip():
+                return url, self.evidence_builder.build(
+                    url=url,
+                    title=title,
+                    text=raw_content,
+                    fetch_method="tavily_search",
+                    question=request,
+                    retrieved_at=datetime.now(timezone.utc),
+                ), []
             try:
                 page = self.reader.read(url)
             except UnsupportedDocument as exc:
-                warnings.append(f"{url}: {exc}")
-                continue
+                return url, None, [f"{url}: {exc}"]
             except ContentReadError as exc:
-                warnings.append(f"{url}: {exc}")
-                continue
+                return url, None, [f"{url}: {exc}"]
             if not page.text.strip():
-                warnings.append(f"{url}: 没有抽出可用正文")
-                continue
-            warnings.extend(f"{url}: {note}" for note in page.notes)
-            evidence.append(
-                self.evidence_builder.build(
-                    url=page.final_url or url,
-                    title=page.title,
-                    text=page.text,
-                    fetch_method=page.fetch_method,
-                    question=request,
-                    retrieved_at=page.retrieved_at,
-                )
-            )
+                return url, None, [f"{url}: 没有抽出可用正文"]
+            return url, page, [f"{url}: {note}" for note in page.notes]
 
+        # Page reads are independent and I/O-bound. Keep a hard cap at the
+        # deployment's max_pages and preserve input order for stable evidence.
+        with ThreadPoolExecutor(max_workers=min(max(len(targets), 1), self.max_pages)) as pool:
+            reads = list(pool.map(read_target, targets))
+
+        evidence: list[dict[str, Any]] = []
+        unreadable_requested: list[str] = []
+        requested_urls = set(urls)
+        for url, page_or_evidence, notes in reads:
+            warnings.extend(notes)
+            if page_or_evidence is None:
+                if url in requested_urls:
+                    unreadable_requested.append(
+                        notes[0] if notes else f"{url}: 无法读取"
+                    )
+                continue
+            if isinstance(page_or_evidence, dict):
+                evidence.append(page_or_evidence)
+                continue
+            page = page_or_evidence
+            if page.text.strip():
+                evidence.append(
+                    self.evidence_builder.build(
+                        url=page.final_url or url,
+                        title=page.title,
+                        text=page.text,
+                        fetch_method=page.fetch_method,
+                        question=request,
+                        retrieved_at=page.retrieved_at,
+                    )
+                )
+
+        if unreadable_requested:
+            raise WebResearchUrlUnreadable(
+                "无法读取用户给出的网址，可能因为页面需要登录、依赖 JavaScript "
+                "或有人机验证："
+                + "；".join(unreadable_requested),
+                code="explicit_url_unreadable",
+            )
         if not evidence:
             raise WebResearchError(
                 "没有抓取到任何可用证据：" + ("；".join(warnings) or "无可读页面"),
@@ -281,7 +324,7 @@ class WebResearchCapability:
 
     def _search(
         self, queries: list[str], domains: list[str], max_results: int
-    ) -> tuple[list[str], list[str], bool, bool]:
+    ) -> tuple[list[Any], list[str], bool, bool]:
         """Candidate URLs from every query; a search outage is not fatal alone."""
 
         warnings: list[str] = []
@@ -315,16 +358,32 @@ class WebResearchCapability:
                 )
             groups.append(relevant)
         merged = merge_results(groups, top_k=max_results)
-        return [item.url for item in merged], warnings, unavailable, True
+        return list(merged), warnings, unavailable, True
 
     @staticmethod
-    def _targets(urls: list[str], candidates: list[str], max_pages: int) -> list[str]:
+    def _targets(urls: list[str], candidates: list[Any], max_pages: int) -> list[tuple[str, str, str]]:
         """User URLs first, then search hits, capped by the page budget."""
 
-        ordered: list[str] = []
-        for url in list(urls) + list(candidates):
-            if url and url not in ordered:
-                ordered.append(url)
+        ordered: list[tuple[str, str, str]] = []
+        seen: set[str] = set()
+        candidates_by_url = {
+            item.url: item for item in candidates if getattr(item, "url", "")
+        }
+        for url in urls:
+            if url and url not in seen:
+                seen.add(url)
+                candidate = candidates_by_url.get(url)
+                ordered.append(
+                    (
+                        url,
+                        getattr(candidate, "title", "") if candidate else "",
+                        getattr(candidate, "raw_content", "") if candidate else "",
+                    )
+                )
+        for item in candidates:
+            if item.url and item.url not in seen:
+                seen.add(item.url)
+                ordered.append((item.url, item.title, item.raw_content))
         return ordered[: max(int(max_pages), 1)]
 
     def _apply_budget(

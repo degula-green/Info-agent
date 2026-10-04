@@ -48,3 +48,22 @@ func TestSummarizeContactProfileUsesKnowledgeCaller(t *testing.T) {
 		t.Fatalf("unexpected summary: %q", summary)
 	}
 }
+
+func TestSummarizeContactProfileAllowsEmptySummary(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"summary":""}`))
+	}))
+	defer server.Close()
+
+	summary, err := New(server.URL, "rag-token").SummarizeContactProfile(
+		context.Background(),
+		"owner", "contact", []string{"不足以形成项目叙述"},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary != "" {
+		t.Fatalf("expected an empty summary, got %q", summary)
+	}
+}

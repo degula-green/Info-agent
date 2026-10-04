@@ -347,6 +347,48 @@ def test_content_question_routes_to_search_content_and_answer() -> None:
     }
 
 
+def test_knowledge_router_uses_the_original_question_not_attachment_body() -> None:
+    original = "采购合同的违约责任是什么？"
+    task = TaskEnvelope(
+        task_id="task-attachment-query",
+        source_type="chat",
+        owner_user_id="user-1",
+        input={
+            "text": original + "\n\n--- 附件内容 ---\n" + "合同正文。" * 300,
+            "_original_text": original,
+            "attachment_ids": ["attachment-1"],
+            "_attachment_referenced": False,
+            "_attachment_excerpt": "合同正文。" * 300,
+        },
+        created_at=datetime.now(timezone.utc),
+    )
+    planner = KnowledgeRoutingPlanner(DeterministicPlanner())
+
+    plan = planner.create_plan(
+        task,
+        [
+            KnowledgeSearchContentCapability.descriptor,
+            KnowledgeAnswerCapability.descriptor,
+        ],
+        [],
+        PlanningConstraints(),
+    )
+
+    content_step = next(
+        step
+        for step in plan.steps
+        if step.capability == "knowledge.search_content"
+    )
+    assert content_step.arguments["query"] == original
+
+
+def test_knowledge_content_query_is_capped_at_schema_limit() -> None:
+    route = classify_knowledge_question("采购合同的违约责任是什么？" + "补充" * 400)
+
+    assert route is not None
+    assert len(route.content_arguments["query"]) <= 500
+
+
 @pytest.mark.parametrize(
     "text",
     [

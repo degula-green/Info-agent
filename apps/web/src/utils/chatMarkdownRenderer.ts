@@ -17,7 +17,31 @@ function renderInline(value: string) {
     .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
     .replace(/__([^_]+)__/g, '<strong>$1</strong>')
     .replace(/(^|[^*])\*([^*\n]+)\*(?!\*)/g, '$1<em>$2</em>')
+    .replace(
+      /\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g,
+      '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>',
+    )
   return escaped.replace(/\u0000CODE(\d+)\u0000/g, (_, index: string) => code[Number(index)] || '')
+}
+
+function splitTableRow(value: string): string[] {
+  let row = value.trim()
+  if (row.startsWith('|')) row = row.slice(1)
+  if (row.endsWith('|')) row = row.slice(0, -1)
+  return row.split('|').map((cell) => cell.trim())
+}
+
+function isTableSeparator(value: string): boolean {
+  const cells = splitTableRow(value)
+  return cells.length > 0 && cells.every((cell) => /^:?-{3,}:?$/.test(cell))
+}
+
+function renderTable(headers: string[], rows: string[][]): string {
+  const head = headers.map((cell) => `<th>${renderInline(cell)}</th>`).join('')
+  const body = rows
+    .map((row) => `<tr>${headers.map((_, index) => `<td>${renderInline(row[index] || '')}</td>`).join('')}</tr>`)
+    .join('')
+  return `<div class="chat-table-scroll"><table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>`
 }
 
 export function renderChatMarkdown(value: string) {
@@ -38,7 +62,8 @@ export function renderChatMarkdown(value: string) {
     list = null
   }
 
-  for (const line of lines) {
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index]
     if (line.trim().startsWith('```')) {
       flushParagraph()
       flushList()
@@ -51,6 +76,24 @@ export function renderChatMarkdown(value: string) {
     }
     if (code != null) {
       code.push(line)
+      continue
+    }
+    if (
+      line.includes('|')
+      && index + 1 < lines.length
+      && isTableSeparator(lines[index + 1])
+    ) {
+      flushParagraph()
+      flushList()
+      const headers = splitTableRow(line)
+      const rows: string[][] = []
+      index += 2
+      while (index < lines.length && lines[index].trim() && lines[index].includes('|')) {
+        rows.push(splitTableRow(lines[index]))
+        index += 1
+      }
+      index -= 1
+      output.push(renderTable(headers, rows))
       continue
     }
 

@@ -272,6 +272,7 @@ class PostgresAgentStore:
             order=row["step_order"],
             capability=row["capability"],
             arguments=row["arguments"] or {},
+            depends_on=row.get("depends_on"),
             status=row["status"],
             attempt_count=int(row.get("attempt_count") or 0),
             replaced_by_step_id=row.get("replaced_by_step_id"),
@@ -763,12 +764,13 @@ class PostgresAgentStore:
             f"""
             INSERT INTO {self._steps} (
                 step_id, plan_id, task_id, step_order, capability, arguments, status,
-                attempt_count, replaced_by_step_id, created_at, updated_at
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, NOW(), NOW())
+                depends_on, attempt_count, replaced_by_step_id, created_at, updated_at
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW(), NOW())
             ON CONFLICT (step_id) DO UPDATE SET
                 status = EXCLUDED.status,
                 arguments = EXCLUDED.arguments,
                 capability = EXCLUDED.capability,
+                depends_on = EXCLUDED.depends_on,
                 attempt_count = EXCLUDED.attempt_count,
                 replaced_by_step_id = EXCLUDED.replaced_by_step_id,
                 updated_at = NOW()
@@ -781,6 +783,7 @@ class PostgresAgentStore:
                 step.capability,
                 _json(step.arguments),
                 step.status,
+                _json(step.depends_on) if step.depends_on is not None else None,
                 step.attempt_count,
                 step.replaced_by_step_id,
             ),
@@ -860,6 +863,7 @@ class PostgresAgentStore:
                     UPDATE {self._steps} SET
                         status = %s,
                         arguments = %s,
+                        depends_on = %s,
                         attempt_count = COALESCE(%s, attempt_count),
                         approved_version = COALESCE(%s, approved_version),
                         last_error = COALESCE(%s, last_error),
@@ -870,6 +874,7 @@ class PostgresAgentStore:
                     (
                         step.status,
                         _json(step.arguments),
+                        _json(step.depends_on) if step.depends_on is not None else None,
                         attempt_count,
                         approved_version,
                         _json(last_error),
@@ -1100,6 +1105,35 @@ class PostgresAgentStore:
                 )
                 return [self._outbox_model(row) for row in cursor.fetchall()]
 
+    def claim_outbox(
+        self, limit: int = 50, *, lease_seconds: float = 60.0
+    ) -> list[OutboxEvent]:
+        """Claim deliverable rows without letting sibling workers publish them."""
+
+        with self.pool.connection() as connection:
+            with connection.cursor(row_factory=dict_row) as cursor:
+                cursor.execute(
+                    f"""
+                    WITH claimable AS (
+                        SELECT event_id
+                        FROM {self._outbox}
+                        WHERE status IN ('pending', 'publishing')
+                          AND available_at <= NOW()
+                        ORDER BY created_at
+                        LIMIT %s
+                        FOR UPDATE SKIP LOCKED
+                    )
+                    UPDATE {self._outbox} AS outbox
+                    SET status = 'publishing',
+                        available_at = NOW() + make_interval(secs => %s)
+                    FROM claimable
+                    WHERE outbox.event_id = claimable.event_id
+                    RETURNING outbox.*
+                    """,
+                    (max(1, int(limit)), max(1.0, float(lease_seconds))),
+                )
+                return [self._outbox_model(row) for row in cursor.fetchall()]
+
     def mark_outbox_sent(self, event_id: str) -> None:
         with self.pool.connection() as connection:
             with connection.cursor() as cursor:
@@ -1112,7 +1146,7 @@ class PostgresAgentStore:
         with self.pool.connection() as connection:
             with connection.cursor() as cursor:
                 cursor.execute(
-                    f"UPDATE {self._outbox} SET attempt_count = attempt_count + 1, last_error = %s, "
+                    f"UPDATE {self._outbox} SET status = 'pending', attempt_count = attempt_count + 1, last_error = %s, "
                     "available_at = NOW() + (LEAST(POWER(2, attempt_count + 1), 30) * INTERVAL '1 second') "
                     "WHERE event_id = %s",
                     (error[:500], event_id),

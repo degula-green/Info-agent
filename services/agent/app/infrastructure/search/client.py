@@ -37,6 +37,9 @@ class SearchResult(BaseModel):
     url: str
     title: str = ""
     snippet: str = ""
+    # Search providers that can return the page body directly may set this.
+    # Empty means the page still has to be fetched before it becomes evidence.
+    raw_content: str = ""
     rank: int = Field(default=0, ge=0)
     provider: str = "searxng"
     published_at: str | None = None

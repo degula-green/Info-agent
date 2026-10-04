@@ -158,12 +158,12 @@ function todo(overrides: Partial<AgentTodo> = {}): AgentTodo {
   }
 }
 
-test('a waiting approval becomes a confirmable draft with the message and time', () => {
+test('a waiting approval becomes a confirmable draft with an unresolved deadline', () => {
   const draft = buildScheduleDraft({ task: task(), approval: approval() })
 
   assert.equal(draft.state, 'confirmable')
   assert.equal(draft.title, '开个评审会，会议室 A')
-  assert.equal(draft.timeLabel, '明天晚上八点')
+  assert.equal(draft.timeLabel, '未设置截止时间')
   assert.equal(draft.timezone, 'Asia/Shanghai')
   assert.equal(draft.notes, '会议室 A')
   assert.equal(draft.senderLabel, '张三')
@@ -240,7 +240,7 @@ test('a draft being confirmed shows the in-flight state first', () => {
   assert.equal(draft.state, 'creating')
   // The title and time are still shown while the write is in flight.
   assert.equal(draft.title, '开个评审会，会议室 A')
-  assert.equal(draft.timeLabel, '明天晚上八点')
+  assert.equal(draft.timeLabel, '未设置截止时间')
 })
 
 test('the in-flight state never overrides a terminal task status', () => {
@@ -362,7 +362,7 @@ test('confirming sends the approval version', async () => {
   assert.deepEqual(calls[0].body, { version: 3 })
 })
 
-test('a to-do draft renders due_at as the deadline instead of 时间待补充', () => {
+test('a to-do draft renders due_at as the deadline instead of an unset deadline', () => {
   const draft = buildScheduleDraft({
     task: task({ source_ref: {} }),
     approval: approval({
@@ -380,12 +380,12 @@ test('a to-do draft renders due_at as the deadline instead of 时间待补充', 
 
   // 2026-09-29T15:59Z is 23:59 in Asia/Shanghai: the end of the day it is due.
   assert.match(draft.timeLabel, /23:59/)
-  assert.notEqual(draft.timeLabel, '时间待补充')
+  assert.notEqual(draft.timeLabel, '未设置截止时间')
   assert.equal(draft.dueAt, '2026-09-29T15:59:00Z')
   assert.equal(draft.timeExpression, '明天')
 })
 
-test('a to-do without a time still says 时间待补充', () => {
+test('a to-do without a time says no deadline is set', () => {
   const draft = buildScheduleDraft({
     task: task(),
     approval: approval({
@@ -394,7 +394,7 @@ test('a to-do without a time still says 时间待补充', () => {
     }),
   })
 
-  assert.equal(draft.timeLabel, '时间待补充')
+  assert.equal(draft.timeLabel, '未设置截止时间')
   assert.equal(draft.dueAt, undefined)
 })
 

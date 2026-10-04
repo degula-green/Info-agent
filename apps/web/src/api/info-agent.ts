@@ -860,8 +860,7 @@ export function buildScheduleDraft({
 
   let timeLabel = ''
   if (startLabel) timeLabel = endLabel ? `${startLabel} → ${endLabel}` : startLabel
-  else if (timeExpression) timeLabel = timeExpression
-  else timeLabel = '时间待补充'
+  else timeLabel = '未设置截止时间'
 
   const observation = latestObservation(observations || [])
   const missingInformation = Array.isArray(observation?.output?.missing_information)

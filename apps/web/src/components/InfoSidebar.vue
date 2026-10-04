@@ -292,9 +292,11 @@ const navItems = [
 }
 
 .info-sidebar__body {
+  display: flex;
   flex: 1;
+  flex-direction: column;
   min-height: 0;
-  overflow-y: auto;
+  overflow: hidden;
 }
 
 .sidebar-nav,
@@ -304,6 +306,7 @@ const navItems = [
 }
 
 .sidebar-nav {
+  flex: 0 0 auto;
   margin-top: 7px;
 }
 
@@ -371,6 +374,10 @@ const navItems = [
 }
 
 .sidebar-history {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
   margin-top: 12px;
 }
 
@@ -397,7 +404,13 @@ const navItems = [
 }
 
 .sidebar-history__list {
+  flex: 1;
+  min-height: 0;
   margin-top: 5px;
+  padding-right: 2px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
 }
 
 .sidebar-history__item {

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import socket
 from dataclasses import dataclass
 from typing import Any, Callable
@@ -48,14 +49,30 @@ class RedisTaskPublisher(TaskEventPublisher):
 class OutboxDispatcher:
     """Publishes pending Outbox rows to Redis and records delivery."""
 
-    def __init__(self, store: AgentStore, publisher: TaskEventPublisher, *, batch_size: int = 50) -> None:
+    def __init__(
+        self,
+        store: AgentStore,
+        publisher: TaskEventPublisher,
+        *,
+        batch_size: int = 50,
+        claim_lease_seconds: float = 60.0,
+    ) -> None:
         self.store = store
         self.publisher = publisher
         self.batch_size = batch_size
+        self.claim_lease_seconds = max(1.0, float(claim_lease_seconds))
 
     def dispatch_once(self) -> int:
         published = 0
-        for event in self.store.pending_outbox(limit=self.batch_size):
+        claim = getattr(self.store, "claim_outbox", None)
+        if callable(claim):
+            events = claim(
+                limit=self.batch_size,
+                lease_seconds=self.claim_lease_seconds,
+            )
+        else:
+            events = self.store.pending_outbox(limit=self.batch_size)
+        for event in events:
             try:
                 self.publisher.publish(event)
             except Exception as exc:  # noqa: BLE001 - delivery is retried from the outbox
@@ -75,12 +92,17 @@ class RedisTaskWorker:
         *,
         client: Any,
         settings: Settings,
+        consumer_name: str = "",
     ) -> None:
         self.handler = handler
         self.client = client
         self.stream = settings.redis_inbound_stream
         self.group = settings.redis_consumer_group
-        self.consumer = settings.redis_consumer_name or socket.gethostname()
+        self.consumer = (
+            consumer_name
+            or settings.redis_consumer_name
+            or f"{socket.gethostname()}-{os.getpid()}"
+        )
         self.block_ms = settings.redis_block_ms
         self.batch_size = settings.redis_batch_size
         self.claim_idle_ms = settings.redis_claim_idle_ms

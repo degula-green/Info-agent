@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+from app.capabilities.answer import AnswerComposeCapability
+from app.capabilities.web_research import WebResearchCapability
 from app.kernel.models import (
     Plan,
     PlannerDecision,
@@ -109,6 +111,28 @@ def test_a_chat_web_request_reaches_the_llm_planner() -> None:
 
     assert plan.objective == "llm"
     assert (deterministic.plans, llm.plans) == (0, 1)
+
+
+def test_an_explicit_url_question_uses_the_fixed_web_pipeline() -> None:
+    planner, deterministic, llm = router()
+
+    plan = planner.create_plan(
+        envelope(text="https://example.com/guide 这个网址在讲什么？"),
+        [
+            WebResearchCapability.descriptor,
+            AnswerComposeCapability.descriptor,
+        ],
+        [],
+        PlanningConstraints(),
+        understanding("web.research"),
+    )
+
+    assert plan.objective == "检索公开网页并回答"
+    assert [step.capability for step in plan.steps] == [
+        "web.research",
+        "answer.compose",
+    ]
+    assert (deterministic.plans, llm.plans) == (0, 0)
 
 
 def test_a_chat_to_do_stays_on_the_deterministic_planner() -> None:
