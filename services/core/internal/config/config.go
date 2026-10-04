@@ -38,6 +38,7 @@ type Config struct {
 	OpenFGAAPIToken             string
 	RAGAuthorizationToken       string
 	KnowledgeAuthorizationToken string
+	KnowledgeURL                string
 	// RefreshRotationGrace is intentionally shorter than the normal request
 	// lifetime: it absorbs in-flight concurrent refreshes without weakening
 	// replay detection after the overlap window.
@@ -95,6 +96,7 @@ func Load() (Config, error) {
 		OpenFGAAPIToken:             env("CORE_OPENFGA_API_TOKEN", ""),
 		RAGAuthorizationToken:       env("CORE_RAG_AUTHZ_TOKEN", ""),
 		KnowledgeAuthorizationToken: env("CORE_KNOWLEDGE_AUTHZ_TOKEN", env("CORE_RAG_AUTHZ_TOKEN", "")),
+		KnowledgeURL:                env("CORE_KNOWLEDGE_URL", "http://127.0.0.1:8090"),
 		RefreshRotationGrace:        refreshGrace,
 	}
 	if err := cfg.Validate(); err != nil {

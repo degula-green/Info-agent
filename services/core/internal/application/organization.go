@@ -157,6 +157,29 @@ func (s *OrganizationService) CheckOrganizationCapability(ctx context.Context, u
 	}
 }
 
+// AccessRequestReviewerBasis reports whether an organization manager may
+// review protected-content access requests. Collector eligibility is resolved
+// by Knowledge because it owns conversation collector assignments.
+func (s *OrganizationService) AccessRequestReviewerBasis(ctx context.Context, userID, organizationID string) (string, bool, error) {
+	membership, roles, err := s.repo.GetMembership(ctx, userID, organizationID)
+	if errors.Is(err, repository.ErrMembershipNotFound) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	if !membership.IsActive() {
+		return "", false, nil
+	}
+	for _, role := range roles {
+		switch role.RoleCode {
+		case domain.RoleOwner, domain.RoleInformationAdmin:
+			return "information_admin", true, nil
+		}
+	}
+	return "", false, nil
+}
+
 func (s *OrganizationService) GrantRole(ctx context.Context, actorID, organizationID, userID, role string) error {
 	if !domain.IsValidRole(role) {
 		return ErrInvalidRole

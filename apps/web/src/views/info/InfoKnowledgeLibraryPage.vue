@@ -164,7 +164,14 @@
       </div>
     </t-dialog>
 
-    <InfoResultDrawer v-model:visible="drawerVisible" :result="drawerResult" @toast="toast" />
+    <InfoSearchPreviewDialog
+      v-model:visible="searchPreviewVisible"
+      :result="searchPreviewResult"
+      :file="searchPreviewFile"
+      :downloading="searchPreviewDownloading"
+      @open-source="openSearchPreviewSource"
+      @download="downloadSearchPreviewFile"
+    />
   </section>
 </template>
 
@@ -176,7 +183,8 @@ import { createLocalUploadTask, discoverConversationsByType, getKnowledgeLibrary
 import { searchGlobal, searchKnowledge } from '@/api/rag'
 import { isHistoryStartAllowed, knowledgeDisplayLabel, mapKnowledgeDisplayStatus } from '@/knowledge-mapping'
 import InfoAttachmentPreview from '@/components/InfoAttachmentPreview.vue'
-import InfoResultDrawer from '@/components/InfoResultDrawer.vue'
+import InfoSearchPreviewDialog from '@/components/InfoSearchPreviewDialog.vue'
+import { useSearchResultNavigation } from '@/composables/useSearchResultNavigation'
 import type { InfoFile, SearchResult } from '@/mock'
 import { useInfoKnowledgeStore } from '@/stores/infoKnowledge'
 import { resolveLibrarySearchScope, searchEmptyHint } from '@/utils/info-search-scope'
@@ -184,6 +192,15 @@ import { isAbortError, mapRagSearchItems } from '@/utils/info-search-result'
 
 const props = defineProps<{ libraryKind: string }>()
 const router = useRouter(); const route = useRoute(); const store = useInfoKnowledgeStore()
+const {
+  previewVisible: searchPreviewVisible,
+  previewResult: searchPreviewResult,
+  previewFile: searchPreviewFile,
+  previewDownloading: searchPreviewDownloading,
+  openSearchResult,
+  openPreviewSource: openSearchPreviewSource,
+  downloadPreviewFile: downloadSearchPreviewFile,
+} = useSearchResultNavigation()
 const library = computed<KnowledgeLibraryDTO | undefined>(() => store.libraries.find((item) => item.base_type === props.libraryKind))
 const title = computed(() => ({ organization_files: '文件库', organization_conversation: '群聊', organization_private_shared: '共享私聊', private_conversation: '私聊知识库', private_local: '本地知识库' } as Record<string, string>)[props.libraryKind] || '知识库')
 const description = computed(() => ({ organization_files: '组织上传、群聊文件和共享私聊文件的聚合视图', organization_conversation: '组织已接入的群聊消息与采集状态', organization_private_shared: '已明确共享到组织的私聊资源', private_conversation: '当前账号接入的私聊内容', private_local: '当前账号上传的附件' } as Record<string, string>)[props.libraryKind] || '')
@@ -198,8 +215,6 @@ const searchResults = ref<SearchResult[]>([])
 const searchLoading = ref(false)
 const searchError = ref('')
 const searchEmptyText = ref('尝试更换关键词，或清除搜索后浏览目录。')
-const drawerVisible = ref(false)
-const drawerResult = ref<SearchResult | null>(null)
 let searchAbort: AbortController | null = null
 let searchTimer: ReturnType<typeof setTimeout> | undefined
 let itemsRefreshTimer: number | null = null
@@ -258,7 +273,6 @@ function collectionStatusLabel(value?: string) {
   }
 }
 function secondary(item: KnowledgeLibraryItemDTO) { if (item.kind === 'conversation') return `${item.conversation_type === 'private' ? '私聊' : '群聊'} · ${item.conversation_name || item.external_conversation_id || ''}`; return item.excerpt || `${item.conversation_name || item.external_conversation_id || ''} · ${item.sent_at ? new Date(item.sent_at).toLocaleString('zh-CN') : ''}` }
-function toast(text: string) { MessagePlugin.success(text) }
 
 function openItem(item: KnowledgeLibraryItemDTO) {
   if (item.kind === 'file' && item.source_attachment_id) {
@@ -296,13 +310,7 @@ function openItem(item: KnowledgeLibraryItemDTO) {
 }
 
 function selectSearchResult(result: SearchResult) {
-  if (result.kind === 'chat' && result.chatId) {
-    const platformKey = result.platform === 'all' ? 'feishu' : result.platform
-    void router.push({ path: `/knowledge/${platformKey}/conversations/${result.chatId}`, query: { return: route.fullPath } })
-    return
-  }
-  drawerResult.value = result
-  drawerVisible.value = true
+  void openSearchResult(result)
 }
 
 function clearLibrarySearch() {

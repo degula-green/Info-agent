@@ -382,8 +382,15 @@ func canReclassifyLegacyFile(existingType, nextType, existingContent, nextConten
 func classifyMessage(input IngestMessageInput) (bool, string) { return privacy.Scan(input.Content) }
 
 type PendingMessage struct {
-	Message         domain.Message
-	OriginalContent string
+	Message          domain.Message
+	OriginalContent  string
+	KnowledgeScope   string
+	ConversationType string
+}
+
+type AccessRequestResource struct {
+	ResourceType string `json:"resource_type"`
+	ResourceID   string `json:"resource_id"`
 }
 
 // CalculatePayloadHash defines the cross-language business payload contract.
@@ -636,8 +643,10 @@ type Repository interface {
 
 	IngestMessage(ctx context.Context, input IngestMessageInput) (*IngestResult, error)
 	ListPendingMessages(ctx context.Context, limit int) ([]PendingMessage, error)
+	ListPrivacyReprocessingMessages(ctx context.Context, policyVersion string, limit int) ([]PendingMessage, error)
 	ListPendingContactFactMessages(ctx context.Context, limit int) ([]domain.Message, error)
 	CompleteMessageClassification(ctx context.Context, messageID, displayContent string, sensitive bool) error
+	ReprocessMessageClassification(ctx context.Context, messageID, displayContent string, sensitive bool, policyVersion string) (bool, error)
 	CompleteContactFactExtraction(ctx context.Context, messageID string, facts []ContactFactInput, status string) error
 	ListContactFacts(ctx context.Context, senderIdentityIDs []string) ([]domain.ContactFact, error)
 	ListContactMessages(ctx context.Context, userID, organizationID string, senderIdentityIDs []string, limit int) ([]domain.Message, error)
@@ -656,6 +665,8 @@ type Repository interface {
 	MarkKnowledgePermissionSynced(ctx context.Context, knowledgeItemID string, aclVersion int64) error
 	MarkKnowledgePermissionFailed(ctx context.Context, knowledgeItemID, failure string) error
 	TryMarkKnowledgeReady(ctx context.Context, knowledgeItemID, traceID string) (bool, error)
+	CanUserReviewAccess(ctx context.Context, userID, resourceType, resourceID string) (bool, error)
+	ListAccessRequestContexts(ctx context.Context, resources []AccessRequestResource) ([]domain.AccessRequestContext, error)
 	GetKnowledgeItem(ctx context.Context, knowledgeItemID string) (*domain.KnowledgeItem, error)
 	GetKnowledgeItemByMessage(ctx context.Context, messageID string) (*domain.KnowledgeItem, error)
 	GetKnowledgeItemByAttachment(ctx context.Context, attachmentID string) (*domain.KnowledgeItem, error)

@@ -1686,9 +1686,42 @@ func (s *MemoryStore) ListPendingMessages(_ context.Context, limit int) ([]Pendi
 	out := []PendingMessage{}
 	for _, m := range s.messages {
 		if m.ClassificationStatus == "pending" {
-			out = append(out, PendingMessage{Message: cloneMessage(m), OriginalContent: s.privateContent[m.ID]})
+			conversation := s.conversations[m.ConversationID]
+			out = append(out, PendingMessage{
+				Message:          cloneMessage(m),
+				OriginalContent:  s.privateContent[m.ID],
+				KnowledgeScope:   conversation.IngestionScope,
+				ConversationType: conversation.ConversationType,
+			})
 		}
 	}
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
+}
+
+func (s *MemoryStore) ListPrivacyReprocessingMessages(_ context.Context, policyVersion string, limit int) ([]PendingMessage, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := []PendingMessage{}
+	for _, message := range s.messages {
+		conversation := s.conversations[message.ConversationID]
+		if conversation.IngestionScope != "organization" || conversation.ConversationType != "group" {
+			continue
+		}
+		item := s.knowledgeItemByMessageLocked(message.ID)
+		if item != nil && item.SecurityPolicyVersion == policyVersion {
+			continue
+		}
+		out = append(out, PendingMessage{
+			Message:          cloneMessage(message),
+			OriginalContent:  s.privateContent[message.ID],
+			KnowledgeScope:   conversation.IngestionScope,
+			ConversationType: conversation.ConversationType,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Message.CreatedAt.Before(out[j].Message.CreatedAt) })
 	if limit > 0 && len(out) > limit {
 		out = out[:limit]
 	}
@@ -1742,6 +1775,7 @@ func (s *MemoryStore) CompleteMessageClassification(ctx context.Context, id, dis
 				item.ContentAccessRequired = sensitive
 				item.ContentVisibility = "original"
 				item.Sensitivity = "internal"
+				item.SecurityPolicyVersion = privacy.PolicyVersion
 				if sensitive {
 					item.ContentVisibility = "masked"
 					item.Sensitivity = "restricted"
@@ -1753,6 +1787,51 @@ func (s *MemoryStore) CompleteMessageClassification(ctx context.Context, id, dis
 		}
 	}
 	return apperror.New("message_not_found", "message not found", 404, false)
+}
+
+func (s *MemoryStore) ReprocessMessageClassification(_ context.Context, id, displayContent string, sensitive bool, policyVersion string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for key, message := range s.messages {
+		if message.ID != id {
+			continue
+		}
+		changed := message.Content != displayContent || message.Sensitive != sensitive
+		if changed {
+			message.ContentVersion++
+		}
+		message.Content, message.Sensitive, message.ClassificationStatus = displayContent, sensitive, "succeeded"
+		message.ContactFactsStatus = "pending"
+		s.messages[key] = message
+		for itemID, item := range s.knowledgeItems {
+			if item.SourceMessageID != id || item.SourceAttachmentID != "" {
+				continue
+			}
+			item.SecurityReady = true
+			item.SecurityStatus = "classified"
+			item.OriginalAccessRequired = sensitive
+			item.ContentAccessRequired = sensitive
+			item.ContentVisibility = "original"
+			item.Sensitivity = "internal"
+			if sensitive {
+				item.ContentVisibility = "masked"
+				item.Sensitivity = "restricted"
+			}
+			item.SecurityPolicyVersion = policyVersion
+			if changed {
+				item.ContentVersion = message.ContentVersion
+				item.PermissionReady = false
+				item.ACLSyncStatus = "pending"
+				item.ProcessingStatus = "pending"
+				item.RAGStatus = "pending"
+				item.RAGLastError = ""
+			}
+			item.UpdatedAt = time.Now().UTC()
+			s.knowledgeItems[itemID] = item
+		}
+		return changed, nil
+	}
+	return false, apperror.New("message_not_found", "message not found", 404, false)
 }
 
 func (s *MemoryStore) CompleteContactFactExtraction(_ context.Context, messageID string, inputs []ContactFactInput, status string) error {
@@ -2499,6 +2578,98 @@ func (s *MemoryStore) ListKnowledgePermissionSubjects(_ context.Context, id stri
 	return out, nil
 }
 
+func (s *MemoryStore) CanUserReviewAccess(_ context.Context, userID, resourceType, resourceID string) (bool, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var item domain.KnowledgeItem
+	found := false
+	for _, candidate := range s.knowledgeItems {
+		switch resourceType {
+		case "knowledge_original":
+			if candidate.ID == resourceID && candidate.SourceAttachmentID == "" {
+				item, found = candidate, true
+			}
+		case "attachment_content":
+			if candidate.SourceAttachmentID == resourceID {
+				item, found = candidate, true
+			}
+		}
+		if found {
+			break
+		}
+	}
+	if !found {
+		return false, nil
+	}
+	conversation, ok := s.conversations[item.ConversationID]
+	if !ok {
+		return false, nil
+	}
+	if conversation.OwnerUserID == userID || conversation.CreatedByUserID == userID {
+		return true, nil
+	}
+	for _, collector := range s.collectors {
+		if collector.ConversationID == conversation.ID && collector.CollectorUserID == userID && collector.Status == "active" {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func (s *MemoryStore) ListAccessRequestContexts(_ context.Context, resources []AccessRequestResource) ([]domain.AccessRequestContext, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]domain.AccessRequestContext, 0, len(resources))
+	for _, resource := range resources {
+		switch resource.ResourceType {
+		case "knowledge_original":
+			item, ok := s.knowledgeItems[resource.ResourceID]
+			if !ok {
+				continue
+			}
+			context := domain.AccessRequestContext{
+				ResourceType: "knowledge_original", ResourceID: item.ID, KnowledgeItemID: item.ID,
+				SourceConversationID: item.ConversationID, ContentVisibility: item.ContentVisibility,
+				OriginalAccessRequired: item.OriginalAccessRequired,
+			}
+			if conversation, ok := s.conversations[item.ConversationID]; ok {
+				context.SourceConversationName = conversation.Name
+				context.SourcePlatform = conversation.Platform
+			}
+			for _, message := range s.messages {
+				if message.ID == item.SourceMessageID {
+					context.SourceMessageID = message.ID
+					context.SenderDisplayName = message.SenderDisplayName
+					context.SentAt = &message.SentAt
+					context.MaskedExcerpt = message.Content
+					break
+				}
+			}
+			out = append(out, context)
+		case "attachment_content":
+			for _, item := range s.knowledgeItems {
+				if item.SourceAttachmentID != resource.ResourceID {
+					continue
+				}
+				attachment := s.attachments[item.SourceAttachmentID]
+				context := domain.AccessRequestContext{
+					ResourceType: "attachment_content", ResourceID: attachment.ID, KnowledgeItemID: item.ID,
+					SourceConversationID: item.ConversationID, FileName: attachment.FileName,
+					MIMEType: attachment.MIMEType, SizeBytes: attachment.SizeBytes,
+					ContentVisibility: item.ContentVisibility, OriginalAccessRequired: item.OriginalAccessRequired,
+				}
+				if conversation, ok := s.conversations[item.ConversationID]; ok {
+					context.SourceConversationName = conversation.Name
+					context.SourcePlatform = conversation.Platform
+				}
+				out = append(out, context)
+				break
+			}
+		}
+	}
+	return out, nil
+}
+
 func (s *MemoryStore) MarkKnowledgePermissionSynced(_ context.Context, id string, aclVersion int64) error {
 	if aclVersion < 1 {
 		return apperror.New("invalid_acl_version", "acl_version must be positive", 400, false)
@@ -2646,7 +2817,7 @@ func (s *MemoryStore) ApplyRAGResult(_ context.Context, id string, input RAGResu
 	defer s.mu.Unlock()
 	item, ok := s.knowledgeItems[id]
 	if !ok {
-		return nil, apperror.New("knowledge_not_found", "knowledge item not found", 404, false)
+		return &RAGResultApply{Applied: false, Status: "not_found", Reason: "knowledge_not_found"}, nil
 	}
 	status := item.RAGStatus
 	if status == "" {
@@ -2688,6 +2859,19 @@ func (s *MemoryStore) ApplyRAGResult(_ context.Context, id string, input RAGResu
 	if input.Status == "ready" || input.Status == "metadata_only" {
 		item.RAGResult = input.Result
 	}
+	messageStatus := "processing"
+	if input.Status == "ready" || input.Status == "metadata_only" {
+		messageStatus = "ready"
+	} else if input.Status == "failed" {
+		messageStatus = "failed"
+	}
+	for key, message := range s.messages {
+		if message.ID == item.SourceMessageID {
+			message.VectorStatus = messageStatus
+			s.messages[key] = message
+			break
+		}
+	}
 	item.UpdatedAt = time.Now().UTC()
 	s.knowledgeItems[id] = item
 	return &RAGResultApply{Applied: true, Status: input.Status}, nil
@@ -2707,6 +2891,16 @@ func (s *MemoryStore) GetKnowledgeItemByMessage(ctx context.Context, messageID s
 		return nil, apperror.New("knowledge_not_found", "knowledge item not found", 404, false)
 	}
 	return s.GetKnowledgeItem(ctx, id)
+}
+
+func (s *MemoryStore) knowledgeItemByMessageLocked(messageID string) *domain.KnowledgeItem {
+	for _, item := range s.knowledgeItems {
+		if item.SourceMessageID == messageID && item.SourceAttachmentID == "" && item.SourceType != "shared_private_item" {
+			copy := item
+			return &copy
+		}
+	}
+	return nil
 }
 
 func (s *MemoryStore) GetKnowledgeItemByAttachment(ctx context.Context, attachmentID string) (*domain.KnowledgeItem, error) {

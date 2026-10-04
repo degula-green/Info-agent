@@ -416,6 +416,73 @@ class CollectorServiceTest(unittest.TestCase):
             self.assertEqual(service.checkpoints, {"collector": 42})
             self.assertEqual(service.replayed_media, {"collector": {"7", "8"}})
 
+    def test_wechat_data_roots_uses_windows_documents_location(self):
+        with tempfile.TemporaryDirectory() as directory:
+            documents = Path(directory)
+            original_documents_dir = service.windows_documents_dir
+            original_roots = os.environ.pop("WECHAT_DATA_ROOTS", None)
+            service.windows_documents_dir = lambda: documents
+            try:
+                roots = service.wechat_data_roots()
+            finally:
+                service.windows_documents_dir = original_documents_dir
+                if original_roots is not None:
+                    os.environ["WECHAT_DATA_ROOTS"] = original_roots
+
+            self.assertEqual(roots[0], documents / "xwechat_files")
+            self.assertEqual(roots[1], documents / "WeChat Files")
+
+    def test_manual_account_path_accepts_desktop_account_suffix(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            account_dir = root / "wxid_manual_ab12"
+            (account_dir / "db_storage").mkdir(parents=True)
+
+            account = service.local_account_from_db_dir(str(root), "wxid_manual")
+
+            self.assertEqual(account["wxid"], "wxid_manual_ab12")
+            self.assertEqual(Path(account["db_dir"]), account_dir.resolve())
+            self.assertEqual(Path(account["root"]), root.resolve())
+
+    def test_manual_browser_pair_uses_explicit_account_path(self):
+        with tempfile.TemporaryDirectory() as directory:
+            account_dir = Path(directory) / "wxid_manual_ab12"
+            (account_dir / "db_storage").mkdir(parents=True)
+            original_validate = service.validate_browser_pairing
+            original_pair = service.pair_local_device
+            captured = {}
+
+            def validate(_pairing_id, _pairing_code):
+                return None
+
+            def pair(pairing_id, pairing_code, wxid, agent_version, account=None):
+                captured.update({
+                    "pairing_id": pairing_id,
+                    "pairing_code": pairing_code,
+                    "wxid": wxid,
+                    "agent_version": agent_version,
+                    "account": account,
+                })
+                return {"device": {"device_id": "device-1"}, "binding": {"connector_id": "connector-1"}}
+
+            service.validate_browser_pairing = validate
+            service.pair_local_device = pair
+            try:
+                result = service.browser_pair(service.BrowserPairRequest(
+                    pairing_id="pairing-1",
+                    pairing_code="code-1",
+                    wxid="wxid_manual",
+                    db_dir=str(account_dir),
+                ))
+            finally:
+                service.validate_browser_pairing = original_validate
+                service.pair_local_device = original_pair
+
+            self.assertEqual(result["status"], "paired")
+            self.assertEqual(result["connector_id"], "connector-1")
+            self.assertEqual(captured["wxid"], "wxid_manual_ab12")
+            self.assertEqual(captured["account"]["db_dir"], str(account_dir.resolve()))
+
 
 if __name__ == "__main__":
     unittest.main()

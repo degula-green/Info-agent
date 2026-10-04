@@ -396,6 +396,24 @@ func registerUserRoutes(r *gin.Engine, app *App, prefix string) {
 		}
 		c.JSON(http.StatusOK, gin.H{"items": out})
 	})
+	g.GET("/knowledge/items/:knowledge_item_id/original", func(c *gin.Context) {
+		p := principal(c)
+		out, err := app.Service.GetKnowledgeOriginal(c, p.UserID, c.Param("knowledge_item_id"))
+		if err != nil {
+			writeError(c, err)
+			return
+		}
+		c.JSON(http.StatusOK, publicKnowledgeOriginalFromDomain(*out))
+	})
+	g.GET("/knowledge/messages/:message_id/original", func(c *gin.Context) {
+		p := principal(c)
+		out, err := app.Service.GetKnowledgeOriginalByMessage(c, p.UserID, c.Param("message_id"))
+		if err != nil {
+			writeError(c, err)
+			return
+		}
+		c.JSON(http.StatusOK, publicKnowledgeOriginalFromDomain(*out))
+	})
 	// Explicit type-specific discovery keeps the group and private workflows
 	// distinct without changing the existing collector discovery contract.
 	g.GET("/connectors/:platform/group-conversations/discover", func(c *gin.Context) {
@@ -1143,6 +1161,50 @@ func registerInternalRoutes(r *gin.Engine, app *App, prefix string) {
 		c.JSON(http.StatusOK, out)
 	})
 	g.Use(internalMiddleware(app))
+	g.GET("/knowledge/access-review-eligibility", func(c *gin.Context) {
+		if !serviceAuthorized(c) || !strings.EqualFold(strings.TrimSpace(c.GetHeader("X-Caller-Service")), "core") {
+			writeError(c, apperror.Clone(apperror.ErrForbidden))
+			return
+		}
+		allowed, err := app.Service.CanReviewAccessRequest(c, c.Query("user_id"), c.Query("resource_type"), c.Query("resource_id"))
+		if err != nil {
+			writeError(c, err)
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"allowed": allowed})
+	})
+	g.POST("/knowledge/access-request-contexts", func(c *gin.Context) {
+		if !serviceAuthorized(c) || !strings.EqualFold(strings.TrimSpace(c.GetHeader("X-Caller-Service")), "core") {
+			writeError(c, apperror.Clone(apperror.ErrForbidden))
+			return
+		}
+		var body struct {
+			Items []repository.AccessRequestResource `json:"items"`
+		}
+		if err := c.ShouldBindJSON(&body); err != nil {
+			writeError(c, apperror.New("invalid_request", "invalid access request context request", 400, false))
+			return
+		}
+		items, err := app.Service.ListAccessRequestContexts(c, body.Items)
+		if err != nil {
+			writeError(c, err)
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"items": items})
+	})
+	g.POST("/knowledge/privacy/reprocess", func(c *gin.Context) {
+		if !serviceAuthorized(c) {
+			writeError(c, apperror.Clone(apperror.ErrForbidden))
+			return
+		}
+		limit, _ := strconv.Atoi(c.DefaultQuery("limit", "100"))
+		changed, err := app.Service.ReprocessPrivacy(c, limit)
+		if err != nil {
+			writeError(c, err)
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"changed": changed})
+	})
 	g.GET("/knowledge/:knowledge_item_id", func(c *gin.Context) {
 		if !ragAuthorized(c) {
 			writeError(c, apperror.Clone(apperror.ErrForbidden))

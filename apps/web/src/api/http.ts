@@ -5,13 +5,15 @@ export class ApiError extends Error {
   code: string
   status: number
   retryable: boolean
+  details: Record<string, any>
 
-  constructor(message: string, code = 'request_failed', status = 500, retryable = false) {
+  constructor(message: string, code = 'request_failed', status = 500, retryable = false, details: Record<string, any> = {}) {
     super(code === 'AUTH_UNAUTHENTICATED' || status === 401 ? '登录已过期，请重新登录' : message)
     this.name = 'ApiError'
     this.code = code
     this.status = status
     this.retryable = retryable
+    this.details = details
   }
 }
 
@@ -97,7 +99,7 @@ async function performKnowledgeRequest<T>(path: string, init: RequestInit): Prom
   }
   if (!response.ok) {
     const error = body && typeof body === 'object' ? body : {}
-    throw new ApiError(error.message || `Knowledge request failed (${response.status})`, error.code || 'request_failed', response.status, Boolean(error.retryable))
+    throw new ApiError(error.message || `Knowledge request failed (${response.status})`, error.code || 'request_failed', response.status, Boolean(error.retryable), error.details || {})
   }
   return body as T
 }

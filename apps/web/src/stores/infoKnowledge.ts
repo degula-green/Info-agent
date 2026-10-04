@@ -160,6 +160,8 @@ function mapMessage(value: MessageDTO, attachments: AttachmentDTO[], senderNames
     sourceMessageId: value.external_message_id,
     messageType: value.message_type,
     vectorStatus: value.vector_status,
+    sensitive: value.sensitive,
+    classificationStatus: value.classification_status,
     attachments: related.map((item) => ({ id: item.id, name: item.file_name, type: item.mime_type?.startsWith('image/') ? 'image' : 'file' })),
   }
 }
