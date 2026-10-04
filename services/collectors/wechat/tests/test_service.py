@@ -416,6 +416,22 @@ class CollectorServiceTest(unittest.TestCase):
             self.assertEqual(service.checkpoints, {"collector": 42})
             self.assertEqual(service.replayed_media, {"collector": {"7", "8"}})
 
+    def test_wechat_data_roots_uses_windows_documents_location(self):
+        with tempfile.TemporaryDirectory() as directory:
+            documents = Path(directory)
+            original_documents_dir = service.windows_documents_dir
+            original_roots = os.environ.pop("WECHAT_DATA_ROOTS", None)
+            service.windows_documents_dir = lambda: documents
+            try:
+                roots = service.wechat_data_roots()
+            finally:
+                service.windows_documents_dir = original_documents_dir
+                if original_roots is not None:
+                    os.environ["WECHAT_DATA_ROOTS"] = original_roots
+
+            self.assertEqual(roots[0], documents / "xwechat_files")
+            self.assertEqual(roots[1], documents / "WeChat Files")
+
 
 if __name__ == "__main__":
     unittest.main()

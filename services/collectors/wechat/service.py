@@ -1043,6 +1043,21 @@ def open_db(path_value: str, wxid: str) -> Any:
     if not (root / account / "db_storage").is_dir(): raise ValueError("db_dir does not contain a readable WeChat db_storage directory")
     opened = MultiShardWeChatDB(account=account, db_dir=str(root)); opened.get_sessions(limit=1); return opened
 
+def windows_documents_dir() -> Path | None:
+    if os.name != "nt":
+        return None
+    try:
+        import winreg
+
+        key_path = r"Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders"
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path) as key:
+            value, _ = winreg.QueryValueEx(key, "Personal")
+    except (ImportError, OSError):
+        return None
+    expanded = os.path.expandvars(str(value or "").strip())
+    return Path(expanded) if expanded else None
+
+
 def wechat_data_roots() -> list[Path]:
     configured = [
         item.strip()
@@ -1051,11 +1066,26 @@ def wechat_data_roots() -> list[Path]:
     ]
     if configured:
         return [Path(item).expanduser() for item in configured]
+
     home = Path.home()
-    return [
+    candidates: list[Path] = []
+    documents = windows_documents_dir()
+    if documents is not None:
+        candidates.extend([documents / "xwechat_files", documents / "WeChat Files"])
+    candidates.extend([
         home / "Documents" / "xwechat_files",
         home / "Documents" / "WeChat Files",
-    ]
+    ])
+
+    roots: list[Path] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        key = str(candidate).casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        roots.append(candidate)
+    return roots
 
 def scan_local_accounts() -> list[dict[str, str]]:
     found: list[dict[str, str]] = []
