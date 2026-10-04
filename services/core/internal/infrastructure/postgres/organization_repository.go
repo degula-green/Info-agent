@@ -231,7 +231,7 @@ func (r *OrganizationRepository) GrantRole(ctx context.Context, actorID, orgID, 
 	if tag.RowsAffected() == 0 {
 		return tx.Commit(ctx)
 	}
-	if _, err = tx.Exec(ctx, `INSERT INTO iam.audit_logs(actor_user_id,organization_id,action,resource_type,resource_id,detail) VALUES($1::uuid,$2::uuid,'organization.role_granted','membership',$3::uuid,jsonb_build_object('role',$4))`, actorID, orgID, mid, role); err != nil {
+	if _, err = tx.Exec(ctx, `INSERT INTO iam.audit_logs(actor_user_id,organization_id,action,resource_type,resource_id,detail) VALUES($1::uuid,$2::uuid,'organization.role_granted','membership',$3::uuid,jsonb_build_object('role',$4::text))`, actorID, orgID, mid, role); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)
@@ -276,7 +276,7 @@ func (r *OrganizationRepository) RevokeRole(ctx context.Context, actorID, orgID,
 	if tag.RowsAffected() == 0 {
 		return repository.ErrRoleAlreadyGranted
 	}
-	if _, err = tx.Exec(ctx, `INSERT INTO iam.audit_logs(actor_user_id,organization_id,action,resource_type,resource_id,detail) VALUES($1::uuid,$2::uuid,'organization.role_revoked','membership',$3::uuid,jsonb_build_object('role',$4))`, actorID, orgID, mid, role); err != nil {
+	if _, err = tx.Exec(ctx, `INSERT INTO iam.audit_logs(actor_user_id,organization_id,action,resource_type,resource_id,detail) VALUES($1::uuid,$2::uuid,'organization.role_revoked','membership',$3::uuid,jsonb_build_object('role',$4::text))`, actorID, orgID, mid, role); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)
