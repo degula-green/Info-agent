@@ -532,6 +532,21 @@ type PrivateAccessRequestInput struct {
 	Now              time.Time `json:"-"`
 }
 
+type OrganizationMembershipEventInput struct {
+	EventID        string `json:"event_id"`
+	EventType      string `json:"event_type"`
+	OrganizationID string `json:"organization_id"`
+	UserID         string `json:"user_id"`
+	MembershipID   string `json:"membership_id"`
+	Status         string `json:"status"`
+	Reason         string `json:"reason"`
+}
+
+type OrganizationExitImpact struct {
+	Blockers []string `json:"blockers"`
+	Warnings []string `json:"warnings"`
+}
+
 type ContactFactInput struct {
 	FactType  string
 	Label     string
@@ -664,6 +679,8 @@ type Repository interface {
 	ListKnowledgePermissionSubjects(ctx context.Context, knowledgeItemID string) ([]string, error)
 	MarkKnowledgePermissionSynced(ctx context.Context, knowledgeItemID string, aclVersion int64) error
 	MarkKnowledgePermissionFailed(ctx context.Context, knowledgeItemID, failure string) error
+	ApplyOrganizationMembershipEvent(ctx context.Context, input OrganizationMembershipEventInput) error
+	OrganizationExitImpact(ctx context.Context, organizationID, userID string) (OrganizationExitImpact, error)
 	TryMarkKnowledgeReady(ctx context.Context, knowledgeItemID, traceID string) (bool, error)
 	CanUserReviewAccess(ctx context.Context, userID, resourceType, resourceID string) (bool, error)
 	ListAccessRequestContexts(ctx context.Context, resources []AccessRequestResource) ([]domain.AccessRequestContext, error)

@@ -6,6 +6,10 @@
         <p>查看组织成员及其管理身份</p>
       </div>
       <div class="organization-heading__actions">
+        <t-button v-if="organization && canLeave" variant="outline" theme="danger" @click="openExitDialog">
+          <template #icon><t-icon name="logout" /></template>
+          退出组织
+        </t-button>
         <t-button variant="outline" @click="router.push('/organization/knowledge')">
           <template #icon><t-icon name="folder-open" /></template>
           知识结构
@@ -108,7 +112,7 @@
           </div>
           <span class="member-meta" role="cell" data-label="加入方式">{{ member.joined_via === 'created' ? '创建组织' : '邀请加入' }}</span>
           <span class="member-meta" role="cell" data-label="加入时间">{{ formatDate(member.joined_at) }}</span>
-          <button v-if="canManageRoles" class="member-more" type="button" title="管理角色" aria-label="管理角色" @click="openRoleDrawer(member)"><t-icon name="more" /></button>
+          <button v-if="canManageMembers || canManageRoles || canTransferOwner" class="member-more" type="button" title="管理成员" aria-label="管理成员" @click="openRoleDrawer(member)"><t-icon name="more" /></button>
         </div>
         <div v-if="!pageLoading && !filteredMembers.length" class="member-empty">
           <t-icon name="search" />
@@ -141,6 +145,28 @@
       <p class="confirm-copy">撤销后该链接立即失效，尚未使用链接的用户将无法加入组织。</p>
     </t-dialog>
 
+    <t-dialog v-model:visible="exitDialogVisible" header="退出组织" width="480px" @close="cancelExitCheck">
+      <div class="exit-dialog">
+        <div v-if="exitLoading" class="member-loading"><t-loading size="small" text="正在检查退出影响..." /></div>
+        <template v-else-if="exitPreflight">
+          <div v-if="(exitPreflight.blockers || []).length" class="exit-impact exit-impact--blocked">
+            <strong>暂时无法退出</strong>
+            <span v-for="item in (exitPreflight.blockers || [])" :key="item">{{ exitBlockerLabel(item) }}</span>
+          </div>
+          <div v-if="(exitPreflight.warnings || []).length" class="exit-impact">
+            <strong>退出前请确认</strong>
+            <span v-for="item in (exitPreflight.warnings || [])" :key="item">{{ exitWarningLabel(item) }}</span>
+          </div>
+        </template>
+      </div>
+      <template #footer>
+        <div class="exit-dialog__footer">
+          <t-button variant="outline" @click="cancelExitCheck">取消</t-button>
+          <t-button v-if="exitPreflight" theme="danger" :disabled="!exitPreflight.allowed || exitSubmitting" :loading="exitSubmitting" @click="confirmLeave">确认退出</t-button>
+        </div>
+      </template>
+    </t-dialog>
+
     <t-drawer v-model:visible="roleDrawerVisible" header="管理成员身份" size="420px" :footer="false" destroy-on-close>
       <div v-if="selectedMember" class="role-drawer">
         <div class="drawer-member">
@@ -155,17 +181,23 @@
           </label>
         </div>
         <p class="drawer-note"><t-icon name="info-circle" />角色变更会立即同步到组织成员权限。</p>
+        <div v-if="selectedMember && !selectedMember.current" class="member-actions">
+          <t-button v-if="canManageMembers && selectedMember.status === 'active'" variant="outline" theme="warning" :loading="memberActionSubmitting" @click="suspendSelectedMember">暂停成员</t-button>
+          <t-button v-if="canManageMembers && selectedMember.status === 'suspended'" variant="outline" theme="success" :loading="memberActionSubmitting" @click="reactivateSelectedMember">恢复成员</t-button>
+          <t-button v-if="canTransferOwner && !selectedMember.roles.includes('owner')" variant="outline" theme="primary" :loading="memberActionSubmitting" @click="transferSelectedOwner">转让管理员</t-button>
+          <t-button v-if="canManageMembers" variant="text" theme="danger" :loading="memberActionSubmitting" @click="removeSelectedMember">永久移除</t-button>
+        </div>
       </div>
     </t-drawer>
   </section>
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { MessagePlugin } from 'tdesign-vue-next'
 import { useRouter } from 'vue-router'
 import { CoreAuthError, getCurrentUser } from '@/api/core-auth'
-import { createOrganizationInvitation, getCurrentOrganization, grantOrganizationRole, listAccessRequests, listOrganizationMembers, revokeOrganizationInvitation, revokeOrganizationRole, type CoreAccessRequest, type CoreOrganizationMember, type CoreOrganizationResponse } from '@/api/core-organization'
+import { createOrganizationInvitation, getCurrentOrganization, getOrganizationCapabilities, getOrganizationExitPreflight, grantOrganizationRole, leaveOrganization, listAccessRequests, listOrganizationMembers, reactivateOrganizationMember, removeOrganizationMember, revokeOrganizationInvitation, revokeOrganizationRole, suspendOrganizationMember, transferOrganizationOwner, type CoreAccessRequest, type CoreOrganizationCapabilities, type CoreOrganizationExitPreflight, type CoreOrganizationMember, type CoreOrganizationResponse } from '@/api/core-organization'
 
 type ManagementRole = 'owner' | 'information_admin' | 'membership_approver'
 type DisplayRole = ManagementRole | 'member'
@@ -180,6 +212,7 @@ const managementRoles: Array<{ code: ManagementRole; label: string; description:
   { code: 'membership_approver', label: '成员审批员', description: '创建和撤销邀请，不包含信息管理权限' },
 ]
 const organization = ref<CoreOrganizationResponse | null>(null)
+const capabilities = ref<CoreOrganizationCapabilities | null>(null)
 const members = ref<Member[]>([])
 const pageLoading = ref(true)
 const invitationSubmitting = ref(false)
@@ -195,12 +228,23 @@ const invitation = ref<Invitation | null>(null)
 const invitationDraft = ref<Invitation | null>(null)
 const accessRequests = ref<CoreAccessRequest[]>([])
 const accessLoading = ref(false)
+const exitDialogVisible = ref(false)
+const exitLoading = ref(false)
+const exitSubmitting = ref(false)
+const exitPreflight = ref<CoreOrganizationExitPreflight | null>(null)
+const memberActionSubmitting = ref(false)
+let exitAbortController: AbortController | null = null
+let exitAbortTimer: number | null = null
+let exitCheckTimedOut = false
 
 const selectedMember = computed(() => members.value.find((item) => item.id === selectedMemberID.value) || null)
 const managementMemberCount = computed(() => members.value.filter((item) => item.roles.length > 0).length)
 const currentRoles = computed(() => organization.value?.membership.roles.map((role) => role.role_code || role.RoleCode || '').filter(Boolean) || [])
-const canManageRoles = computed(() => currentRoles.value.includes('owner'))
-const canInvite = computed(() => currentRoles.value.includes('owner') || currentRoles.value.includes('membership_approver'))
+const canManageRoles = computed(() => capabilities.value?.can_manage_roles ?? currentRoles.value.includes('owner'))
+const canManageMembers = computed(() => capabilities.value?.can_manage_members ?? false)
+const canTransferOwner = computed(() => capabilities.value?.can_transfer_owner ?? false)
+const canLeave = computed(() => capabilities.value?.can_leave ?? false)
+const canInvite = computed(() => capabilities.value?.can_invite ?? (currentRoles.value.includes('owner') || currentRoles.value.includes('membership_approver')))
 const canReviewAccess = computed(() => currentRoles.value.includes('owner') || currentRoles.value.includes('information_admin'))
 const currentIdentity = computed(() => currentRoles.value.includes('owner') ? '管理员' : currentRoles.value.includes('information_admin') ? '信息管理员' : currentRoles.value.includes('membership_approver') ? '成员审批员' : '成员')
 const organizationStatusLabel = computed(() => organization.value?.organization.status === 'active' ? '正常' : organization.value?.organization.status || '')
@@ -217,6 +261,81 @@ function visibleRoles(member: Member): DisplayRole[] { return member.roles.lengt
 function formatDate(value: string) { return new Intl.DateTimeFormat('zh-CN', { year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(value)) }
 function formatDateTime(value: Date) { return new Intl.DateTimeFormat('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false }).format(value) }
 function openRoleDrawer(member: Member) { selectedMemberID.value = member.id; roleDrawerVisible.value = true }
+function exitBlockerLabel(value: string) {
+  if (value === 'LAST_OWNER_REQUIRED') return '你是最后一个管理员，请先转让管理员身份。'
+  if (value === 'ACTIVE_COLLECTOR_RESPONSIBILITY') return '你仍是部分群聊的唯一有效采集者，请先暂停、解除或转让采集任务。'
+  return value
+}
+function exitWarningLabel(value: string) {
+  const labels: Record<string, string> = {
+    'organization knowledge and question history will become unavailable': '退出后将无法查看原组织知识、附件和组织问答。',
+    'documents already downloaded cannot be revoked': '已经下载的内容无法撤回。',
+    'organization collector assignments will be removed': '你的组织采集任务会被移除。',
+  }
+  return labels[value] || value
+}
+function isAbortError(cause: any) {
+  return cause?.name === 'AbortError' || cause?.code === 'ABORT_ERR'
+}
+function clearExitRequest() {
+  if (exitAbortTimer !== null) {
+    window.clearTimeout(exitAbortTimer)
+    exitAbortTimer = null
+  }
+  exitAbortController = null
+}
+function cancelExitCheck() {
+  exitCheckTimedOut = false
+  clearExitRequest()
+  exitLoading.value = false
+  exitPreflight.value = null
+  exitDialogVisible.value = false
+}
+async function openExitDialog() {
+  if (!organization.value) return
+  cancelExitCheck()
+  exitDialogVisible.value = true
+  exitLoading.value = true
+  exitPreflight.value = null
+  exitCheckTimedOut = false
+  const controller = new AbortController()
+  exitAbortController = controller
+  exitAbortTimer = window.setTimeout(() => {
+    exitCheckTimedOut = true
+    controller.abort()
+  }, 8000)
+  try {
+    exitPreflight.value = await getOrganizationExitPreflight(organization.value.organization.id, controller.signal)
+  } catch (cause) {
+    if (isAbortError(cause)) {
+      if (exitCheckTimedOut && exitDialogVisible.value) MessagePlugin.error('退出影响检查超时，请稍后重试')
+    } else {
+      MessagePlugin.error(errorMessage(cause, '退出影响检查失败'))
+    }
+  } finally {
+    if (exitAbortController === controller) {
+      clearExitRequest()
+      exitLoading.value = false
+    }
+  }
+}
+async function confirmLeave() {
+  if (!organization.value || !exitPreflight.value?.allowed || exitSubmitting.value) return
+  exitSubmitting.value = true
+  try {
+    await leaveOrganization(organization.value.organization.id)
+    MessagePlugin.success('已退出组织')
+    exitDialogVisible.value = false
+    organization.value = null
+    capabilities.value = null
+    members.value = []
+    await router.push('/profile')
+  } catch (cause) {
+    MessagePlugin.error(errorMessage(cause, '退出组织失败'))
+  } finally {
+    exitSubmitting.value = false
+  }
+}
 function roleDisabled(role: ManagementRole) { return role === 'owner' && Boolean(selectedMember.value?.roles.includes('owner')) && members.value.filter((item) => item.roles.includes('owner')).length === 1 }
 async function setRole(role: ManagementRole, enabled: boolean) {
   const member = selectedMember.value
@@ -264,6 +383,10 @@ async function loadMembers() {
   const result = await listOrganizationMembers(organization.value.organization.id)
   members.value = result.members.map((member) => ({ ...member, id: member.user_id, color: memberColor(member.user_id), current: member.user_id === currentUserID.value }))
 }
+async function loadCapabilities() {
+  if (!organization.value) return
+  capabilities.value = await getOrganizationCapabilities(organization.value.organization.id)
+}
 async function loadAccessRequests() {
   if (!organization.value || !canReviewAccess.value) {
     accessRequests.value = []
@@ -283,13 +406,48 @@ async function loadOrganization() {
   pageLoading.value = true
   try {
     const [current, user] = await Promise.all([getCurrentOrganization(), getCurrentUser()])
-    organization.value = current; currentUserID.value = user.id; await loadMembers(); await loadAccessRequests()
+    organization.value = current; currentUserID.value = user.id; await Promise.all([loadMembers(), loadCapabilities()]); await loadAccessRequests()
   } catch (cause) {
     if (cause instanceof CoreAuthError && cause.code === 'ORG_MEMBERSHIP_REQUIRED') MessagePlugin.info('你尚未加入组织')
     else MessagePlugin.error(errorMessage(cause, '组织信息加载失败'))
   } finally { pageLoading.value = false }
 }
+async function runMemberAction(action: () => Promise<void>, success: string) {
+  if (!organization.value || memberActionSubmitting.value) return
+  memberActionSubmitting.value = true
+  try {
+    await action()
+    await Promise.all([loadMembers(), loadCapabilities()])
+    MessagePlugin.success(success)
+    roleDrawerVisible.value = false
+  } catch (cause) {
+    MessagePlugin.error(errorMessage(cause, '成员操作失败'))
+  } finally {
+    memberActionSubmitting.value = false
+  }
+}
+function suspendSelectedMember() {
+  const member = selectedMember.value
+  if (!member || !organization.value || !window.confirm(`确认暂停 ${member.nickname}？`)) return
+  void runMemberAction(() => suspendOrganizationMember(organization.value!.organization.id, member.user_id), '成员已暂停')
+}
+function reactivateSelectedMember() {
+  const member = selectedMember.value
+  if (!member || !organization.value) return
+  void runMemberAction(() => reactivateOrganizationMember(organization.value!.organization.id, member.user_id), '成员已恢复')
+}
+function transferSelectedOwner() {
+  const member = selectedMember.value
+  if (!member || !organization.value || !window.confirm(`确认将管理员身份转让给 ${member.nickname}？`)) return
+  void runMemberAction(() => transferOrganizationOwner(organization.value!.organization.id, member.user_id), '管理员身份已转让')
+}
+function removeSelectedMember() {
+  const member = selectedMember.value
+  if (!member || !organization.value || !window.confirm(`永久移除 ${member.nickname}？该操作不可撤销。`)) return
+  void runMemberAction(() => removeOrganizationMember(organization.value!.organization.id, member.user_id), '成员已移除')
+}
 onMounted(() => { void loadOrganization() })
+onBeforeUnmount(cancelExitCheck)
 </script>
 
 <style lang="less" scoped>
@@ -348,6 +506,8 @@ onMounted(() => { void loadOrganization() })
 .role-drawer { padding-bottom: 20px; }.drawer-member { display: flex; align-items: center; gap: 11px; padding-bottom: 18px; border-bottom: 1px solid var(--td-component-stroke); }.drawer-member div { display: grid; gap: 4px; }.drawer-member strong { font-size: 14px; }.drawer-member div span { color: var(--td-text-color-secondary); font-size: 11px; }
 .base-role, .role-option { display: flex; align-items: center; justify-content: space-between; gap: 18px; padding: 16px 2px; border-bottom: 1px solid var(--td-component-stroke); }.base-role > span, .role-option > span { display: grid; gap: 4px; }.base-role strong, .role-option strong { font-size: 13px; }.base-role small, .role-option small { color: var(--td-text-color-secondary); font-size: 11px; line-height: 1.5; }.role-option { cursor: pointer; }.role-option--disabled { cursor: not-allowed; }.role-option em { color: var(--td-warning-color); font-size: 10px; font-style: normal; }
 .drawer-note { display: flex; align-items: flex-start; gap: 7px; margin: 18px 0 0; padding: 11px; border-radius: 6px; color: var(--td-text-color-secondary); background: var(--td-bg-color-secondarycontainer); font-size: 11px; line-height: 1.55; }.drawer-note svg { flex: 0 0 15px; width: 15px; margin-top: 1px; color: var(--td-brand-color); }
+.member-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 18px; padding-top: 16px; border-top: 1px solid var(--td-component-stroke); }
+.exit-dialog { display: grid; gap: 10px; min-height: 56px; }.exit-dialog__footer { display: flex; justify-content: flex-end; gap: 8px; }.exit-impact { display: grid; gap: 6px; padding: 12px 13px; border: 1px solid var(--td-component-stroke); border-radius: 6px; color: var(--td-text-color-secondary); background: var(--td-bg-color-secondarycontainer); font-size: 12px; line-height: 1.6; }.exit-impact + .exit-impact { margin-top: 0; }.exit-impact strong { color: var(--td-text-color-primary); font-size: 13px; }.exit-impact--blocked { border-color: var(--td-error-color-3); color: var(--td-error-color-7); background: var(--td-error-color-1); }
 @media (max-width: 900px) { .organization-overview { align-items: flex-start; flex-direction: column; }.organization-facts { width: 100%; }.organization-facts div:first-child { border-left: 0; padding-left: 0; }.members-toolbar { align-items: stretch; flex-direction: column; }.members-filters .t-input { flex: 1; width: auto; }.member-row { grid-template-columns: minmax(190px, 1.3fr) minmax(185px, 1fr) 100px 36px; }.member-row > :nth-child(4) { display: none; } }
 @media (max-width: 700px) { .organization-page { padding: 24px 16px 44px; }.organization-heading { align-items: stretch; flex-direction: column; }.organization-heading .t-button { align-self: flex-start; }.organization-overview { padding: 18px; }.organization-facts div { padding: 0 12px; }.organization-facts dd { font-size: 14px; }.invitation-strip { align-items: flex-start; flex-wrap: wrap; }.invitation-strip__actions { width: 100%; padding-left: 44px; }.members-filters { align-items: stretch; flex-direction: column; }.role-filter { width: 100%; }.member-table { border-radius: 7px; }.member-row--header { display: none; }.member-row { grid-template-columns: 1fr auto; gap: 11px 14px; padding: 15px; }.member-person { grid-column: 1; }.member-more { grid-column: 2; grid-row: 1; }.member-roles { grid-column: 1 / -1; }.member-meta { grid-column: 1 / -1; margin: 0; }.member-meta::before { content: attr(data-label) '：'; color: var(--td-text-color-placeholder); }.member-row > :nth-child(4) { display: block; }.access-review-row { grid-template-columns: 1fr; align-items: start; }.access-review-actions { justify-content: flex-end; }.dialog-actions { flex-direction: row; }.dialog-actions .t-button { flex: 1; } }
 </style>

@@ -29,6 +29,7 @@ type Server struct {
 	Engine *gin.Engine
 	pool   *pgxpool.Pool
 	redis  *redis.Client
+	cancel context.CancelFunc
 }
 
 func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Server, error) {
@@ -38,7 +39,13 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Server, 
 	startupCtx, cancel := context.WithTimeout(ctx, startupTimeout)
 	defer cancel()
 
-	pool, err := pgxpool.New(startupCtx, cfg.DatabaseURL)
+	poolConfig, err := pgxpool.ParseConfig(cfg.DatabaseURL)
+	if err != nil {
+		return nil, fmt.Errorf("parse PostgreSQL config: %w", err)
+	}
+	poolConfig.ConnConfig.ConnectTimeout = 3 * time.Second
+	poolConfig.ConnConfig.RuntimeParams["statement_timeout"] = "5000"
+	pool, err := pgxpool.NewWithConfig(startupCtx, poolConfig)
 	if err != nil {
 		return nil, fmt.Errorf("create PostgreSQL pool: %w", err)
 	}
@@ -128,6 +135,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Server, 
 	authorizationClient := openfga.NewClient(cfg)
 	permissionSync := application.NewPermissionSyncService(authorizationClient, postgres.NewAuthorizationVersionRepository(pool))
 	knowledgeClient := knowledgeclient.New(cfg.KnowledgeURL, cfg.KnowledgeAuthorizationToken)
+	organizationService.SetExitPreflightChecker(knowledgeClient)
 	accessRequestService := application.NewAccessRequestService(
 		postgres.NewAccessRequestRepository(pool),
 		authorizationClient,
@@ -137,15 +145,22 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Server, 
 		knowledgeClient,
 		clock.Now,
 	)
+	relayCtx, relayCancel := context.WithCancel(ctx)
+	eventRelay := application.NewOrganizationEventRelay(organizationRepository, knowledgeClient, 5*time.Second, clock.Now)
+	go eventRelay.Run(relayCtx)
 	return &Server{
 		Engine: httpapi.NewRouterWithRegistration(authService, cookies, logger, registrationService, organizationService, &httpapi.AuthorizationConfig{Provider: authorizationClient, Token: cfg.RAGAuthorizationToken, KnowledgeToken: cfg.KnowledgeAuthorizationToken, PermissionSync: permissionSync}, accessRequestService),
 		pool:   pool,
 		redis:  redisClient,
+		cancel: relayCancel,
 	}, nil
 }
 
 func (s *Server) Close() error {
 	var closeErrors []error
+	if s.cancel != nil {
+		s.cancel()
+	}
 	if s.redis != nil {
 		if err := s.redis.Close(); err != nil {
 			closeErrors = append(closeErrors, err)

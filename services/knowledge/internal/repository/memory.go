@@ -2699,6 +2699,105 @@ func (s *MemoryStore) MarkKnowledgePermissionFailed(_ context.Context, id, failu
 	return nil
 }
 
+func (s *MemoryStore) ApplyOrganizationMembershipEvent(ctx context.Context, input OrganizationMembershipEventInput) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := time.Now().UTC()
+	if input.EventType == "organization.membership.deactivated" || input.EventType == "organization.membership.suspended" {
+		affected := map[string]struct{}{}
+		for id, collector := range s.collectors {
+			conversation, ok := s.conversations[collector.ConversationID]
+			if !ok || conversation.OrganizationID != input.OrganizationID || collector.CollectorUserID != input.UserID || collector.Status == domain.CollectorRemoved {
+				continue
+			}
+			collector.Status = domain.CollectorRemoved
+			collector.RemovedAt = &now
+			s.collectors[id] = collector
+			affected[collector.ConversationID] = struct{}{}
+		}
+		for conversationID := range affected {
+			conversation := s.conversations[conversationID]
+			if conversation.Status != domain.ConversationActive {
+				continue
+			}
+			hasActive := false
+			for _, collector := range s.collectors {
+				if collector.ConversationID == conversationID && collector.Status == domain.CollectorActive {
+					hasActive = true
+					break
+				}
+			}
+			if !hasActive {
+				conversation.Status = domain.ConversationPaused
+				conversation.PauseReason = "no_available_collector"
+				conversation.UpdatedAt = now
+				s.conversations[conversationID] = conversation
+			}
+		}
+		for id, request := range s.accessRequests {
+			if request.RequesterUserID != input.UserID || request.Status != "pending" {
+				continue
+			}
+			if ref, ok := s.shareRefs[request.ShareReferenceID]; ok && ref.OrganizationID == input.OrganizationID {
+				request.Status = "cancelled"
+				request.ReviewedAt = &now
+				request.ReviewNote = "organization membership ended"
+				s.accessRequests[id] = request
+			}
+		}
+	}
+	if input.EventType != "organization.membership.role_changed" {
+		for id, item := range s.knowledgeItems {
+			if item.OrganizationID != input.OrganizationID || item.LifecycleStatus != "active" {
+				continue
+			}
+			item.PermissionReady = false
+			item.ACLSyncStatus = "pending"
+			item.UpdatedAt = now
+			s.knowledgeItems[id] = item
+			s.ensurePermissionEventLocked(ctx, item, now)
+		}
+	}
+	return nil
+}
+
+func (s *MemoryStore) OrganizationExitImpact(_ context.Context, organizationID, userID string) (OrganizationExitImpact, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var impact OrganizationExitImpact
+	for _, collector := range s.collectors {
+		if collector.CollectorUserID != userID || collector.Status != domain.CollectorActive {
+			continue
+		}
+		conversation, ok := s.conversations[collector.ConversationID]
+		if !ok || conversation.OrganizationID != organizationID || (conversation.Status != domain.ConversationActive && conversation.Status != domain.ConversationPaused) {
+			continue
+		}
+		if collector.CollectorRole == domain.CollectorPrimary {
+			hasOther := false
+			for _, other := range s.collectors {
+				if other.ConversationID == collector.ConversationID && other.ID != collector.ID && other.Status == domain.CollectorActive {
+					hasOther = true
+					break
+				}
+			}
+			if !hasOther {
+				impact.Blockers = append(impact.Blockers, "ACTIVE_COLLECTOR_RESPONSIBILITY")
+				break
+			}
+		}
+	}
+	for _, collector := range s.collectors {
+		if collector.CollectorUserID == userID && collector.Status == domain.CollectorActive {
+			if conversation, ok := s.conversations[collector.ConversationID]; ok && conversation.OrganizationID == organizationID {
+				impact.Warnings = append(impact.Warnings, "organization collector assignments will be removed")
+				break
+			}
+		}
+	}
+	return impact, nil
+}
+
 func (s *MemoryStore) TryMarkKnowledgeReady(ctx context.Context, id, traceID string) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

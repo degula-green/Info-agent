@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"info-agent/core/internal/application"
+	"info-agent/core/internal/domain"
 )
 
 type Client struct {
@@ -88,4 +89,75 @@ func (c *Client) LoadAccessRequestContexts(ctx context.Context, resources []appl
 		return nil, err
 	}
 	return result.Items, nil
+}
+
+func (c *Client) PublishOrganizationEvent(ctx context.Context, event domain.OrganizationEvent) error {
+	if c == nil || c.baseURL == "" || c.token == "" {
+		return errors.New("knowledge organization event client is not configured")
+	}
+	body, err := json.Marshal(event)
+	if err != nil {
+		return err
+	}
+	request, err := http.NewRequestWithContext(
+		ctx,
+		http.MethodPost,
+		c.baseURL+"/api/knowledge/v1/internal/knowledge/organization-membership-events",
+		strings.NewReader(string(body)),
+	)
+	if err != nil {
+		return err
+	}
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Authorization", "Bearer "+c.token)
+	request.Header.Set("X-Caller-Service", "core")
+	response, err := c.http.Do(request)
+	if err != nil {
+		return err
+	}
+	defer response.Body.Close()
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return fmt.Errorf("knowledge organization membership event failed: %s", response.Status)
+	}
+	return nil
+}
+
+func (c *Client) OrganizationExitPreflight(ctx context.Context, organizationID, userID string) (domain.OrganizationExitPreflight, error) {
+	if c == nil || c.baseURL == "" || c.token == "" {
+		return domain.OrganizationExitPreflight{}, errors.New("knowledge exit-preflight client is not configured")
+	}
+	query := url.Values{}
+	query.Set("organization_id", organizationID)
+	query.Set("user_id", userID)
+	request, err := http.NewRequestWithContext(
+		ctx,
+		http.MethodGet,
+		c.baseURL+"/api/knowledge/v1/internal/knowledge/organization-exit-preflight?"+query.Encode(),
+		nil,
+	)
+	if err != nil {
+		return domain.OrganizationExitPreflight{}, err
+	}
+	request.Header.Set("Authorization", "Bearer "+c.token)
+	request.Header.Set("X-Caller-Service", "core")
+	response, err := c.http.Do(request)
+	if err != nil {
+		return domain.OrganizationExitPreflight{}, err
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return domain.OrganizationExitPreflight{}, fmt.Errorf("knowledge exit preflight failed: %s", response.Status)
+	}
+	var impact struct {
+		Blockers []string `json:"blockers"`
+		Warnings []string `json:"warnings"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&impact); err != nil {
+		return domain.OrganizationExitPreflight{}, err
+	}
+	return domain.OrganizationExitPreflight{
+		Allowed:  len(impact.Blockers) == 0,
+		Blockers: impact.Blockers,
+		Warnings: impact.Warnings,
+	}, nil
 }

@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -45,6 +46,27 @@ func (s *organizationCheckStub) GrantRole(context.Context, string, string, strin
 func (s *organizationCheckStub) RevokeRole(context.Context, string, string, string, string) error {
 	return nil
 }
+func (s *organizationCheckStub) Capabilities(context.Context, string, string) (domain.OrganizationCapabilities, error) {
+	return domain.OrganizationCapabilities{}, nil
+}
+func (s *organizationCheckStub) ExitPreflight(context.Context, string, string) (domain.OrganizationExitPreflight, error) {
+	return domain.OrganizationExitPreflight{Allowed: true}, nil
+}
+func (s *organizationCheckStub) SuspendMember(context.Context, string, string, string, string) error {
+	return nil
+}
+func (s *organizationCheckStub) ReactivateMember(context.Context, string, string, string) error {
+	return nil
+}
+func (s *organizationCheckStub) RemoveMember(context.Context, string, string, string, string) error {
+	return nil
+}
+func (s *organizationCheckStub) LeaveOrganization(context.Context, string, string, string) error {
+	return nil
+}
+func (s *organizationCheckStub) TransferOwner(context.Context, string, string, string) error {
+	return nil
+}
 
 func TestInternalOrganizationMemberCheckRestrictsCaller(t *testing.T) {
 	gin.SetMode(gin.TestMode)
@@ -68,5 +90,16 @@ func TestInternalOrganizationMemberCheckRestrictsCaller(t *testing.T) {
 	router.ServeHTTP(result, request)
 	if result.Code != http.StatusOK || !strings.Contains(result.Body.String(), `"allowed":true`) || !strings.Contains(result.Body.String(), `"is_member":true`) {
 		t.Fatalf("unexpected member check response: status=%d body=%s", result.Code, result.Body.String())
+	}
+}
+
+func TestExitPreflightResponseNormalizesNilArrays(t *testing.T) {
+	response := exitPreflightResponse(domain.OrganizationExitPreflight{Allowed: true})
+	encoded, err := json.Marshal(response)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(encoded) != `{"allowed":true,"blockers":[],"warnings":[]}` {
+		t.Fatalf("unexpected response: %s", encoded)
 	}
 }

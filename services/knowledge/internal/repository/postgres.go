@@ -28,7 +28,13 @@ type PostgresStore struct {
 }
 
 func NewPostgresStore(ctx context.Context, databaseURL string) (*PostgresStore, error) {
-	pool, err := pgxpool.New(ctx, databaseURL)
+	poolConfig, err := pgxpool.ParseConfig(databaseURL)
+	if err != nil {
+		return nil, err
+	}
+	poolConfig.ConnConfig.ConnectTimeout = 3 * time.Second
+	poolConfig.ConnConfig.RuntimeParams["statement_timeout"] = "5000"
+	pool, err := pgxpool.NewWithConfig(ctx, poolConfig)
 	if err != nil {
 		return nil, err
 	}
@@ -3084,6 +3090,132 @@ func (s *PostgresStore) MarkKnowledgePermissionFailed(ctx context.Context, id, f
 		return dbError(err)
 	}
 	return dbError(tx.Commit(ctx))
+}
+
+func (s *PostgresStore) ApplyOrganizationMembershipEvent(ctx context.Context, input OrganizationMembershipEventInput) error {
+	input.OrganizationID = strings.TrimSpace(input.OrganizationID)
+	input.UserID = strings.TrimSpace(input.UserID)
+	input.EventType = strings.TrimSpace(input.EventType)
+	if input.OrganizationID == "" || input.UserID == "" || input.EventType == "" {
+		return apperror.New("invalid_membership_event", "organization_id, user_id, and event_type are required", 400, false)
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return dbError(err)
+	}
+	defer tx.Rollback(ctx)
+
+	switch input.EventType {
+	case "organization.membership.deactivated", "organization.membership.suspended":
+		if _, err = tx.Exec(ctx, `
+			UPDATE knowledge.conversation_collectors cc
+			SET status='removed',removed_at=now(),updated_at=now()
+			FROM knowledge.conversation_ingestions ci
+			WHERE cc.conversation_ingestion_id=ci.id
+			  AND ci.organization_id=$1::uuid
+			  AND cc.collector_user_id=$2::uuid
+			  AND cc.status<>'removed'`,
+			input.OrganizationID, input.UserID); err != nil {
+			return dbError(err)
+		}
+		if _, err = tx.Exec(ctx, `
+			UPDATE knowledge.conversation_ingestions ci
+			SET status='paused',pause_reason='no_available_collector',updated_at=now()
+			WHERE ci.organization_id=$1::uuid
+			  AND ci.status='active'
+			  AND NOT EXISTS (
+			      SELECT 1 FROM knowledge.conversation_collectors cc
+			      WHERE cc.conversation_ingestion_id=ci.id AND cc.status='active'
+			  )`,
+			input.OrganizationID); err != nil {
+			return dbError(err)
+		}
+		if _, err = tx.Exec(ctx, `
+			UPDATE knowledge.private_access_requests r
+			SET status='cancelled',reviewed_at=now(),review_note='organization membership ended'
+			FROM knowledge.private_share_references sr
+			WHERE r.share_reference_id=sr.id
+			  AND sr.organization_id=$1::uuid
+			  AND r.requester_user_id=$2::uuid
+			  AND r.status='pending'`,
+			input.OrganizationID, input.UserID); err != nil {
+			return dbError(err)
+		}
+	}
+
+	if input.EventType != "organization.membership.role_changed" {
+		traceID := strings.TrimSpace(input.EventID)
+		if traceID == "" {
+			traceID = uuid.NewString()
+		}
+		if _, err = tx.Exec(ctx, `
+			WITH affected AS (
+				UPDATE knowledge.knowledge_items
+				SET permission_ready=FALSE,acl_sync_status='pending',updated_at=now()
+				WHERE organization_id=$1::uuid AND lifecycle_status='active'
+				RETURNING id,content_version
+			)
+			INSERT INTO knowledge.outbox_events
+				(id,aggregate_type,aggregate_id,event_type,event_version,schema_version,organization_id,trace_id,payload,status,retry_count,available_at)
+			SELECT gen_random_uuid(),'knowledge_item',id,'permission.sync.requested',content_version,1,$1::uuid,$2,
+			       jsonb_build_object('knowledge_item_id',id::text,'content_version',content_version,'reason',$3::text),
+			       'pending',0,now()
+			FROM affected
+			ON CONFLICT (aggregate_type,aggregate_id,event_type,event_version)
+			DO UPDATE SET status='pending',retry_count=0,available_at=now(),last_error=NULL,published_at=NULL`,
+			input.OrganizationID, traceID, input.EventType); err != nil {
+			return dbError(err)
+		}
+	}
+	return dbError(tx.Commit(ctx))
+}
+
+func (s *PostgresStore) OrganizationExitImpact(ctx context.Context, organizationID, userID string) (OrganizationExitImpact, error) {
+	organizationID = strings.TrimSpace(organizationID)
+	userID = strings.TrimSpace(userID)
+	if organizationID == "" || userID == "" {
+		return OrganizationExitImpact{}, apperror.New("invalid_request", "organization_id and user_id are required", 400, false)
+	}
+	var impact OrganizationExitImpact
+	var soleCollectorCount int
+	err := s.pool.QueryRow(ctx, `
+		SELECT count(*)
+		FROM knowledge.conversation_collectors cc
+		JOIN knowledge.conversation_ingestions ci ON ci.id=cc.conversation_ingestion_id
+		WHERE ci.organization_id=$1::uuid
+		  AND cc.collector_user_id=$2::uuid
+		  AND cc.status='active'
+		  AND cc.collector_role='primary'
+		  AND ci.status IN ('active','paused')
+		  AND NOT EXISTS (
+		      SELECT 1 FROM knowledge.conversation_collectors other
+		      WHERE other.conversation_ingestion_id=ci.id
+		        AND other.id<>cc.id
+		        AND other.status='active'
+		  )`,
+		organizationID, userID).Scan(&soleCollectorCount)
+	if err != nil {
+		return OrganizationExitImpact{}, dbError(err)
+	}
+	if soleCollectorCount > 0 {
+		impact.Blockers = append(impact.Blockers, "ACTIVE_COLLECTOR_RESPONSIBILITY")
+	}
+	var collectorCount int
+	err = s.pool.QueryRow(ctx, `
+		SELECT count(*)
+		FROM knowledge.conversation_collectors cc
+		JOIN knowledge.conversation_ingestions ci ON ci.id=cc.conversation_ingestion_id
+		WHERE ci.organization_id=$1::uuid
+		  AND cc.collector_user_id=$2::uuid
+		  AND cc.status='active'`,
+		organizationID, userID).Scan(&collectorCount)
+	if err != nil {
+		return OrganizationExitImpact{}, dbError(err)
+	}
+	if collectorCount > 0 {
+		impact.Warnings = append(impact.Warnings, "organization collector assignments will be removed")
+	}
+	return impact, nil
 }
 
 func (s *PostgresStore) TryMarkKnowledgeReady(ctx context.Context, id, traceID string) (bool, error) {
