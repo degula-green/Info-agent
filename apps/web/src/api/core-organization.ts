@@ -20,9 +20,23 @@ export interface CoreAccessRequest {
   id: string
   organization_id: string
   requester_user_id: string
+  requester_nickname?: string
+  requester_email?: string
   resource_scope: 'organization' | 'private' | string
   resource_type: 'knowledge_original' | 'attachment_content' | string
   resource_id: string
+  source_conversation_id?: string
+  source_conversation_name?: string
+  source_platform?: string
+  source_message_id?: string
+  sender_display_name?: string
+  sent_at?: string | null
+  masked_excerpt?: string
+  content_visibility?: string
+  original_access_required?: boolean
+  file_name?: string
+  mime_type?: string
+  size_bytes?: number
   action: 'view' | 'download' | string
   reason?: string
   status: 'pending' | 'approved' | 'rejected' | 'cancelled' | 'expired' | 'revoked' | string

@@ -56,16 +56,13 @@
       </div>
       <div v-if="accessLoading" class="member-loading"><t-loading size="small" text="正在加载访问申请..." /></div>
       <div v-else-if="accessRequests.length" class="access-review-list">
-        <article v-for="request in accessRequests" :key="request.id" class="access-review-row">
+        <article class="access-review-row">
           <div>
-            <strong>{{ request.requester_user_id }}</strong>
-            <span>{{ request.resource_type === 'knowledge_original' ? '消息原文' : '附件内容' }} · {{ request.action === 'download' ? '下载' : '查看' }}</span>
-            <small v-if="request.reason">{{ request.reason }}</small>
+            <strong>{{ accessRequests.length }} 条待审批申请</strong>
+            <span>请在个人主页统一查看申请人、来源群聊和脱敏消息摘要</span>
           </div>
-          <time>{{ formatRequestTime(request.created_at) }}</time>
           <div class="access-review-actions">
-            <t-button size="small" variant="outline" :loading="reviewingID === request.id" @click="reviewAccess(request, false)">拒绝</t-button>
-            <t-button size="small" theme="primary" :loading="reviewingID === request.id" @click="reviewAccess(request, true)">批准</t-button>
+            <t-button size="small" theme="primary" @click="router.push('/profile?tab=permissions')">进入审批中心</t-button>
           </div>
         </article>
       </div>
@@ -168,7 +165,7 @@ import { computed, onMounted, ref } from 'vue'
 import { MessagePlugin } from 'tdesign-vue-next'
 import { useRouter } from 'vue-router'
 import { CoreAuthError, getCurrentUser } from '@/api/core-auth'
-import { approveAccessRequest, createOrganizationInvitation, getCurrentOrganization, grantOrganizationRole, listAccessRequests, listOrganizationMembers, rejectAccessRequest, revokeOrganizationInvitation, revokeOrganizationRole, type CoreAccessRequest, type CoreOrganizationMember, type CoreOrganizationResponse } from '@/api/core-organization'
+import { createOrganizationInvitation, getCurrentOrganization, grantOrganizationRole, listAccessRequests, listOrganizationMembers, revokeOrganizationInvitation, revokeOrganizationRole, type CoreAccessRequest, type CoreOrganizationMember, type CoreOrganizationResponse } from '@/api/core-organization'
 
 type ManagementRole = 'owner' | 'information_admin' | 'membership_approver'
 type DisplayRole = ManagementRole | 'member'
@@ -198,7 +195,6 @@ const invitation = ref<Invitation | null>(null)
 const invitationDraft = ref<Invitation | null>(null)
 const accessRequests = ref<CoreAccessRequest[]>([])
 const accessLoading = ref(false)
-const reviewingID = ref('')
 
 const selectedMember = computed(() => members.value.find((item) => item.id === selectedMemberID.value) || null)
 const managementMemberCount = computed(() => members.value.filter((item) => item.roles.length > 0).length)
@@ -220,7 +216,6 @@ const filteredMembers = computed(() => {
 function visibleRoles(member: Member): DisplayRole[] { return member.roles.length ? member.roles.map((role) => role as ManagementRole) : ['member'] }
 function formatDate(value: string) { return new Intl.DateTimeFormat('zh-CN', { year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(value)) }
 function formatDateTime(value: Date) { return new Intl.DateTimeFormat('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false }).format(value) }
-function formatRequestTime(value: string) { return new Intl.DateTimeFormat('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false }).format(new Date(value)) }
 function openRoleDrawer(member: Member) { selectedMemberID.value = member.id; roleDrawerVisible.value = true }
 function roleDisabled(role: ManagementRole) { return role === 'owner' && Boolean(selectedMember.value?.roles.includes('owner')) && members.value.filter((item) => item.roles.includes('owner')).length === 1 }
 async function setRole(role: ManagementRole, enabled: boolean) {
@@ -282,20 +277,6 @@ async function loadAccessRequests() {
     MessagePlugin.error(errorMessage(cause, '访问申请加载失败'))
   } finally {
     accessLoading.value = false
-  }
-}
-async function reviewAccess(request: CoreAccessRequest, approve: boolean) {
-  if (reviewingID.value) return
-  reviewingID.value = request.id
-  try {
-    if (approve) await approveAccessRequest(request.id)
-    else await rejectAccessRequest(request.id)
-    MessagePlugin.success(approve ? '原文权限已批准' : '访问申请已拒绝')
-    await loadAccessRequests()
-  } catch (cause) {
-    MessagePlugin.error(errorMessage(cause, '访问申请审批失败'))
-  } finally {
-    reviewingID.value = ''
   }
 }
 async function loadOrganization() {
