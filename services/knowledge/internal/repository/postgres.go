@@ -2357,15 +2357,15 @@ func (s *PostgresStore) ReprocessMessageClassification(ctx context.Context, mess
 	if sensitive {
 		sensitivity, visibility = "restricted", "masked"
 	}
-	if _, err = tx.Exec(ctx, `UPDATE knowledge.knowledge_items
-		SET security_status='classified',security_ready=TRUE,sensitivity=$2,content_visibility=$3,
-		    original_access_required=$4,security_policy_version=$5,content_version=$6,
-		    permission_ready=FALSE,acl_sync_status='pending',processing_status='pending',
-		    rag_status='pending',rag_last_error=NULL,last_error=NULL,updated_at=now()
-		WHERE source_message_id=$1 AND source_attachment_id IS NULL`, messageID, sensitivity, visibility, sensitive, policyVersion, nextVersion); err != nil {
-		return false, dbError(err)
-	}
 	if changed {
+		if _, err = tx.Exec(ctx, `UPDATE knowledge.knowledge_items
+			SET security_status='classified',security_ready=TRUE,sensitivity=$2,content_visibility=$3,
+			    original_access_required=$4,security_policy_version=$5,content_version=$6,
+			    permission_ready=FALSE,acl_sync_status='pending',processing_status='pending',
+			    rag_status='pending',rag_last_error=NULL,last_error=NULL,updated_at=now()
+			WHERE source_message_id=$1 AND source_attachment_id IS NULL`, messageID, sensitivity, visibility, sensitive, policyVersion, nextVersion); err != nil {
+			return false, dbError(err)
+		}
 		var itemID string
 		if err = tx.QueryRow(ctx, `SELECT id::text FROM knowledge.knowledge_items WHERE source_message_id=$1 AND source_attachment_id IS NULL LIMIT 1`, messageID).Scan(&itemID); err != nil {
 			return false, dbError(err)
@@ -2374,6 +2374,11 @@ func (s *PostgresStore) ReprocessMessageClassification(ctx context.Context, mess
 		if _, err = tx.Exec(ctx, `INSERT INTO knowledge.outbox_events (id,aggregate_type,aggregate_id,event_type,event_version,trace_id,payload) VALUES ($1,'knowledge_item',$2,'permission.sync.requested',$3,$4,$5)`, uuid.NewString(), itemID, nextVersion, trace.TraceID(ctx), payload); err != nil {
 			return false, dbError(err)
 		}
+	} else if _, err = tx.Exec(ctx, `UPDATE knowledge.knowledge_items
+		SET security_status='classified',security_ready=TRUE,sensitivity=$2,content_visibility=$3,
+		    original_access_required=$4,security_policy_version=$5,last_error=NULL,updated_at=now()
+		WHERE source_message_id=$1 AND source_attachment_id IS NULL`, messageID, sensitivity, visibility, sensitive, policyVersion); err != nil {
+		return false, dbError(err)
 	}
 	if err = tx.Commit(ctx); err != nil {
 		return false, dbError(err)
@@ -2760,7 +2765,7 @@ func (s *PostgresStore) ApplyRAGResult(ctx context.Context, id string, input RAG
 	var ragACLVersion int64
 	err = tx.QueryRow(ctx, `SELECT content_version,acl_version,COALESCE(rag_status,'pending'),COALESCE(rag_source_event_id::text,''),COALESCE(rag_job_id::text,''),COALESCE(rag_content_version,0),COALESCE(rag_acl_version,0) FROM knowledge.knowledge_items WHERE id=$1 FOR UPDATE`, id).Scan(&contentVersion, &aclVersion, &status, &sourceEventID, &jobID, &ragContentVersion, &ragACLVersion)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, apperror.New("knowledge_not_found", "knowledge item not found", 404, false)
+		return &RAGResultApply{Applied: false, Status: "not_found", Reason: "knowledge_not_found"}, nil
 	}
 	if err != nil {
 		return nil, dbError(err)

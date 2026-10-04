@@ -1693,12 +1693,14 @@ func (s *MemoryStore) ReprocessMessageClassification(_ context.Context, id, disp
 				item.Sensitivity = "restricted"
 			}
 			item.SecurityPolicyVersion = policyVersion
-			item.ContentVersion = message.ContentVersion
-			item.PermissionReady = false
-			item.ACLSyncStatus = "pending"
-			item.ProcessingStatus = "pending"
-			item.RAGStatus = "pending"
-			item.RAGLastError = ""
+			if changed {
+				item.ContentVersion = message.ContentVersion
+				item.PermissionReady = false
+				item.ACLSyncStatus = "pending"
+				item.ProcessingStatus = "pending"
+				item.RAGStatus = "pending"
+				item.RAGLastError = ""
+			}
 			item.UpdatedAt = time.Now().UTC()
 			s.knowledgeItems[itemID] = item
 		}
@@ -2690,7 +2692,7 @@ func (s *MemoryStore) ApplyRAGResult(_ context.Context, id string, input RAGResu
 	defer s.mu.Unlock()
 	item, ok := s.knowledgeItems[id]
 	if !ok {
-		return nil, apperror.New("knowledge_not_found", "knowledge item not found", 404, false)
+		return &RAGResultApply{Applied: false, Status: "not_found", Reason: "knowledge_not_found"}, nil
 	}
 	status := item.RAGStatus
 	if status == "" {
