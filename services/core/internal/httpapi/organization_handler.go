@@ -283,11 +283,19 @@ func capabilitiesResponse(capabilities domain.OrganizationCapabilities) gin.H {
 func (h *OrganizationHandler) write(c *gin.Context, err error) {
 	var blocked *application.OrganizationExitBlockedError
 	if errors.As(err, &blocked) {
+		blockers := blocked.Blockers
+		if blockers == nil {
+			blockers = []string{}
+		}
+		warnings := blocked.Warnings
+		if warnings == nil {
+			warnings = []string{}
+		}
 		c.JSON(http.StatusConflict, gin.H{
 			"code":     "ORG_EXIT_BLOCKED",
 			"message":  "organization exit is blocked",
-			"blockers": blocked.Blockers,
-			"warnings": blocked.Warnings,
+			"blockers": blockers,
+			"warnings": warnings,
 		})
 		return
 	}
@@ -322,9 +330,17 @@ func (h *OrganizationHandler) write(c *gin.Context, err error) {
 }
 
 func exitPreflightResponse(preflight domain.OrganizationExitPreflight) gin.H {
+	blockers := preflight.Blockers
+	if blockers == nil {
+		blockers = []string{}
+	}
+	warnings := preflight.Warnings
+	if warnings == nil {
+		warnings = []string{}
+	}
 	return gin.H{
 		"allowed":  preflight.Allowed,
-		"blockers": preflight.Blockers,
-		"warnings": preflight.Warnings,
+		"blockers": blockers,
+		"warnings": warnings,
 	}
 }

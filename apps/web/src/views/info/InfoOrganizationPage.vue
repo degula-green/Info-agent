@@ -149,13 +149,13 @@
       <div class="exit-dialog">
         <div v-if="exitLoading" class="member-loading"><t-loading size="small" text="正在检查退出影响..." /></div>
         <template v-else-if="exitPreflight">
-          <div v-if="exitPreflight.blockers.length" class="exit-impact exit-impact--blocked">
+          <div v-if="(exitPreflight.blockers || []).length" class="exit-impact exit-impact--blocked">
             <strong>暂时无法退出</strong>
-            <span v-for="item in exitPreflight.blockers" :key="item">{{ exitBlockerLabel(item) }}</span>
+            <span v-for="item in (exitPreflight.blockers || [])" :key="item">{{ exitBlockerLabel(item) }}</span>
           </div>
-          <div v-if="exitPreflight.warnings.length" class="exit-impact">
+          <div v-if="(exitPreflight.warnings || []).length" class="exit-impact">
             <strong>退出前请确认</strong>
-            <span v-for="item in exitPreflight.warnings" :key="item">{{ exitWarningLabel(item) }}</span>
+            <span v-for="item in (exitPreflight.warnings || [])" :key="item">{{ exitWarningLabel(item) }}</span>
           </div>
         </template>
       </div>

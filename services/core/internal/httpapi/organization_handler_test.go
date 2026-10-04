@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -89,5 +90,16 @@ func TestInternalOrganizationMemberCheckRestrictsCaller(t *testing.T) {
 	router.ServeHTTP(result, request)
 	if result.Code != http.StatusOK || !strings.Contains(result.Body.String(), `"allowed":true`) || !strings.Contains(result.Body.String(), `"is_member":true`) {
 		t.Fatalf("unexpected member check response: status=%d body=%s", result.Code, result.Body.String())
+	}
+}
+
+func TestExitPreflightResponseNormalizesNilArrays(t *testing.T) {
+	response := exitPreflightResponse(domain.OrganizationExitPreflight{Allowed: true})
+	encoded, err := json.Marshal(response)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(encoded) != `{"allowed":true,"blockers":[],"warnings":[]}` {
+		t.Fatalf("unexpected response: %s", encoded)
 	}
 }

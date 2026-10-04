@@ -30,6 +30,14 @@ export interface CoreOrganizationExitPreflight {
   blockers: string[]
   warnings: string[]
 }
+
+export function normalizeOrganizationExitPreflight(value: Partial<CoreOrganizationExitPreflight> | null | undefined): CoreOrganizationExitPreflight {
+  return {
+    allowed: Boolean(value?.allowed),
+    blockers: Array.isArray(value?.blockers) ? value.blockers : [],
+    warnings: Array.isArray(value?.warnings) ? value.warnings : [],
+  }
+}
 export interface CoreAccessRequest {
   id: string
   organization_id: string
@@ -79,7 +87,10 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
 
 export const getCurrentOrganization = () => request<CoreOrganizationResponse>('/organizations/current')
 export const getOrganizationCapabilities = (organizationID: string) => request<CoreOrganizationCapabilities>(`/organizations/${encodeURIComponent(organizationID)}/capabilities`)
-export const getOrganizationExitPreflight = (organizationID: string, signal?: AbortSignal) => request<CoreOrganizationExitPreflight>(`/organizations/${encodeURIComponent(organizationID)}/membership/exit-preflight`, { signal })
+export const getOrganizationExitPreflight = async (organizationID: string, signal?: AbortSignal) => {
+  const result = await request<CoreOrganizationExitPreflight>(`/organizations/${encodeURIComponent(organizationID)}/membership/exit-preflight`, { signal })
+  return normalizeOrganizationExitPreflight(result)
+}
 export const listOrganizationMembers = (organizationID: string) => request<CoreOrganizationMembersResponse>(`/organizations/${encodeURIComponent(organizationID)}/members`)
 export const createOrganizationInvitation = (organizationID: string) => request<CoreInvitationResponse>(`/organizations/${encodeURIComponent(organizationID)}/invitations`, { method: 'POST', body: '{}' })
 export const revokeOrganizationInvitation = (organizationID: string, invitationID: string) => request<void>(`/organizations/${encodeURIComponent(organizationID)}/invitations/${encodeURIComponent(invitationID)}/revoke`, { method: 'POST' })
