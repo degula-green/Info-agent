@@ -72,6 +72,33 @@ class AuthorizationTests(unittest.TestCase):
         )
         self.assertEqual(decisions, [False])
 
+    def test_organization_scope_bypasses_cache_for_immediate_revocation(self) -> None:
+        http = _Http([
+            {"available": True, "authorized_protected_object_keys": ["knowledge_original:item-1"]},
+            {"available": True, "authorized_protected_object_keys": []},
+        ])
+        client = RagAuthorizationClient(
+            base_url="http://core",
+            token="token",
+            http=http,
+            cache_ttl_seconds=30,
+        )
+        first = client.search_scope(
+            user_id="user-1",
+            scope_type="organization",
+            scope_id="org-1",
+            resource_parts=("original",),
+        )
+        second = client.search_scope(
+            user_id="user-1",
+            scope_type="organization",
+            scope_id="org-1",
+            resource_parts=("original",),
+        )
+        self.assertEqual(first.authorized_protected_object_keys, ("knowledge_original:item-1",))
+        self.assertEqual(second.authorized_protected_object_keys, ())
+        self.assertEqual(len(http.requests), 2)
+
 
 if __name__ == "__main__":
     unittest.main()

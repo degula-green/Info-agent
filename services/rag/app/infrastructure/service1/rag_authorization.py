@@ -25,10 +25,16 @@ class RagAuthorizationClient(AuthorizationGateway):
         base_url: str | None = None,
         token: str | None = None,
         http: HttpClient | None = None,
+        cache_ttl_seconds: int | None = None,
     ) -> None:
         self.base_url = (base_url if base_url is not None else settings.authz_base_url).rstrip("/")
         self.token = token if token is not None else settings.authz_api_token
         self.http = http or HttpClient()
+        self.cache_ttl_seconds = (
+            settings.authz_scope_cache_ttl_seconds
+            if cache_ttl_seconds is None
+            else cache_ttl_seconds
+        )
         self._cache: dict[tuple[str, str, str, tuple[str, ...]], _CacheEntry] = {}
         self._lock = threading.Lock()
 
@@ -42,10 +48,14 @@ class RagAuthorizationClient(AuthorizationGateway):
     ) -> AuthorizationScope:
         key = (user_id, scope_type, scope_id, tuple(sorted(resource_parts)))
         now = time.monotonic()
-        with self._lock:
-            cached = self._cache.get(key)
-            if cached and cached.expires_at > now:
-                return cached.value
+        # Organization membership can change at any time. P0 trades a little
+        # latency for immediate revocation by bypassing the scope cache here.
+        cache_ttl = 0 if scope_type == "organization" else min(5, max(0, self.cache_ttl_seconds))
+        if cache_ttl > 0:
+            with self._lock:
+                cached = self._cache.get(key)
+                if cached and cached.expires_at > now:
+                    return cached.value
         if not self.base_url:
             return AuthorizationScope(
                 scope_type,
@@ -82,9 +92,9 @@ class RagAuthorizationClient(AuthorizationGateway):
                 denied=exc.status == 403,
                 failed=exc.status != 403,
             )
-        ttl = min(5, max(0, settings.authz_scope_cache_ttl_seconds))
-        with self._lock:
-            self._cache[key] = _CacheEntry(now + ttl, value)
+        if cache_ttl > 0:
+            with self._lock:
+                self._cache[key] = _CacheEntry(now + cache_ttl, value)
         return value
 
     def check_batch(
