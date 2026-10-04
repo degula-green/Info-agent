@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -656,6 +657,23 @@ func (s *Service) PairStatus(ctx context.Context, userID, id string) (PairStatus
 		status = "expired"
 	}
 	return PairStatus{PairingID: p.ID, Status: status, ExpiresAt: p.ExpiresAt, DeviceID: p.DeviceID, ConnectorID: p.ConnectorID, FailureCode: p.FailureCode}, nil
+}
+
+// ValidatePairing lets the local collector verify a browser-created pairing
+// before it exposes local WeChat account metadata or consumes the pairing.
+func (s *Service) ValidatePairing(ctx context.Context, id, code string) error {
+	if strings.TrimSpace(id) == "" || strings.TrimSpace(code) == "" {
+		return apperror.New("invalid_pairing_request", "pairing id and code are required", 400, false)
+	}
+	p, err := s.Repo.GetPairing(ctx, id)
+	if err != nil {
+		return err
+	}
+	if p.Status != "pending" || p.ConsumedAt != nil || !p.ExpiresAt.After(s.Now()) ||
+		subtle.ConstantTimeCompare([]byte(p.CodeHash), []byte(hash(code))) != 1 {
+		return apperror.New("wechat_pairing_expired", "pairing code is invalid or expired", 400, false)
+	}
+	return nil
 }
 
 // FailPairing lets an unpaired Agent report an allow-listed local failure.

@@ -1104,6 +1104,21 @@ func registerInternalRoutes(r *gin.Engine, app *App, prefix string) {
 		}
 		c.JSON(http.StatusOK, gin.H{"status": "failed"})
 	})
+	g.POST("/wechat/pair/validate", func(c *gin.Context) {
+		var body struct {
+			PairingID   string `json:"pairing_id"`
+			PairingCode string `json:"pairing_code"`
+		}
+		if err := c.ShouldBindJSON(&body); err != nil {
+			writeError(c, apperror.New("invalid_request", "invalid pairing validation request", 400, false))
+			return
+		}
+		if err := app.Service.ValidatePairing(c, body.PairingID, body.PairingCode); err != nil {
+			writeError(c, err)
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"status": "valid"})
+	})
 	g.POST("/wechat/pair", func(c *gin.Context) {
 		var body struct {
 			PairingID       string `json:"pairing_id"`

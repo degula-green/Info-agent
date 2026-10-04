@@ -6,10 +6,25 @@ from typing import Any
 from contextvars import ContextVar
 from contextlib import contextmanager
 from fastapi import FastAPI, Header, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from wechatauto import MediaDownloader, WeChatDB
 
 app = FastAPI(title="info-agent-wechat-collector")
+def collector_allowed_origins() -> list[str]:
+    raw = os.getenv(
+        "WECHAT_COLLECTOR_ALLOWED_ORIGINS",
+        "http://localhost:5173,http://127.0.0.1:5173,http://localhost,http://127.0.0.1",
+    )
+    return [item.strip() for item in raw.split(",") if item.strip()]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=collector_allowed_origins(),
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Content-Type"],
+)
 lock = threading.Lock()
 _runtime_var: ContextVar["RuntimeState | None"] = ContextVar("wechat_runtime", default=None)
 
@@ -205,6 +220,12 @@ class PairDeviceRequest(BaseModel):
     pairing_id: str = Field(min_length=1)
     pairing_code: str = Field(min_length=1)
     wxid: str = Field(min_length=3)
+    agent_version: str = "local-wechat-agent"
+
+class BrowserPairRequest(BaseModel):
+    pairing_id: str = Field(min_length=1)
+    pairing_code: str = Field(min_length=1)
+    wxid: str = ""
     agent_version: str = "local-wechat-agent"
 
 def auth(token: str | None) -> None:
@@ -1067,6 +1088,13 @@ def local_account_for_wxid(wxid: str) -> dict[str, str] | None:
     ]
     return matches[0] if len(matches) == 1 else None
 
+def validate_browser_pairing(pairing_id: str, pairing_code: str) -> None:
+    knowledge(
+        "/api/knowledge/v1/internal/wechat/pair/validate",
+        "POST",
+        {"pairing_id": pairing_id, "pairing_code": pairing_code},
+    )
+
 def pair_local_device(pairing_id: str, pairing_code: str, wxid: str, agent_version: str) -> dict[str, Any]:
     account = local_account_for_wxid(wxid)
     if account is None:
@@ -1123,6 +1151,49 @@ def local_accounts(x_collector_token: str | None = Header(default=None)) -> dict
     auth(x_collector_token)
     items = scan_local_accounts()
     return {"items": items, "total": len(items)}
+@app.post("/local/browser/accounts")
+def browser_accounts(req: BrowserPairRequest) -> dict[str, Any]:
+    try:
+        validate_browser_pairing(req.pairing_id, req.pairing_code)
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        exc.close()
+        raise HTTPException(exc.code, detail) from exc
+    items = scan_local_accounts()
+    return {"items": items, "total": len(items)}
+@app.post("/local/browser/pair")
+def browser_pair(req: BrowserPairRequest) -> dict[str, Any]:
+    try:
+        validate_browser_pairing(req.pairing_id, req.pairing_code)
+        accounts = scan_local_accounts()
+        if req.wxid.strip():
+            account = local_account_for_wxid(req.wxid)
+        elif len(accounts) == 1:
+            account = accounts[0]
+        elif not accounts:
+            raise HTTPException(404, "no local WeChat account was found")
+        else:
+            raise HTTPException(409, "multiple local WeChat accounts require explicit selection")
+        if account is None:
+            raise HTTPException(404, "the selected WeChat account was not found")
+        result = pair_local_device(
+            req.pairing_id,
+            req.pairing_code,
+            account["wxid"],
+            req.agent_version,
+        )
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        exc.close()
+        raise HTTPException(exc.code, detail) from exc
+    except ValueError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    return {
+        "status": "paired",
+        "device_id": str((result.get("device") or {}).get("device_id") or ""),
+        "connector_id": str((result.get("binding") or {}).get("connector_id") or ""),
+        "wxid": account["wxid"],
+    }
 @app.post("/pair")
 def pair_device(req: PairDeviceRequest, x_collector_token: str | None = Header(default=None)) -> dict[str, Any]:
     auth(x_collector_token)
