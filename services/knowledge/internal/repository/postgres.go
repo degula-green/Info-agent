@@ -1959,7 +1959,7 @@ func (s *PostgresStore) ListPendingMessages(ctx context.Context, limit int) ([]P
 	if limit <= 0 || limit > 200 {
 		limit = 200
 	}
-	rows, err := s.pool.Query(ctx, `SELECT m.id::text,m.conversation_ingestion_id::text,m.external_message_id,COALESCE(m.sender_identity_id::text,''),COALESCE(m.sender_display_name,''),m.message_type,COALESCE(m.normalized_content_ref,''),COALESCE(m.normalized_content,''),m.content_hash,m.content_version,m.sent_at,COALESCE((SELECT MIN(ms.collected_at) FROM knowledge.message_sources ms WHERE ms.message_id=m.id),m.created_at),m.lifecycle_status,m.vector_status,m.created_at,m.sensitive,m.classification_status,p.content FROM knowledge.messages m JOIN knowledge.message_private_content p ON p.message_id=m.id WHERE m.classification_status='pending' ORDER BY m.created_at LIMIT $1`, limit)
+	rows, err := s.pool.Query(ctx, `SELECT m.id::text,m.conversation_ingestion_id::text,m.external_message_id,COALESCE(m.sender_identity_id::text,''),COALESCE(m.sender_display_name,''),m.message_type,COALESCE(m.normalized_content_ref,''),COALESCE(m.normalized_content,''),m.content_hash,m.content_version,m.sent_at,COALESCE((SELECT MIN(ms.collected_at) FROM knowledge.message_sources ms WHERE ms.message_id=m.id),m.created_at),m.lifecycle_status,m.vector_status,m.created_at,m.sensitive,m.classification_status,p.content,COALESCE(ci.ingestion_scope,''),COALESCE(ci.conversation_type,'') FROM knowledge.messages m JOIN knowledge.message_private_content p ON p.message_id=m.id JOIN knowledge.conversation_ingestions ci ON ci.id=m.conversation_ingestion_id WHERE m.classification_status='pending' ORDER BY m.created_at LIMIT $1`, limit)
 	if err != nil {
 		return nil, dbError(err)
 	}
@@ -1968,10 +1968,11 @@ func (s *PostgresStore) ListPendingMessages(ctx context.Context, limit int) ([]P
 	for rows.Next() {
 		var m domain.Message
 		var raw string
-		if err := rows.Scan(&m.ID, &m.ConversationID, &m.ExternalMessageID, &m.SenderIdentityID, &m.SenderDisplayName, &m.MessageType, &m.NormalizedContentRef, &m.Content, &m.ContentHash, &m.ContentVersion, &m.SentAt, &m.CollectedAt, &m.LifecycleStatus, &m.VectorStatus, &m.CreatedAt, &m.Sensitive, &m.ClassificationStatus, &raw); err != nil {
+		var scope, conversationType string
+		if err := rows.Scan(&m.ID, &m.ConversationID, &m.ExternalMessageID, &m.SenderIdentityID, &m.SenderDisplayName, &m.MessageType, &m.NormalizedContentRef, &m.Content, &m.ContentHash, &m.ContentVersion, &m.SentAt, &m.CollectedAt, &m.LifecycleStatus, &m.VectorStatus, &m.CreatedAt, &m.Sensitive, &m.ClassificationStatus, &raw, &scope, &conversationType); err != nil {
 			return nil, dbError(err)
 		}
-		out = append(out, PendingMessage{Message: m, OriginalContent: raw})
+		out = append(out, PendingMessage{Message: m, OriginalContent: raw, KnowledgeScope: scope, ConversationType: conversationType})
 	}
 	return out, dbError(rows.Err())
 }

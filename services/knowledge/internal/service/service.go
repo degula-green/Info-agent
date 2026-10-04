@@ -2652,7 +2652,11 @@ func (s *Service) ProcessPrivacy(ctx context.Context) error {
 		return err
 	}
 	for _, item := range pending {
-		sensitive, display := privacy.Scan(item.OriginalContent)
+		sensitive, display := false, item.OriginalContent
+		if item.KnowledgeScope != "private" {
+			decision := privacy.Analyze(item.OriginalContent)
+			sensitive, display = decision.Sensitive, decision.Redacted
+		}
 		// Media payloads are stored in message_private_content for audit, but
 		// their provider XML is not message text. The attachment is the separate
 		// resource shown to users and processed by RAG; never promote the XML

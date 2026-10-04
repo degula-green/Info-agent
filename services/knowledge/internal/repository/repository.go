@@ -382,8 +382,10 @@ func canReclassifyLegacyFile(existingType, nextType, existingContent, nextConten
 func classifyMessage(input IngestMessageInput) (bool, string) { return privacy.Scan(input.Content) }
 
 type PendingMessage struct {
-	Message         domain.Message
-	OriginalContent string
+	Message          domain.Message
+	OriginalContent  string
+	KnowledgeScope   string
+	ConversationType string
 }
 
 // CalculatePayloadHash defines the cross-language business payload contract.

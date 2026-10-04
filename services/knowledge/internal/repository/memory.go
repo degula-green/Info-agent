@@ -1561,7 +1561,13 @@ func (s *MemoryStore) ListPendingMessages(_ context.Context, limit int) ([]Pendi
 	out := []PendingMessage{}
 	for _, m := range s.messages {
 		if m.ClassificationStatus == "pending" {
-			out = append(out, PendingMessage{Message: cloneMessage(m), OriginalContent: s.privateContent[m.ID]})
+			conversation := s.conversations[m.ConversationID]
+			out = append(out, PendingMessage{
+				Message:          cloneMessage(m),
+				OriginalContent:  s.privateContent[m.ID],
+				KnowledgeScope:   conversation.IngestionScope,
+				ConversationType: conversation.ConversationType,
+			})
 		}
 	}
 	if limit > 0 && len(out) > limit {
