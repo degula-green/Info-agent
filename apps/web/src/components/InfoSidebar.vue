@@ -70,19 +70,22 @@
         </button>
 
         <div v-if="!historyCollapsed" class="sidebar-history__list">
-          <button
+          <div
             v-for="item in historyItems"
             :key="item.id"
             class="sidebar-history__item"
             :class="{ 'sidebar-history__item--active': activeHistoryId === item.id }"
-            type="button"
             :title="item.title"
-            @click="emit('history-select', item.id)"
           >
-            <t-icon name="chat" />
-            <span>{{ item.title }}</span>
-            <span class="sidebar-history__actions"><button type="button" title="重命名" @click.stop="emit('history-rename', item.id)"><t-icon name="edit-1" /></button><button type="button" title="删除" @click.stop="emit('history-delete', item.id)"><t-icon name="delete" /></button></span>
-          </button>
+            <button class="sidebar-history__select" type="button" @click="emit('history-select', item.id)">
+              <t-icon name="chat" />
+              <span class="sidebar-history__title">{{ item.title }}</span>
+            </button>
+            <span class="sidebar-history__actions">
+              <button type="button" title="重命名" @click.stop="emit('history-rename', item.id)"><t-icon name="edit-1" /></button>
+              <button type="button" title="删除" @click.stop="emit('history-delete', item.id)"><t-icon name="delete" /></button>
+            </span>
+          </div>
           <p v-if="!historyItems.length" class="sidebar-history__empty">暂无历史对话</p>
         </div>
       </section>
@@ -299,8 +302,7 @@ const navItems = [
   overflow: hidden;
 }
 
-.sidebar-nav,
-.sidebar-history__list {
+.sidebar-nav {
   display: grid;
   gap: 3px;
 }
@@ -375,7 +377,7 @@ const navItems = [
 
 .sidebar-history {
   display: flex;
-  flex: 1;
+  flex: 0 0 auto;
   flex-direction: column;
   min-height: 0;
   margin-top: 12px;
@@ -404,25 +406,30 @@ const navItems = [
 }
 
 .sidebar-history__list {
-  flex: 1;
+  display: flex;
+  flex: 0 0 auto;
+  flex-direction: column;
+  gap: 3px;
+  height: clamp(240px, calc(100vh - 620px), 420px);
+  max-height: none;
   min-height: 0;
   margin-top: 5px;
-  padding-right: 2px;
+  padding: 2px 4px 2px 0;
   overflow-y: auto;
   overscroll-behavior: contain;
+  scrollbar-gutter: stable;
   scrollbar-width: thin;
 }
 
 .sidebar-history__item {
   display: flex;
+  flex: 0 0 36px;
   align-items: center;
   min-width: 0;
-  min-height: 34px;
-  gap: 8px;
-  padding: 0 10px 0 14px;
+  height: 36px;
+  min-height: 36px;
   border-radius: 4px;
   color: var(--td-text-color-secondary);
-  text-align: left;
   font-size: 13px;
 }
 
@@ -437,13 +444,32 @@ const navItems = [
   font-weight: 500;
 }
 
-.sidebar-history__item svg {
+.sidebar-history__select {
+  display: flex;
+  align-items: center;
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 100%;
+  gap: 8px;
+  padding: 0 4px 0 14px;
+  border: 0;
+  border-radius: 4px;
+  color: inherit;
+  background: transparent;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.sidebar-history__select svg {
   flex: 0 0 15px;
   width: 15px;
   height: 15px;
 }
 
-.sidebar-history__item span {
+.sidebar-history__title {
+  flex: 1 1 auto;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -503,8 +529,10 @@ const navItems = [
   font-size: 11px;
   font-weight: 600;
 }
-.sidebar-history__actions { display: none; flex: 0 0 auto; gap: 2px; }
-.sidebar-history__item:hover .sidebar-history__actions { display: inline-flex; }
+.sidebar-history__actions { display: inline-flex; flex: 0 0 auto; gap: 2px; padding-right: 6px; visibility: hidden; opacity: 0; pointer-events: none; transition: opacity .12s ease; }
+.sidebar-history__item:hover .sidebar-history__actions,
+.sidebar-history__item:has(.sidebar-history__select:focus-visible) .sidebar-history__actions,
+.sidebar-history__item:has(.sidebar-history__actions button:focus-visible) .sidebar-history__actions { visibility: visible; opacity: 1; pointer-events: auto; }
 .sidebar-history__actions button { display: inline-grid; place-items: center; width: 22px; height: 22px; padding: 0; border: 0; border-radius: 4px; color: var(--td-text-color-placeholder); background: transparent; cursor: pointer; }
 .sidebar-history__actions button:hover { color: var(--td-text-color-primary); background: var(--td-bg-color-container-hover); }
 .sidebar-history__actions svg { width: 13px; height: 13px; }
