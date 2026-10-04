@@ -396,6 +396,49 @@ func registerUserRoutes(r *gin.Engine, app *App, prefix string) {
 		}
 		c.JSON(http.StatusOK, gin.H{"items": out})
 	})
+	g.POST("/deletion-requests", func(c *gin.Context) {
+		p := principal(c)
+		var body struct {
+			ScopeType      string `json:"scope_type"`
+			ScopeID        string `json:"scope_id"`
+			Reason         string `json:"reason"`
+			IdempotencyKey string `json:"idempotency_key"`
+		}
+		if err := c.ShouldBindJSON(&body); err != nil {
+			writeError(c, apperror.New("invalid_request", "invalid deletion request", 400, false))
+			return
+		}
+		out, err := app.Service.CreateDeletionRequest(c, p.UserID, p.OrganizationID, repository.DeletionRequestInput{
+			ScopeType: body.ScopeType, ScopeID: body.ScopeID, Reason: body.Reason, IdempotencyKey: body.IdempotencyKey,
+		})
+		if err != nil {
+			writeError(c, err)
+			return
+		}
+		c.JSON(http.StatusAccepted, publicDeletionRequest(*out))
+	})
+	g.GET("/deletion-requests", func(c *gin.Context) {
+		p := principal(c)
+		out, err := app.Service.ListDeletionRequests(c, p.UserID, c.Query("status"))
+		if err != nil {
+			writeError(c, err)
+			return
+		}
+		items := make([]publicDeletionRequestDTO, 0, len(out))
+		for _, item := range out {
+			items = append(items, publicDeletionRequest(item))
+		}
+		c.JSON(http.StatusOK, gin.H{"items": items})
+	})
+	g.GET("/deletion-requests/:request_id", func(c *gin.Context) {
+		p := principal(c)
+		out, err := app.Service.GetDeletionRequest(c, p.UserID, c.Param("request_id"))
+		if err != nil {
+			writeError(c, err)
+			return
+		}
+		c.JSON(http.StatusOK, publicDeletionRequest(*out))
+	})
 	g.GET("/knowledge/items/:knowledge_item_id/original", func(c *gin.Context) {
 		p := principal(c)
 		out, err := app.Service.GetKnowledgeOriginal(c, p.UserID, c.Param("knowledge_item_id"))
@@ -951,6 +994,13 @@ func registerUserRoutes(r *gin.Engine, app *App, prefix string) {
 			writeError(c, err)
 			return
 		}
+		visibleMessages := make([]domain.Message, 0, len(out))
+		for _, message := range out {
+			if message.LifecycleStatus == "active" || message.LifecycleStatus == "ready" {
+				visibleMessages = append(visibleMessages, message)
+			}
+		}
+		out = visibleMessages
 		if strings.TrimSpace(c.Query("scope")) == "shared" {
 			view, viewErr := app.Service.ResolveSharedPrivateView(c, p.UserID, conversationID, c.GetHeader("X-Organization-ID"), c.GetHeader("Authorization"))
 			if viewErr != nil {
@@ -1001,6 +1051,14 @@ func registerUserRoutes(r *gin.Engine, app *App, prefix string) {
 			writeError(c, err)
 			return
 		}
+		visibleTimeline := make([]domain.ConversationTimelineItem, 0, len(out))
+		for _, item := range out {
+			if item.Message != nil && item.Message.LifecycleStatus != "active" && item.Message.LifecycleStatus != "ready" {
+				continue
+			}
+			visibleTimeline = append(visibleTimeline, item)
+		}
+		out = visibleTimeline
 		if strings.TrimSpace(c.Query("scope")) == "shared" {
 			view, viewErr := app.Service.ResolveSharedPrivateView(c, p.UserID, conversationID, c.GetHeader("X-Organization-ID"), c.GetHeader("Authorization"))
 			if viewErr != nil {

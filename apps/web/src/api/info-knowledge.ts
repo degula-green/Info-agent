@@ -113,6 +113,43 @@ export interface KnowledgeLibraryItemDTO {
   searchable?: boolean
 }
 
+export interface DeletionTargetDTO {
+  id: string
+  resource_type: string
+  resource_id: string
+  knowledge_item_id?: string
+  content_version: number
+  acl_version: number
+  visibility_state: string
+  vector_state: string
+  object_state: string
+  auth_state: string
+  attempt_count: number
+  last_error?: string
+  created_at: string
+  updated_at: string
+}
+
+export interface DeletionRequestDTO {
+  id: string
+  organization_id?: string
+  requester_user_id: string
+  reviewer_user_id?: string
+  scope_type: string
+  scope_id: string
+  status: string
+  reason: string
+  idempotency_key: string
+  requested_at: string
+  reviewed_at?: string
+  execution_started_at?: string
+  completed_at?: string
+  purge_after?: string
+  last_error?: string
+  created_at: string
+  updated_at: string
+  targets: DeletionTargetDTO[]
+}
 export interface LocalUploadTaskDTO {
   request_id: string
   upload_destination: 'private_local_library' | 'organization_file_library' | string
@@ -391,6 +428,27 @@ export async function getKnowledgeLibraryItems(libraryID: string, options: { kin
   return body.items || []
 }
 
+export async function createMessageDeletionRequest(messageID: string, reason: string) {
+  return knowledgeRequest<DeletionRequestDTO>('/deletion-requests', {
+    method: 'POST',
+    body: JSON.stringify({
+      scope_type: 'message',
+      scope_id: messageID,
+      reason,
+      idempotency_key: `message-delete-${messageID}-${Date.now()}`,
+    }),
+  })
+}
+
+export async function getDeletionRequest(requestID: string) {
+  return knowledgeRequest<DeletionRequestDTO>(`/deletion-requests/${encodeURIComponent(requestID)}`)
+}
+
+export async function listDeletionRequests(status = '') {
+  const suffix = status ? `?status=${encodeURIComponent(status)}` : ''
+  const body = await knowledgeRequest<{ items: DeletionRequestDTO[] }>(`/deletion-requests${suffix}`)
+  return body.items || []
+}
 export async function getMessageOriginal(messageID: string) {
   return knowledgeRequest<KnowledgeOriginalDTO>(`/knowledge/messages/${encodeURIComponent(messageID)}/original`)
 }

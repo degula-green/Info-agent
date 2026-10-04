@@ -591,7 +591,72 @@ type RAGSourceAuditInput struct {
 	Result          string
 }
 
+type DeletionRequestInput struct {
+	OrganizationID  string
+	RequesterUserID string
+	ScopeType       string
+	ScopeID         string
+	Status          string
+	Reason          string
+	IdempotencyKey  string
+	PurgeAfter      time.Time
+}
+
+type DeletionTarget struct {
+	ID                string
+	DeletionRequestID string
+	ResourceType      string
+	ResourceID        string
+	KnowledgeItemID   string
+	ConversationID    string
+	ContentVersion    int
+	ACLVersion        int64
+	VisibilityState   string
+	VectorState       string
+	ObjectState       string
+	AuthState         string
+	AttemptCount      int
+	LastError         string
+	CreatedAt         time.Time
+	UpdatedAt         time.Time
+}
+
+type DeletionRequest struct {
+	ID                 string
+	OrganizationID     string
+	RequesterUserID    string
+	ReviewerUserID     string
+	ScopeType          string
+	ScopeID            string
+	Status             string
+	Reason             string
+	IdempotencyKey     string
+	RequestedAt        time.Time
+	ReviewedAt         *time.Time
+	ExecutionStartedAt *time.Time
+	CompletedAt        *time.Time
+	PurgeAfter         *time.Time
+	LastError          string
+	CreatedAt          time.Time
+	UpdatedAt          time.Time
+	Targets            []DeletionTarget
+}
+
+type DeletionAuditInput struct {
+	DeletionRequestID string
+	ActorUserID       string
+	Action            string
+	ResourceType      string
+	ResourceID        string
+	Detail            map[string]any
+}
 type Repository interface {
+	CreateDeletionRequest(ctx context.Context, input DeletionRequestInput) (*DeletionRequest, error)
+	GetDeletionRequest(ctx context.Context, id string) (*DeletionRequest, error)
+	ListDeletionRequests(ctx context.Context, userID, status string, limit int) ([]DeletionRequest, error)
+	RecordDeletionAudit(ctx context.Context, input DeletionAuditInput) error
+	HideDeletionTargets(ctx context.Context, requestID string) (int, error)
+
 	Close() error
 
 	ListConnectorViews(ctx context.Context, userID string) ([]domain.ConnectorView, error)

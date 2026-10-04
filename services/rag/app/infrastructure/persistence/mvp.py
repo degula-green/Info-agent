@@ -778,6 +778,15 @@ class PostgresRagMVPRepository:
                     (knowledge_item_id, content_version),
                 )
 
+    def delete_resource_data(self, *, knowledge_item_id: str, resource_id: str) -> int:
+        with self._connection() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    f"""DELETE FROM {self.schema}.chunks WHERE knowledge_item_id=%s::uuid OR resource_id=%s::uuid""",
+                    (knowledge_item_id, resource_id),
+                )
+                return int(cursor.rowcount or 0)
+
     def upsert_projection(
         self,
         chunk: Chunk,
@@ -2144,6 +2153,20 @@ class InMemoryRagMVPRepository:
         for chunk in self.chunks.values():
             if chunk.knowledge_item_id == knowledge_item_id and chunk.content_version < content_version:
                 chunk.lifecycle_status = "inactive"
+
+    def delete_resource_data(self, *, knowledge_item_id: str, resource_id: str) -> int:
+        removed = {
+            chunk_id for chunk_id, chunk in self.chunks.items()
+            if chunk.knowledge_item_id == knowledge_item_id or chunk.resource_id == resource_id
+        }
+        for chunk_id in removed:
+            del self.chunks[chunk_id]
+        self.projections = [item for item in self.projections if item.get("chunk_id") not in removed]
+        for key in list(self.branches):
+            if key[0] in removed:
+                del self.branches[key]
+        return len(removed)
+
 
     def upsert_projection(self, chunk: Chunk, **value: Any) -> None:
         existing = next(

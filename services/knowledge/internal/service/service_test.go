@@ -604,6 +604,62 @@ func TestAttachValidatesHistoryAndDerivesWorkspace(t *testing.T) {
 	}
 }
 
+func TestDeletionRequestHidesMessageAndIsIdempotent(t *testing.T) {
+	ctx := context.Background()
+	fixture := newPipelineFixture(t, domain.PlatformWechat)
+	service, repo := fixture.service, fixture.repo
+	ingested, err := fixture.repo.IngestMessage(ctx, pipelineInput(fixture, "delete-message", "text", "sensitive delete target"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	message := ingested.Message
+	request, err := service.CreateDeletionRequest(ctx, "u1", "org-1", repository.DeletionRequestInput{
+		ScopeType: "message", ScopeID: message.ID, Reason: "user request", IdempotencyKey: "delete-1",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if request.Status != "executing" || len(request.Targets) != 1 || request.Targets[0].VisibilityState != "hidden" {
+		t.Fatalf("unexpected deletion request: %+v", request)
+	}
+	again, err := service.CreateDeletionRequest(ctx, "u1", "org-1", repository.DeletionRequestInput{
+		ScopeType: "message", ScopeID: message.ID, Reason: "user request", IdempotencyKey: "delete-1",
+	})
+	if err != nil || again.ID != request.ID {
+		t.Fatalf("idempotent deletion request mismatch: %+v err=%v", again, err)
+	}
+	stored, err := repo.GetKnowledgeItemByMessage(ctx, message.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.LifecycleStatus != "deleting" {
+		t.Fatalf("knowledge item was not hidden: %+v", stored)
+	}
+	_ = service
+	_ = repo
+}
+func TestDeletedMessageCannotBeRevivedByCollectorReplay(t *testing.T) {
+	ctx := context.Background()
+	fixture := newPipelineFixture(t, domain.PlatformWechat)
+	service, repo := fixture.service, fixture.repo
+	input := pipelineInput(fixture, "replay-delete-message", "text", "delete me")
+	ingested, err := repo.IngestMessage(ctx, input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.CreateDeletionRequest(ctx, "owner", "org-1", repository.DeletionRequestInput{
+		ScopeType: "message", ScopeID: ingested.Message.ID, Reason: "replay tombstone", IdempotencyKey: "replay-delete-1",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	replayed, err := repo.IngestMessage(ctx, input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !replayed.Duplicate || replayed.Message.LifecycleStatus != "deleting" {
+		t.Fatalf("replay revived deleted message: %+v", replayed.Message)
+	}
+}
 func TestPairAgentCreatesMappedWechatIdentity(t *testing.T) {
 	service, repo, _ := newServiceForTest(nil)
 	pairing, err := service.CreatePairingForWXID(context.Background(), "u1", "wxid-a", "org-1")

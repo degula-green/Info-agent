@@ -319,6 +319,13 @@ type Message struct {
 	CollectedAt          time.Time    `json:"collected_at"`
 	LifecycleStatus      string       `json:"lifecycle_status"`
 	VectorStatus         string       `json:"vector_status,omitempty"`
+	DeletedAt            *time.Time   `json:"deleted_at,omitempty"`
+	DeletedByUserID      string       `json:"deleted_by_user_id,omitempty"`
+	DeleteReason         string       `json:"delete_reason,omitempty"`
+	DeleteRequestID      string       `json:"delete_request_id,omitempty"`
+	PurgeAfter           *time.Time   `json:"purge_after,omitempty"`
+	ContentPurgedAt      *time.Time   `json:"content_purged_at,omitempty"`
+	VectorDeleteStatus   string       `json:"vector_delete_status,omitempty"`
 	Attachments          []Attachment `json:"attachments,omitempty"`
 	CreatedAt            time.Time    `json:"created_at"`
 }
@@ -423,6 +430,13 @@ type KnowledgeItem struct {
 	ACLSyncStatus          string         `json:"acl_sync_status"`
 	ProcessingStatus       string         `json:"processing_status"`
 	LifecycleStatus        string         `json:"lifecycle_status"`
+	DeletedAt              *time.Time     `json:"deleted_at,omitempty"`
+	DeletedByUserID        string         `json:"deleted_by_user_id,omitempty"`
+	DeleteReason           string         `json:"delete_reason,omitempty"`
+	DeleteRequestID        string         `json:"delete_request_id,omitempty"`
+	PurgeAfter             *time.Time     `json:"purge_after,omitempty"`
+	ContentPurgedAt        *time.Time     `json:"content_purged_at,omitempty"`
+	VectorDeleteStatus     string         `json:"vector_delete_status,omitempty"`
 	ContentAccessRequired  bool           `json:"content_access_required"`
 	LastError              string         `json:"last_error,omitempty"`
 	RAGStatus              string         `json:"rag_status"`

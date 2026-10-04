@@ -3125,6 +3125,84 @@ func (s *Service) GetKnowledgeOriginal(ctx context.Context, userID, knowledgeIte
 	return content, nil
 }
 
+func (s *Service) CreateDeletionRequest(ctx context.Context, userID, organizationID string, input repository.DeletionRequestInput) (*repository.DeletionRequest, error) {
+	userID = strings.TrimSpace(userID)
+	if userID == "" {
+		return nil, apperror.New("invalid_request", "user is required", 400, false)
+	}
+	input.RequesterUserID = userID
+	input.OrganizationID = strings.TrimSpace(organizationID)
+	if input.PurgeAfter.IsZero() {
+		input.PurgeAfter = s.Now().UTC().Add(7 * 24 * time.Hour)
+	}
+	item, itemErr := s.Repo.GetKnowledgeItemByMessage(ctx, input.ScopeID)
+	if itemErr != nil {
+		return nil, itemErr
+	}
+	allowed, checkErr := s.canDeleteKnowledge(ctx, userID, item)
+	if checkErr != nil {
+		return nil, checkErr
+	}
+	if !allowed {
+		input.Status = "pending"
+	}
+	request, err := s.Repo.CreateDeletionRequest(ctx, input)
+	if err != nil {
+		return nil, err
+	}
+	if input.Status != "pending" {
+		if _, err := s.Repo.HideDeletionTargets(ctx, request.ID); err != nil {
+			return nil, err
+		}
+		if err := s.Repo.RecordDeletionAudit(ctx, repository.DeletionAuditInput{
+			DeletionRequestID: request.ID, ActorUserID: userID, Action: "deletion.hidden",
+		}); err != nil {
+			return nil, err
+		}
+	} else if err := s.Repo.RecordDeletionAudit(ctx, repository.DeletionAuditInput{
+		DeletionRequestID: request.ID, ActorUserID: userID, Action: "deletion.requested",
+	}); err != nil {
+		return nil, err
+	}
+	return s.Repo.GetDeletionRequest(ctx, request.ID)
+}
+
+func (s *Service) canDeleteKnowledge(ctx context.Context, userID string, item *domain.KnowledgeItem) (bool, error) {
+	if item == nil {
+		return false, nil
+	}
+	if item.KnowledgeScope == "private" && item.OwnerUserID == userID {
+		return true, nil
+	}
+	if item.KnowledgeScope != "organization" {
+		return false, nil
+	}
+	if s.Core == nil {
+		return true, nil
+	}
+	decisions, err := s.Core.CheckBatch(ctx, userID, item.OrganizationID, []coreclient.AuthorizationCheck{{
+		ResourceType: "knowledge_item", ResourcePart: "delete", ResourceID: item.ID, Action: "delete",
+	}})
+	if err != nil {
+		return false, err
+	}
+	return len(decisions) == 1 && decisions[0].Allowed, nil
+}
+
+func (s *Service) GetDeletionRequest(ctx context.Context, userID, id string) (*repository.DeletionRequest, error) {
+	request, err := s.Repo.GetDeletionRequest(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if request.RequesterUserID != strings.TrimSpace(userID) {
+		return nil, apperror.Clone(apperror.ErrForbidden)
+	}
+	return request, nil
+}
+
+func (s *Service) ListDeletionRequests(ctx context.Context, userID, status string) ([]repository.DeletionRequest, error) {
+	return s.Repo.ListDeletionRequests(ctx, strings.TrimSpace(userID), strings.TrimSpace(status), 50)
+}
 func (s *Service) GetKnowledgeOriginalByMessage(ctx context.Context, userID, messageID string) (*domain.KnowledgeContent, error) {
 	item, err := s.Repo.GetKnowledgeItemByMessage(ctx, strings.TrimSpace(messageID))
 	if err != nil {

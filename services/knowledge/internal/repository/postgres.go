@@ -3322,6 +3322,203 @@ func (s *PostgresStore) TryMarkKnowledgeReady(ctx context.Context, id, traceID s
 	return tag.RowsAffected() == 1, nil
 }
 
+func scanDeletionRequest(row rowScanner) (*DeletionRequest, error) {
+	var value DeletionRequest
+	err := row.Scan(
+		&value.ID, &value.OrganizationID, &value.RequesterUserID, &value.ReviewerUserID,
+		&value.ScopeType, &value.ScopeID, &value.Status, &value.Reason, &value.IdempotencyKey,
+		&value.RequestedAt, &value.ReviewedAt, &value.ExecutionStartedAt, &value.CompletedAt,
+		&value.PurgeAfter, &value.LastError, &value.CreatedAt, &value.UpdatedAt,
+	)
+	if err != nil {
+		return nil, err
+	}
+	return &value, nil
+}
+
+func (s *PostgresStore) CreateDeletionRequest(ctx context.Context, input DeletionRequestInput) (*DeletionRequest, error) {
+	input.ScopeType = strings.TrimSpace(input.ScopeType)
+	input.ScopeID = strings.TrimSpace(input.ScopeID)
+	input.RequesterUserID = strings.TrimSpace(input.RequesterUserID)
+	input.Reason = strings.TrimSpace(input.Reason)
+	input.IdempotencyKey = strings.TrimSpace(input.IdempotencyKey)
+	if input.ScopeType != "message" {
+		return nil, apperror.New("unsupported_deletion_scope", "only message deletion is implemented in this phase", 400, false)
+	}
+	if input.ScopeID == "" || input.RequesterUserID == "" || input.Reason == "" || input.IdempotencyKey == "" {
+		return nil, apperror.New("invalid_deletion_request", "scope, requester, reason and idempotency key are required", 400, false)
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, dbError(err)
+	}
+	defer tx.Rollback(ctx)
+	var message ConversationMessageRef
+	err = tx.QueryRow(ctx, `SELECT id::text,conversation_ingestion_id::text,content_version,lifecycle_status FROM knowledge.messages WHERE id=$1 FOR UPDATE`, input.ScopeID).Scan(&message.ID, &message.ConversationID, &message.ContentVersion, &message.LifecycleStatus)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, apperror.New("message_not_found", "message was not found", 404, false)
+	}
+	if err != nil {
+		return nil, dbError(err)
+	}
+	var requestID string
+	err = tx.QueryRow(ctx, `SELECT id::text FROM knowledge.deletion_requests WHERE requester_user_id=$1 AND idempotency_key=$2`, input.RequesterUserID, input.IdempotencyKey).Scan(&requestID)
+	if err == nil {
+		request, loadErr := s.GetDeletionRequest(ctx, requestID)
+		if loadErr != nil {
+			return nil, loadErr
+		}
+		return request, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return nil, dbError(err)
+	}
+	requestID = uuid.NewString()
+	now := time.Now().UTC()
+	if input.PurgeAfter.IsZero() {
+		input.PurgeAfter = now.Add(7 * 24 * time.Hour)
+	}
+	_, err = tx.Exec(ctx, `INSERT INTO knowledge.deletion_requests (id,organization_id,requester_user_id,scope_type,scope_id,status,reason,idempotency_key,requested_at,execution_started_at,purge_after,created_at,updated_at) VALUES ($1,NULLIF($2,'')::uuid,$3,$4,$5,'executing',$6,$7,$8,$8,$9,$8,$8)`, requestID, input.OrganizationID, input.RequesterUserID, input.ScopeType, input.ScopeID, input.Reason, input.IdempotencyKey, now, input.PurgeAfter)
+	if err != nil {
+		if isUnique(err) {
+			var existingID string
+			if lookupErr := s.pool.QueryRow(ctx, `SELECT id::text FROM knowledge.deletion_requests WHERE requester_user_id=$1 AND idempotency_key=$2`, input.RequesterUserID, input.IdempotencyKey).Scan(&existingID); lookupErr == nil {
+				return s.GetDeletionRequest(ctx, existingID)
+			}
+		}
+		return nil, dbError(err)
+	}
+	var itemID string
+	var aclVersion int64
+	itemErr := tx.QueryRow(ctx, `SELECT id::text,acl_version FROM knowledge.knowledge_items WHERE source_message_id=$1 AND source_attachment_id IS NULL AND source_type<>'shared_private_item' ORDER BY created_at LIMIT 1`, input.ScopeID).Scan(&itemID, &aclVersion)
+	if itemErr != nil && !errors.Is(itemErr, pgx.ErrNoRows) {
+		return nil, dbError(itemErr)
+	}
+	targetID := uuid.NewString()
+	_, err = tx.Exec(ctx, `INSERT INTO knowledge.deletion_targets (id,deletion_request_id,resource_type,resource_id,knowledge_item_id,conversation_ingestion_id,content_version,acl_version,visibility_state,vector_state,object_state,auth_state,created_at,updated_at) VALUES ($1,$2,'message',$3,NULLIF($4,'')::uuid,$5,$6,$7,'hidden','pending','pending','pending',$8,$8)`, targetID, requestID, message.ID, itemID, message.ConversationID, message.ContentVersion, aclVersion, now)
+	if err != nil {
+		return nil, dbError(err)
+	}
+	detail, _ := json.Marshal(map[string]any{"scope_type": input.ScopeType})
+	_, err = tx.Exec(ctx, `INSERT INTO knowledge.deletion_audit_logs (deletion_request_id,actor_user_id,action,resource_type,resource_id,detail) VALUES ($1,NULLIF($2,'')::uuid,'deletion.requested','message',$3,$4::jsonb)`, requestID, input.RequesterUserID, message.ID, string(detail))
+	if err != nil {
+		return nil, dbError(err)
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return nil, dbError(err)
+	}
+	return s.GetDeletionRequest(ctx, requestID)
+}
+
+func (s *PostgresStore) GetDeletionRequest(ctx context.Context, id string) (*DeletionRequest, error) {
+	value, err := scanDeletionRequest(s.pool.QueryRow(ctx, `SELECT id::text,COALESCE(organization_id::text,''),requester_user_id::text,COALESCE(reviewer_user_id::text,''),scope_type,scope_id::text,status,reason,idempotency_key,requested_at,reviewed_at,execution_started_at,completed_at,purge_after,COALESCE(last_error,''),created_at,updated_at FROM knowledge.deletion_requests WHERE id=$1`, id))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, apperror.New("deletion_request_not_found", "deletion request was not found", 404, false)
+	}
+	if err != nil {
+		return nil, dbError(err)
+	}
+	rows, err := s.pool.Query(ctx, `SELECT id::text,deletion_request_id::text,resource_type,resource_id::text,COALESCE(knowledge_item_id::text,''),COALESCE(conversation_ingestion_id::text,''),content_version,acl_version,visibility_state,vector_state,object_state,auth_state,attempt_count,COALESCE(last_error,''),created_at,updated_at FROM knowledge.deletion_targets WHERE deletion_request_id=$1 ORDER BY created_at`, id)
+	if err != nil {
+		return nil, dbError(err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var target DeletionTarget
+		if err := rows.Scan(&target.ID, &target.DeletionRequestID, &target.ResourceType, &target.ResourceID, &target.KnowledgeItemID, &target.ConversationID, &target.ContentVersion, &target.ACLVersion, &target.VisibilityState, &target.VectorState, &target.ObjectState, &target.AuthState, &target.AttemptCount, &target.LastError, &target.CreatedAt, &target.UpdatedAt); err != nil {
+			return nil, dbError(err)
+		}
+		value.Targets = append(value.Targets, target)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, dbError(err)
+	}
+	return value, nil
+}
+
+func (s *PostgresStore) ListDeletionRequests(ctx context.Context, userID, status string, limit int) ([]DeletionRequest, error) {
+	if limit <= 0 || limit > 100 {
+		limit = 50
+	}
+	conditions := []string{"1=1"}
+	args := []any{}
+	if strings.TrimSpace(userID) != "" {
+		args = append(args, userID)
+		conditions = append(conditions, "requester_user_id=$"+strconv.Itoa(len(args))+"::uuid")
+	}
+	if strings.TrimSpace(status) != "" {
+		args = append(args, status)
+		conditions = append(conditions, "status=$"+strconv.Itoa(len(args)))
+	}
+	args = append(args, limit)
+	rows, err := s.pool.Query(ctx, `SELECT id::text FROM knowledge.deletion_requests WHERE `+strings.Join(conditions, " AND ")+` ORDER BY requested_at DESC LIMIT $`+strconv.Itoa(len(args)), args...)
+	if err != nil {
+		return nil, dbError(err)
+	}
+	defer rows.Close()
+	ids := make([]string, 0)
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, dbError(err)
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, dbError(err)
+	}
+	out := make([]DeletionRequest, 0, len(ids))
+	for _, id := range ids {
+		value, err := s.GetDeletionRequest(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, *value)
+	}
+	return out, nil
+}
+
+func (s *PostgresStore) RecordDeletionAudit(ctx context.Context, input DeletionAuditInput) error {
+	detail, err := json.Marshal(input.Detail)
+	if err != nil {
+		return dbError(err)
+	}
+	_, err = s.pool.Exec(ctx, `INSERT INTO knowledge.deletion_audit_logs (deletion_request_id,actor_user_id,action,resource_type,resource_id,detail) VALUES ($1,NULLIF($2,'')::uuid,$3,NULLIF($4,''),NULLIF($5,'')::uuid,$6::jsonb)`, input.DeletionRequestID, input.ActorUserID, input.Action, input.ResourceType, input.ResourceID, string(detail))
+	return dbError(err)
+}
+
+func (s *PostgresStore) HideDeletionTargets(ctx context.Context, requestID string) (int, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return 0, dbError(err)
+	}
+	defer tx.Rollback(ctx)
+	tag, err := tx.Exec(ctx, `UPDATE knowledge.messages m SET lifecycle_status='deleting',deleted_at=COALESCE(m.deleted_at,now()),deleted_by_user_id=COALESCE(m.deleted_by_user_id,dr.requester_user_id),delete_reason=COALESCE(m.delete_reason,dr.reason),delete_request_id=dr.id,updated_at=now() FROM knowledge.deletion_requests dr JOIN knowledge.deletion_targets dt ON dt.deletion_request_id=dr.id WHERE dr.id=$1 AND dt.resource_type='message' AND m.id=dt.resource_id AND m.lifecycle_status='active'`, requestID)
+	if err != nil {
+		return 0, dbError(err)
+	}
+	if _, err = tx.Exec(ctx, `UPDATE knowledge.knowledge_items ki SET lifecycle_status='deleting',deleted_at=COALESCE(ki.deleted_at,now()),deleted_by_user_id=COALESCE(ki.deleted_by_user_id,dr.requester_user_id),delete_reason=COALESCE(ki.delete_reason,dr.reason),delete_request_id=dr.id,updated_at=now() FROM knowledge.deletion_requests dr JOIN knowledge.deletion_targets dt ON dt.deletion_request_id=dr.id WHERE dr.id=$1 AND dt.knowledge_item_id=ki.id AND ki.lifecycle_status='active'`, requestID); err != nil {
+		return 0, dbError(err)
+	}
+	if _, err = tx.Exec(ctx, `UPDATE knowledge.deletion_targets SET visibility_state='hidden',updated_at=now() WHERE deletion_request_id=$1`, requestID); err != nil {
+		return 0, dbError(err)
+	}
+	if _, err = tx.Exec(ctx, `INSERT INTO knowledge.outbox_events (id,aggregate_type,aggregate_id,event_type,event_version,schema_version,trace_id,organization_id,payload,status,retry_count,available_at) SELECT gen_random_uuid(),'knowledge_item',dt.knowledge_item_id,'knowledge.deletion.requested',dt.content_version,1,dr.id,dr.organization_id,jsonb_build_object('deletion_request_id',dr.id::text,'deletion_target_id',dt.id::text,'knowledge_item_id',dt.knowledge_item_id::text,'resource_type',dt.resource_type,'resource_id',dt.resource_id::text,'content_version',dt.content_version,'acl_version',dt.acl_version,'scope_type','organization','scope_id',COALESCE(dr.organization_id::text,''),'requested_by',dr.requester_user_id::text,'reason',dr.reason),'pending',0,now() FROM knowledge.deletion_requests dr JOIN knowledge.deletion_targets dt ON dt.deletion_request_id=dr.id WHERE dr.id=$1 AND dt.knowledge_item_id IS NOT NULL ON CONFLICT DO NOTHING`, requestID); err != nil {
+		return 0, dbError(err)
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return 0, dbError(err)
+	}
+	return int(tag.RowsAffected()), nil
+}
+
+type ConversationMessageRef struct {
+	ID              string
+	ConversationID  string
+	ContentVersion  int
+	LifecycleStatus string
+}
+
 func (s *PostgresStore) GetKnowledgeItem(ctx context.Context, id string) (*domain.KnowledgeItem, error) {
 	item, err := scanKnowledgeItem(s.pool.QueryRow(ctx, `SELECT `+knowledgeItemColumns+` FROM knowledge.knowledge_items ki LEFT JOIN knowledge.conversation_ingestions ci ON ci.id=ki.conversation_ingestion_id WHERE ki.id=$1`, id))
 	if errors.Is(err, pgx.ErrNoRows) {

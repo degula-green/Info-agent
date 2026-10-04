@@ -89,6 +89,37 @@ func (c *Client) ListObjectsWithMetadata(ctx context.Context, subjectID, organiz
 	}, nil
 }
 
+func (c *Client) SyncOrganizationRole(ctx context.Context, organizationID, userID, role string, granted bool) error {
+	organizationID = strings.TrimSpace(organizationID)
+	userID = strings.TrimSpace(userID)
+	role = strings.TrimSpace(role)
+	if organizationID == "" || userID == "" || role == "" {
+		return fmt.Errorf("organization_id, user_id and role are required")
+	}
+	relation := ""
+	switch role {
+	case "owner", "information_admin":
+		relation = "information_admin"
+	default:
+		return nil
+	}
+	tuple := application.RelationTuple{
+		User:     "user:" + userID,
+		Relation: relation,
+		Object:   "organization:" + organizationID,
+	}
+	if granted {
+		exists, err := c.relationExists(ctx, tuple)
+		if err != nil {
+			return err
+		}
+		if exists {
+			return nil
+		}
+		return c.writeChanges(ctx, []map[string]string{relationMap(tuple)}, nil)
+	}
+	return c.writeChanges(ctx, nil, []map[string]string{relationMap(tuple)})
+}
 func (c *Client) WriteRelations(ctx context.Context, tuples []application.RelationTuple) error {
 	missing := make([]map[string]string, 0, len(tuples))
 	for _, tuple := range tuples {
@@ -249,7 +280,7 @@ func mapResource(check application.AuthorizationCheck) (string, string, string, 
 	if strings.TrimSpace(check.ResourceID) == "" {
 		return "", "", "", fmt.Errorf("resource_id is required")
 	}
-	if check.Action != "view" && check.Action != "download" {
+	if check.Action != "view" && check.Action != "download" && check.Action != "delete" {
 		return "", "", "", fmt.Errorf("unsupported action")
 	}
 	part := check.ResourcePart
@@ -257,6 +288,9 @@ func mapResource(check application.AuthorizationCheck) (string, string, string, 
 	case "knowledge_item":
 		if part == "display" {
 			return "knowledge_item", check.Action, check.ResourceID, nil
+		}
+		if part == "delete" && check.Action == "delete" {
+			return "knowledge_item", "delete", check.ResourceID, nil
 		}
 		if part == "original" && check.Action == "view" {
 			return "knowledge_original", "view", check.ResourceID, nil

@@ -138,6 +138,9 @@
             <t-button variant="outline" @click="downloadMessage">
               <template #icon><t-icon name="download" /></template>下载
             </t-button>
+            <t-button theme="danger" variant="outline" :loading="deletingMessage" :disabled="deletingMessage" @click="requestMessageDeletion">
+              <template #icon><t-icon name="delete" /></template>申请删除
+            </t-button>
           </div>
         </footer>
       </article>
@@ -192,7 +195,7 @@
 import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import { createAccessRequest } from '@/api/core-organization'
 import { ApiError } from '@/api/http'
-import { getKnowledgeAttachmentContent, getMessageOriginal } from '@/api/info-knowledge'
+import { createMessageDeletionRequest, getKnowledgeAttachmentContent, getMessageOriginal } from '@/api/info-knowledge'
 import InfoAttachmentPreview from '@/components/InfoAttachmentPreview.vue'
 import type { CollectionStatus, InfoChat, InfoFile, InfoMessage } from '@/mock'
 import { sourceName } from '@/mock'
@@ -241,6 +244,7 @@ const originalText = ref('')
 const originalKnowledgeItemID = ref('')
 const highlightedItemKey = ref<string | null>(null)
 const fileDownloading = ref(false)
+const deletingMessage = ref(false)
 const shareSelecting = ref(false)
 const selectedMessageIDs = ref<string[]>([])
 const selectedAttachmentIDs = ref<string[]>([])
@@ -476,7 +480,28 @@ function downloadMessage() {
   saveBlob(blob, `消息-${activeMessage.value.id}.txt`)
 }
 
+async function requestMessageDeletion() {
+  if (!activeMessage.value || deletingMessage.value) return
+  const messageID = activeMessage.value.sourceMessageId || activeMessage.value.id
+  if (!messageID) {
+    emit('toast', '缺少消息标识，无法提交删除申请')
+    return
+  }
+  if (!window.confirm('删除后将从知识库、搜索和问答中移除，原始平台消息不会被删除。是否继续？')) return
+  deletingMessage.value = true
+  try {
+    await createMessageDeletionRequest(messageID, `申请删除消息 ${messageID}`)
+    messageDialogVisible.value = false
+    emit('toast', '删除申请已提交，内容将停止对外展示')
+  } catch (error: any) {
+    emit('toast', error?.message || '删除申请提交失败')
+  } finally {
+    deletingMessage.value = false
+  }
+}
+
 async function loadMessageOriginal() {
+
   if (!activeMessage.value || originalLoading.value || originalRequesting.value) return
   originalLoading.value = true
   try {

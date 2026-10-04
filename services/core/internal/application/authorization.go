@@ -67,6 +67,13 @@ type RelationWriter interface {
 	WriteRelations(ctx context.Context, tuples []RelationTuple) error
 }
 
+// RoleRelationWriter synchronizes organization role grants with OpenFGA
+// relations. It is optional so services that only expose resource-relation
+// writes remain compatible.
+type RoleRelationWriter interface {
+	SyncOrganizationRole(ctx context.Context, organizationID, userID, role string, granted bool) error
+}
+
 type RelationSynchronizer interface {
 	SyncRelations(ctx context.Context, managedObjects []string, tuples []RelationTuple) error
 }
