@@ -247,6 +247,8 @@ type permissionSyncRequest struct {
 	OrganizationID        string   `json:"organization_id"`
 	ConversationID        string   `json:"conversation_id"`
 	ParticipantUserIDs    []string `json:"participant_user_ids"`
+	OriginalViewerUserIDs []string `json:"original_viewer_user_ids"`
+	ContentViewerUserIDs  []string `json:"content_viewer_user_ids"`
 	ContentAccessRequired bool     `json:"content_access_required"`
 }
 
@@ -273,7 +275,8 @@ func (h *PermissionSyncHandler) Sync(c *gin.Context) {
 		KnowledgeItemID: req.KnowledgeItemID, AttachmentID: req.AttachmentID,
 		KnowledgeScope: req.KnowledgeScope, OwnerUserID: req.OwnerUserID,
 		OrganizationID: req.OrganizationID, ConversationID: req.ConversationID,
-		ParticipantUserIDs: req.ParticipantUserIDs, ContentAccessRequired: req.ContentAccessRequired,
+		ParticipantUserIDs: req.ParticipantUserIDs, OriginalViewerUserIDs: req.OriginalViewerUserIDs,
+		ContentViewerUserIDs: req.ContentViewerUserIDs, ContentAccessRequired: req.ContentAccessRequired,
 	})
 	if err != nil {
 		writeError(c, http.StatusServiceUnavailable, "AUTHZ_SYNC_FAILED", "permission synchronization failed", true)

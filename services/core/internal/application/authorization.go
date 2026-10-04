@@ -52,6 +52,8 @@ type ResourcePermission struct {
 	OrganizationID        string
 	ConversationID        string
 	ParticipantUserIDs    []string
+	OriginalViewerUserIDs []string
+	ContentViewerUserIDs  []string
 	OrganizationMemberIDs []string
 	ContentAccessRequired bool
 }
@@ -180,6 +182,12 @@ func permissionTuples(input ResourcePermission) ([]RelationTuple, error) {
 	if input.KnowledgeScope == "private" {
 		add("user:"+input.OwnerUserID, "owner", "knowledge_original:"+itemID)
 	}
+	for _, viewer := range input.OriginalViewerUserIDs {
+		viewer = strings.TrimSpace(viewer)
+		if viewer != "" {
+			add("user:"+viewer, "viewer", "knowledge_original:"+itemID)
+		}
+	}
 	if input.AttachmentID != "" {
 		meta := "attachment_meta:" + input.AttachmentID
 		content := "attachment_content:" + input.AttachmentID
@@ -193,6 +201,12 @@ func permissionTuples(input ResourcePermission) ([]RelationTuple, error) {
 			add(group, "conversation_group", meta)
 			if !input.ContentAccessRequired {
 				add(group+"#member", "accessor", content)
+			}
+		}
+		for _, viewer := range input.ContentViewerUserIDs {
+			viewer = strings.TrimSpace(viewer)
+			if viewer != "" {
+				add("user:"+viewer, "viewer", content)
 			}
 		}
 		add(meta, "parent", content)

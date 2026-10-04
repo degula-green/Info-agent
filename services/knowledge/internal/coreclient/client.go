@@ -266,15 +266,22 @@ func (c *Client) SyncKnowledgePermissions(ctx context.Context, item domain.Knowl
 	if c == nil || c.BaseURL == "" || c.ServiceToken == "" {
 		return PermissionSyncResult{}, errors.New("core permission service is not configured")
 	}
+	originalViewers := append([]string(nil), participantUserIDs...)
+	var contentViewers []string
+	if item.SourceAttachmentID != "" && item.ContentAccessRequired {
+		contentViewers = append([]string(nil), participantUserIDs...)
+	}
 	body, err := json.Marshal(map[string]any{
-		"knowledge_item_id":       item.ID,
-		"attachment_id":           item.SourceAttachmentID,
-		"knowledge_scope":         item.KnowledgeScope,
-		"owner_user_id":           item.OwnerUserID,
-		"organization_id":         item.OrganizationID,
-		"conversation_id":         item.ConversationID,
-		"participant_user_ids":    participantUserIDs,
-		"content_access_required": item.ContentAccessRequired,
+		"knowledge_item_id":        item.ID,
+		"attachment_id":            item.SourceAttachmentID,
+		"knowledge_scope":          item.KnowledgeScope,
+		"owner_user_id":            item.OwnerUserID,
+		"organization_id":          item.OrganizationID,
+		"conversation_id":          item.ConversationID,
+		"participant_user_ids":     participantUserIDs,
+		"original_viewer_user_ids": originalViewers,
+		"content_viewer_user_ids":  contentViewers,
+		"content_access_required":  item.ContentAccessRequired,
 	})
 	if err != nil {
 		return PermissionSyncResult{}, err

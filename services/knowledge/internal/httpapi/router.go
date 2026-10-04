@@ -396,6 +396,15 @@ func registerUserRoutes(r *gin.Engine, app *App, prefix string) {
 		}
 		c.JSON(http.StatusOK, gin.H{"items": out})
 	})
+	g.GET("/knowledge/items/:knowledge_item_id/original", func(c *gin.Context) {
+		p := principal(c)
+		out, err := app.Service.GetKnowledgeOriginal(c, p.UserID, c.Param("knowledge_item_id"))
+		if err != nil {
+			writeError(c, err)
+			return
+		}
+		c.JSON(http.StatusOK, publicKnowledgeOriginalFromDomain(*out))
+	})
 	// Explicit type-specific discovery keeps the group and private workflows
 	// distinct without changing the existing collector discovery contract.
 	g.GET("/connectors/:platform/group-conversations/discover", func(c *gin.Context) {

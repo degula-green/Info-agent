@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"info-agent/knowledge/internal/domain"
 	"info-agent/knowledge/internal/trace"
 )
 
@@ -105,5 +106,42 @@ func TestCheckBatchUsesKnowledgeCallerAndPreservesDecisionOrder(t *testing.T) {
 	}
 	if len(decisions) != 2 || decisions[0].CheckID != "c1" || !decisions[0].Allowed || decisions[1].CheckID != "c2" || decisions[1].Allowed {
 		t.Fatalf("unexpected decisions: %+v", decisions)
+	}
+}
+
+func TestSyncKnowledgePermissionsSendsProtectedViewers(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/internal/v1/authorization/resource-relations/sync" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		var body struct {
+			KnowledgeItemID       string   `json:"knowledge_item_id"`
+			OriginalViewerUserIDs []string `json:"original_viewer_user_ids"`
+			ContentViewerUserIDs  []string `json:"content_viewer_user_ids"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		if body.KnowledgeItemID != "item-1" {
+			t.Fatalf("unexpected knowledge item: %+v", body)
+		}
+		if len(body.OriginalViewerUserIDs) != 1 || body.OriginalViewerUserIDs[0] != "member-1" {
+			t.Fatalf("original viewers missing: %+v", body)
+		}
+		if len(body.ContentViewerUserIDs) != 1 || body.ContentViewerUserIDs[0] != "member-1" {
+			t.Fatalf("content viewers missing for protected attachment: %+v", body)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"knowledge_item_id":"item-1","acl_version":3,"relation_count":4,"status":"synced"}`))
+	}))
+	defer server.Close()
+
+	_, err := New(server.URL, "service-token").SyncKnowledgePermissions(context.Background(), domain.KnowledgeItem{
+		ID: "item-1", KnowledgeScope: "organization", OrganizationID: "org-1",
+		ConversationID: "conversation-1", SourceAttachmentID: "attachment-1",
+		ContentAccessRequired: true,
+	}, []string{"member-1"})
+	if err != nil {
+		t.Fatal(err)
 	}
 }

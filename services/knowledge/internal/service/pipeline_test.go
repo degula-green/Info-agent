@@ -362,6 +362,48 @@ func TestProcessPrivacyKeepsPrivateContentOwnerOnlyAndUnmasked(t *testing.T) {
 	}
 }
 
+func TestGetKnowledgeOriginalRequiresResourceGrant(t *testing.T) {
+	f := newPipelineFixture(t, domain.PlatformFeishu)
+	result, err := f.service.IngestMessage(context.Background(), pipelineInput(f, "original-access", "text", "密码123456"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.service.ProcessPrivacy(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	item, err := f.repo.GetKnowledgeItemByMessage(context.Background(), result.Message.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	core := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			SubjectID string `json:"subject_id"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"snapshot_id": "test",
+			"decisions": []map[string]any{{
+				"check_id": "c1",
+				"allowed":  body.SubjectID == "member",
+			}},
+		})
+	}))
+	defer core.Close()
+	f.service.Core = coreclient.New(core.URL, "service-token")
+
+	if _, err := f.service.GetKnowledgeOriginal(context.Background(), "outsider", item.ID); apperror.From(err).Code != "original_access_required" {
+		t.Fatalf("unprotected original was returned to outsider: %v", err)
+	}
+	content, err := f.service.GetKnowledgeOriginal(context.Background(), "member", item.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if content.ContentVariant != "original" || content.Text != "密码123456" {
+		t.Fatalf("authorized original mismatch: %+v", content)
+	}
+}
+
 func TestPrivacyPermissionAndReadyOutboxContract(t *testing.T) {
 	f := newPipelineFixture(t, domain.PlatformWechat)
 	f.service.Config.RedisOutboundStream = "test:knowledge:ready"

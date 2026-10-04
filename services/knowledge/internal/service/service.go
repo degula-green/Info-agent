@@ -3000,6 +3000,65 @@ func (s *Service) GetKnowledgeForRAG(ctx context.Context, id string, contentVers
 	return item, nil
 }
 
+// GetKnowledgeOriginal returns the user-facing original message after the
+// resource-level authorization check. Non-sensitive content is served from the
+// display projection so the original projection is only used after an explicit
+// protected-resource grant.
+func (s *Service) GetKnowledgeOriginal(ctx context.Context, userID, knowledgeItemID string) (*domain.KnowledgeContent, error) {
+	userID = strings.TrimSpace(userID)
+	knowledgeItemID = strings.TrimSpace(knowledgeItemID)
+	if userID == "" || knowledgeItemID == "" {
+		return nil, apperror.New("invalid_request", "user and knowledge item are required", 400, false)
+	}
+	item, err := s.Repo.GetKnowledgeItem(ctx, knowledgeItemID)
+	if err != nil {
+		return nil, err
+	}
+	if item.LifecycleStatus != "active" && item.LifecycleStatus != "ready" {
+		return nil, apperror.New("knowledge_not_found", "knowledge item is not active", 404, false)
+	}
+	if item.SourceMessageID == "" {
+		return nil, apperror.New("knowledge_original_unavailable", "knowledge item has no message original", 409, false)
+	}
+	part, action := "display", "view"
+	if item.OriginalAccessRequired {
+		part = "original"
+	}
+	if s.Core == nil {
+		return nil, apperror.New("core_dependency_unavailable", "authorization service is unavailable", 503, true)
+	}
+	decisions, checkErr := s.Core.CheckBatch(ctx, userID, item.OrganizationID, []coreclient.AuthorizationCheck{{
+		ResourceType: "knowledge_item", ResourcePart: part, ResourceID: item.ID, Action: action,
+	}})
+	if checkErr != nil {
+		return nil, apperror.Wrap("core_dependency_unavailable", "authorization service is unavailable", 503, true, checkErr)
+	}
+	allowed := len(decisions) == 1 && decisions[0].Allowed
+	auditVariant := "display"
+	if part == "original" {
+		auditVariant = "original"
+	}
+	if auditErr := s.Repo.RecordRAGSourceAudit(ctx, repository.RAGSourceAuditInput{
+		CallerService: "knowledge-ui", Purpose: "view", KnowledgeItemID: item.ID,
+		ResourceID: item.SourceMessageID, ContentVersion: item.ContentVersion, ACLVersion: item.ACLVersion,
+		ContentVariant: auditVariant, TraceID: trace.TraceID(ctx),
+		Result: map[bool]string{true: "success", false: "denied"}[allowed],
+	}); auditErr != nil {
+		return nil, apperror.New("knowledge_audit_unavailable", "original access audit is unavailable", 503, true)
+	}
+	if !allowed {
+		if item.OriginalAccessRequired {
+			return nil, apperror.New("original_access_required", "original content requires approval", 403, false)
+		}
+		return nil, apperror.Clone(apperror.ErrForbidden)
+	}
+	content, err := s.Repo.GetKnowledgeContent(ctx, item.ID, auditVariant)
+	if err != nil {
+		return nil, err
+	}
+	return content, nil
+}
+
 // ApplyRAGResult is an additive callback contract for service three. Version
 // and terminal-state protection is implemented by the repository transaction.
 func (s *Service) ApplyRAGResult(ctx context.Context, id string, input repository.RAGResultInput) (*repository.RAGResultApply, error) {
