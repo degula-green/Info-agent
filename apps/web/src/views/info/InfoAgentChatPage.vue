@@ -1730,7 +1730,7 @@ async function cancelTask(message: AgentMessage): Promise<boolean> {
 
 function handleTextareaKeydown(value: unknown, context?: { e?: KeyboardEvent }): void {
   const event = context?.e || (value instanceof KeyboardEvent ? value : undefined)
-  if (!event || event.key !== 'Enter' || (!event.ctrlKey && !event.metaKey)) return
+  if (!event || event.key !== 'Enter' || event.shiftKey || event.isComposing || event.keyCode === 229) return
   event.preventDefault()
   void sendMessage()
 }
