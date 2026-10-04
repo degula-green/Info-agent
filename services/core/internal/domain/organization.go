@@ -98,6 +98,12 @@ type OrganizationEvent struct {
 	CreatedAt      time.Time
 }
 
+type OrganizationExitPreflight struct {
+	Allowed  bool
+	Blockers []string
+	Warnings []string
+}
+
 func IsValidRole(role string) bool { _, ok := FixedRoleCodes[role]; return ok }
 
 func (m Membership) IsActive() bool { return m.Status == MembershipStatusActive }

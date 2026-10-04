@@ -24,6 +24,7 @@ type OrganizationApplication interface {
 	GrantRole(context.Context, string, string, string, string) error
 	RevokeRole(context.Context, string, string, string, string) error
 	Capabilities(context.Context, string, string) (domain.OrganizationCapabilities, error)
+	ExitPreflight(context.Context, string, string) (domain.OrganizationExitPreflight, error)
 	SuspendMember(context.Context, string, string, string, string) error
 	ReactivateMember(context.Context, string, string, string) error
 	RemoveMember(context.Context, string, string, string, string) error
@@ -126,6 +127,15 @@ func (h *OrganizationHandler) Capabilities(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, capabilitiesResponse(capabilities))
+}
+func (h *OrganizationHandler) ExitPreflight(c *gin.Context) {
+	p, _ := PrincipalFromContext(c.Request.Context())
+	preflight, err := h.service.ExitPreflight(c.Request.Context(), p.UserID, c.Param("organization_id"))
+	if err != nil {
+		h.write(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, exitPreflightResponse(preflight))
 }
 func (h *OrganizationHandler) Leave(c *gin.Context) {
 	var req memberReasonRequest
@@ -266,6 +276,16 @@ func capabilitiesResponse(capabilities domain.OrganizationCapabilities) gin.H {
 	}
 }
 func (h *OrganizationHandler) write(c *gin.Context, err error) {
+	var blocked *application.OrganizationExitBlockedError
+	if errors.As(err, &blocked) {
+		c.JSON(http.StatusConflict, gin.H{
+			"code":     "ORG_EXIT_BLOCKED",
+			"message":  "organization exit is blocked",
+			"blockers": blocked.Blockers,
+			"warnings": blocked.Warnings,
+		})
+		return
+	}
 	switch {
 	case errors.Is(err, application.ErrOrganizationAlreadyJoined):
 		writeError(c, 409, "ORGANIZATION_ALREADY_JOINED", "user already belongs to an organization", false)
@@ -285,11 +305,21 @@ func (h *OrganizationHandler) write(c *gin.Context, err error) {
 		writeError(c, http.StatusConflict, "ORG_SELF_ACTION_INVALID", "operation cannot target the current user", false)
 	case errors.Is(err, application.ErrInvalidMemberReason):
 		writeError(c, http.StatusBadRequest, "INVALID_REQUEST", "member action reason is too long", false)
+	case errors.Is(err, application.ErrExitPreflightUnavailable):
+		writeError(c, http.StatusServiceUnavailable, "ORG_EXIT_PREFLIGHT_UNAVAILABLE", "organization exit preflight is unavailable", true)
 	case errors.Is(err, application.ErrLastOwner):
 		writeError(c, 409, "LAST_OWNER_REQUIRED", "organization must retain an owner", false)
 	case errors.Is(err, application.ErrInvalidOrganizationName):
 		writeError(c, 400, "INVALID_REQUEST", "invalid organization request", false)
 	default:
 		writeError(c, 503, "ORG_SERVICE_UNAVAILABLE", "organization service unavailable", true)
+	}
+}
+
+func exitPreflightResponse(preflight domain.OrganizationExitPreflight) gin.H {
+	return gin.H{
+		"allowed":  preflight.Allowed,
+		"blockers": preflight.Blockers,
+		"warnings": preflight.Warnings,
 	}
 }

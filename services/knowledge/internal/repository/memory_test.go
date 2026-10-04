@@ -125,6 +125,24 @@ func TestApplyOrganizationMembershipEventOffboardsAndRequeuesPermissions(t *test
 	}
 }
 
+func TestOrganizationExitImpactBlocksSolePrimaryCollector(t *testing.T) {
+	repo := NewMemoryStore()
+	repo.conversations["conversation-1"] = domain.ConversationIngestion{
+		ID: "conversation-1", OrganizationID: "organization-1", Status: domain.ConversationActive,
+	}
+	repo.collectors["collector-1"] = domain.Collector{
+		ID: "collector-1", ConversationID: "conversation-1", CollectorUserID: "user-1",
+		CollectorRole: domain.CollectorPrimary, Status: domain.CollectorActive,
+	}
+	impact, err := repo.OrganizationExitImpact(context.Background(), "organization-1", "user-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(impact.Blockers) != 1 || impact.Blockers[0] != "ACTIVE_COLLECTOR_RESPONSIBILITY" {
+		t.Fatalf("impact = %#v", impact)
+	}
+}
+
 func TestIngestMessageInputUsesSnakeCaseProtocolFields(t *testing.T) {
 	var input IngestMessageInput
 	if err := json.Unmarshal([]byte(`{"collector_id":"collector-1","external_conversation_id":"chat-1","external_message_id":"message-1","payload_hash":"payload-hash","sender_external_id":"sender-1","sender_display_name":"Sender","message_type":"text","content":"hello","content_hash":"content-hash","sent_at":"2026-09-05T00:00:00Z","cursor":"3","attachments":[{"external_attachment_id":"attachment-1","file_name":"note.txt","mime_type":"text/plain","size_bytes":12,"content_hash":"attachment-hash"}]}`), &input); err != nil {

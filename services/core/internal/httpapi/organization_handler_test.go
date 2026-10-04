@@ -48,6 +48,9 @@ func (s *organizationCheckStub) RevokeRole(context.Context, string, string, stri
 func (s *organizationCheckStub) Capabilities(context.Context, string, string) (domain.OrganizationCapabilities, error) {
 	return domain.OrganizationCapabilities{}, nil
 }
+func (s *organizationCheckStub) ExitPreflight(context.Context, string, string) (domain.OrganizationExitPreflight, error) {
+	return domain.OrganizationExitPreflight{Allowed: true}, nil
+}
 func (s *organizationCheckStub) SuspendMember(context.Context, string, string, string, string) error {
 	return nil
 }

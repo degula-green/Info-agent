@@ -1999,6 +1999,10 @@ func (s *Service) ApplyOrganizationMembershipEvent(ctx context.Context, input re
 	return s.Repo.ApplyOrganizationMembershipEvent(ctx, input)
 }
 
+func (s *Service) OrganizationExitImpact(ctx context.Context, organizationID, userID string) (repository.OrganizationExitImpact, error) {
+	return s.Repo.OrganizationExitImpact(ctx, organizationID, userID)
+}
+
 func normalizeMessageCandidate(input repository.IngestMessageInput, rawContent, sourcePayloadHash string, account domain.ConnectorAccount, collectedAt time.Time) (domain.UnifiedMessage, error) {
 	// Platform adapters already extracted source identities and attachment
 	// metadata. This is the first point at which they become the shared domain

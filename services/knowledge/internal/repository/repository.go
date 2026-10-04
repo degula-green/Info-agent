@@ -542,6 +542,11 @@ type OrganizationMembershipEventInput struct {
 	Reason         string `json:"reason"`
 }
 
+type OrganizationExitImpact struct {
+	Blockers []string `json:"blockers"`
+	Warnings []string `json:"warnings"`
+}
+
 type ContactFactInput struct {
 	FactType  string
 	Label     string
@@ -675,6 +680,7 @@ type Repository interface {
 	MarkKnowledgePermissionSynced(ctx context.Context, knowledgeItemID string, aclVersion int64) error
 	MarkKnowledgePermissionFailed(ctx context.Context, knowledgeItemID, failure string) error
 	ApplyOrganizationMembershipEvent(ctx context.Context, input OrganizationMembershipEventInput) error
+	OrganizationExitImpact(ctx context.Context, organizationID, userID string) (OrganizationExitImpact, error)
 	TryMarkKnowledgeReady(ctx context.Context, knowledgeItemID, traceID string) (bool, error)
 	CanUserReviewAccess(ctx context.Context, userID, resourceType, resourceID string) (bool, error)
 	ListAccessRequestContexts(ctx context.Context, resources []AccessRequestResource) ([]domain.AccessRequestContext, error)

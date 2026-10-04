@@ -48,6 +48,7 @@ func newRouter(authentication Authentication, cookies RefreshCookieConfig, logge
 		org.POST("", orgHandler.Create)
 		org.GET("/current", orgHandler.Current)
 		org.GET("/:organization_id/capabilities", orgHandler.Capabilities)
+		org.GET("/:organization_id/membership/exit-preflight", orgHandler.ExitPreflight)
 		org.POST("/:organization_id/leave", orgHandler.Leave)
 		org.POST("/:organization_id/transfer-owner", orgHandler.TransferOwner)
 		org.GET("/:organization_id/members", orgHandler.Members)

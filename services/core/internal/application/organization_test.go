@@ -2,6 +2,7 @@ package application
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -60,10 +61,27 @@ func (r *organizationRepositoryStub) TransferOwner(context.Context, string, stri
 func (r *organizationRepositoryStub) CountActiveOwners(context.Context, string) (int, error) {
 	return r.ownerCount, nil
 }
+func (r *organizationRepositoryStub) ListPendingOrganizationEvents(context.Context, int) ([]domain.OrganizationEvent, error) {
+	return nil, nil
+}
+func (r *organizationRepositoryStub) MarkOrganizationEventPublished(context.Context, string, time.Time) error {
+	return nil
+}
+func (r *organizationRepositoryStub) MarkOrganizationEventFailed(context.Context, string, string, time.Time, time.Time) error {
+	return nil
+}
 
 type rbacRepositoryStub struct {
 	*organizationRepositoryStub
 	permissions map[string]struct{}
+}
+
+type exitPreflightCheckerStub struct {
+	result domain.OrganizationExitPreflight
+}
+
+func (s exitPreflightCheckerStub) OrganizationExitPreflight(context.Context, string, string) (domain.OrganizationExitPreflight, error) {
+	return s.result, nil
 }
 
 func (r *rbacRepositoryStub) PermissionsForRoles(context.Context, []string) (map[string]struct{}, error) {
@@ -143,8 +161,13 @@ func TestLeaveOrganizationRejectsLastOwner(t *testing.T) {
 		ownerCount: 1,
 	}
 	service := NewOrganizationService(repo, nil)
-	if err := service.LeaveOrganization(context.Background(), "owner", "organization", ""); err != ErrLastOwner {
+	err := service.LeaveOrganization(context.Background(), "owner", "organization", "")
+	var blocked *OrganizationExitBlockedError
+	if !errors.As(err, &blocked) {
 		t.Fatalf("last owner leave error = %v", err)
+	}
+	if len(blocked.Blockers) != 1 || blocked.Blockers[0] != "LAST_OWNER_REQUIRED" {
+		t.Fatalf("last owner blockers = %#v", blocked.Blockers)
 	}
 	if len(repo.statusChanges) != 0 {
 		t.Fatalf("last owner unexpectedly changed status: %#v", repo.statusChanges)
@@ -200,5 +223,27 @@ func TestCapabilitiesForOwner(t *testing.T) {
 	}
 	if !capabilities.CanManageMembers || !capabilities.CanTransferOwner || !capabilities.CanLeave {
 		t.Fatalf("unexpected owner capabilities: %#v", capabilities)
+	}
+}
+
+func TestLeaveOrganizationBlockedByExitPreflight(t *testing.T) {
+	repo := &organizationRepositoryStub{
+		membership: domain.Membership{Status: domain.MembershipStatusActive},
+		ownerCount: 2,
+	}
+	service := NewOrganizationService(repo, nil)
+	service.SetExitPreflightChecker(exitPreflightCheckerStub{result: domain.OrganizationExitPreflight{
+		Blockers: []string{"ACTIVE_COLLECTOR_RESPONSIBILITY"},
+	}})
+	err := service.LeaveOrganization(context.Background(), "member", "organization", "")
+	var blocked *OrganizationExitBlockedError
+	if !errors.As(err, &blocked) {
+		t.Fatalf("leave error = %v", err)
+	}
+	if len(blocked.Blockers) != 1 || blocked.Blockers[0] != "ACTIVE_COLLECTOR_RESPONSIBILITY" {
+		t.Fatalf("blockers = %#v", blocked.Blockers)
+	}
+	if len(repo.statusChanges) != 0 {
+		t.Fatalf("blocked leave changed status: %#v", repo.statusChanges)
 	}
 }

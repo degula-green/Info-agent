@@ -2761,6 +2761,43 @@ func (s *MemoryStore) ApplyOrganizationMembershipEvent(ctx context.Context, inpu
 	return nil
 }
 
+func (s *MemoryStore) OrganizationExitImpact(_ context.Context, organizationID, userID string) (OrganizationExitImpact, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var impact OrganizationExitImpact
+	for _, collector := range s.collectors {
+		if collector.CollectorUserID != userID || collector.Status != domain.CollectorActive {
+			continue
+		}
+		conversation, ok := s.conversations[collector.ConversationID]
+		if !ok || conversation.OrganizationID != organizationID || (conversation.Status != domain.ConversationActive && conversation.Status != domain.ConversationPaused) {
+			continue
+		}
+		if collector.CollectorRole == domain.CollectorPrimary {
+			hasOther := false
+			for _, other := range s.collectors {
+				if other.ConversationID == collector.ConversationID && other.ID != collector.ID && other.Status == domain.CollectorActive {
+					hasOther = true
+					break
+				}
+			}
+			if !hasOther {
+				impact.Blockers = append(impact.Blockers, "ACTIVE_COLLECTOR_RESPONSIBILITY")
+				break
+			}
+		}
+	}
+	for _, collector := range s.collectors {
+		if collector.CollectorUserID == userID && collector.Status == domain.CollectorActive {
+			if conversation, ok := s.conversations[collector.ConversationID]; ok && conversation.OrganizationID == organizationID {
+				impact.Warnings = append(impact.Warnings, "organization collector assignments will be removed")
+				break
+			}
+		}
+	}
+	return impact, nil
+}
+
 func (s *MemoryStore) TryMarkKnowledgeReady(ctx context.Context, id, traceID string) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

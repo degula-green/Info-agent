@@ -121,3 +121,43 @@ func (c *Client) PublishOrganizationEvent(ctx context.Context, event domain.Orga
 	}
 	return nil
 }
+
+func (c *Client) OrganizationExitPreflight(ctx context.Context, organizationID, userID string) (domain.OrganizationExitPreflight, error) {
+	if c == nil || c.baseURL == "" || c.token == "" {
+		return domain.OrganizationExitPreflight{}, errors.New("knowledge exit-preflight client is not configured")
+	}
+	query := url.Values{}
+	query.Set("organization_id", organizationID)
+	query.Set("user_id", userID)
+	request, err := http.NewRequestWithContext(
+		ctx,
+		http.MethodGet,
+		c.baseURL+"/api/knowledge/v1/internal/knowledge/organization-exit-preflight?"+query.Encode(),
+		nil,
+	)
+	if err != nil {
+		return domain.OrganizationExitPreflight{}, err
+	}
+	request.Header.Set("Authorization", "Bearer "+c.token)
+	request.Header.Set("X-Caller-Service", "core")
+	response, err := c.http.Do(request)
+	if err != nil {
+		return domain.OrganizationExitPreflight{}, err
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return domain.OrganizationExitPreflight{}, fmt.Errorf("knowledge exit preflight failed: %s", response.Status)
+	}
+	var impact struct {
+		Blockers []string `json:"blockers"`
+		Warnings []string `json:"warnings"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&impact); err != nil {
+		return domain.OrganizationExitPreflight{}, err
+	}
+	return domain.OrganizationExitPreflight{
+		Allowed:  len(impact.Blockers) == 0,
+		Blockers: impact.Blockers,
+		Warnings: impact.Warnings,
+	}, nil
+}

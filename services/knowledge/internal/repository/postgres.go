@@ -3164,6 +3164,54 @@ func (s *PostgresStore) ApplyOrganizationMembershipEvent(ctx context.Context, in
 	return dbError(tx.Commit(ctx))
 }
 
+func (s *PostgresStore) OrganizationExitImpact(ctx context.Context, organizationID, userID string) (OrganizationExitImpact, error) {
+	organizationID = strings.TrimSpace(organizationID)
+	userID = strings.TrimSpace(userID)
+	if organizationID == "" || userID == "" {
+		return OrganizationExitImpact{}, apperror.New("invalid_request", "organization_id and user_id are required", 400, false)
+	}
+	var impact OrganizationExitImpact
+	var soleCollectorCount int
+	err := s.pool.QueryRow(ctx, `
+		SELECT count(*)
+		FROM knowledge.conversation_collectors cc
+		JOIN knowledge.conversation_ingestions ci ON ci.id=cc.conversation_ingestion_id
+		WHERE ci.organization_id=$1::uuid
+		  AND cc.collector_user_id=$2::uuid
+		  AND cc.status='active'
+		  AND cc.collector_role='primary'
+		  AND ci.status IN ('active','paused')
+		  AND NOT EXISTS (
+		      SELECT 1 FROM knowledge.conversation_collectors other
+		      WHERE other.conversation_ingestion_id=ci.id
+		        AND other.id<>cc.id
+		        AND other.status='active'
+		  )`,
+		organizationID, userID).Scan(&soleCollectorCount)
+	if err != nil {
+		return OrganizationExitImpact{}, dbError(err)
+	}
+	if soleCollectorCount > 0 {
+		impact.Blockers = append(impact.Blockers, "ACTIVE_COLLECTOR_RESPONSIBILITY")
+	}
+	var collectorCount int
+	err = s.pool.QueryRow(ctx, `
+		SELECT count(*)
+		FROM knowledge.conversation_collectors cc
+		JOIN knowledge.conversation_ingestions ci ON ci.id=cc.conversation_ingestion_id
+		WHERE ci.organization_id=$1::uuid
+		  AND cc.collector_user_id=$2::uuid
+		  AND cc.status='active'`,
+		organizationID, userID).Scan(&collectorCount)
+	if err != nil {
+		return OrganizationExitImpact{}, dbError(err)
+	}
+	if collectorCount > 0 {
+		impact.Warnings = append(impact.Warnings, "organization collector assignments will be removed")
+	}
+	return impact, nil
+}
+
 func (s *PostgresStore) TryMarkKnowledgeReady(ctx context.Context, id, traceID string) (bool, error) {
 	if strings.TrimSpace(traceID) == "" {
 		traceID = trace.TraceID(ctx)

@@ -83,6 +83,10 @@ func (s organizationApplicationStub) Capabilities(context.Context, string, strin
 	return domain.OrganizationCapabilities{}, nil
 }
 
+func (s organizationApplicationStub) ExitPreflight(context.Context, string, string) (domain.OrganizationExitPreflight, error) {
+	return domain.OrganizationExitPreflight{Allowed: true}, nil
+}
+
 func (s organizationApplicationStub) SuspendMember(context.Context, string, string, string, string) error {
 	return nil
 }

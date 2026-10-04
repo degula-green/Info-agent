@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
@@ -29,12 +30,27 @@ var (
 	ErrMemberStateInvalid        = errors.New("membership state invalid")
 	ErrSelfAction                = errors.New("self action is not allowed")
 	ErrInvalidMemberReason       = errors.New("invalid member action reason")
+	ErrExitPreflightUnavailable  = errors.New("organization exit preflight unavailable")
 )
 
 type OrganizationService struct {
-	repo repository.OrganizationRepository
-	rbac repository.RBACRepository
-	now  func() time.Time
+	repo          repository.OrganizationRepository
+	rbac          repository.RBACRepository
+	exitPreflight OrganizationExitPreflightChecker
+	now           func() time.Time
+}
+
+type OrganizationExitPreflightChecker interface {
+	OrganizationExitPreflight(ctx context.Context, organizationID, userID string) (domain.OrganizationExitPreflight, error)
+}
+
+type OrganizationExitBlockedError struct {
+	Blockers []string
+	Warnings []string
+}
+
+func (e *OrganizationExitBlockedError) Error() string {
+	return "organization exit blocked"
 }
 
 func NewOrganizationService(repo repository.OrganizationRepository, now func() time.Time) *OrganizationService {
@@ -43,6 +59,10 @@ func NewOrganizationService(repo repository.OrganizationRepository, now func() t
 	}
 	rbac, _ := repo.(repository.RBACRepository)
 	return &OrganizationService{repo: repo, rbac: rbac, now: now}
+}
+
+func (s *OrganizationService) SetExitPreflightChecker(checker OrganizationExitPreflightChecker) {
+	s.exitPreflight = checker
 }
 
 func (s *OrganizationService) CreateOrganization(ctx context.Context, userID, name string) (domain.Organization, domain.OrganizationMember, error) {
@@ -278,6 +298,13 @@ func (s *OrganizationService) LeaveOrganization(ctx context.Context, userID, org
 	if err != nil {
 		return err
 	}
+	preflight, err := s.ExitPreflight(ctx, userID, organizationID)
+	if err != nil {
+		return err
+	}
+	if !preflight.Allowed {
+		return &OrganizationExitBlockedError{Blockers: preflight.Blockers, Warnings: preflight.Warnings}
+	}
 	membership, roles, err := s.repo.GetMembership(ctx, userID, organizationID)
 	if errors.Is(err, repository.ErrMembershipNotFound) {
 		return ErrMembershipRequired
@@ -305,6 +332,47 @@ func (s *OrganizationService) LeaveOrganization(ctx context.Context, userID, org
 		Reason: reason, Now: s.now().UTC(),
 	})
 	return s.mapMembershipError(err)
+}
+
+func (s *OrganizationService) ExitPreflight(ctx context.Context, userID, organizationID string) (domain.OrganizationExitPreflight, error) {
+	membership, roles, err := s.repo.GetMembership(ctx, userID, organizationID)
+	if errors.Is(err, repository.ErrMembershipNotFound) {
+		return domain.OrganizationExitPreflight{}, ErrMembershipRequired
+	}
+	if err != nil {
+		return domain.OrganizationExitPreflight{}, err
+	}
+	if membership.Status != domain.MembershipStatusActive && membership.Status != domain.MembershipStatusSuspended {
+		return domain.OrganizationExitPreflight{}, ErrMemberStateInvalid
+	}
+	result := domain.OrganizationExitPreflight{
+		Warnings: []string{
+			"organization knowledge and question history will become unavailable",
+			"documents already downloaded cannot be revoked",
+		},
+	}
+	for _, role := range roles {
+		if role.RoleCode != domain.RoleOwner {
+			continue
+		}
+		ownerCount, countErr := s.repo.CountActiveOwners(ctx, organizationID)
+		if countErr != nil {
+			return domain.OrganizationExitPreflight{}, countErr
+		}
+		if ownerCount <= 1 {
+			result.Blockers = append(result.Blockers, "LAST_OWNER_REQUIRED")
+		}
+	}
+	if s.exitPreflight != nil {
+		impact, impactErr := s.exitPreflight.OrganizationExitPreflight(ctx, organizationID, userID)
+		if impactErr != nil {
+			return domain.OrganizationExitPreflight{}, fmt.Errorf("%w: %v", ErrExitPreflightUnavailable, impactErr)
+		}
+		result.Blockers = append(result.Blockers, impact.Blockers...)
+		result.Warnings = append(result.Warnings, impact.Warnings...)
+	}
+	result.Allowed = len(result.Blockers) == 0
+	return result, nil
 }
 
 func (s *OrganizationService) TransferOwner(ctx context.Context, actorID, organizationID, targetUserID string) error {

@@ -1208,6 +1208,18 @@ func registerInternalRoutes(r *gin.Engine, app *App, prefix string) {
 		}
 		c.JSON(http.StatusAccepted, gin.H{"status": "accepted"})
 	})
+	g.GET("/knowledge/organization-exit-preflight", func(c *gin.Context) {
+		if !serviceAuthorized(c) || !strings.EqualFold(strings.TrimSpace(c.GetHeader("X-Caller-Service")), "core") {
+			writeError(c, apperror.Clone(apperror.ErrForbidden))
+			return
+		}
+		impact, err := app.Service.OrganizationExitImpact(c, c.Query("organization_id"), c.Query("user_id"))
+		if err != nil {
+			writeError(c, err)
+			return
+		}
+		c.JSON(http.StatusOK, impact)
+	})
 	g.POST("/knowledge/privacy/reprocess", func(c *gin.Context) {
 		if !serviceAuthorized(c) {
 			writeError(c, apperror.Clone(apperror.ErrForbidden))
