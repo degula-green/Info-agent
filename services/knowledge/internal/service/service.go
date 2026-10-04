@@ -3104,6 +3104,28 @@ func (s *Service) CanReviewAccessRequest(ctx context.Context, userID, resourceTy
 	return s.Repo.CanUserReviewAccess(ctx, strings.TrimSpace(userID), strings.TrimSpace(resourceType), strings.TrimSpace(resourceID))
 }
 
+func (s *Service) ListAccessRequestContexts(ctx context.Context, resources []repository.AccessRequestResource) ([]domain.AccessRequestContext, error) {
+	if len(resources) == 0 {
+		return []domain.AccessRequestContext{}, nil
+	}
+	if len(resources) > 100 {
+		resources = resources[:100]
+	}
+	clean := make([]repository.AccessRequestResource, 0, len(resources))
+	for _, resource := range resources {
+		resource.ResourceType = strings.TrimSpace(resource.ResourceType)
+		resource.ResourceID = strings.TrimSpace(resource.ResourceID)
+		if resource.ResourceID == "" {
+			continue
+		}
+		if resource.ResourceType != "knowledge_original" && resource.ResourceType != "attachment_content" {
+			continue
+		}
+		clean = append(clean, resource)
+	}
+	return s.Repo.ListAccessRequestContexts(ctx, clean)
+}
+
 // ApplyRAGResult is an additive callback contract for service three. Version
 // and terminal-state protection is implemented by the repository transaction.
 func (s *Service) ApplyRAGResult(ctx context.Context, id string, input repository.RAGResultInput) (*repository.RAGResultApply, error) {

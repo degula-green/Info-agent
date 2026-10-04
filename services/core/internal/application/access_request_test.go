@@ -92,7 +92,7 @@ func TestAccessRequestApprovalWritesViewerTuple(t *testing.T) {
 	service := NewAccessRequestService(
 		repo, writer,
 		accessReviewerStub{basis: "information_admin", allowed: true, member: true},
-		collectorReviewerStub{}, time.Now,
+		collectorReviewerStub{}, nil, nil, time.Now,
 	)
 	request, err := service.Create(context.Background(), "requester-1", AccessRequestInput{
 		OrganizationID: "org-1", ResourceScope: "organization",
@@ -126,7 +126,7 @@ func TestAccessRequestCollectorApprovalWritesDownloaderTuple(t *testing.T) {
 	service := NewAccessRequestService(
 		repo, writer,
 		accessReviewerStub{member: true},
-		collectorReviewerStub{allowed: true}, time.Now,
+		collectorReviewerStub{allowed: true}, nil, nil, time.Now,
 	)
 	request, err := service.Create(context.Background(), "requester-1", AccessRequestInput{
 		OrganizationID: "org-1", ResourceScope: "organization",

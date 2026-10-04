@@ -2885,6 +2885,67 @@ func (s *PostgresStore) CanUserReviewAccess(ctx context.Context, userID, resourc
 	return allowed, nil
 }
 
+func (s *PostgresStore) ListAccessRequestContexts(ctx context.Context, resources []AccessRequestResource) ([]domain.AccessRequestContext, error) {
+	messageIDs := make([]string, 0)
+	attachmentIDs := make([]string, 0)
+	for _, resource := range resources {
+		switch resource.ResourceType {
+		case "knowledge_original":
+			messageIDs = append(messageIDs, resource.ResourceID)
+		case "attachment_content":
+			attachmentIDs = append(attachmentIDs, resource.ResourceID)
+		}
+	}
+	out := make([]domain.AccessRequestContext, 0, len(resources))
+	if len(messageIDs) > 0 {
+		rows, err := s.pool.Query(ctx, `SELECT 'knowledge_original',ki.id::text,ki.id::text,COALESCE(ci.id::text,''),COALESCE(ci.name,''),COALESCE(ci.platform,''),COALESCE(m.id::text,''),COALESCE(NULLIF(m.sender_display_name,''),''),m.sent_at,COALESCE(m.normalized_content,''),COALESCE(ki.content_visibility,''),COALESCE(ki.original_access_required,FALSE)
+			FROM knowledge.knowledge_items ki
+			JOIN knowledge.conversation_ingestions ci ON ci.id=ki.conversation_ingestion_id
+			LEFT JOIN knowledge.messages m ON m.id=ki.source_message_id
+			WHERE ki.id=ANY($1::uuid[])`, messageIDs)
+		if err != nil {
+			return nil, dbError(err)
+		}
+		for rows.Next() {
+			var item domain.AccessRequestContext
+			if err := rows.Scan(&item.ResourceType, &item.ResourceID, &item.KnowledgeItemID, &item.SourceConversationID, &item.SourceConversationName, &item.SourcePlatform, &item.SourceMessageID, &item.SenderDisplayName, &item.SentAt, &item.MaskedExcerpt, &item.ContentVisibility, &item.OriginalAccessRequired); err != nil {
+				rows.Close()
+				return nil, dbError(err)
+			}
+			out = append(out, item)
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return nil, dbError(err)
+		}
+		rows.Close()
+	}
+	if len(attachmentIDs) > 0 {
+		rows, err := s.pool.Query(ctx, `SELECT 'attachment_content',a.id::text,ki.id::text,COALESCE(ci.id::text,''),COALESCE(ci.name,''),COALESCE(ci.platform,''),COALESCE(a.file_name,''),COALESCE(a.mime_type,''),COALESCE(a.size_bytes,0),COALESCE(ki.content_visibility,''),COALESCE(ki.original_access_required,FALSE)
+			FROM knowledge.attachments a
+			JOIN knowledge.knowledge_items ki ON ki.source_attachment_id=a.id
+			JOIN knowledge.conversation_ingestions ci ON ci.id=ki.conversation_ingestion_id
+			WHERE a.id=ANY($1::uuid[])`, attachmentIDs)
+		if err != nil {
+			return nil, dbError(err)
+		}
+		for rows.Next() {
+			var item domain.AccessRequestContext
+			if err := rows.Scan(&item.ResourceType, &item.ResourceID, &item.KnowledgeItemID, &item.SourceConversationID, &item.SourceConversationName, &item.SourcePlatform, &item.FileName, &item.MIMEType, &item.SizeBytes, &item.ContentVisibility, &item.OriginalAccessRequired); err != nil {
+				rows.Close()
+				return nil, dbError(err)
+			}
+			out = append(out, item)
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return nil, dbError(err)
+		}
+		rows.Close()
+	}
+	return out, nil
+}
+
 func (s *PostgresStore) MarkKnowledgePermissionSynced(ctx context.Context, id string, aclVersion int64) error {
 	if aclVersion < 1 {
 		return apperror.New("invalid_acl_version", "acl_version must be positive", 400, false)

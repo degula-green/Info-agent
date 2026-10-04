@@ -2489,6 +2489,60 @@ func (s *MemoryStore) CanUserReviewAccess(_ context.Context, userID, resourceTyp
 	return false, nil
 }
 
+func (s *MemoryStore) ListAccessRequestContexts(_ context.Context, resources []AccessRequestResource) ([]domain.AccessRequestContext, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]domain.AccessRequestContext, 0, len(resources))
+	for _, resource := range resources {
+		switch resource.ResourceType {
+		case "knowledge_original":
+			item, ok := s.knowledgeItems[resource.ResourceID]
+			if !ok {
+				continue
+			}
+			context := domain.AccessRequestContext{
+				ResourceType: "knowledge_original", ResourceID: item.ID, KnowledgeItemID: item.ID,
+				SourceConversationID: item.ConversationID, ContentVisibility: item.ContentVisibility,
+				OriginalAccessRequired: item.OriginalAccessRequired,
+			}
+			if conversation, ok := s.conversations[item.ConversationID]; ok {
+				context.SourceConversationName = conversation.Name
+				context.SourcePlatform = conversation.Platform
+			}
+			for _, message := range s.messages {
+				if message.ID == item.SourceMessageID {
+					context.SourceMessageID = message.ID
+					context.SenderDisplayName = message.SenderDisplayName
+					context.SentAt = &message.SentAt
+					context.MaskedExcerpt = message.Content
+					break
+				}
+			}
+			out = append(out, context)
+		case "attachment_content":
+			for _, item := range s.knowledgeItems {
+				if item.SourceAttachmentID != resource.ResourceID {
+					continue
+				}
+				attachment := s.attachments[item.SourceAttachmentID]
+				context := domain.AccessRequestContext{
+					ResourceType: "attachment_content", ResourceID: attachment.ID, KnowledgeItemID: item.ID,
+					SourceConversationID: item.ConversationID, FileName: attachment.FileName,
+					MIMEType: attachment.MIMEType, SizeBytes: attachment.SizeBytes,
+					ContentVisibility: item.ContentVisibility, OriginalAccessRequired: item.OriginalAccessRequired,
+				}
+				if conversation, ok := s.conversations[item.ConversationID]; ok {
+					context.SourceConversationName = conversation.Name
+					context.SourcePlatform = conversation.Platform
+				}
+				out = append(out, context)
+				break
+			}
+		}
+	}
+	return out, nil
+}
+
 func (s *MemoryStore) MarkKnowledgePermissionSynced(_ context.Context, id string, aclVersion int64) error {
 	if aclVersion < 1 {
 		return apperror.New("invalid_acl_version", "acl_version must be positive", 400, false)

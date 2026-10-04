@@ -9,6 +9,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"info-agent/core/internal/application"
 )
 
 type Client struct {
@@ -54,4 +56,36 @@ func (c *Client) CanReviewAccessRequest(ctx context.Context, userID, resourceTyp
 		return false, err
 	}
 	return body.Allowed, nil
+}
+
+func (c *Client) LoadAccessRequestContexts(ctx context.Context, resources []application.AccessRequestResource) ([]application.AccessRequestContext, error) {
+	if c == nil || c.baseURL == "" || c.token == "" {
+		return nil, errors.New("knowledge access-request client is not configured")
+	}
+	body, err := json.Marshal(map[string]any{"items": resources})
+	if err != nil {
+		return nil, err
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/api/knowledge/v1/internal/knowledge/access-request-contexts", strings.NewReader(string(body)))
+	if err != nil {
+		return nil, err
+	}
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Authorization", "Bearer "+c.token)
+	request.Header.Set("X-Caller-Service", "core")
+	response, err := c.http.Do(request)
+	if err != nil {
+		return nil, err
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("knowledge access-request context failed: %s", response.Status)
+	}
+	var result struct {
+		Items []application.AccessRequestContext `json:"items"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&result); err != nil {
+		return nil, err
+	}
+	return result.Items, nil
 }

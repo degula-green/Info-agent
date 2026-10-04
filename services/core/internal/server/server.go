@@ -127,11 +127,14 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Server, 
 	}
 	authorizationClient := openfga.NewClient(cfg)
 	permissionSync := application.NewPermissionSyncService(authorizationClient, postgres.NewAuthorizationVersionRepository(pool))
+	knowledgeClient := knowledgeclient.New(cfg.KnowledgeURL, cfg.KnowledgeAuthorizationToken)
 	accessRequestService := application.NewAccessRequestService(
 		postgres.NewAccessRequestRepository(pool),
 		authorizationClient,
 		organizationService,
-		knowledgeclient.New(cfg.KnowledgeURL, cfg.KnowledgeAuthorizationToken),
+		knowledgeClient,
+		authRepository,
+		knowledgeClient,
 		clock.Now,
 	)
 	return &Server{

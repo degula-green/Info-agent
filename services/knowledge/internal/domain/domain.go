@@ -528,6 +528,24 @@ type KnowledgeContent struct {
 	Text            string `json:"text"`
 }
 
+type AccessRequestContext struct {
+	ResourceType           string     `json:"resource_type"`
+	ResourceID             string     `json:"resource_id"`
+	KnowledgeItemID        string     `json:"knowledge_item_id,omitempty"`
+	SourceConversationID   string     `json:"source_conversation_id,omitempty"`
+	SourceConversationName string     `json:"source_conversation_name,omitempty"`
+	SourcePlatform         string     `json:"source_platform,omitempty"`
+	SourceMessageID        string     `json:"source_message_id,omitempty"`
+	SenderDisplayName      string     `json:"sender_display_name,omitempty"`
+	SentAt                 *time.Time `json:"sent_at,omitempty"`
+	MaskedExcerpt          string     `json:"masked_excerpt,omitempty"`
+	ContentVisibility      string     `json:"content_visibility,omitempty"`
+	OriginalAccessRequired bool       `json:"original_access_required"`
+	FileName               string     `json:"file_name,omitempty"`
+	MIMEType               string     `json:"mime_type,omitempty"`
+	SizeBytes              int64      `json:"size_bytes,omitempty"`
+}
+
 type PrivateShareReference struct {
 	ID                      string    `json:"share_reference_id"`
 	OrganizationID          string    `json:"organization_id"`

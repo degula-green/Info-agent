@@ -1195,6 +1195,25 @@ func registerInternalRoutes(r *gin.Engine, app *App, prefix string) {
 		}
 		c.JSON(http.StatusOK, gin.H{"allowed": allowed})
 	})
+	g.POST("/knowledge/access-request-contexts", func(c *gin.Context) {
+		if !serviceAuthorized(c) || !strings.EqualFold(strings.TrimSpace(c.GetHeader("X-Caller-Service")), "core") {
+			writeError(c, apperror.Clone(apperror.ErrForbidden))
+			return
+		}
+		var body struct {
+			Items []repository.AccessRequestResource `json:"items"`
+		}
+		if err := c.ShouldBindJSON(&body); err != nil {
+			writeError(c, apperror.New("invalid_request", "invalid access request context request", 400, false))
+			return
+		}
+		items, err := app.Service.ListAccessRequestContexts(c, body.Items)
+		if err != nil {
+			writeError(c, err)
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"items": items})
+	})
 	g.POST("/knowledge/privacy/reprocess", func(c *gin.Context) {
 		if !serviceAuthorized(c) {
 			writeError(c, apperror.Clone(apperror.ErrForbidden))

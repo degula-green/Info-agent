@@ -388,6 +388,11 @@ type PendingMessage struct {
 	ConversationType string
 }
 
+type AccessRequestResource struct {
+	ResourceType string `json:"resource_type"`
+	ResourceID   string `json:"resource_id"`
+}
+
 // CalculatePayloadHash defines the cross-language business payload contract.
 // It excludes payload_hash itself, includes every other message field (including
 // attachment metadata), sorts object keys, emits UTF-8 JSON without HTML
@@ -658,6 +663,7 @@ type Repository interface {
 	MarkKnowledgePermissionFailed(ctx context.Context, knowledgeItemID, failure string) error
 	TryMarkKnowledgeReady(ctx context.Context, knowledgeItemID, traceID string) (bool, error)
 	CanUserReviewAccess(ctx context.Context, userID, resourceType, resourceID string) (bool, error)
+	ListAccessRequestContexts(ctx context.Context, resources []AccessRequestResource) ([]domain.AccessRequestContext, error)
 	GetKnowledgeItem(ctx context.Context, knowledgeItemID string) (*domain.KnowledgeItem, error)
 	GetKnowledgeItemByMessage(ctx context.Context, messageID string) (*domain.KnowledgeItem, error)
 	GetKnowledgeItemByAttachment(ctx context.Context, attachmentID string) (*domain.KnowledgeItem, error)
