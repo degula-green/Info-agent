@@ -1,21 +1,37 @@
 from __future__ import annotations
-import hashlib, html, json, mimetypes, os, re, shutil, tempfile, threading, time, urllib.error, urllib.request
+import hashlib, hmac, html, json, mimetypes, os, re, shutil, tempfile, threading, time, urllib.error, urllib.parse, urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from contextvars import ContextVar
 from contextlib import contextmanager
 from fastapi import FastAPI, Header, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from wechatauto import MediaDownloader, WeChatDB
 
 app = FastAPI(title="info-agent-wechat-collector")
+def collector_allowed_origins() -> list[str]:
+    raw = os.getenv(
+        "WECHAT_COLLECTOR_ALLOWED_ORIGINS",
+        "http://localhost:5173,http://127.0.0.1:5173,http://localhost,http://127.0.0.1",
+    )
+    return [item.strip() for item in raw.split(",") if item.strip()]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=collector_allowed_origins(),
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Content-Type"],
+)
 lock = threading.Lock()
 _runtime_var: ContextVar["RuntimeState | None"] = ContextVar("wechat_runtime", default=None)
 
 class RuntimeState:
     def __init__(self, connector_id: str = "") -> None:
         self.connector_id = connector_id
+        self.device_identity: dict[str, Any] = {}
         self.binding: dict[str, Any] = {}
         self.config: dict[str, Any] = {"selected_conversations": [], "history_start_at": None, "enabled": True, "listen_mode": "whitelist", "connector_id": connector_id}
         self.db: Any = None
@@ -181,6 +197,7 @@ class _RuntimeObjectProxy:
     def __bool__(self): return bool(self._value())
 
 binding = _RuntimeDictProxy("binding")
+device_identity = _RuntimeDictProxy("device_identity")
 config = _RuntimeDictProxy("config")
 db = _RuntimeObjectProxy("db")
 media = _RuntimeObjectProxy("media")
@@ -190,6 +207,7 @@ discovery_lock = threading.Lock()
 # Legacy single-runtime loop state. These remain until the connector-scoped
 # worker manager replaces the module-level collection loop completely.
 last_bootstrap_at = 0.0
+last_device_heartbeat_at = 0.0
 last_discovery_at = 0.0
 worker_thread: threading.Thread | None = None
 discovery_thread: threading.Thread | None = None
@@ -197,6 +215,18 @@ discovery_thread: threading.Thread | None = None
 class BindRequest(BaseModel):
     wxid: str = Field(min_length=3)
     db_dir: str = Field(min_length=3)
+
+class PairDeviceRequest(BaseModel):
+    pairing_id: str = Field(min_length=1)
+    pairing_code: str = Field(min_length=1)
+    wxid: str = Field(min_length=3)
+    agent_version: str = "local-wechat-agent"
+
+class BrowserPairRequest(BaseModel):
+    pairing_id: str = Field(min_length=1)
+    pairing_code: str = Field(min_length=1)
+    wxid: str = ""
+    agent_version: str = "local-wechat-agent"
 
 def auth(token: str | None) -> None:
     if token != os.getenv("COLLECTOR_INTERNAL_TOKEN", "local-development-only"): raise HTTPException(401, "invalid collector credential")
@@ -208,29 +238,66 @@ def load_state() -> None:
         value = json.loads(state_path().read_text(encoding="utf-8"))
         checkpoints = {str(k): int(v) for k, v in (value.get("checkpoints") or {}).items()}
         replayed_media = {str(k): {str(item) for item in (items or [])} for k, items in (value.get("replayed_media") or {}).items()}
+        device_identity.clear()
+        device_identity.update(value.get("device") or {})
+        binding.clear()
+        binding.update(value.get("binding") or {})
     except (FileNotFoundError, ValueError, OSError): pass
 def bootstrap_from_knowledge() -> None:
     global binding, config, bootstrap_error
+    local_binding = dict(binding)
     binding.clear()
     config.clear(); config.update({"selected_conversations": [], "history_start_at": None, "enabled": True, "listen_mode": "whitelist", "connector_id": ""})
     bootstrap_error = None
     try:
-        connector_id = os.getenv("WECHAT_CONNECTOR_ID", "").strip()
-        suffix = "?connector_id=" + connector_id if connector_id else ""
-        result = knowledge("/api/knowledge/v1/internal/wechat/bootstrap" + suffix)
-        entries = [result] if connector_id else (result.get("items") or [])
-        runnable = [entry for entry in entries if str((entry.get("runtime") or {}).get("status") or "") != "stopped"]
-        if not runnable: return
-        if len(runnable) > 1:
-            bootstrap_error = "multiple runnable WeChat connectors found; set WECHAT_CONNECTOR_ID"
+        device_id = str(device_identity.get("device_id") or "").strip()
+        device_key = str(device_identity.get("device_key") or "").strip()
+        if not device_id or not device_key:
+            bootstrap_error = "agent is not paired; complete device pairing first"
+            save_state()
             return
-        entry = runnable[0]
+        result = knowledge(
+            "/api/knowledge/v1/internal/wechat/bootstrap?device_id="
+            + urllib.parse.quote(device_id)
+        )
+        if str(result.get("status") or "") != "bound":
+            bootstrap_error = "agent device has no active connector assignment"
+            save_state()
+            return
+        entry = result
         connector = entry.get("connector") or {}
         runtime = entry.get("runtime") or {}
-        binding.update({"wxid": connector.get("external_account_id") or connector.get("wechat_id"), "db_dir": connector.get("database_ref"), "status": runtime.get("status") or "running", "connector_id": connector.get("id")})
+        wxid = str(connector.get("external_account_id") or "").strip()
+        db_dir = str(local_binding.get("db_dir") or "").strip()
+        local_wxid = str(local_binding.get("wxid") or "").strip()
+        if wxid and not db_dir:
+            match = local_account_for_wxid(wxid)
+            if match is not None:
+                db_dir = match["db_dir"]
+                local_wxid = match["wxid"]
+        if not local_wxid:
+            local_wxid = wxid
+        if not wxid or not db_dir or not local_wxid:
+            bootstrap_error = "local pairing state is missing its WeChat path"
+            save_state()
+            return
+        if not same_wechat_account(local_wxid, wxid):
+            bootstrap_error = "local WeChat path does not match the assigned connector"
+            save_state()
+            return
+        binding.update({"wxid": wxid, "db_dir": db_dir, "status": runtime.get("status") or "running", "connector_id": connector.get("id")})
         saved = entry.get("config") or {}
         config.update(saved)
         config["connector_id"] = connector.get("id")
+        save_state()
+    except urllib.error.HTTPError as exc:
+        if exc.code == 401:
+            device_identity.clear()
+            binding.clear()
+            save_state()
+            bootstrap_error = "agent device is expired or revoked; pair it again"
+            return
+        bootstrap_error = f"Knowledge bootstrap failed: {exc}"[:500]
     except Exception as exc:
         bootstrap_error = f"Knowledge bootstrap failed: {exc}"[:500]
 
@@ -260,13 +327,59 @@ def ensure_bootstrap() -> bool:
         bootstrap_error = f"WeChat database bootstrap failed: {exc}"[:500]
         return False
 
+def send_device_heartbeat(*, force: bool = False) -> bool:
+    global last_device_heartbeat_at
+    device_id = str(device_identity.get("device_id") or "").strip()
+    if not device_id or not device_identity.get("device_key"):
+        return False
+    now = time.time()
+    interval = max(5.0, float(os.getenv("WECHAT_HEARTBEAT_INTERVAL", "30")))
+    if not force and now - last_device_heartbeat_at < interval:
+        return True
+    path = f"/api/knowledge/v1/internal/devices/{urllib.parse.quote(device_id)}/heartbeat"
+    try:
+        knowledge(
+            path,
+            "POST",
+            {"agent_version": str(device_identity.get("agent_version") or "local-wechat-agent")},
+        )
+        last_device_heartbeat_at = now
+        return True
+    except urllib.error.HTTPError as exc:
+        if exc.code == 401:
+            device_identity.clear()
+            binding.clear()
+            save_state()
+        return False
+
 def save_state() -> None:
     path = state_path(); path.parent.mkdir(parents=True, exist_ok=True); temp = path.with_suffix(path.suffix + ".tmp")
-    temp.write_text(json.dumps({"checkpoints": checkpoints, "replayed_media": {key: sorted(values) for key, values in replayed_media.items()}}, ensure_ascii=False), encoding="utf-8"); temp.replace(path)
+    temp.write_text(json.dumps({"device": dict(device_identity), "binding": dict(binding), "checkpoints": checkpoints, "replayed_media": {key: sorted(values) for key, values in replayed_media.items()}}, ensure_ascii=False), encoding="utf-8"); temp.replace(path)
+
+def auth_headers_for(path: str, method: str, body: bytes | None) -> dict[str, str]:
+    device_id = str(device_identity.get("device_id") or "").strip()
+    device_key = str(device_identity.get("device_key") or "").strip()
+    if device_id and device_key:
+        timestamp = str(int(time.time()))
+        request_path = urllib.parse.urlsplit(path).path
+        payload_hash = hashlib.sha256(body or b"").hexdigest()
+        signed = f"{timestamp}\n{method.upper()}\n{request_path}\n{payload_hash}"
+        signature = hmac.new(device_key.encode("utf-8"), signed.encode("utf-8"), hashlib.sha256).hexdigest()
+        return {
+            "X-Agent-Device-Key": device_key,
+            "X-Agent-Timestamp": timestamp,
+            "X-Agent-Payload-Hash": payload_hash,
+            "X-Agent-Signature": signature,
+        }
+    return {"X-Service-Token": os.getenv("KNOWLEDGE_INTERNAL_SERVICE_TOKEN", "local-development-only")}
+
 def knowledge(path: str, method: str = "GET", payload: Any = None) -> dict[str, Any]:
     base = os.getenv("KNOWLEDGE_BASE_URL", "http://127.0.0.1:8090").rstrip("/"); body = None if payload is None else json.dumps(payload, ensure_ascii=False).encode("utf-8")
-    token = os.getenv("KNOWLEDGE_INTERNAL_SERVICE_TOKEN", "local-development-only")
-    req = urllib.request.Request(base + path, data=body, method=method, headers={"Accept": "application/json", "Content-Type": "application/json", "X-Service-Token": token})
+    headers = {"Accept": "application/json"}
+    if body is not None:
+        headers["Content-Type"] = "application/json"
+    headers.update(auth_headers_for(path, method, body))
+    req = urllib.request.Request(base + path, data=body, method=method, headers=headers)
     with urllib.request.urlopen(req, timeout=30) as response: return json.loads(response.read().decode("utf-8") or "{}")
 
 def ingest_message(collector_id: str, payload: dict[str, Any]) -> dict[str, Any] | None:
@@ -610,8 +723,10 @@ def upload_attachment(collector_id: str, attachment_id: str, path: Path, name: s
     body = b"".join(f"--{boundary}\r\nContent-Disposition: form-data; name=\"{key}\"\r\n\r\n{value}\r\n".encode() for key, value in fields)
     body += f"--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"{name.replace(chr(34), '')}\"\r\nContent-Type: {mime}\r\n\r\n".encode() + path.read_bytes() + f"\r\n--{boundary}--\r\n".encode()
     base = os.getenv("KNOWLEDGE_BASE_URL", "http://127.0.0.1:8090").rstrip("/")
-    token = os.getenv("KNOWLEDGE_INTERNAL_SERVICE_TOKEN", "local-development-only")
-    request = urllib.request.Request(f"{base}/api/knowledge/v1/internal/collectors/{collector_id}/attachments", data=body, method="POST", headers={"Content-Type": f"multipart/form-data; boundary={boundary}", "X-Service-Token": token, "Accept": "application/json"})
+    path_value = f"/api/knowledge/v1/internal/collectors/{collector_id}/attachments"
+    headers = {"Content-Type": f"multipart/form-data; boundary={boundary}", "Accept": "application/json"}
+    headers.update(auth_headers_for(path_value, "POST", body))
+    request = urllib.request.Request(f"{base}{path_value}", data=body, method="POST", headers=headers)
     with urllib.request.urlopen(request, timeout=60) as response: return json.loads(response.read().decode() or "{}")
 
 def messages_after(
@@ -700,7 +815,12 @@ def media_replay_candidates(
 
 def collect_once() -> None:
     if binding.get("status") == "running" and config.get("enabled") and config.get("connector_id") and db is not None:
-        assignments = knowledge("/api/knowledge/v1/internal/wechat/assignments?connector_id=" + str(config["connector_id"])).get("items", [])
+        device_id = urllib.parse.quote(str(device_identity.get("device_id") or ""))
+        if not device_id:
+            return
+        assignments = knowledge(
+            f"/api/knowledge/v1/internal/devices/{device_id}/collectors"
+        ).get("items", [])
         selected = set(config.get("selected_conversations") or [])
         # An attached active conversation is already an explicit collection
         # choice. Keep it collectable even when an older whitelist snapshot
@@ -901,6 +1021,7 @@ def collector_worker() -> None:
             if not ensure_bootstrap():
                 time.sleep(float(os.getenv("WECHAT_COLLECTOR_POLL_INTERVAL", "5")))
                 continue
+            send_device_heartbeat()
             if time.time() - last_discovery_at >= float(os.getenv("WECHAT_DISCOVERY_INTERVAL", "60")):
                 refresh_discovery(); last_discovery_at = time.time()
             collect_once()
@@ -922,8 +1043,175 @@ def open_db(path_value: str, wxid: str) -> Any:
     if not (root / account / "db_storage").is_dir(): raise ValueError("db_dir does not contain a readable WeChat db_storage directory")
     opened = MultiShardWeChatDB(account=account, db_dir=str(root)); opened.get_sessions(limit=1); return opened
 
+def wechat_data_roots() -> list[Path]:
+    configured = [
+        item.strip()
+        for item in re.split(r"[,;]", os.getenv("WECHAT_DATA_ROOTS", ""))
+        if item.strip()
+    ]
+    if configured:
+        return [Path(item).expanduser() for item in configured]
+    home = Path.home()
+    return [
+        home / "Documents" / "xwechat_files",
+        home / "Documents" / "WeChat Files",
+    ]
+
+def scan_local_accounts() -> list[dict[str, str]]:
+    found: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for root in wechat_data_roots():
+        if not root.is_dir():
+            continue
+        try:
+            children = list(root.iterdir())
+        except OSError:
+            continue
+        for account_dir in children:
+            if not account_dir.is_dir() or not (account_dir / "db_storage").is_dir():
+                continue
+            wxid = str(account_dir.name).strip()
+            db_dir = str(account_dir.resolve())
+            key = (wxid.lower(), db_dir.lower())
+            if not wxid or key in seen:
+                continue
+            seen.add(key)
+            found.append({"wxid": wxid, "db_dir": db_dir, "root": str(root.resolve())})
+    return found
+
+def local_account_for_wxid(wxid: str) -> dict[str, str] | None:
+    normalized = str(wxid).strip().lower()
+    matches = [
+        item
+        for item in scan_local_accounts()
+        if same_wechat_account(item["wxid"], normalized)
+    ]
+    return matches[0] if len(matches) == 1 else None
+
+def validate_browser_pairing(pairing_id: str, pairing_code: str) -> None:
+    knowledge(
+        "/api/knowledge/v1/internal/wechat/pair/validate",
+        "POST",
+        {"pairing_id": pairing_id, "pairing_code": pairing_code},
+    )
+
+def pair_local_device(pairing_id: str, pairing_code: str, wxid: str, agent_version: str) -> dict[str, Any]:
+    account = local_account_for_wxid(wxid)
+    if account is None:
+        raise ValueError("wxid was not found under the configured local WeChat data roots")
+    fingerprint = hashlib.sha256(account["db_dir"].encode("utf-8")).hexdigest()
+    result = knowledge(
+        "/api/knowledge/v1/internal/wechat/pair",
+        "POST",
+        {
+            "pairing_id": pairing_id,
+            "pairing_code": pairing_code,
+            "wxid": account["wxid"],
+            "path_fingerprint": fingerprint,
+            "agent_version": agent_version,
+        },
+    )
+    device_identity.clear()
+    device_identity.update(
+        {
+            "device_id": str(result.get("device_id") or ""),
+            "device_key": str(result.get("device_key") or ""),
+            "agent_version": agent_version,
+        }
+    )
+    binding.clear()
+    binding.update(
+        {
+            "connector_id": str(result.get("connector_id") or ""),
+            "wxid": account["wxid"],
+            "db_dir": account["db_dir"],
+            "status": "starting",
+        }
+    )
+    save_state()
+    bootstrap_from_knowledge()
+    send_device_heartbeat(force=True)
+    return {"device": dict(device_identity), "binding": dict(binding), "bootstrap_error": bootstrap_error}
+
 @app.get("/health")
 def health() -> dict[str, Any]: return {"service": "wechat-collector", "status": "degraded" if bootstrap_error else "ok", "bound": bool(binding), "bootstrap_error": bootstrap_error}
+@app.get("/device")
+def device_status(x_collector_token: str | None = Header(default=None)) -> dict[str, Any]:
+    auth(x_collector_token)
+    return {
+        "paired": bool(device_identity.get("device_id") and device_identity.get("device_key")),
+        "device_id": device_identity.get("device_id") or "",
+        "connector_id": binding.get("connector_id") or "",
+        "wxid": binding.get("wxid") or "",
+        "status": binding.get("status") or "unbound",
+        "bootstrap_error": bootstrap_error,
+    }
+@app.get("/local/accounts")
+def local_accounts(x_collector_token: str | None = Header(default=None)) -> dict[str, Any]:
+    auth(x_collector_token)
+    items = scan_local_accounts()
+    return {"items": items, "total": len(items)}
+@app.post("/local/browser/accounts")
+def browser_accounts(req: BrowserPairRequest) -> dict[str, Any]:
+    try:
+        validate_browser_pairing(req.pairing_id, req.pairing_code)
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        exc.close()
+        raise HTTPException(exc.code, detail) from exc
+    items = scan_local_accounts()
+    return {"items": items, "total": len(items)}
+@app.post("/local/browser/pair")
+def browser_pair(req: BrowserPairRequest) -> dict[str, Any]:
+    try:
+        validate_browser_pairing(req.pairing_id, req.pairing_code)
+        accounts = scan_local_accounts()
+        if req.wxid.strip():
+            account = local_account_for_wxid(req.wxid)
+        elif len(accounts) == 1:
+            account = accounts[0]
+        elif not accounts:
+            raise HTTPException(404, "no local WeChat account was found")
+        else:
+            raise HTTPException(409, "multiple local WeChat accounts require explicit selection")
+        if account is None:
+            raise HTTPException(404, "the selected WeChat account was not found")
+        result = pair_local_device(
+            req.pairing_id,
+            req.pairing_code,
+            account["wxid"],
+            req.agent_version,
+        )
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        exc.close()
+        raise HTTPException(exc.code, detail) from exc
+    except ValueError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    return {
+        "status": "paired",
+        "device_id": str((result.get("device") or {}).get("device_id") or ""),
+        "connector_id": str((result.get("binding") or {}).get("connector_id") or ""),
+        "wxid": account["wxid"],
+    }
+@app.post("/pair")
+def pair_device(req: PairDeviceRequest, x_collector_token: str | None = Header(default=None)) -> dict[str, Any]:
+    auth(x_collector_token)
+    try:
+        return pair_local_device(req.pairing_id, req.pairing_code, req.wxid, req.agent_version)
+    except urllib.error.HTTPError as exc:
+        try:
+            detail = exc.read().decode("utf-8", errors="replace")
+        finally:
+            exc.close()
+        raise HTTPException(exc.code, detail) from exc
+    except ValueError as exc:
+        raise HTTPException(404, str(exc)) from exc
+@app.post("/bootstrap")
+def bootstrap_device(x_collector_token: str | None = Header(default=None)) -> dict[str, Any]:
+    auth(x_collector_token)
+    bootstrap_from_knowledge()
+    return {"status": binding.get("status") or "unbound", "bound": bool(binding), "bootstrap_error": bootstrap_error}
 @app.post("/bind")
 def bind(req: BindRequest, x_collector_token: str | None = Header(default=None)) -> dict[str, Any]:
     auth(x_collector_token); global db, media, worker_thread

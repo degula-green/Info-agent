@@ -600,6 +600,9 @@ type Repository interface {
 	CreateDevice(ctx context.Context, device domain.AgentDevice) error
 	CompletePairing(ctx context.Context, pairingID, deviceID, connectorID string) error
 	GetDeviceByHash(ctx context.Context, keyHash string) (*domain.AgentDevice, error)
+	CreateDeviceAssignment(ctx context.Context, assignment domain.AgentDeviceAssignment) error
+	GetActiveDeviceAssignment(ctx context.Context, deviceID string) (*domain.AgentDeviceAssignment, error)
+	RevokeDeviceAssignments(ctx context.Context, connectorID, actorUserID string, now time.Time) error
 	RevokeDevices(ctx context.Context, connectorID string) error
 	RevokeDevice(ctx context.Context, connectorID, deviceID string) error
 	TouchDevice(ctx context.Context, deviceID, agentVersion string, now time.Time) error

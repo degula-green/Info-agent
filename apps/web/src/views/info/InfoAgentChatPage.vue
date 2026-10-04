@@ -1,6 +1,6 @@
 <template>
   <section ref="pageRef" class="agent-chat-page">
-    <div ref="scrollRef" class="agent-chat-scroll">
+    <div ref="scrollRef" class="agent-chat-scroll" @scroll.passive="handleChatScroll">
       <div v-if="restoringConversation" class="agent-welcome">
         <h1>正在加载会话</h1>
         <p>请稍候</p>
@@ -11,7 +11,7 @@
         <p>输入指令，Agent 会在后台规划、审批并执行</p>
       </div>
 
-      <div v-else class="agent-transcript">
+      <div v-else ref="transcriptRef" class="agent-transcript">
         <div v-for="message in messages" :key="message.id" :class="['agent-message', `agent-message--${message.role}`]">
           <AgentUserMessage
             v-if="message.role === 'user'"
@@ -186,6 +186,17 @@
       </div>
     </div>
 
+    <button
+      v-if="hasNewChatContent"
+      type="button"
+      class="agent-scroll-latest"
+      aria-label="回到最新内容"
+      @click="jumpToLatest({ smooth: true })"
+    >
+      <t-icon name="chevron-down" />
+      <span>有新内容</span>
+    </button>
+
     <div class="agent-composer-area">
       <div class="agent-composer" :class="{ 'agent-composer--focused': focused }">
         <t-textarea
@@ -298,6 +309,7 @@ import AgentSourceList from '@/components/agent-chat/AgentSourceList.vue'
 import AgentStatusIndicator from '@/components/agent-chat/AgentStatusIndicator.vue'
 import AgentStepsTimeline from '@/components/agent-chat/AgentStepsTimeline.vue'
 import AgentUserMessage from '@/components/agent-chat/AgentUserMessage.vue'
+import { useChatAutoScroll } from '@/composables/useChatAutoScroll'
 import type { InfoFile } from '@/mock'
 import { useInfoKnowledgeStore } from '@/stores/infoKnowledge'
 import { navigateToKnowledgeSource } from '@/utils/knowledge-source-navigation'
@@ -435,6 +447,7 @@ const selectedFile = ref<File | null>(null)
 const fileInputRef = ref<HTMLInputElement | null>(null)
 const messages = ref<AgentMessage[]>([])
 const scrollRef = ref<HTMLElement | null>(null)
+const transcriptRef = ref<HTMLElement | null>(null)
 const pageRef = ref<HTMLElement | null>(null)
 const textareaRef = ref<{ focus?: () => void } | null>(null)
 const activeTaskID = ref('')
@@ -450,10 +463,24 @@ const formEditors = reactive<Record<string, Array<{ name: string; value: string;
 const inputValues = reactive<Record<string, string>>({})
 const expandedTraces = reactive<Record<string, boolean>>({})
 const expandedSources = reactive<Record<string, boolean>>({})
+const {
+  hasNewContent: hasNewChatContent,
+  bind: bindChatScroll,
+  handleScroll: handleChatScroll,
+  jumpToLatest,
+  reset: resetChatScroll,
+  scheduleFollow: scheduleChatFollow,
+  dispose: disposeChatScroll,
+} = useChatAutoScroll()
 let activeController: AbortController | null = null
 let conversationLoadSequence = 0
 const router = useRouter()
 const route = useRoute()
+watch(
+  [scrollRef, transcriptRef],
+  () => bindChatScroll(scrollRef.value, transcriptRef.value),
+  { immediate: true, flush: 'post' },
+)
 const sourcePreviewVisible = ref(false)
 const previewDownloading = ref(false)
 const activeSourceFile = ref<InfoFile | null>(null)
@@ -1249,11 +1276,13 @@ function resetConversationState(): void {
 
 async function loadConversation(id: string): Promise<void> {
   const sequence = ++conversationLoadSequence
+  resetChatScroll()
   resetConversationState()
   if (!id) {
     conversationId.value = ''
     restoringConversation.value = false
     await nextTick()
+    await jumpToLatest()
     return
   }
 
@@ -1279,8 +1308,7 @@ async function loadConversation(id: string): Promise<void> {
   } finally {
     if (sequence === conversationLoadSequence) restoringConversation.value = false
   }
-  await nextTick()
-  if (scrollRef.value) scrollRef.value.scrollTop = scrollRef.value.scrollHeight
+  await jumpToLatest()
 }
 
 async function syncConversationFromRoute(): Promise<void> {
@@ -1310,7 +1338,7 @@ async function hydrateTerminal(message: AgentMessage): Promise<void> {
   } catch {
     // The terminal event already carries the user-visible result when available.
   }
-  await scrollToBottom()
+  scheduleChatFollow()
 }
 
 async function watchTask(message: AgentMessage, after = message.lastEventId): Promise<void> {
@@ -1340,7 +1368,7 @@ async function watchTask(message: AgentMessage, after = message.lastEventId): Pr
     if (activeTaskID.value === message.taskId) activeTaskID.value = ''
     notifyConversationChanged()
   }
-  await scrollToBottom()
+  scheduleChatFollow()
 }
 
 async function sendMessage(): Promise<void> {
@@ -1375,6 +1403,7 @@ async function sendMessage(): Promise<void> {
   })
   messages.value.push(userMessage, agentMessage)
   question.value = ''
+  await jumpToLatest()
   try {
     const created = await createAgentTask({
       text,
@@ -1403,7 +1432,7 @@ async function sendMessage(): Promise<void> {
   } finally {
     activeTaskID.value = ''
     notifyConversationChanged()
-    await scrollToBottom()
+    scheduleChatFollow()
   }
 }
 
@@ -1735,11 +1764,6 @@ function handleTextareaKeydown(value: unknown, context?: { e?: KeyboardEvent }):
   void sendMessage()
 }
 
-async function scrollToBottom(): Promise<void> {
-  await nextTick()
-  scrollRef.value?.scrollTo({ top: scrollRef.value.scrollHeight, behavior: 'smooth' })
-}
-
 onMounted(() => {
   void syncConversationFromRoute()
 })
@@ -1755,6 +1779,7 @@ onBeforeUnmount(() => {
   messages.value.forEach((message) => stopTakeover(message))
   conversationLoadSequence += 1
   activeController?.abort()
+  disposeChatScroll()
 })
 </script>
 
@@ -1879,6 +1904,10 @@ onBeforeUnmount(() => {
 .agent-input-request button { grid-column: 2; align-self: end; }
 .agent-error { margin: 2px 0 0; padding: 11px 13px; border: 1px solid var(--td-error-color-3); border-radius: 10px; color: var(--td-error-color); background: var(--td-error-color-1); font-size: 13px; line-height: 1.6; }
 .agent-composer-area { position: absolute; z-index: 5; right: 0; bottom: 0; left: 0; display: flex; flex-direction: column; align-items: center; padding: 0 24px 22px; background: linear-gradient(to top, var(--td-bg-color-container) 62%, transparent); }
+.agent-scroll-latest { position: absolute; z-index: 6; bottom: 176px; left: 50%; display: inline-flex; align-items: center; min-height: 34px; gap: 6px; padding: 0 12px; border: 1px solid var(--td-component-stroke); border-radius: 17px; color: var(--td-text-color-secondary); background: var(--td-bg-color-container); box-shadow: 0 4px 14px rgba(0, 0, 0, .1); font-size: 12px; cursor: pointer; transform: translateX(-50%); }
+.agent-scroll-latest:hover { border-color: var(--td-brand-color); color: var(--td-brand-color); }
+.agent-scroll-latest:focus-visible { outline: 2px solid var(--td-brand-color); outline-offset: 2px; }
+.agent-scroll-latest svg { width: 15px; height: 15px; }
 .agent-composer { position: relative; width: min(960px, 100%); border: 1px solid var(--td-component-stroke); border-radius: 14px; background: var(--td-bg-color-container); box-shadow: 0 2px 8px rgba(0, 0, 0, .04), 0 8px 16px -4px rgba(0, 0, 0, .06); transition: border-color .15s, box-shadow .15s; }
 .agent-composer--focused { border-color: var(--td-brand-color); box-shadow: 0 0 0 3px var(--td-brand-color-focus), 0 8px 18px -8px rgba(0, 0, 0, .18); }
 .agent-textarea :deep(.t-textarea__inner) { min-height: 112px; padding: 16px 18px 56px; border: 0; border-radius: 14px; resize: none; color: var(--td-text-color-primary); font-size: 16px; line-height: 1.5; box-shadow: none; }
@@ -1905,6 +1934,6 @@ onBeforeUnmount(() => {
 .agent-source-preview footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding-top: 10px; border-top: 1px solid var(--td-component-stroke); color: var(--td-text-color-secondary); font-size: 12px; }
 .agent-source-preview__actions { display: inline-flex; align-items: center; gap: 8px; }
 .agent-source-preview-dialog .t-dialog__body { padding: 0; }
-@media (max-width: 760px) { .agent-chat-page { min-height: 560px; } .agent-chat-scroll { padding: 24px 16px 185px; } .agent-welcome { padding-bottom: 80px; } .agent-welcome h1 { font-size: 28px; } .agent-message { margin-bottom: 30px; } .agent-response { gap: 10px; } .agent-response__mark { width: 26px; height: 26px; flex-basis: 26px; } .agent-answer { width: 100%; margin-left: 0; } .agent-source-card { display: grid; } .agent-source-card__actions { justify-content: flex-start; } .agent-composer-area { padding: 0 12px 14px; } .agent-textarea :deep(.t-textarea__inner) { min-height: 100px; padding: 13px 14px 58px; font-size: 14px; } .agent-input-request { grid-template-columns: 1fr; } .agent-input-request button { grid-column: 1; } }
+@media (max-width: 760px) { .agent-chat-page { min-height: 560px; } .agent-chat-scroll { padding: 24px 16px 185px; } .agent-scroll-latest { bottom: 154px; } .agent-welcome { padding-bottom: 80px; } .agent-welcome h1 { font-size: 28px; } .agent-message { margin-bottom: 30px; } .agent-response { gap: 10px; } .agent-response__mark { width: 26px; height: 26px; flex-basis: 26px; } .agent-answer { width: 100%; margin-left: 0; } .agent-source-card { display: grid; } .agent-source-card__actions { justify-content: flex-start; } .agent-composer-area { padding: 0 12px 14px; } .agent-textarea :deep(.t-textarea__inner) { min-height: 100px; padding: 13px 14px 58px; font-size: 14px; } .agent-input-request { grid-template-columns: 1fr; } .agent-input-request button { grid-column: 1; } }
 @media (hover: none) { .agent-user-actions, .agent-answer__actions { opacity: 1; pointer-events: auto; } }
 </style>
