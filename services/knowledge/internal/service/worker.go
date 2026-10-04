@@ -125,6 +125,9 @@ func (w *Worker) Tick(ctx context.Context) error {
 	if privacyErr := w.service.ProcessPrivacy(ctx); privacyErr != nil && firstErr == nil {
 		firstErr = privacyErr
 	}
+	if _, reprocessErr := w.service.ReprocessPrivacy(ctx, 100); reprocessErr != nil && firstErr == nil {
+		firstErr = reprocessErr
+	}
 	if contactFactErr := w.service.ProcessContactFacts(ctx); contactFactErr != nil && firstErr == nil {
 		firstErr = contactFactErr
 	}
