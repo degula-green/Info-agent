@@ -55,13 +55,15 @@ func TestPermissionSyncBuildsOrganizationAttachmentRelationsAndStableVersion(t *
 	if err != nil {
 		t.Fatal(err)
 	}
-	if first.ACLVersion != 1 || first.RelationCount != 8 {
+	if first.ACLVersion != 1 || first.RelationCount != 10 {
 		t.Fatalf("unexpected first sync: %+v tuples=%+v", first, writer.tuples)
 	}
 	if len(writer.managedObjects) != 4 || writer.managedObjects[3] != "attachment_content:att-1" {
 		t.Fatalf("permission sync did not own the complete resource set: %+v", writer.managedObjects)
 	}
 	want := map[RelationTuple]bool{
+		{User: "organization:org-1", Relation: "organization", Object: "knowledge_item:ki-1"}:                        true,
+		{User: "organization:org-1", Relation: "organization", Object: "attachment_meta:att-1"}:                      true,
 		{User: "user:member-1", Relation: "member", Object: "organization:org-1"}:                                    true,
 		{User: "user:participant-1", Relation: "participant", Object: "conversation_group:conversation-1"}:           true,
 		{User: "conversation_group:conversation-1", Relation: "conversation_group", Object: "knowledge_item:ki-1"}:   true,

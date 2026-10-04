@@ -161,6 +161,7 @@ func permissionTuples(input ResourcePermission) ([]RelationTuple, error) {
 		}
 		group := "conversation_group:" + input.ConversationID
 		organization := "organization:" + input.OrganizationID
+		add(organization, "organization", itemObject)
 		add(organization, "organization", group)
 		for _, member := range input.OrganizationMemberIDs {
 			member = strings.TrimSpace(member)
@@ -198,6 +199,7 @@ func permissionTuples(input ResourcePermission) ([]RelationTuple, error) {
 			}
 		} else {
 			group := "conversation_group:" + input.ConversationID
+			add("organization:"+input.OrganizationID, "organization", meta)
 			add(group, "conversation_group", meta)
 			if !input.ContentAccessRequired {
 				add(group+"#member", "accessor", content)
