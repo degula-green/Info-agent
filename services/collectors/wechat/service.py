@@ -80,7 +80,7 @@ class MultiShardWeChatDB(WeChatDB):
             rows = []
             for conn, table in tables:
                 rows.extend(conn.execute(
-                    "SELECT local_id, local_type, real_sender_id, create_time, "
+                    "SELECT local_id, local_type, server_id, real_sender_id, create_time, "
                     "message_content, source, packed_info_data, compress_content, sort_seq "
                     f"FROM {table} WHERE sort_seq > ? ORDER BY sort_seq ASC LIMIT ?",
                     (since_seq, limit),
@@ -98,7 +98,7 @@ class MultiShardWeChatDB(WeChatDB):
             rows = []
             for conn, table in tables:
                 rows.extend(conn.execute(
-                    "SELECT local_id, local_type, real_sender_id, create_time, "
+                    "SELECT local_id, local_type, server_id, real_sender_id, create_time, "
                     "message_content, source, packed_info_data, compress_content, sort_seq "
                     f"FROM {table} ORDER BY sort_seq DESC LIMIT ?",
                     (limit + offset,),
@@ -137,6 +137,14 @@ class MultiShardWeChatDB(WeChatDB):
             return None
         finally:
             self._close_tables(tables)
+
+    def _msg_row_to_dict(self, row) -> dict[str, Any]:
+        value = super()._msg_row_to_dict(row)
+        try:
+            value["server_id"] = row["server_id"]
+        except (KeyError, IndexError, TypeError):
+            value["server_id"] = None
+        return value
 
     def _find_media_rows(self, user: str, types: set):
         if not types:
@@ -504,6 +512,33 @@ def payload_hash(value: dict[str, Any]) -> str:
     raw = json.dumps({key: item for key, item in value.items() if key != "payload_hash"}, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
     raw = raw.replace("\u2028".encode("utf-8"), b"\\u2028").replace("\u2029".encode("utf-8"), b"\\u2029")
     return hashlib.sha256(raw).hexdigest()
+
+def message_external_id(
+    chat_id: str,
+    raw: dict[str, Any],
+    sender_external_id: str,
+    content_hash: str,
+    attachments: list[dict[str, Any]],
+) -> str:
+    """Build a WeChat message identity that is stable across collector accounts."""
+    server_id = str(raw.get("server_id") or "").strip()
+    if server_id and server_id not in {"0", "None", "null"}:
+        return f"wechat:{chat_id}:server:{server_id}"
+    attachment_keys = sorted(
+        f"{str(item.get('file_name') or '')}:{str(item.get('mime_type') or '')}"
+        for item in attachments
+    )
+    seed = "\x00".join(
+        [
+            chat_id,
+            str(sender_external_id or ""),
+            parse_time(raw.get("create_time")).isoformat(),
+            content_hash,
+            *attachment_keys,
+        ]
+    )
+    digest = hashlib.sha256(seed.encode("utf-8")).hexdigest()
+    return f"wechat:{chat_id}:fallback:{digest}"
 
 def nickname_index() -> dict[str, str]:
     """Return the local WeChat contact display-name index when available."""
@@ -888,16 +923,29 @@ def collect_once() -> None:
                     conversation_name=str(conversation.get("name") or ""),
                 )
                 content = message_content(raw, attachments, sender_external_id)
+                sent_at = parse_time(raw.get("create_time"))
+                content_hash = hashlib.sha256(content.encode()).hexdigest()
+                external_message_id = message_external_id(
+                    chat_id,
+                    raw,
+                    sender_external_id,
+                    content_hash,
+                    attachments,
+                )
+                for index, attachment in enumerate(attachments):
+                    attachment["external_attachment_id"] = (
+                        f"{external_message_id}:attachment:{index}"
+                    )
                 value = {
                     "collector_id": collector_id,
                     "external_conversation_id": chat_id,
-                    "external_message_id": f"{binding.get('wxid', '')}:{chat_id}:{local_id}",
+                    "external_message_id": external_message_id,
                     "sender_external_id": sender_external_id,
                     "sender_display_name": sender_display_name,
                     "message_type": normalized_type(raw),
                     "content": content,
-                    "content_hash": hashlib.sha256(content.encode()).hexdigest(),
-                    "sent_at": parse_time(raw.get("create_time")).isoformat().replace("+00:00", "Z"),
+                    "content_hash": content_hash,
+                    "sent_at": sent_at.isoformat().replace("+00:00", "Z"),
                     "cursor": cursor,
                     "attachments": attachments,
                 }

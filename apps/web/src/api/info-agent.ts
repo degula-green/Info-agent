@@ -541,7 +541,7 @@ export async function rejectAgentApproval(approvalID: string, version?: number):
  */
 export async function submitAgentTaskInput(
   taskID: string,
-  payload: { text?: string; fields?: Record<string, unknown> } = {},
+  payload: { text?: string; fields?: Record<string, unknown>; resume?: boolean } = {},
 ): Promise<AgentTask> {
   return agentRequest<AgentTask>(`/tasks/${encodeURIComponent(taskID)}/input`, {
     method: 'POST',

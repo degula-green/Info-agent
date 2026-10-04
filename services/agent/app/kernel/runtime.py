@@ -545,7 +545,7 @@ class AgentRuntime:
                 },
             )
         try:
-            understanding = self._call_understanding_provider(task)
+            understanding = self._call_understanding_provider_with_retry(task)
         except Exception as exc:  # noqa: BLE001 - provider errors are classified
             error = {
                 "classification": classify_error(exc),
@@ -804,6 +804,31 @@ class AgentRuntime:
         if task.source_type == "knowledge_event":
             return collected if collected is not None else chat
         return chat
+
+    def _call_understanding_provider_with_retry(
+        self,
+        task: TaskRecord,
+        *,
+        attempts: int = 2,
+    ) -> TaskUnderstanding:
+        """Retries one transport-level understanding failure.
+
+        The classifier reaches remote models (Jev and the LLM fallback). A
+        dropped connection or a read timeout is not a verdict about the user's
+        message, so it must not end the Task on the first occurrence. Permanent
+        errors and exhausted retries keep the existing failure path.
+        """
+
+        attempt = 0
+        limit = max(1, int(attempts))
+        while True:
+            try:
+                return self._call_understanding_provider(task)
+            except Exception as exc:  # noqa: BLE001 - classified below
+                attempt += 1
+                if classify_error(exc) != "retryable_error" or attempt >= limit:
+                    raise
+                self._sleep(0.5)
 
     def _begin_planning(self, task: TaskRecord) -> TaskRunResult | None:
         ensure_task_transition(task.status, "planning")
@@ -1300,9 +1325,19 @@ class AgentRuntime:
         citation_count = len(citations) if isinstance(citations, list) else 0
         requested_urls = extract_http_urls(str(task.input.get("text") or ""))
         lowered = answer.lower()
+        fetched_urls = {
+            str(item.get("url") or "").strip()
+            for observation in observations
+            if observation.capability == "web.research"
+            and observation.status == "succeeded"
+            for item in ((observation.output or {}).get("evidence") or [])
+            if isinstance(item, dict)
+        }
 
-        if requested_urls and any(
-            marker in lowered for marker in _UNANSWERED_URL_MARKERS
+        if (
+            requested_urls
+            and not any(url in fetched_urls for url in requested_urls)
+            and any(marker in lowered for marker in _UNANSWERED_URL_MARKERS)
         ):
             return {
                 "classification": "permanent_error",
@@ -1321,6 +1356,30 @@ class AgentRuntime:
                 "message": "公网研究已完成，但回答步骤没有生成有效答案。",
             }
         if citation_count == 0:
+            research_observations = [
+                observation
+                for observation in observations
+                if observation.capability == "web.research"
+                and observation.status == "succeeded"
+            ]
+            evidence_count = sum(
+                len((observation.output or {}).get("evidence") or [])
+                for observation in research_observations
+            )
+            # "I could not find a reliable public source" is an honest result,
+            # not an answer that needs a citation. It must complete with the
+            # explicit not-found text instead of failing the Task.
+            if evidence_count == 0 and any(
+                marker in lowered for marker in _UNANSWERED_URL_MARKERS
+            ):
+                return None
+            # The answer composer sometimes returns prose without citation
+            # markers even though real pages were read (a PDF comparison was
+            # observed doing exactly this). Failing here deletes the grounded
+            # answer the user asked for, so a present answer with fetched
+            # evidence completes; the missing citations are a residual risk.
+            if evidence_count > 0 and answer:
+                return None
             return {
                 "classification": "permanent_error",
                 "type": "AnswerQualityError",

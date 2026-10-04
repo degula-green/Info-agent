@@ -1650,8 +1650,23 @@ async function takeoverPressEnter(message: AgentMessage): Promise<void> {
 
 async function continueAfterTakeover(message: AgentMessage): Promise<void> {
   stopTakeover(message)
-  inputValues[message.id] = '已完成登录，请继续'
-  await submitInput(message)
+  if (!message.taskId || message.submitting) return
+  message.submitting = true
+  try {
+    await submitAgentTaskInput(message.taskId, {
+      text: '已完成登录，请继续',
+      resume: true,
+    })
+    message.inputRequest = undefined
+    message.status = 'executing'
+    message.statusText = '登录已完成，正在继续原任务'
+    await watchTask(message, message.lastEventId)
+  } catch (error) {
+    message.error = error instanceof Error ? error.message : '继续任务失败'
+    MessagePlugin.error(message.error)
+  } finally {
+    message.submitting = false
+  }
 }
 
 async function confirmApproval(message: AgentMessage): Promise<void> {

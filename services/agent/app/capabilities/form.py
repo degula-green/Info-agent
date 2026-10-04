@@ -28,6 +28,7 @@ from app.infrastructure.web.form_browser_client import (
     FormLoginRequired,
 )
 from app.infrastructure.web.url_tools import trusted_urls
+from app.kernel.execution_context import current_execution_context
 from app.kernel.models import (
     CapabilityDescriptor,
     CapabilityInputBinding,
@@ -38,6 +39,14 @@ PREVIEW_NAME = "form.preview"
 APPLY_NAME = "form.apply"
 
 FormAction = Literal["fill_only", "fill_and_submit", "write_cells"]
+
+
+def _resume_session_id() -> str:
+    try:
+        value = current_execution_context().task_input.get("resume_session_id")
+    except RuntimeError:
+        return ""
+    return str(value or "").strip()
 
 _SEPARATORS = ":：=,，;；、\t "
 _TRAILING = "。.,，;；"
@@ -50,6 +59,33 @@ _SENTENCE_MARKERS = "。！？!?\n"
 MAX_RETRIEVAL_FIELDS = 8
 # Particles people put between a label and its value ("学号是2025").
 _VALUE_PREFIXES = _SEPARATORS + "是为"
+
+# Instruction clauses that follow a value ("负责人是张三，填写并提交") and
+# labels that follow another field inside one retrieved sentence
+# ("服务器账号是root，密码lyc302974"). Both are cut so a cell holds a value,
+# not the rest of the sentence.
+_VALUE_TRAILING_COMMANDS = (
+    "填写并提交",
+    "确认提交",
+    "并提交",
+    "然后提交",
+    "再提交",
+    "填写",
+    "提交",
+    "并确认",
+    "确认",
+)
+_VALUE_FOLLOWING_KEYS = (
+    "密码",
+    "账号",
+    "电话",
+    "手机号",
+    "姓名",
+    "负责人",
+    "项目",
+    "地址",
+    "编号",
+)
 
 # Collected data is typed by a person, so the label is whatever they happen to
 # call the column and it is usually glued straight to the value --
@@ -303,6 +339,7 @@ def extract_values(
                 .strip(_TRAILING)
                 .strip()
             )
+            value = _clean_value(value)
             header = _target_header(canonical, names)
             if (
                 header is not None
@@ -427,6 +464,23 @@ def _looks_like_a_value(value: str) -> bool:
     if not text or len(text) > MAX_FIELD_VALUE_CHARS:
         return False
     return not any(marker in text for marker in _SENTENCE_MARKERS)
+
+
+def _clean_value(value: str) -> str:
+    """Keep only the field value, not the clause that follows it."""
+
+    text = str(value or "").strip()
+    for marker in _VALUE_TRAILING_COMMANDS:
+        index = text.find(marker)
+        if index > 0:
+            text = text[:index].rstrip(" ，,。.;；:：")
+            break
+    for marker in _VALUE_FOLLOWING_KEYS:
+        match = re.search(rf"[，,、;；\s]+{re.escape(marker)}", text)
+        if match and match.start() > 0:
+            text = text[: match.start()].strip()
+            break
+    return text
 
 
 def build_fields(
@@ -573,9 +627,18 @@ class FormPreviewCapability:
 
     def execute(self, arguments: FormPreviewInput) -> dict[str, Any]:
         url = _trusted(arguments.url, arguments.request)
-        session_id = self.client.create_session()
+        resume_session_id = _resume_session_id()
+        session_id = resume_session_id or self.client.create_session()
+        reused_session = bool(resume_session_id)
         try:
-            page = self.client.open(session_id, url)
+            try:
+                page = self.client.open(session_id, url)
+            except FormBrowserError:
+                if not reused_session:
+                    raise
+                session_id = self.client.create_session()
+                reused_session = False
+                page = self.client.open(session_id, url)
             if page.get("login_required"):
                 # Not a failure: the owner has to sign in, then we continue.
                 return {
@@ -597,13 +660,15 @@ class FormPreviewCapability:
                     f"unsupported page kind: {kind}", code="unsupported_page_kind"
                 )
         except Exception:
-            self.client.close_session(session_id)
+            if not reused_session:
+                self.client.close_session(session_id)
             raise
 
         # The preview does not hand its session to the write step: the approval
         # may sit for minutes, and the write opens a fresh session anyway. Not
         # closing here would leak one Chromium context per preview.
-        self.client.close_session(session_id)
+        if not reused_session:
+            self.client.close_session(session_id)
 
         if kind == "spreadsheet":
             headers = [str(item) for item in (grid.get("headers") or [])]
@@ -626,7 +691,7 @@ class FormPreviewCapability:
                 title=str(page.get("title") or ""),
                 kind="spreadsheet",
                 write_model="live_document",
-                session_id="",
+                session_id=session_id if reused_session else "",
                 page_fingerprint=fingerprint_headers(headers),
                 headers=headers,
                 target_cell=f"A{target_row}" if target_row >= 1 else "A1",
@@ -672,7 +737,7 @@ class FormPreviewCapability:
                 title=str(page.get("title") or ""),
                 kind="form",
                 write_model="submit_form",
-                session_id="",
+                session_id=session_id if reused_session else "",
                 # The layout identity is the set of controls, not their labels.
                 page_fingerprint=fingerprint_headers(
                     [str(field.ref) for field in fields]
@@ -754,11 +819,21 @@ class FormApplyCapability:
         # A fresh session: the approval may sit for minutes, and the stored
         # login state re-authenticates anyway. The fingerprint is what ties
         # this write back to the page the owner actually reviewed.
-        session_id = self.client.create_session()
+        resume_session_id = _resume_session_id()
+        session_id = str(draft.session_id or resume_session_id or "").strip()
+        reused_session = bool(session_id)
+        if not session_id:
+            session_id = self.client.create_session()
         try:
-            page = self.client.open(session_id, url)
+            try:
+                page = self.client.open(session_id, url)
+            except FormBrowserError:
+                if not reused_session:
+                    raise
+                session_id = self.client.create_session()
+                reused_session = False
+                page = self.client.open(session_id, url)
             if page.get("login_required"):
-                self.client.close_session(session_id)
                 return {
                     "requires_user_input": True,
                     "missing_information": ["form_login"],
@@ -770,7 +845,6 @@ class FormApplyCapability:
             else:
                 result = self._apply_cells(session_id, draft, arguments)
         except FormLoginRequired as exc:
-            self.client.close_session(session_id)
             return {
                 "requires_user_input": True,
                 "missing_information": ["form_login"],
@@ -778,7 +852,8 @@ class FormApplyCapability:
                 "takeover": {"session_id": session_id, "url": url},
             }
         except Exception:
-            self.client.close_session(session_id)
+            if not reused_session:
+                self.client.close_session(session_id)
             raise
         self.client.close_session(session_id)
         return result

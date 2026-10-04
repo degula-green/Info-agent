@@ -20,15 +20,20 @@ from app.capabilities.knowledge import (
 from app.capabilities.web_research import WebResearchCapability
 from app.container import build_container, build_planner, build_registry
 from app.kernel.models import (
+    CapabilityDescriptor,
     Observation,
     Plan,
     PlanningConstraints,
     PlanStep,
     TaskEnvelope,
+    TaskUnderstanding,
+    UnderstandingIntent,
 )
 from app.kernel.registry import CapabilityRegistry
 from app.planning.knowledge import (
     KnowledgeRoutingPlanner,
+    build_compliance_plan,
+    build_form_plan,
     build_knowledge_plan,
     classify_knowledge_question,
 )
@@ -45,6 +50,18 @@ from app.kernel.execution_context import (
 from app.kernel.bindings import bind_plan_references
 from app.kernel.models import Plan, PlanStep
 from app.planning.deterministic import DeterministicPlanner
+
+
+def _descriptor(name: str) -> CapabilityDescriptor:
+    return CapabilityDescriptor(
+        name=name,
+        description=name,
+        risk_level="read_only",
+        side_effect=False,
+        requires_approval=False,
+        idempotent=True,
+        timeout_seconds=60,
+    )
 
 
 def context(*, organization_id: str | None = "org-1") -> ExecutionContext:
@@ -835,6 +852,401 @@ def test_composite_source_plan_continues_after_a_successful_step() -> None:
     )
 
     assert decision.action == "continue"
+
+
+def test_knowledge_plan_with_answer_compose_closes_without_the_base_planner() -> None:
+    class FailIfCalledPlanner:
+        name = "stub"
+        last_call_count = 0
+
+        def decide_after_observation(self, *args, **kwargs):
+            raise AssertionError("a knowledge plan must not pay for a model decision")
+
+    plan = Plan(
+        plan_id="plan-knowledge-compose",
+        task_id="task-1",
+        objective="回答知识问题",
+        steps=[
+            PlanStep(
+                step_id="plan-knowledge-compose-step-1",
+                plan_id="plan-knowledge-compose",
+                order=1,
+                capability="knowledge.search_content",
+                status="succeeded",
+            ),
+            PlanStep(
+                step_id="plan-knowledge-compose-step-2",
+                plan_id="plan-knowledge-compose",
+                order=2,
+                capability="answer.compose",
+                status="pending",
+            ),
+        ],
+    )
+    observation = Observation(
+        observation_id="obs-1",
+        task_id="task-1",
+        plan_id=plan.plan_id,
+        step_id="plan-knowledge-compose-step-1",
+        capability="knowledge.search_content",
+        status="succeeded",
+        output={"evidence": [{"evidence_id": "doc-1"}]},
+        created_at=datetime.now(timezone.utc),
+    )
+    planner = KnowledgeRoutingPlanner(FailIfCalledPlanner())
+
+    decision = planner.decide_after_observation(
+        TaskEnvelope(
+            task_id="task-1",
+            source_type="chat",
+            owner_user_id="user-1",
+            input={"text": "数据库密码是多少"},
+            created_at=datetime.now(timezone.utc),
+        ),
+        plan,
+        [observation],
+        PlanningConstraints(),
+    )
+
+    assert decision.action == "continue"
+
+
+def test_confident_web_research_is_not_overridden_by_internal_object_words() -> None:
+    class WebPlanner:
+        name = "routing"
+        last_call_count = 0
+
+        def create_plan(
+            self,
+            task,
+            capabilities,
+            observations,
+            constraints=None,
+            understanding=None,
+        ):
+            return Plan(
+                plan_id="plan-web",
+                task_id=task.task_id,
+                objective="联网搜索",
+                steps=[
+                    PlanStep(
+                        step_id="plan-web-step-1",
+                        plan_id="plan-web",
+                        order=1,
+                        capability="web.research",
+                    )
+                ],
+            )
+
+    planner = KnowledgeRoutingPlanner(WebPlanner())
+    understanding = TaskUnderstanding(
+        is_task=True,
+        goal="搜索飞书开放平台",
+        task_kind="action",
+        intent_candidates=[
+            UnderstandingIntent(name="web.research", confidence=1.0)
+        ],
+        confidence=1.0,
+    )
+    plan = planner.create_plan(
+        TaskEnvelope(
+            task_id="task-1",
+            source_type="chat",
+            owner_user_id="user-1",
+            input={"text": "帮我搜索一下飞书开放平台是什么，并总结一下"},
+            created_at=datetime.now(timezone.utc),
+        ),
+        [
+            CapabilityDescriptor(
+                name="web.research",
+                description="web",
+                risk_level="read_only",
+                side_effect=False,
+                requires_approval=False,
+                idempotent=True,
+                timeout_seconds=90,
+            )
+        ],
+        [],
+        PlanningConstraints(),
+        understanding,
+    )
+
+    assert [step.capability for step in plan.steps] == ["web.research"]
+
+
+def test_compliance_assessment_builds_company_plus_web_comparison() -> None:
+    plan = build_compliance_plan(
+        TaskEnvelope(
+            task_id="task-1",
+            source_type="chat",
+            owner_user_id="user-1",
+            input={
+                "text": (
+                    "请阅读 https://example.com/protocol.pdf 并说明我们公司是否符合"
+                    "该协议，哪些符合、哪些不符合"
+                )
+            },
+            created_at=datetime.now(timezone.utc),
+        ),
+        [
+            _descriptor("knowledge.search_content"),
+            _descriptor("web.research"),
+            _descriptor("answer.compose"),
+        ],
+    )
+
+    assert plan is not None
+    assert [step.capability for step in plan.steps] == [
+        "knowledge.search_content",
+        "web.research",
+        "answer.compose",
+    ]
+    answer = plan.steps[-1]
+    assert answer.arguments["knowledge_evidence_refs"] == [
+        {"step": 1, "output": "evidence"}
+    ]
+    assert answer.arguments["evidence_refs"] == [
+        {"step": 2, "output": "evidence"}
+    ]
+
+
+def test_compliance_plan_uses_uploaded_attachment_as_company_evidence() -> None:
+    plan = build_compliance_plan(
+        TaskEnvelope(
+            task_id="task-1",
+            source_type="chat",
+            owner_user_id="user-1",
+            input={
+                "text": (
+                    "请结合我上传的附件和 https://example.com/protocol.pdf，"
+                    "说明我们公司是否符合该协议"
+                ),
+                "attachment_ids": ["att-1"],
+                "_attachment_processed": True,
+                "_attachment_referenced": True,
+                "_attachment_excerpt": "公司制度：账号由张三管理，密码每 90 天更换。",
+                "_attachment_file_names": ["公司制度.txt"],
+            },
+            created_at=datetime.now(timezone.utc),
+        ),
+        [
+            _descriptor("web.research"),
+            _descriptor("answer.compose"),
+        ],
+    )
+
+    assert plan is not None
+    assert [step.capability for step in plan.steps] == [
+        "web.research",
+        "answer.compose",
+    ]
+    answer = plan.steps[-1]
+    evidence = answer.arguments["knowledge_evidence"]
+    assert evidence[0]["fetch_method"] == "attachment"
+    assert evidence[0]["title"] == "公司制度.txt"
+    assert "张三" in evidence[0]["text"]
+
+
+def test_compliance_web_query_drops_the_company_material_clause() -> None:
+    plan = build_compliance_plan(
+        TaskEnvelope(
+            task_id="task-1",
+            source_type="chat",
+            owner_user_id="user-1",
+            input={
+                "text": (
+                    "请你搜索北京市网络协议，然后结合我们公司已采集的材料，"
+                    "说明我们公司是否符合，哪些符合哪些不符合"
+                )
+            },
+            created_at=datetime.now(timezone.utc),
+        ),
+        [
+            _descriptor("knowledge.search_content"),
+            _descriptor("web.research"),
+            _descriptor("answer.compose"),
+        ],
+    )
+
+    assert plan is not None
+    web = next(step for step in plan.steps if step.capability == "web.research")
+    assert web.arguments["queries"] == ["请你搜索北京市网络协议，"]
+
+
+def test_attachment_plus_url_comparison_uses_both_sources() -> None:
+    class NeverPlanner:
+        name = "never"
+        last_call_count = 0
+
+        def create_plan(self, *args, **kwargs):  # pragma: no cover
+            raise AssertionError("the comparison plan is deterministic")
+
+    planner = KnowledgeRoutingPlanner(NeverPlanner())
+    task = TaskEnvelope(
+        task_id="task-1",
+        source_type="chat",
+        owner_user_id="user-1",
+        input={
+            "text": (
+                "根据我上传的附件和 https://example.com/protocol.pdf，"
+                "说明我们公司哪些符合、哪些不符合"
+            ),
+            "attachment_ids": ["att-1"],
+            "_attachment_processed": True,
+            "_attachment_referenced": True,
+            "_attachment_excerpt": "公司制度：数据每周备份一次。",
+            "_attachment_file_names": ["公司制度.docx"],
+        },
+        created_at=datetime.now(timezone.utc),
+    )
+    understanding = TaskUnderstanding(
+        is_task=True,
+        goal="附件与协议对比",
+        task_kind="mixed",
+        intent_candidates=[
+            UnderstandingIntent(name="knowledge.answer", confidence=0.95)
+        ],
+        confidence=0.95,
+    )
+
+    plan = planner.create_plan(
+        task,
+        [
+            _descriptor("web.research"),
+            _descriptor("answer.compose"),
+        ],
+        [],
+        PlanningConstraints(),
+        understanding,
+    )
+
+    assert [step.capability for step in plan.steps] == [
+        "web.research",
+        "answer.compose",
+    ]
+    answer = plan.steps[-1]
+    assert answer.arguments["knowledge_evidence"][0]["fetch_method"] == "attachment"
+    assert answer.arguments["evidence_refs"] == [
+        {"step": 1, "output": "evidence"}
+    ]
+
+
+def test_action_phrase_does_not_take_the_knowledge_route() -> None:
+    class ActionPlanner:
+        name = "deterministic"
+        last_call_count = 0
+
+        def create_plan(
+            self,
+            task,
+            capabilities,
+            observations,
+            constraints=None,
+            understanding=None,
+        ):
+            return Plan(
+                plan_id="plan-todo",
+                task_id=task.task_id,
+                objective="创建待办",
+                steps=[
+                    PlanStep(
+                        step_id="plan-todo-step-1",
+                        plan_id="plan-todo",
+                        order=1,
+                        capability="todo.create",
+                    )
+                ],
+            )
+
+    planner = KnowledgeRoutingPlanner(ActionPlanner())
+    understanding = TaskUnderstanding(
+        is_task=True,
+        goal="完成登录模块代码",
+        task_kind="action",
+        intent_candidates=[],
+        confidence=0.99,
+    )
+    plan = planner.create_plan(
+        TaskEnvelope(
+            task_id="task-1",
+            source_type="chat",
+            owner_user_id="user-1",
+            input={"text": "完成登录模块代码"},
+            created_at=datetime.now(timezone.utc),
+        ),
+        [_descriptor("todo.create"), _descriptor("knowledge.search_content")],
+        [],
+        PlanningConstraints(),
+        understanding,
+    )
+
+    assert [step.capability for step in plan.steps] == ["todo.create"]
+
+
+def test_form_complete_builds_the_fixed_preview_apply_plan() -> None:
+    plan = build_form_plan(
+        TaskEnvelope(
+            task_id="task-1",
+            source_type="chat",
+            owner_user_id="user-1",
+            input={
+                "text": "打开表单 http://127.0.0.1:8765/form2 ，项目是 aims，填写并提交。"
+            },
+            created_at=datetime.now(timezone.utc),
+        ),
+        [_descriptor("form.preview"), _descriptor("form.apply")],
+    )
+
+    assert plan is not None
+    assert [step.capability for step in plan.steps] == [
+        "form.preview",
+        "form.apply",
+    ]
+    assert plan.steps[0].arguments["url"] == "http://127.0.0.1:8765/form2"
+    assert plan.steps[1].arguments["draft_ref"] == {
+        "step": 1,
+        "output": "form",
+    }
+    assert plan.steps[1].arguments["action"] == "fill_and_submit"
+
+
+def test_form_complete_intent_skips_the_llm_planner() -> None:
+    class NeverPlanner:
+        name = "never"
+        last_call_count = 0
+
+        def create_plan(self, *args, **kwargs):  # pragma: no cover
+            raise AssertionError("form.complete uses the fixed pipeline")
+
+    planner = KnowledgeRoutingPlanner(NeverPlanner())
+    understanding = TaskUnderstanding(
+        is_task=True,
+        goal="填写并提交表单",
+        task_kind="action",
+        intent_candidates=[
+            UnderstandingIntent(name="form.complete", confidence=0.95)
+        ],
+        confidence=0.95,
+    )
+    plan = planner.create_plan(
+        TaskEnvelope(
+            task_id="task-1",
+            source_type="chat",
+            owner_user_id="user-1",
+            input={"text": "打开 http://127.0.0.1:8765/form2 填写并提交"},
+            created_at=datetime.now(timezone.utc),
+        ),
+        [_descriptor("form.preview"), _descriptor("form.apply")],
+        [],
+        PlanningConstraints(),
+        understanding,
+    )
+
+    assert [step.capability for step in plan.steps] == [
+        "form.preview",
+        "form.apply",
+    ]
 
 
 def test_routing_planner_executes_content_pipeline_end_to_end() -> None:

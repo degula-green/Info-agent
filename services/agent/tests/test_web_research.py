@@ -15,6 +15,7 @@ from app.capabilities.web_research import (
     WebResearchError,
     WebResearchInput,
     WebResearchUrlUnreadable,
+    clean_search_query,
 )
 from app.infrastructure.search.client import SearchResult, SearchUnavailable
 from app.infrastructure.web.content_reader import ContentReader
@@ -26,6 +27,14 @@ from app.testing.fake_providers import FakePageFetcher
 USER_URL = "https://93.184.216.34/protocol"
 OTHER_URL = "https://93.184.216.34/other"
 PAGE = "<html><head><title>北京市网络协议</title></head><body><p>" + "正文内容。" * 80 + "</p></body></html>"
+
+
+def test_search_query_strips_conversational_wrappers() -> None:
+    assert (
+        clean_search_query("帮我搜索一下北京市网络协议是什么，并给出原文链接")
+        == "北京市网络协议"
+    )
+    assert clean_search_query("搜索一下 飞书 开放平台 文档") == "飞书 开放平台 文档"
 
 
 class FakeSearchProvider:
@@ -400,6 +409,29 @@ def test_a_transient_fetch_failure_falls_back_to_the_renderer() -> None:
     renderer = FakeRenderer()
     capability = WebResearchCapability(
         ContentReader(FailingFetcher(), renderer=renderer, min_text_chars=1),
+        search_provider=None,
+        aliases={},
+    )
+
+    result = capability.execute(
+        capability.validate({"request": f"读一下 {USER_URL}", "urls": [USER_URL]})
+    )
+
+    assert renderer.calls == [USER_URL]
+    assert result["evidence"][0]["fetch_method"] == "crawl4ai"
+
+
+def test_a_pdf_fetch_rejection_falls_back_to_the_renderer() -> None:
+    class PdfFetcher(FakePageFetcher):
+        def fetch(self, url, *, max_bytes=None):
+            raise PageFetchError(
+                "unsupported content type: application/pdf",
+                code="unsupported_content_type",
+            )
+
+    renderer = FakeRenderer()
+    capability = WebResearchCapability(
+        ContentReader(PdfFetcher(), renderer=renderer, min_text_chars=1),
         search_provider=None,
         aliases={},
     )

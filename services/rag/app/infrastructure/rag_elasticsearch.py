@@ -135,10 +135,15 @@ class RagChunkIndex:
         branches = [
             (settings.elasticsearch_display_read_index, _filters(request, branch_keys=branch_keys)),
         ]
-        if request.include_protected and protected_object_keys:
+        if request.include_protected:
+            # Do NOT filter the protected index by the enumerated key list.
+            # OpenFGA's list-objects can return a capped, unstable subset, so a
+            # genuinely authorized original may be missing from it and its
+            # masked display twin will not match the query. Retrieval returns
+            # candidates and RAG authorizes each one exactly before exposing it.
             branches.append((
                 settings.elasticsearch_protected_read_index,
-                _filters(request, branch_keys=branch_keys, protected_object_keys=protected_object_keys),
+                _filters(request, branch_keys=branch_keys),
             ))
         output: list[SearchResult] = []
         for index, filters in branches:
@@ -167,10 +172,10 @@ class RagChunkIndex:
         branches = [
             (settings.elasticsearch_display_read_index, _filters(request, branch_keys=branch_keys)),
         ]
-        if request.include_protected and protected_object_keys:
+        if request.include_protected:
             branches.append((
                 settings.elasticsearch_protected_read_index,
-                _filters(request, branch_keys=branch_keys, protected_object_keys=protected_object_keys),
+                _filters(request, branch_keys=branch_keys),
             ))
         output: list[SearchResult] = []
         for index, filters in branches:
@@ -215,17 +220,17 @@ class RagChunkIndex:
             if not neighbor_indexes:
                 continue
             protected = content_variant == "protected"
-            if protected and (not request.include_protected or not protected_object_keys):
+            if protected and not request.include_protected:
                 continue
             index = (
                 settings.elasticsearch_protected_read_index
                 if protected
                 else settings.elasticsearch_display_read_index
             )
-            filters = _filters(
-                request,
-                protected_object_keys=protected_object_keys if protected else (),
-            )
+            # The anchor already passed an exact authorization check. Its own
+            # knowledge_item_id is the safe filter; the enumerated key list is
+            # not used because it can be incomplete.
+            filters = _filters(request)
             filters.extend([
                 {"term": {"knowledge_item_id": knowledge_item_id}},
                 {"term": {"content_version": content_version}},
@@ -246,6 +251,42 @@ class RagChunkIndex:
         for result in output:
             unique[result.chunk_id] = result
         return list(unique.values())
+
+    def search_protected_variants(
+        self,
+        request: SearchRequest,
+        knowledge_item_ids: tuple[str, ...],
+    ) -> list[SearchResult]:
+        """Load the protected chunks for specific knowledge items.
+
+        Authorization is checked per item by the caller; this method only
+        hydrates the already-approved candidates. The scope filters still apply
+        so a requested item from another tenant cannot be read by accident.
+        """
+
+        ids = tuple(
+            dict.fromkeys(
+                str(value).strip()
+                for value in knowledge_item_ids
+                if str(value or "").strip()
+            )
+        )
+        if not ids:
+            return []
+        response = self._search(
+            index=settings.elasticsearch_protected_read_index,
+            query={
+                "bool": {
+                    "filter": [
+                        *_filters(request),
+                        {"terms": {"knowledge_item_id": list(ids)}},
+                        {"term": {"content_variant": "protected"}},
+                    ]
+                }
+            },
+            size=max(len(ids) * max(1, settings.max_chunks_per_item), len(ids)),
+        )
+        return _dedupe_display_protected(_results(response))
 
     def _search(self, *, sort: list[dict[str, Any]] | None = None, **kwargs: Any) -> Any:
         if sort:

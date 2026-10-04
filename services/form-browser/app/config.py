@@ -45,7 +45,9 @@ class Settings:
     api_token: str = _text("", "FORM_BROWSER_API_TOKEN")
     headless: bool = _bool(True, "FORM_BROWSER_HEADLESS")
     # Where a logged-in storage state is kept between sessions.
-    storage_state_path: str = _text("", "FORM_BROWSER_STORAGE_STATE")
+    storage_state_path: str = _text(
+        "./data/form-browser-state.json", "FORM_BROWSER_STORAGE_STATE"
+    )
     # A session that nobody touches is closed instead of leaking Chromium.
     session_ttl_seconds: int = _int(900, "FORM_BROWSER_SESSION_TTL_SECONDS")
     max_sessions: int = _int(4, "FORM_BROWSER_MAX_SESSIONS")

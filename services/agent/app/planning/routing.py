@@ -193,6 +193,17 @@ def _build_web_research_plan(
         "网上",
         "新闻",
         "最新",
+        # Analysis and comparison requests need a composed answer, not just the
+        # raw evidence: "说明我们公司是否符合…" / "哪些符合、哪些不符合".
+        "说明",
+        "分析",
+        "比较",
+        "对比",
+        "评估",
+        "符合",
+        "哪些",
+        "依据",
+        "结论",
     )
     urls = extract_http_urls(request)
     wants_answer = any(marker in request for marker in answer_markers)

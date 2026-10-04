@@ -1283,9 +1283,6 @@ func (s *Service) AddCollector(ctx context.Context, userID, conversationID strin
 	if err != nil {
 		return nil, err
 	}
-	if !canManageConversation(conversation, userID) {
-		return nil, apperror.Clone(apperror.ErrForbidden)
-	}
 	if conversation.ConversationType != "group" {
 		return nil, apperror.New("collector_not_allowed", "supplemental collectors are only allowed for group conversations", 400, false)
 	}
@@ -1431,6 +1428,35 @@ func (s *Service) RemoveCollector(ctx context.Context, userID, conversationID, c
 		return apperror.Clone(apperror.ErrForbidden)
 	}
 	return s.Repo.RemoveCollector(ctx, conversationID, collectorID)
+}
+
+func (s *Service) SetCollectorPaused(ctx context.Context, userID, conversationID string, paused bool) ([]domain.Collector, error) {
+	if _, err := s.Repo.GetConversation(ctx, conversationID); err != nil {
+		return nil, err
+	}
+	collectors, err := s.Repo.ListCollectors(ctx, conversationID)
+	if err != nil {
+		return nil, err
+	}
+	status := domain.CollectorActive
+	if paused {
+		status = domain.CollectorPaused
+	}
+	out := make([]domain.Collector, 0, len(collectors))
+	for _, collector := range collectors {
+		if collector.CollectorUserID != userID || collector.Status == domain.CollectorRemoved {
+			continue
+		}
+		updated, updateErr := s.Repo.SetCollectorStatus(ctx, conversationID, collector.ID, status, s.Now())
+		if updateErr != nil {
+			return nil, updateErr
+		}
+		out = append(out, *updated)
+	}
+	if len(out) == 0 {
+		return nil, apperror.New("collector_not_found", "current user is not an active collector", 404, false)
+	}
+	return out, nil
 }
 
 func (s *Service) ListConversations(ctx context.Context, userID, platformName string) ([]domain.ConversationIngestion, error) {

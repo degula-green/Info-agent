@@ -70,6 +70,23 @@ def test_extract_values_stops_at_the_next_header() -> None:
     }
 
 
+def test_extract_values_drops_a_trailing_submit_clause() -> None:
+    text = "项目是 aims，负责人是 张三，填写并提交"
+    assert extract_values(["项目", "负责人"], text) == {
+        "项目": "aims",
+        "负责人": "张三",
+    }
+
+
+def test_extract_values_stops_at_the_next_key_in_a_retrieved_sentence() -> None:
+    assert extract_values(["服务器账号"], "服务器账号是root，密码lyc302974") == {
+        "服务器账号": "root"
+    }
+    assert extract_values(["数据库账号"], "数据库账号 root 密码123456") == {
+        "数据库账号": "root"
+    }
+
+
 def test_fingerprint_is_stable_and_layout_sensitive() -> None:
     assert fingerprint_headers(HEADERS) == fingerprint_headers(list(HEADERS))
     assert fingerprint_headers(HEADERS) != fingerprint_headers(["姓名", "学号"])

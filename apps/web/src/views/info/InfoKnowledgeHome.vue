@@ -250,7 +250,7 @@ async function refresh() {
   try { await store.refreshLibraries() } catch { /* error is displayed in the page */ }
 }
 
-onMounted(() => { void store.ensureLibraries() })
+onMounted(() => { void store.refreshLibraries() })
 onBeforeUnmount(() => {
   if (searchTimer) clearTimeout(searchTimer)
   searchAbort?.abort()

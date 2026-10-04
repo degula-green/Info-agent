@@ -271,7 +271,12 @@ class TaskService:
         return self.store.list_events(task_id, after_sequence=after_sequence)
 
     def submit_input(
-        self, task_id: str, *, owner_user_id: str, payload: dict[str, Any]
+        self,
+        task_id: str,
+        *,
+        owner_user_id: str,
+        payload: dict[str, Any],
+        resume: bool = False,
     ) -> TaskRecord:
         task = self.get_task(task_id, owner_user_id=owner_user_id)
         if task.status != "waiting_input":
@@ -289,6 +294,53 @@ class TaskService:
                 created_at=moment,
             )
         )
+
+        # A takeover/login confirmation is not new user intent. Resume the
+        # existing Plan so its ready Step is re-executed after the external
+        # prerequisite has been satisfied.
+        if resume and task.current_plan_id and self.store.get_active_plan(task_id):
+            merged = dict(task.input)
+            incoming = dict(payload)
+            resume_text = incoming.pop("text", None)
+            if resume_text:
+                merged["resume_input"] = resume_text
+            for observation in reversed(self.store.list_observations(task_id)):
+                takeover = (observation.output or {}).get("takeover")
+                if isinstance(takeover, dict) and takeover.get("session_id"):
+                    merged["resume_session_id"] = str(takeover["session_id"])
+                    break
+            merged.update(incoming)
+            task.input = merged
+            task.result = None
+            ensure_task_transition(task.status, "ready")
+            task.status = "ready"
+            task.updated_at = moment
+            self.store.commit(
+                task,
+                events=[
+                    new_task_event(
+                        task_id,
+                        EVENT_TASK_INPUT_RECEIVED,
+                        {
+                            "version": next_version,
+                            "payload": payload,
+                            "resume": True,
+                        },
+                        occurred_at=moment,
+                    )
+                ],
+                outbox_events=[
+                    new_outbox_event(
+                        task_id,
+                        "agent.task.wakeup",
+                        {"reason": "input_resumed"},
+                        created_at=moment,
+                    )
+                ],
+            )
+            updated = self.store.get_task(task_id)
+            assert updated is not None
+            return updated
 
         # The unfinished plan belonged to the incomplete input, so it is
         # invalidated and the runtime re-plans from the accumulated input.
@@ -308,7 +360,7 @@ class TaskService:
                 new_task_event(
                     task_id,
                     EVENT_TASK_INPUT_RECEIVED,
-                    {"version": next_version, "payload": payload},
+                    {"version": next_version, "payload": payload, "resume": False},
                     occurred_at=moment,
                 )
             ],

@@ -6,6 +6,7 @@ import tempfile
 import unittest
 import urllib.error
 from pathlib import Path
+from unittest import mock
 
 from services.collectors.wechat import service
 
@@ -88,11 +89,12 @@ class CollectorServiceTest(unittest.TestCase):
     def setUp(self):
         self.original = {name: getattr(service, name) for name in ("db", "knowledge", "download_attachment", "upload_attachment", "save_state")}
         service.binding.clear(); service.binding.update({"status": "running", "wxid": "wxid-test"})
+        service.device_identity.clear(); service.device_identity.update({"device_id": "device-1", "device_key": "device-key"})
         service.config.clear(); service.config.update({"enabled": True, "listen_mode": "whitelist", "selected_conversations": ["chat"], "connector_id": "account"})
         service.checkpoints.clear(); service.replayed_media.clear(); service.db = FakeDB(); self.calls = []
         def knowledge(path, method="GET", payload=None):
             self.calls.append((path, method, payload))
-            if path.endswith("assignments?connector_id=account"):
+            if path.endswith("/internal/devices/device-1/collectors"):
                 return {"items": [{"collector": {"id": "collector", "status": "active"}, "conversation": {"status": "active", "external_conversation_id": "chat"}}]}
             if path.endswith("/messages"):
                 return {"attachments": [{"id": "attachment", "content_status": "pending"}]}
@@ -128,6 +130,96 @@ class CollectorServiceTest(unittest.TestCase):
             )
         finally:
             service.db = original_db
+
+    def test_local_account_scan_uses_configured_roots(self):
+        with tempfile.TemporaryDirectory() as directory:
+            account = Path(directory) / "wxid-local_abcd"
+            (account / "db_storage").mkdir(parents=True)
+            original = os.environ.get("WECHAT_DATA_ROOTS")
+            os.environ["WECHAT_DATA_ROOTS"] = directory
+            try:
+                items = service.scan_local_accounts()
+            finally:
+                if original is None:
+                    os.environ.pop("WECHAT_DATA_ROOTS", None)
+                else:
+                    os.environ["WECHAT_DATA_ROOTS"] = original
+            self.assertEqual(len(items), 1)
+            self.assertEqual(items[0]["wxid"], "wxid-local_abcd")
+            self.assertEqual(Path(items[0]["db_dir"]), account.resolve())
+
+    def test_pairing_keeps_database_path_local_and_uses_device_auth(self):
+        with tempfile.TemporaryDirectory() as directory:
+            account = Path(directory) / "wxid-local"
+            (account / "db_storage").mkdir(parents=True)
+            original = os.environ.get("WECHAT_DATA_ROOTS")
+            os.environ["WECHAT_DATA_ROOTS"] = directory
+            calls = []
+
+            def pair_knowledge(path, method="GET", payload=None):
+                calls.append((path, method, payload))
+                if path.endswith("/internal/wechat/pair"):
+                    return {
+                        "device_id": "device-paired",
+                        "device_key": "device-secret",
+                        "connector_id": "connector-paired",
+                        "platform": "wechat",
+                    }
+                if "/internal/wechat/bootstrap" in path:
+                    return {
+                        "status": "bound",
+                        "connector": {
+                            "id": "connector-paired",
+                            "external_account_id": "wxid-local",
+                            "status": "active",
+                        },
+                        "config": {},
+                        "runtime": {"status": "running"},
+                        "assignments": [],
+                    }
+                return {}
+
+            service.knowledge = pair_knowledge
+            try:
+                result = service.pair_local_device(
+                    "pairing-1", "code-1", "wxid-local", "agent"
+                )
+            finally:
+                if original is None:
+                    os.environ.pop("WECHAT_DATA_ROOTS", None)
+                else:
+                    os.environ["WECHAT_DATA_ROOTS"] = original
+
+            self.assertEqual(result["device"]["device_id"], "device-paired")
+            self.assertEqual(service.binding["db_dir"], str(account.resolve()))
+            pair_call = next(call for call in calls if call[0].endswith("/internal/wechat/pair"))
+            self.assertNotIn("db_dir", pair_call[2])
+            self.assertIn("path_fingerprint", pair_call[2])
+
+    def test_device_requests_are_hmac_signed(self):
+        captured = {}
+
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self):
+                return b"{}"
+
+        def open_request(request, timeout=30):
+            captured["request"] = request
+            return Response()
+
+        service.device_identity.update({"device_id": "device-1", "device_key": "device-secret"})
+        with mock.patch("urllib.request.urlopen", open_request):
+            self.original["knowledge"]("/api/knowledge/v1/internal/wechat/bootstrap?device_id=device-1")
+        headers = captured["request"].headers
+        self.assertEqual(headers.get("X-agent-device-key"), "device-secret")
+        self.assertTrue(headers.get("X-agent-signature"))
+        self.assertNotIn("X-service-token", headers)
 
     def tearDown(self):
         for name, value in self.original.items(): setattr(service, name, value)
@@ -280,6 +372,37 @@ class CollectorServiceTest(unittest.TestCase):
         self.assertEqual(service.message_content({"content": '{"file_key":"k","file_name":"安排.docx"}'}, attachment), "")
         self.assertEqual(service.message_content({"content": "请查收"}, attachment), "请查收")
 
+    def test_message_external_id_prefers_wechat_server_id(self):
+        identity = service.message_external_id(
+            "chat@chatroom",
+            {"server_id": 987654, "local_id": 11, "create_time": 1_700_000_000},
+            "wxid_sender",
+            "content-hash",
+            [],
+        )
+        self.assertEqual(identity, "wechat:chat@chatroom:server:987654")
+
+    def test_collect_once_uses_stable_message_and_attachment_ids(self):
+        class ServerIDDB:
+            def get_messages(self, _chat_id, limit=1000, offset=0):
+                return [{
+                    "local_id": 11,
+                    "server_id": 987654,
+                    "sort_seq": 11,
+                    "type": 3,
+                    "content": "image",
+                    "create_time": 1_700_000_000,
+                }]
+
+        service.db = ServerIDDB()
+        service.collect_once()
+        payload = next(call[2] for call in self.calls if call[0].endswith("/collector/messages"))
+        self.assertEqual(payload["external_message_id"], "wechat:chat:server:987654")
+        self.assertEqual(
+            payload["attachments"][0]["external_attachment_id"],
+            "wechat:chat:server:987654:attachment:0",
+        )
+
     def test_local_file_fallback_matches_wechat_duplicate_name(self):
         with tempfile.TemporaryDirectory() as directory:
             account = Path(directory) / "account"
@@ -324,7 +447,7 @@ class CollectorServiceTest(unittest.TestCase):
 
         def conflict_then_success(path, method="GET", payload=None):
             self.calls.append((path, method, payload))
-            if path.endswith("assignments?connector_id=account"):
+            if path.endswith("/internal/devices/device-1/collectors"):
                 return {"items": [
                     {"collector": {"id": "collector-a", "status": "active"}, "conversation": {"status": "active", "external_conversation_id": "chat-a"}},
                     {"collector": {"id": "collector-b", "status": "active"}, "conversation": {"status": "active", "external_conversation_id": "chat-b"}},
@@ -348,7 +471,7 @@ class CollectorServiceTest(unittest.TestCase):
 
         def paused_knowledge(path, method="GET", payload=None):
             self.calls.append((path, method, payload))
-            if path.endswith("assignments?connector_id=account"):
+            if path.endswith("/internal/devices/device-1/collectors"):
                 return {"items": [{"collector": {"id": "collector", "status": "active"}, "conversation": {"status": "paused", "external_conversation_id": "chat"}}]}
             return {}
 
@@ -357,14 +480,14 @@ class CollectorServiceTest(unittest.TestCase):
             service.collect_once()
         finally:
             service.knowledge = original_knowledge
-        self.assertEqual([call[0].rsplit("/", 1)[-1] for call in self.calls], ["assignments?connector_id=account"])
+        self.assertEqual([call[0].rsplit("/", 1)[-1] for call in self.calls], ["collectors"])
 
     def test_system_paused_conversation_is_recovered_by_heartbeat(self):
         self.calls.clear()
 
         def system_paused_knowledge(path, method="GET", payload=None):
             self.calls.append((path, method, payload))
-            if path.endswith("assignments?connector_id=account"):
+            if path.endswith("/internal/devices/device-1/collectors"):
                 return {"items": [{
                     "collector": {"id": "collector", "status": "active"},
                     "conversation": {
@@ -388,11 +511,12 @@ class CollectorServiceTest(unittest.TestCase):
         self.assertTrue(any(path.endswith("/collector/heartbeat") for path in paths))
         self.assertTrue(any(path.endswith("/collector/messages") for path in paths))
 
-    def test_local_state_only_restores_checkpoint_cache(self):
+    def test_local_state_restores_device_binding_and_checkpoint_cache(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "state.json"
             path.write_text(json.dumps({
-                "binding": {"wxid": "stale", "db_dir": "C:/stale", "status": "running"},
+                "device": {"device_id": "device-1", "device_key": "device-key"},
+                "binding": {"wxid": "wxid-test", "db_dir": "C:/local", "status": "running"},
                 "config": {"selected_conversations": ["stale-chat"]},
                 "checkpoints": {"collector": 42},
                 "replayed_media": {"collector": ["7", "8"]},
@@ -411,7 +535,8 @@ class CollectorServiceTest(unittest.TestCase):
                 else:
                     os.environ["WECHAT_COLLECTOR_STATE_FILE"] = original_path
 
-            self.assertEqual(service.binding, {})
+            self.assertEqual(service.device_identity["device_id"], "device-1")
+            self.assertEqual(service.binding["db_dir"], "C:/local")
             self.assertEqual(service.config, {})
             self.assertEqual(service.checkpoints, {"collector": 42})
             self.assertEqual(service.replayed_media, {"collector": {"7", "8"}})

@@ -4,7 +4,11 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from app.kernel.models import CapabilityDescriptor, TaskEnvelope
+from app.kernel.models import (
+    CapabilityDescriptor,
+    TaskEnvelope,
+    TaskUnderstanding,
+)
 from app.planning.deterministic import (
     DEFAULT_CAPABILITY_NAME,
     DeterministicPlanner,
@@ -12,6 +16,46 @@ from app.planning.deterministic import (
 )
 
 PLANNER = DeterministicPlanner(default_timezone="Asia/Shanghai")
+
+
+def test_other_task_action_phrase_still_creates_a_todo() -> None:
+    understanding = TaskUnderstanding(
+        is_task=True,
+        goal="完成登录模块代码",
+        task_kind="action",
+        intent_candidates=[],
+        confidence=0.99,
+    )
+
+    plan = PLANNER.create_plan(
+        envelope("完成登录模块代码", source_type="chat"),
+        [descriptor()],
+        [],
+        None,
+        understanding,
+    )
+
+    assert [step.capability for step in plan.steps] == [DEFAULT_CAPABILITY_NAME]
+
+
+def test_form_submit_phrase_is_not_a_todo() -> None:
+    understanding = TaskUnderstanding(
+        is_task=True,
+        goal="确认无误后提交表单",
+        task_kind="action",
+        intent_candidates=[],
+        confidence=0.95,
+    )
+
+    plan = PLANNER.create_plan(
+        envelope("确认无误后提交表单", source_type="chat"),
+        [descriptor()],
+        [],
+        None,
+        understanding,
+    )
+
+    assert plan.steps == []
 
 
 def descriptor(name: str = DEFAULT_CAPABILITY_NAME) -> CapabilityDescriptor:

@@ -12,7 +12,7 @@ from app.domain.rag import (
     SearchRequest,
     SearchResult,
 )
-from app.infrastructure.rag_elasticsearch import _bm25_query, _filters
+from app.infrastructure.rag_elasticsearch import RagChunkIndex, _bm25_query, _filters
 from app.infrastructure.persistence.mvp import InMemoryRagMVPRepository
 
 
@@ -75,6 +75,29 @@ class _Indexer:
         return list(self.neighbors)
 
 
+class _ProtectedIndexer(_Indexer):
+    def __init__(self, *, protected_variants=None, **kwargs):
+        super().__init__(**kwargs)
+        self.protected_variants = list(protected_variants or [])
+
+    def search_protected_variants(self, request, knowledge_item_ids):
+        self.calls.append(("protected", {"ids": tuple(knowledge_item_ids)}))
+        return [
+            item
+            for item in self.protected_variants
+            if item.source.get("knowledge_item_id") in knowledge_item_ids
+        ]
+
+
+class _RecordingElasticsearch:
+    def __init__(self) -> None:
+        self.calls = []
+
+    def search(self, **kwargs):
+        self.calls.append(kwargs)
+        return {"hits": {"hits": []}}
+
+
 class RetrievalTests(unittest.TestCase):
     def test_boost_keeps_global_and_branch_channels(self) -> None:
         repository = InMemoryRagMVPRepository()
@@ -118,6 +141,71 @@ class RetrievalTests(unittest.TestCase):
         protected = SearchResult("p", "protected", score=0.1, source={"logical_position_key": "x", "content_variant": "protected"})
         values = dedupe_logical_positions([display, protected])
         self.assertEqual([item.chunk_id for item in values], ["p"])
+
+    def test_authorized_candidate_upgrades_to_protected_variant(self) -> None:
+        display = SearchResult(
+            chunk_id="d1",
+            content="[密码已脱敏]",
+            score=1.0,
+            source={
+                "logical_position_key": "l1",
+                "resource_id": "r1",
+                "resource_type": "message",
+                "knowledge_item_id": "item-1",
+                "content_variant": "display",
+                "rag_eligible": True,
+            },
+        )
+        protected = SearchResult(
+            chunk_id="p1",
+            content="密码123456",
+            score=0.5,
+            source={
+                "logical_position_key": "l1",
+                "resource_id": "r1",
+                "resource_type": "message",
+                "knowledge_item_id": "item-1",
+                "content_variant": "protected",
+                "rag_eligible": True,
+            },
+        )
+        indexer = _ProtectedIndexer(
+            bm25_results=[display],
+            protected_variants=[protected],
+        )
+        service = RAGRetrievalService(
+            repository=InMemoryRagMVPRepository(),
+            indexer=indexer,
+            embedding=_Embedding(),
+            authorization=_Authorization(),
+        )
+        response = service.search(SearchRequest(
+            query="密码",
+            user_id="user-1",
+            scope_type="organization",
+            scope_id="org-1",
+            include_protected=True,
+        ))
+        self.assertEqual([item.content for item in response.results], ["密码123456"])
+        self.assertEqual(service.authorization.batch_sizes, [1, 1])
+        self.assertEqual(indexer.calls[-1][0], "protected")
+
+    def test_protected_channel_is_searched_without_enumerated_keys(self) -> None:
+        client = _RecordingElasticsearch()
+        index = RagChunkIndex(client)
+        request = SearchRequest(
+            query="密码",
+            user_id="user-1",
+            scope_type="organization",
+            scope_id="org-1",
+            include_protected=True,
+        )
+
+        index.search_bm25(request, protected_object_keys=())
+
+        indexes = [call["index"] for call in client.calls]
+        self.assertIn(settings.elasticsearch_display_read_index, indexes)
+        self.assertIn(settings.elasticsearch_protected_read_index, indexes)
 
     def test_metadata_filters_and_empty_query(self) -> None:
         request = SearchRequest(

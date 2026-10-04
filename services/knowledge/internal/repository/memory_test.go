@@ -172,6 +172,108 @@ func TestMemoryCompleteAgentPairingRollsBackOnIdentityConflict(t *testing.T) {
 	}
 }
 
+func TestMemoryAgentDeviceAssignmentTracksBindingAndRevocation(t *testing.T) {
+	repo := NewMemoryStore()
+	ctx := context.Background()
+	now := time.Now().UTC()
+	codeHash := hashForTest("pair-code")
+	if err := repo.CreatePairing(ctx, domain.Pairing{
+		ID: "p1", OwnerUserID: "u1", Platform: domain.PlatformWechat,
+		CodeHash: codeHash, Status: "pending", WXID: "wxid-a",
+		ExpiresAt: now.Add(time.Minute), CreatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	result, err := repo.CompleteAgentPairing(ctx, AgentPairingInput{
+		PairingID: "p1", CodeHash: codeHash, WXID: "wxid-a",
+		AgentVersion: "agent", DeviceID: "d1",
+		DeviceKeyHash:   hashForTest("device-key"),
+		DeviceExpiresAt: now.Add(time.Hour), Now: now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assignment, err := repo.GetActiveDeviceAssignment(ctx, result.Device.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if assignment.ConnectorID != result.Connector.ID || assignment.Status != "active" {
+		t.Fatalf("unexpected assignment: %+v", assignment)
+	}
+	if err := repo.RevokeDevice(ctx, result.Connector.ID, result.Device.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repo.GetActiveDeviceAssignment(ctx, result.Device.ID); apperror.From(err).Code != "device_assignment_not_found" {
+		t.Fatalf("revoked device still has an active assignment: %v", err)
+	}
+}
+
+func TestMemoryRevokeConnectorReleasesExternalIdentityForRebinding(t *testing.T) {
+	repo := NewMemoryStore()
+	ctx := context.Background()
+	now := time.Now().UTC()
+	codeHash := hashForTest("pair-code")
+	if err := repo.CreatePairing(ctx, domain.Pairing{
+		ID: "p1", OwnerUserID: "u1", Platform: domain.PlatformWechat,
+		CodeHash: codeHash, Status: "pending", WXID: "wxid-a",
+		ExpiresAt: now.Add(time.Minute), CreatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repo.CompleteAgentPairing(ctx, AgentPairingInput{
+		PairingID: "p1", CodeHash: codeHash, WXID: "wxid-a",
+		AgentVersion: "agent", DeviceID: "d1",
+		DeviceKeyHash:   hashForTest("device-key"),
+		DeviceExpiresAt: now.Add(time.Hour), Now: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.RevokeConnector(ctx, "u1", domain.PlatformWechat); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repo.UpsertExternalIdentity(ctx, ExternalIdentityInput{
+		Platform: domain.PlatformWechat, ExternalUserID: "wxid-a", MappedUserID: "u2",
+	}); err != nil {
+		t.Fatalf("revoked wxid was not released for another user: %v", err)
+	}
+}
+
+func TestMemoryWechatRebindRequiresUnbindFirst(t *testing.T) {
+	repo := NewMemoryStore()
+	ctx := context.Background()
+	now := time.Now().UTC()
+	codeHash := hashForTest("pair-code")
+	if err := repo.CreatePairing(ctx, domain.Pairing{
+		ID: "p1", OwnerUserID: "u1", Platform: domain.PlatformWechat,
+		CodeHash: codeHash, Status: "pending", WXID: "wxid-a",
+		ExpiresAt: now.Add(time.Minute), CreatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repo.CompleteAgentPairing(ctx, AgentPairingInput{
+		PairingID: "p1", CodeHash: codeHash, WXID: "wxid-a",
+		DeviceID: "d1", DeviceKeyHash: hashForTest("device-key-1"),
+		DeviceExpiresAt: now.Add(time.Hour), Now: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.CreatePairing(ctx, domain.Pairing{
+		ID: "p2", OwnerUserID: "u1", Platform: domain.PlatformWechat,
+		CodeHash: codeHash, Status: "pending", WXID: "wxid-b",
+		ExpiresAt: now.Add(time.Minute), CreatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	_, err := repo.CompleteAgentPairing(ctx, AgentPairingInput{
+		PairingID: "p2", CodeHash: codeHash, WXID: "wxid-b",
+		DeviceID: "d2", DeviceKeyHash: hashForTest("device-key-2"),
+		DeviceExpiresAt: now.Add(time.Hour), Now: now,
+	})
+	if apperror.From(err).Code != "rebind_required" {
+		t.Fatalf("expected rebind_required, got %v", err)
+	}
+}
+
 func TestMemoryAttachCreatesPrimaryCollectorAtomically(t *testing.T) {
 	repo := NewMemoryStore()
 	ctx := context.Background()
@@ -205,11 +307,14 @@ func TestMemoryKnowledgeLibrariesKeepPrivateAndOrganizationItemsSeparate(t *test
 	repo := NewMemoryStore()
 	ctx := context.Background()
 	now := time.Now().UTC()
+	if _, err := repo.SaveConnector(ctx, domain.ConnectorAccount{ID: "library-a1", OwnerUserID: "u1", Platform: domain.PlatformFeishu, WorkspaceKey: "tenant", ExternalAccountID: "user-1", DefaultOrganizationID: "org-1", Status: domain.ConnectorActive}); err != nil {
+		t.Fatal(err)
+	}
 	private, err := repo.AttachConversation(ctx, AttachInput{UserID: "u1", Platform: domain.PlatformWechat, WorkspaceKey: "wx", ExternalConversationID: "private", ConversationType: "private", RequestedStartAt: &now})
 	if err != nil {
 		t.Fatal(err)
 	}
-	group, err := repo.AttachConversation(ctx, AttachInput{UserID: "u1", Platform: domain.PlatformFeishu, WorkspaceKey: "tenant", ExternalConversationID: "group", ConversationType: "group", OrganizationID: "org-1", RequestedStartAt: &now})
+	group, err := repo.AttachConversation(ctx, AttachInput{UserID: "u1", Platform: domain.PlatformFeishu, WorkspaceKey: "tenant", ExternalConversationID: "group", ConversationType: "group", OrganizationID: "org-1", RequestedStartAt: &now, PrimaryConnectorID: "library-a1"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -239,6 +344,9 @@ func TestMemoryKnowledgeLibrariesKeepPrivateAndOrganizationItemsSeparate(t *test
 	groupLibraryItems, err := repo.ListKnowledgeLibraryItems(ctx, orgGroupsLibraryPrefix+"org-1", "u1", "org-1", "conversations", "", "", 50)
 	if err != nil || len(groupLibraryItems) != 1 || groupLibraryItems[0].Kind != "conversation" || groupLibraryItems[0].ConversationID != group.ID {
 		t.Fatalf("attached group conversation should be visible before ingestion: %+v err=%v", groupLibraryItems, err)
+	}
+	if groupLibraryItems[0].CurrentCollectorID == "" || groupLibraryItems[0].CurrentCollectorStatus != domain.CollectorActive || groupLibraryItems[0].PrimaryCollectorUserID != "u1" {
+		t.Fatalf("group library item did not expose current and primary collector state: %+v", groupLibraryItems[0])
 	}
 	for _, library := range libraries {
 		if library.ID == orgGroupsLibraryPrefix+"org-1" && library.ConversationCount != 1 {
