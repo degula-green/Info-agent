@@ -380,15 +380,18 @@ func (r *OrganizationRepository) ChangeMembershipStatus(
 
 	err = tx.QueryRow(ctx, `
 		UPDATE iam.organization_memberships
-		SET status=$1,
-		    exit_reason=NULLIF($2,''),
-		    suspended_at=CASE WHEN $1='suspended' THEN $3 ELSE NULL END,
-		    left_at=CASE WHEN $1='left' THEN $3 ELSE NULL END,
-		    updated_at=$3
+		SET status=$1::varchar,
+		    exit_reason=NULLIF($2::text,''),
+		    suspended_at=CASE WHEN $1::varchar='suspended' THEN $3::timestamptz ELSE NULL::timestamptz END,
+		    left_at=CASE WHEN $1::varchar='left' THEN $3::timestamptz ELSE NULL::timestamptz END,
+		    updated_at=$3::timestamptz
 		WHERE id=$4::uuid
-		RETURNING id::text,organization_id::text,user_id::text,status,joined_via,invitation_id::text,joined_at`,
+		RETURNING id::text,organization_id::text,user_id::text,status,joined_via,invitation_id::text,joined_at,
+		          COALESCE(exit_reason,''),COALESCE(exit_review_note,''),exit_reviewed_by_user_id::text,
+		          exit_requested_at,exit_reviewed_at,left_at,suspended_at`,
 		input.Status, input.Reason, input.Now, m.ID).Scan(
-		&m.ID, &m.OrganizationID, &m.UserID, &m.Status, &m.JoinedVia, &m.InvitationID, &m.JoinedAt)
+		&m.ID, &m.OrganizationID, &m.UserID, &m.Status, &m.JoinedVia, &m.InvitationID, &m.JoinedAt,
+		&m.ExitReason, &m.ExitReviewNote, &m.ExitReviewedBy, &m.ExitRequestedAt, &m.ExitReviewedAt, &m.LeftAt, &m.SuspendedAt)
 	if err != nil {
 		return domain.Membership{}, mapDBError(err)
 	}
