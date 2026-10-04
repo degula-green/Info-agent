@@ -2790,6 +2790,15 @@ func (s *PostgresStore) ApplyRAGResult(ctx context.Context, id string, input RAG
 	if err != nil {
 		return nil, dbError(err)
 	}
+	messageVectorStatus := "processing"
+	if input.Status == "ready" || input.Status == "metadata_only" {
+		messageVectorStatus = "ready"
+	} else if input.Status == "failed" {
+		messageVectorStatus = "failed"
+	}
+	if _, err = tx.Exec(ctx, `UPDATE knowledge.messages AS message SET vector_status=$2 FROM knowledge.knowledge_items AS item WHERE item.id=$1 AND message.id=item.source_message_id`, id, messageVectorStatus); err != nil {
+		return nil, dbError(err)
+	}
 	if err = tx.Commit(ctx); err != nil {
 		return nil, dbError(err)
 	}

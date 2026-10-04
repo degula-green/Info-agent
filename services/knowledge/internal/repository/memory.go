@@ -2734,6 +2734,19 @@ func (s *MemoryStore) ApplyRAGResult(_ context.Context, id string, input RAGResu
 	if input.Status == "ready" || input.Status == "metadata_only" {
 		item.RAGResult = input.Result
 	}
+	messageStatus := "processing"
+	if input.Status == "ready" || input.Status == "metadata_only" {
+		messageStatus = "ready"
+	} else if input.Status == "failed" {
+		messageStatus = "failed"
+	}
+	for key, message := range s.messages {
+		if message.ID == item.SourceMessageID {
+			message.VectorStatus = messageStatus
+			s.messages[key] = message
+			break
+		}
+	}
 	item.UpdatedAt = time.Now().UTC()
 	s.knowledgeItems[id] = item
 	return &RAGResultApply{Applied: true, Status: input.Status}, nil
