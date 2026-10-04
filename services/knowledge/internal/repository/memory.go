@@ -24,6 +24,7 @@ type MemoryStore struct {
 	connectors         map[string]domain.ConnectorAccount
 	pairings           map[string]domain.Pairing
 	devices            map[string]domain.AgentDevice
+	assignments        map[string]domain.AgentDeviceAssignment
 	discoveries        map[string]domain.Discovery
 	conversations      map[string]domain.ConversationIngestion
 	collectors         map[string]domain.Collector
@@ -56,7 +57,8 @@ type attachmentCursorReceipt struct {
 func NewMemoryStore() *MemoryStore {
 	return &MemoryStore{
 		connectors: map[string]domain.ConnectorAccount{}, pairings: map[string]domain.Pairing{},
-		devices: map[string]domain.AgentDevice{}, discoveries: map[string]domain.Discovery{},
+		devices: map[string]domain.AgentDevice{}, assignments: map[string]domain.AgentDeviceAssignment{},
+		discoveries:   map[string]domain.Discovery{},
 		conversations: map[string]domain.ConversationIngestion{}, collectors: map[string]domain.Collector{},
 		messages: map[string]domain.Message{}, contactFacts: map[string][]domain.ContactFact{}, sources: map[string]domain.MessageSource{},
 		privateContent: map[string]string{},
@@ -492,6 +494,24 @@ func (s *MemoryStore) RevokeConnector(_ context.Context, userID, platform string
 				s.devices[deviceID] = device
 			}
 		}
+		for assignmentID, assignment := range s.assignments {
+			if assignment.ConnectorID == id && assignment.Status == "active" && assignment.RevokedAt == nil {
+				now := time.Now().UTC()
+				assignment.Status = "revoked"
+				assignment.RevokedByUserID = userID
+				assignment.RevokedAt = &now
+				s.assignments[assignmentID] = assignment
+			}
+		}
+		for identityID, identity := range s.identities {
+			if identity.Platform == platform &&
+				identity.ExternalUserID == account.ExternalAccountID &&
+				identity.MappedUserID == userID {
+				identity.MappedUserID = ""
+				identity.MappingStatus = "unmapped"
+				s.identities[identityID] = identity
+			}
+		}
 		for collectorID, collector := range s.collectors {
 			if collector.ConnectorAccountID == id && collector.Status != domain.CollectorRemoved {
 				collector.Status = domain.CollectorUnavailable
@@ -567,6 +587,72 @@ func (s *MemoryStore) CreateDevice(_ context.Context, device domain.AgentDevice)
 		device.ID = uuid.NewString()
 	}
 	s.devices[device.ID] = device
+	if device.ConnectorID != "" && device.RevokedAt == nil {
+		if err := s.activateAssignmentLocked(domain.AgentDeviceAssignment{
+			DeviceID:         device.ID,
+			ConnectorID:      device.ConnectorID,
+			Status:           "active",
+			AssignedByUserID: device.OwnerUserID,
+			AssignedAt:       device.CreatedAt,
+		}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *MemoryStore) CreateDeviceAssignment(_ context.Context, assignment domain.AgentDeviceAssignment) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.activateAssignmentLocked(assignment)
+}
+
+func (s *MemoryStore) activateAssignmentLocked(assignment domain.AgentDeviceAssignment) error {
+	if assignment.ID == "" {
+		assignment.ID = uuid.NewString()
+	}
+	if assignment.Status == "" {
+		assignment.Status = "active"
+	}
+	if assignment.AssignedAt.IsZero() {
+		assignment.AssignedAt = time.Now().UTC()
+	}
+	for _, existing := range s.assignments {
+		if existing.Status != "active" || existing.ID == assignment.ID {
+			continue
+		}
+		if existing.DeviceID == assignment.DeviceID || existing.ConnectorID == assignment.ConnectorID {
+			return apperror.New("device_assignment_conflict", "device or connector already has an active assignment", 409, false)
+		}
+	}
+	s.assignments[assignment.ID] = assignment
+	return nil
+}
+
+func (s *MemoryStore) GetActiveDeviceAssignment(_ context.Context, deviceID string) (*domain.AgentDeviceAssignment, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, assignment := range s.assignments {
+		if assignment.DeviceID == deviceID && assignment.Status == "active" && assignment.RevokedAt == nil {
+			value := assignment
+			return &value, nil
+		}
+	}
+	return nil, apperror.New("device_assignment_not_found", "device has no active connector assignment", 404, false)
+}
+
+func (s *MemoryStore) RevokeDeviceAssignments(_ context.Context, connectorID, actorUserID string, now time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for id, assignment := range s.assignments {
+		if assignment.ConnectorID == connectorID && assignment.Status == "active" && assignment.RevokedAt == nil {
+			assignment.Status = "revoked"
+			assignment.RevokedByUserID = actorUserID
+			revokedAt := now.UTC()
+			assignment.RevokedAt = &revokedAt
+			s.assignments[id] = assignment
+		}
+	}
 	return nil
 }
 
@@ -609,6 +695,9 @@ func (s *MemoryStore) CompleteAgentPairing(_ context.Context, input AgentPairing
 			break
 		}
 	}
+	if previous != nil && !strings.EqualFold(previous.ExternalAccountID, input.WXID) {
+		return nil, apperror.New("rebind_required", "unbind the current WeChat account before binding another", 409, false)
+	}
 	for _, account := range s.connectors {
 		if previous != nil && account.ID == previous.ID {
 			continue
@@ -636,6 +725,14 @@ func (s *MemoryStore) CompleteAgentPairing(_ context.Context, input AgentPairing
 				s.devices[id] = device
 			}
 		}
+		for id, assignment := range s.assignments {
+			if assignment.ConnectorID == previous.ID && assignment.Status == "active" && assignment.RevokedAt == nil {
+				assignment.Status = "revoked"
+				revokedAt := now
+				assignment.RevokedAt = &revokedAt
+				s.assignments[id] = assignment
+			}
+		}
 		for id, collector := range s.collectors {
 			if collector.ConnectorAccountID == previous.ID && collector.Status != domain.CollectorRemoved {
 				collector.Status = domain.CollectorUnavailable
@@ -645,6 +742,15 @@ func (s *MemoryStore) CompleteAgentPairing(_ context.Context, input AgentPairing
 		}
 	}
 	s.connectors[connector.ID] = connector
+	if _, ok := s.wechatConfigs[connector.ID]; !ok {
+		s.wechatConfigs[connector.ID] = domain.WechatCollectionConfig{
+			ConnectorID: connector.ID, SelectedConversations: []string{},
+			Enabled: true, ListenMode: "whitelist", UpdatedAt: now,
+		}
+	}
+	s.wechatRuntime[connector.ID] = domain.WechatCollectorRuntime{
+		ConnectorID: connector.ID, Status: "running", UpdatedAt: now,
+	}
 	if !identityExists {
 		identity = ExternalIdentity{ID: uuid.NewString(), Platform: domain.PlatformWechat, ExternalUserID: input.WXID}
 	}
@@ -654,6 +760,9 @@ func (s *MemoryStore) CompleteAgentPairing(_ context.Context, input AgentPairing
 	s.identities[identityKey] = identity
 	device := domain.AgentDevice{ID: input.DeviceID, ConnectorID: connector.ID, OwnerUserID: pairing.OwnerUserID, KeyHash: input.DeviceKeyHash, ExpiresAt: input.DeviceExpiresAt.UTC(), AgentVersion: input.AgentVersion, CreatedAt: now}
 	s.devices[device.ID] = device
+	if err := s.activateAssignmentLocked(domain.AgentDeviceAssignment{DeviceID: device.ID, ConnectorID: connector.ID, Status: "active", AssignedByUserID: pairing.OwnerUserID, AssignedAt: now}); err != nil {
+		return nil, err
+	}
 	consumedAt := now
 	pairing.Status = "consumed"
 	pairing.ConsumedAt = &consumedAt
@@ -687,6 +796,14 @@ func (s *MemoryStore) RevokeDevices(_ context.Context, connectorID string) error
 			s.devices[id] = d
 		}
 	}
+	for id, assignment := range s.assignments {
+		if assignment.ConnectorID == connectorID && assignment.Status == "active" && assignment.RevokedAt == nil {
+			assignment.Status = "revoked"
+			revokedAt := now
+			assignment.RevokedAt = &revokedAt
+			s.assignments[id] = assignment
+		}
+	}
 	return nil
 }
 
@@ -701,6 +818,14 @@ func (s *MemoryStore) RevokeDevice(_ context.Context, connectorID, deviceID stri
 		now := time.Now().UTC()
 		device.RevokedAt = &now
 		s.devices[deviceID] = device
+	}
+	for id, assignment := range s.assignments {
+		if assignment.DeviceID == deviceID && assignment.Status == "active" && assignment.RevokedAt == nil {
+			assignment.Status = "revoked"
+			revokedAt := time.Now().UTC()
+			assignment.RevokedAt = &revokedAt
+			s.assignments[id] = assignment
+		}
 	}
 	return nil
 }
@@ -3952,9 +4077,10 @@ func previewCapability(mime string) string {
 	return "download"
 }
 
-func cloneAccount(a domain.ConnectorAccount) domain.ConnectorAccount { return a }
-func clonePairing(p domain.Pairing) domain.Pairing                   { return p }
-func cloneDevice(d domain.AgentDevice) domain.AgentDevice            { return d }
+func cloneAccount(a domain.ConnectorAccount) domain.ConnectorAccount              { return a }
+func clonePairing(p domain.Pairing) domain.Pairing                                { return p }
+func cloneDevice(d domain.AgentDevice) domain.AgentDevice                         { return d }
+func cloneAssignment(a domain.AgentDeviceAssignment) domain.AgentDeviceAssignment { return a }
 func cloneDiscovery(d domain.Discovery) domain.Discovery {
 	d.Conversations = append([]domain.AvailableConversation(nil), d.Conversations...)
 	for i := range d.Conversations {

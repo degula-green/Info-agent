@@ -10,6 +10,7 @@ import (
 	"io"
 	"log/slog"
 	"mime"
+	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
@@ -56,6 +57,14 @@ func (s *Service) WechatCollector() *wechatclient.Client {
 }
 
 func (s *Service) BindWechat(ctx context.Context, userID, wxid, dbDir, organizationID string, rebind bool) (map[string]any, error) {
+	if strings.TrimSpace(dbDir) != "" {
+		return nil, apperror.New(
+			"device_pairing_required",
+			"use device pairing instead of submitting a local path",
+			http.StatusGone,
+			false,
+		)
+	}
 	if strings.TrimSpace(wxid) == "" || strings.TrimSpace(dbDir) == "" {
 		return nil, apperror.New("invalid_request", "wxid and db_dir are required", 400, false)
 	}
@@ -230,18 +239,7 @@ func (s *Service) WechatAssignments(ctx context.Context, connectorID string) ([]
 
 func (s *Service) WechatBootstrap(ctx context.Context, connectorID string) (map[string]any, error) {
 	if strings.TrimSpace(connectorID) == "" {
-		accounts, err := s.Repo.ListConnectorAccounts(ctx, domain.PlatformWechat)
-		if err != nil {
-			return nil, err
-		}
-		items := make([]map[string]any, 0, len(accounts))
-		for _, a := range accounts {
-			c, _ := s.Repo.GetWechatConfig(ctx, a.ID)
-			r, _ := s.Repo.GetWechatRuntime(ctx, a.ID)
-			as, _ := s.WechatAssignments(ctx, a.ID)
-			items = append(items, map[string]any{"connector": map[string]any{"id": a.ID, "external_account_id": a.ExternalAccountID, "database_ref": a.DatabaseRef, "status": a.Status}, "config": c, "runtime": r, "assignments": as})
-		}
-		return map[string]any{"items": items}, nil
+		return nil, apperror.New("device_id_required", "device_id is required for bootstrap", 400, false)
 	}
 	a, err := s.Repo.GetConnectorByID(ctx, connectorID)
 	if err != nil {
@@ -259,7 +257,56 @@ func (s *Service) WechatBootstrap(ctx context.Context, connectorID string) (map[
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{"connector": map[string]any{"id": a.ID, "external_account_id": a.ExternalAccountID, "database_ref": a.DatabaseRef, "status": a.Status}, "config": c, "runtime": r, "assignments": items}, nil
+	return map[string]any{"status": "bound", "connector": map[string]any{"id": a.ID, "external_account_id": a.ExternalAccountID, "status": a.Status}, "config": c, "runtime": r, "assignments": items}, nil
+}
+
+func (s *Service) WechatBootstrapForDevice(ctx context.Context, device *domain.AgentDevice) (map[string]any, error) {
+	if device == nil || strings.TrimSpace(device.ID) == "" {
+		return nil, apperror.New("agent_device_invalid", "agent device is invalid", 401, false)
+	}
+	assignment, err := s.Repo.GetActiveDeviceAssignment(ctx, device.ID)
+	if err != nil {
+		if apperror.From(err).Code == "device_assignment_not_found" {
+			return map[string]any{
+				"status":      "unbound",
+				"connector":   nil,
+				"config":      nil,
+				"runtime":     nil,
+				"assignments": []map[string]any{},
+			}, nil
+		}
+		return nil, err
+	}
+	account, err := s.Repo.GetConnectorByID(ctx, assignment.ConnectorID)
+	if err != nil {
+		return nil, err
+	}
+	if account.OwnerUserID != device.OwnerUserID {
+		return nil, apperror.New("device_assignment_conflict", "device assignment owner does not match device owner", 409, false)
+	}
+	c, err := s.Repo.GetWechatConfig(ctx, account.ID)
+	if err != nil {
+		return nil, err
+	}
+	r, err := s.Repo.GetWechatRuntime(ctx, account.ID)
+	if err != nil {
+		return nil, err
+	}
+	items, err := s.WechatAssignments(ctx, account.ID)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{
+		"status": "bound",
+		"connector": map[string]any{
+			"id":                  account.ID,
+			"external_account_id": account.ExternalAccountID,
+			"status":              account.Status,
+		},
+		"config":      c,
+		"runtime":     r,
+		"assignments": items,
+	}, nil
 }
 
 type OAuthStart struct {
@@ -630,7 +677,7 @@ func (s *Service) PairAgent(ctx context.Context, id, code, wxid, databaseRef, ag
 	}
 	plainKey := randomToken(32)
 	now := s.Now()
-	result, err := s.Repo.CompleteAgentPairing(ctx, repository.AgentPairingInput{PairingID: id, CodeHash: hash(code), WXID: strings.TrimSpace(wxid), DatabaseRef: safeDatabaseRef(databaseRef), AgentVersion: strings.TrimSpace(agentVersion), DeviceID: uuid.NewString(), DeviceKeyHash: hash(plainKey), DeviceExpiresAt: now.Add(s.Config.DeviceTTL), Now: now})
+	result, err := s.Repo.CompleteAgentPairing(ctx, repository.AgentPairingInput{PairingID: id, CodeHash: hash(code), WXID: strings.TrimSpace(wxid), DatabaseRef: "", AgentVersion: strings.TrimSpace(agentVersion), DeviceID: uuid.NewString(), DeviceKeyHash: hash(plainKey), DeviceExpiresAt: now.Add(s.Config.DeviceTTL), Now: now})
 	if err != nil {
 		return PairExchange{}, err
 	}
@@ -648,16 +695,11 @@ func (s *Service) RevokeConnector(ctx context.Context, userID, platformName stri
 		return err
 	}
 	if platformName == domain.PlatformWechat {
-		status, statusErr := s.WechatCollector().Status(ctx)
-		if statusErr == nil {
-			if boundID, ok := status["connector_id"].(string); ok && boundID != "" && boundID != account.ID {
-				return apperror.New("wechat_collector_mismatch", "微信采集器当前绑定了其他连接器，请先处理采集器状态", 409, true)
-			}
-		}
-		if stopErr := s.WechatCollector().Stop(ctx); stopErr != nil {
-			_ = s.Repo.UpdateConnectorStatus(ctx, account.ID, domain.ConnectorError, "wechat_stop_failed")
-			return apperror.Wrap("wechat_cleanup_pending", "微信采集器尚未停止，请重试解绑", 409, true, stopErr)
-		}
+		// Device-bound collectors discover revocation on their next signed
+		// request. The legacy server-managed collector is stopped best-effort
+		// only; a stale optional sidecar must not block the owner from freeing
+		// the wxid globally.
+		_ = s.WechatCollector().Stop(ctx)
 	}
 	if err := s.Repo.RevokeConnector(ctx, userID, platformName); err != nil {
 		return err
@@ -978,7 +1020,14 @@ func (s *Service) ListDeviceCollectors(ctx context.Context, device *domain.Agent
 	if device == nil {
 		return nil, apperror.Clone(apperror.ErrUnauthorized)
 	}
-	collectors, err := s.Repo.ListCollectorsByConnector(ctx, device.ConnectorID)
+	assignment, err := s.Repo.GetActiveDeviceAssignment(ctx, device.ID)
+	if err != nil {
+		if apperror.From(err).Code == "device_assignment_not_found" {
+			return []CollectorAssignment{}, nil
+		}
+		return nil, err
+	}
+	collectors, err := s.Repo.ListCollectorsByConnector(ctx, assignment.ConnectorID)
 	if err != nil {
 		return nil, err
 	}
@@ -994,6 +1043,21 @@ func (s *Service) ListDeviceCollectors(ctx context.Context, device *domain.Agent
 		out = append(out, CollectorAssignment{Collector: collector, Conversation: *conversation})
 	}
 	return out, nil
+}
+
+func (s *Service) HeartbeatDevice(ctx context.Context, device *domain.AgentDevice, agentVersion string) error {
+	if device == nil || strings.TrimSpace(device.ID) == "" {
+		return apperror.New("agent_device_invalid", "agent device is invalid", 401, false)
+	}
+	assignment, err := s.Repo.GetActiveDeviceAssignment(ctx, device.ID)
+	if err != nil {
+		return err
+	}
+	now := s.Now().UTC()
+	if err := s.Repo.TouchDevice(ctx, device.ID, strings.TrimSpace(agentVersion), now); err != nil {
+		return err
+	}
+	return s.Repo.UpdateWechatRuntime(ctx, assignment.ConnectorID, "running", "", &now, nil)
 }
 
 func (s *Service) Attach(ctx context.Context, input repository.AttachInput, authorization ...string) (*domain.ConversationIngestion, error) {

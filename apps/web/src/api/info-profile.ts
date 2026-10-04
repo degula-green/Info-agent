@@ -3,7 +3,6 @@
 // API calls and are re-exported here for the Profile page.
 export { getProfile, updateProfile, uploadAvatar, removeAvatar } from '@/mock-api/info-profile'
 export {
-	bindWechat,
 	getWechatStatus,
 	stopWechat,
   connectorCatalog,

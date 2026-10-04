@@ -118,11 +118,19 @@
         </div>
       </div>
     </t-dialog>
-    <t-dialog v-model:visible="wechatDialogVisible" header="绑定个人微信" confirm-btn="确认绑定" cancel-btn="取消" :confirm-loading="wechatBinding" :close-on-overlay-click="!wechatBinding" @confirm="confirmWechatBind">
-      <t-form :data="wechatForm" label-align="top">
-        <t-form-item label="微信 ID"><t-input v-model="wechatForm.wxid" placeholder="例如 wxid_xxx" /></t-form-item>
-        <t-form-item label="本机微信数据目录"><t-input v-model="wechatForm.db_dir" placeholder="例如 C:\\Users\\..." /></t-form-item>
-      </t-form>
+    <t-dialog v-model:visible="wechatDialogVisible" header="绑定个人微信" confirm-btn="检查绑定状态" cancel-btn="取消" :confirm-loading="wechatBinding" :close-on-overlay-click="!wechatBinding" @confirm="confirmWechatBind">
+      <div class="wechat-pairing">
+        <p>在本机 Agent 中选择要绑定的微信，并提交下面的配对信息。</p>
+        <div class="wechat-pairing__field">
+          <span>配对 ID</span>
+          <strong>{{ wechatPairingID || '正在生成…' }}</strong>
+        </div>
+        <div class="wechat-pairing__field">
+          <span>配对码</span>
+          <strong>{{ wechatPairingCode || '正在生成…' }}</strong>
+        </div>
+        <t-button variant="text" :disabled="wechatBinding" @click="startWechatPairing">重新生成配对码</t-button>
+      </div>
     </t-dialog>
     <t-dialog v-model:visible="restoreDialogVisible" header="恢复演示数据" :confirm-btn="{ content: '恢复数据', theme: 'danger' }" cancel-btn="取消" @confirm="restoreDemo">
       <p class="restore-dialog__copy">将恢复默认资料、连接器、会话和问答历史，当前本地修改会被覆盖。</p>
@@ -143,12 +151,12 @@ import { MessagePlugin } from 'tdesign-vue-next'
 import { sourceColor } from '@/mock'
 import { useInfoMockStore } from '@/stores/infoMock'
 import { useAuthStore } from '@/stores/auth'
-import { bindWechat, connectorCatalog, getConnectors, getFeishuAuthorizeURL, type Connector, type ConnectorPlatform, type Profile, unbindConnector } from '@/api/info-profile'
+import { connectorCatalog, getConnectors, getFeishuAuthorizeURL, type Connector, type ConnectorPlatform, type Profile, unbindConnector } from '@/api/info-profile'
 import { oauthCallbackNotice } from '@/knowledge-mapping'
 import { downloadAvatar, getCurrentUser, updateCurrentUser, uploadAvatar as uploadCoreAvatar } from '@/api/core-auth'
 import { acceptOrganizationInvitation, createOrganization, getCurrentOrganization, type CoreOrganizationResponse } from '@/api/core-organization'
 import { CoreAuthError } from '@/api/core-auth'
-import { approvePrivateAccessRequest, listPrivateAccessRequests, rejectPrivateAccessRequest, type PrivateAccessRequestDTO } from '@/api/info-knowledge'
+import { approvePrivateAccessRequest, createWechatPairing, getWechatPairingStatus, listPrivateAccessRequests, rejectPrivateAccessRequest, type PrivateAccessRequestDTO } from '@/api/info-knowledge'
 
 const store = useInfoMockStore()
 const authStore = useAuthStore()
@@ -172,8 +180,8 @@ const accessScope = ref<'mine' | 'inbox'>('mine')
 const accessRequests = ref<PrivateAccessRequestDTO[]>([])
 const accessLoading = ref(false)
 let accessRequestSequence = 0
-const wechatRebind = ref(false)
-const wechatForm = reactive({ wxid: '', db_dir: '' })
+const wechatPairingID = ref('')
+const wechatPairingCode = ref('')
 const connectorPending = reactive<Record<ConnectorPlatform, boolean>>({ feishu: false, wecom: false, wechat: false })
 const feishuBinding = ref(false)
 const wechatBinding = ref(false)
@@ -182,6 +190,7 @@ const avatarLabel = computed(() => (form.nickname.trim().slice(0, 1) || '我'))
 function errorMessage(cause: any, fallback: string) {
   const code = cause?.code || cause?.error?.code
   if (code === 'connector_already_bound') return '该微信账号已被其他账号绑定'
+  if (code === 'rebind_required') return '请先解绑当前微信，再绑定新的微信账号'
   if (code === 'wechat_cleanup_pending') return '微信采集器尚未停止，请重试解绑'
   return cause?.message || cause?.error?.message || fallback
 }
@@ -364,7 +373,10 @@ async function handleConnector(connector: Connector) {
     return
   }
   if (connector.platform === 'feishu') feishuDialogVisible.value = true
-  if (connector.platform === 'wechat') { wechatRebind.value = false; wechatForm.wxid = ''; wechatForm.db_dir = ''; wechatDialogVisible.value = true }
+  if (connector.platform === 'wechat') {
+    wechatDialogVisible.value = true
+    await startWechatPairing()
+  }
 }
 async function confirmFeishuBind() {
   if (feishuBinding.value) return
@@ -378,15 +390,36 @@ async function confirmFeishuBind() {
 }
 async function confirmWechatBind() {
   if (wechatBinding.value) return
-  if (!wechatForm.wxid.trim() || !wechatForm.db_dir.trim()) { MessagePlugin.warning('请填写微信 ID 和本机微信数据目录'); return }
+  if (!wechatPairingID.value) { await startWechatPairing(); return }
   wechatBinding.value = true
   try {
-    await bindWechat(wechatForm.wxid.trim(), wechatForm.db_dir.trim(), wechatRebind.value)
-    wechatDialogVisible.value = false
-    await refreshConnectors()
-    MessagePlugin.success('个人微信已绑定，采集器已启动')
-  } catch (cause) { MessagePlugin.error(errorMessage(cause, '个人微信绑定失败')) }
+    const result = await getWechatPairingStatus(wechatPairingID.value)
+    if (result.status === 'consumed' && result.connector_id) {
+      wechatDialogVisible.value = false
+      await refreshConnectors()
+      MessagePlugin.success('个人微信已绑定到当前设备')
+    } else if (result.status === 'failed') {
+      MessagePlugin.error('本机 Agent 配对失败，请重新生成配对码')
+    } else {
+      MessagePlugin.info('配对尚未完成，请确认本机 Agent 已提交配对信息')
+    }
+  } catch (cause) { MessagePlugin.error(errorMessage(cause, '检查微信绑定状态失败')) }
   finally { wechatBinding.value = false }
+}
+async function startWechatPairing() {
+  if (wechatBinding.value) return
+  wechatBinding.value = true
+  try {
+    const pairing = await createWechatPairing()
+    wechatPairingID.value = pairing.pairing_id
+    wechatPairingCode.value = pairing.pairing_code
+  } catch (cause) {
+    wechatPairingID.value = ''
+    wechatPairingCode.value = ''
+    MessagePlugin.error(errorMessage(cause, '生成微信配对码失败'))
+  } finally {
+    wechatBinding.value = false
+  }
 }
 async function handleOAuthCallback() {
   const notice = oauthCallbackNotice(route.query)
@@ -793,6 +826,36 @@ onMounted(async () => {
 .auth-dialog__scope span :deep(svg) {
   width: 14px;
   color: var(--td-brand-color);
+}
+
+.wechat-pairing {
+  display: grid;
+  gap: 12px;
+}
+
+.wechat-pairing p {
+  margin: 0;
+  color: var(--td-text-color-secondary);
+}
+
+.wechat-pairing__field {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 10px 12px;
+  background: var(--td-bg-color-container-hover);
+  border-radius: 6px;
+}
+
+.wechat-pairing__field span {
+  color: var(--td-text-color-secondary);
+}
+
+.wechat-pairing__field strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
 }
 
 @media (max-width: 700px) {

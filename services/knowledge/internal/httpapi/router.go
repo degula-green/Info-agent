@@ -578,51 +578,14 @@ func registerUserRoutes(r *gin.Engine, app *App, prefix string) {
 		}
 		writeError(c, apperror.New("unsupported_platform", "platform is not supported in this release", 400, false))
 	})
-	// Server-managed personal WeChat collector (方案 A). The Knowledge API
-	// proxies lifecycle and whitelist operations to the long-running collector.
+	// Device pairing replaces server-managed local-path binding. The old
+	// endpoints stay addressable only long enough to return a deterministic
+	// migration error instead of silently accepting another machine's path.
 	g.POST("/connectors/wechat/bind", func(c *gin.Context) {
-		p := principal(c)
-		var body struct {
-			WXID  string `json:"wxid"`
-			DBDir string `json:"db_dir"`
-		}
-		if err := c.ShouldBindJSON(&body); err != nil {
-			writeError(c, apperror.New("invalid_request", "invalid wechat bind request", 400, false))
-			return
-		}
-		organizationID, err := app.Service.ResolveCurrentOrganization(c, p.UserID, p.OrganizationID, c.GetHeader("Authorization"))
-		if err != nil {
-			writeError(c, err)
-			return
-		}
-		out, err := app.Service.BindWechat(c, p.UserID, body.WXID, body.DBDir, organizationID, false)
-		if err != nil {
-			writeError(c, err)
-			return
-		}
-		c.JSON(http.StatusOK, out)
+		writeError(c, apperror.New("device_pairing_required", "use device pairing instead of submitting a local path", http.StatusGone, false))
 	})
 	g.POST("/connectors/wechat/rebind", func(c *gin.Context) {
-		p := principal(c)
-		var body struct {
-			WXID  string `json:"wxid"`
-			DBDir string `json:"db_dir"`
-		}
-		if err := c.ShouldBindJSON(&body); err != nil {
-			writeError(c, apperror.New("invalid_request", "invalid wechat bind request", 400, false))
-			return
-		}
-		organizationID, err := app.Service.ResolveCurrentOrganization(c, p.UserID, p.OrganizationID, c.GetHeader("Authorization"))
-		if err != nil {
-			writeError(c, err)
-			return
-		}
-		out, err := app.Service.BindWechat(c, p.UserID, body.WXID, body.DBDir, organizationID, true)
-		if err != nil {
-			writeError(c, err)
-			return
-		}
-		c.JSON(http.StatusOK, out)
+		writeError(c, apperror.New("device_pairing_required", "use device pairing instead of submitting a local path", http.StatusGone, false))
 	})
 	g.GET("/connectors/wechat/status", func(c *gin.Context) {
 		out, err := app.Service.WechatStatus(c, principal(c).UserID)
@@ -1153,7 +1116,7 @@ func registerInternalRoutes(r *gin.Engine, app *App, prefix string) {
 			writeError(c, apperror.New("invalid_request", "invalid pairing request", 400, false))
 			return
 		}
-		if !validFingerprint(body.PathFingerprint) {
+		if strings.TrimSpace(body.PathFingerprint) != "" && !validFingerprint(body.PathFingerprint) {
 			writeError(c, apperror.New("wechat_path_invalid", "path_fingerprint must be a SHA-256 fingerprint", 400, false))
 			return
 		}
@@ -1260,11 +1223,31 @@ func registerInternalRoutes(r *gin.Engine, app *App, prefix string) {
 		c.JSON(http.StatusOK, gin.H{"items": items})
 	})
 	g.GET("/wechat/bootstrap", func(c *gin.Context) {
+		device := agentDevice(c)
+		deviceID := strings.TrimSpace(c.Query("device_id"))
+		if device != nil {
+			if deviceID == "" || deviceID != device.ID {
+				writeError(c, apperror.Clone(apperror.ErrForbidden))
+				return
+			}
+			out, err := app.Service.WechatBootstrapForDevice(c, device)
+			if err != nil {
+				writeError(c, err)
+				return
+			}
+			c.JSON(http.StatusOK, out)
+			return
+		}
 		if !serviceAuthorized(c) {
 			writeError(c, apperror.Clone(apperror.ErrUnauthorized))
 			return
 		}
-		out, err := app.Service.WechatBootstrap(c, strings.TrimSpace(c.Query("connector_id")))
+		connectorID := strings.TrimSpace(c.Query("connector_id"))
+		if connectorID == "" {
+			writeError(c, apperror.New("device_id_required", "device_id is required for bootstrap", 400, false))
+			return
+		}
+		out, err := app.Service.WechatBootstrap(c, connectorID)
 		if err != nil {
 			writeError(c, err)
 			return
@@ -1272,10 +1255,6 @@ func registerInternalRoutes(r *gin.Engine, app *App, prefix string) {
 		c.JSON(http.StatusOK, out)
 	})
 	g.POST("/wechat/discovery", func(c *gin.Context) {
-		if !serviceAuthorized(c) {
-			writeError(c, apperror.Clone(apperror.ErrUnauthorized))
-			return
-		}
 		var body struct {
 			ConnectorID   string                         `json:"connector_id"`
 			Conversations []domain.AvailableConversation `json:"conversations"`
@@ -1283,6 +1262,10 @@ func registerInternalRoutes(r *gin.Engine, app *App, prefix string) {
 		}
 		if err := c.ShouldBindJSON(&body); err != nil || strings.TrimSpace(body.ConnectorID) == "" {
 			writeError(c, apperror.New("invalid_request", "invalid discovery payload", 400, false))
+			return
+		}
+		if !serviceAuthorized(c) && !deviceCanAccessConnector(c, app, agentDevice(c), body.ConnectorID) {
+			writeError(c, apperror.Clone(apperror.ErrForbidden))
 			return
 		}
 		items := body.Conversations
@@ -1343,6 +1326,25 @@ func registerInternalRoutes(r *gin.Engine, app *App, prefix string) {
 		}
 		c.JSON(http.StatusOK, gin.H{"items": items})
 	})
+	g.POST("/devices/:device_id/heartbeat", func(c *gin.Context) {
+		device := agentDevice(c)
+		if device == nil || device.ID != c.Param("device_id") {
+			writeError(c, apperror.Clone(apperror.ErrForbidden))
+			return
+		}
+		var body struct {
+			AgentVersion string `json:"agent_version"`
+		}
+		if err := c.ShouldBindJSON(&body); err != nil && err != io.EOF {
+			writeError(c, apperror.New("invalid_request", "invalid heartbeat payload", 400, false))
+			return
+		}
+		if err := app.Service.HeartbeatDevice(c, device, body.AgentVersion); err != nil {
+			writeError(c, err)
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"status": "ok"})
+	})
 	g.POST("/devices/:device_id/discoveries", func(c *gin.Context) {
 		device := agentDevice(c)
 		if device.ID != c.Param("device_id") {
@@ -1380,7 +1382,7 @@ func registerInternalRoutes(r *gin.Engine, app *App, prefix string) {
 			writeError(c, err)
 			return
 		}
-		if device != nil && collector.ConnectorAccountID != device.ConnectorID && !serviceAuthorized(c) {
+		if !serviceAuthorized(c) && !deviceCanAccessConnector(c, app, device, collector.ConnectorAccountID) {
 			writeError(c, apperror.Clone(apperror.ErrForbidden))
 			return
 		}
@@ -1404,7 +1406,7 @@ func registerInternalRoutes(r *gin.Engine, app *App, prefix string) {
 			writeError(c, err)
 			return
 		}
-		if device != nil && collector.ConnectorAccountID != device.ConnectorID && !serviceAuthorized(c) {
+		if !serviceAuthorized(c) && !deviceCanAccessConnector(c, app, device, collector.ConnectorAccountID) {
 			writeError(c, apperror.Clone(apperror.ErrForbidden))
 			return
 		}
@@ -1429,7 +1431,7 @@ func registerInternalRoutes(r *gin.Engine, app *App, prefix string) {
 			writeError(c, err)
 			return
 		}
-		if device != nil && collector.ConnectorAccountID != device.ConnectorID && !serviceAuthorized(c) {
+		if !serviceAuthorized(c) && !deviceCanAccessConnector(c, app, device, collector.ConnectorAccountID) {
 			writeError(c, apperror.Clone(apperror.ErrForbidden))
 			return
 		}
@@ -1457,7 +1459,7 @@ func registerInternalRoutes(r *gin.Engine, app *App, prefix string) {
 			writeError(c, err)
 			return
 		}
-		if device != nil && collector.ConnectorAccountID != device.ConnectorID && !serviceAuthorized(c) {
+		if !serviceAuthorized(c) && !deviceCanAccessConnector(c, app, device, collector.ConnectorAccountID) {
 			writeError(c, apperror.Clone(apperror.ErrForbidden))
 			return
 		}
@@ -1501,7 +1503,7 @@ func registerInternalRoutes(r *gin.Engine, app *App, prefix string) {
 			writeError(c, err)
 			return
 		}
-		if device != nil && collector.ConnectorAccountID != device.ConnectorID && !serviceAuthorized(c) {
+		if !serviceAuthorized(c) && !deviceCanAccessConnector(c, app, device, collector.ConnectorAccountID) {
 			writeError(c, apperror.Clone(apperror.ErrForbidden))
 			return
 		}
@@ -1527,7 +1529,7 @@ func registerInternalRoutes(r *gin.Engine, app *App, prefix string) {
 			writeError(c, err)
 			return
 		}
-		if device != nil && collector.ConnectorAccountID != device.ConnectorID && !serviceAuthorized(c) {
+		if !serviceAuthorized(c) && !deviceCanAccessConnector(c, app, device, collector.ConnectorAccountID) {
 			writeError(c, apperror.Clone(apperror.ErrForbidden))
 			return
 		}
@@ -1914,6 +1916,13 @@ func agentDevice(c *gin.Context) *domain.AgentDevice {
 	}
 	device, _ := value.(*domain.AgentDevice)
 	return device
+}
+func deviceCanAccessConnector(c *gin.Context, app *App, device *domain.AgentDevice, connectorID string) bool {
+	if device == nil || strings.TrimSpace(connectorID) == "" {
+		return false
+	}
+	assignment, err := app.Service.Repo.GetActiveDeviceAssignment(c, device.ID)
+	return err == nil && assignment.ConnectorID == connectorID
 }
 func serviceAuthorized(c *gin.Context) bool {
 	value, ok := c.Get("service-authorized")
