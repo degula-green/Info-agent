@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
@@ -130,7 +131,9 @@ func (h *OrganizationHandler) Capabilities(c *gin.Context) {
 }
 func (h *OrganizationHandler) ExitPreflight(c *gin.Context) {
 	p, _ := PrincipalFromContext(c.Request.Context())
-	preflight, err := h.service.ExitPreflight(c.Request.Context(), p.UserID, c.Param("organization_id"))
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 4*time.Second)
+	defer cancel()
+	preflight, err := h.service.ExitPreflight(ctx, p.UserID, c.Param("organization_id"))
 	if err != nil {
 		h.write(c, err)
 		return
@@ -141,7 +144,9 @@ func (h *OrganizationHandler) Leave(c *gin.Context) {
 	var req memberReasonRequest
 	_ = decodeJSON(c, &req)
 	p, _ := PrincipalFromContext(c.Request.Context())
-	if err := h.service.LeaveOrganization(c.Request.Context(), p.UserID, c.Param("organization_id"), req.Reason); err != nil {
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 8*time.Second)
+	defer cancel()
+	if err := h.service.LeaveOrganization(ctx, p.UserID, c.Param("organization_id"), req.Reason); err != nil {
 		h.write(c, err)
 		return
 	}

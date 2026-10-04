@@ -39,7 +39,13 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Server, 
 	startupCtx, cancel := context.WithTimeout(ctx, startupTimeout)
 	defer cancel()
 
-	pool, err := pgxpool.New(startupCtx, cfg.DatabaseURL)
+	poolConfig, err := pgxpool.ParseConfig(cfg.DatabaseURL)
+	if err != nil {
+		return nil, fmt.Errorf("parse PostgreSQL config: %w", err)
+	}
+	poolConfig.ConnConfig.ConnectTimeout = 3 * time.Second
+	poolConfig.ConnConfig.RuntimeParams["statement_timeout"] = "5000"
+	pool, err := pgxpool.NewWithConfig(startupCtx, poolConfig)
 	if err != nil {
 		return nil, fmt.Errorf("create PostgreSQL pool: %w", err)
 	}

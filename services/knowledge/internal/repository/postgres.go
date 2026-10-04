@@ -28,7 +28,13 @@ type PostgresStore struct {
 }
 
 func NewPostgresStore(ctx context.Context, databaseURL string) (*PostgresStore, error) {
-	pool, err := pgxpool.New(ctx, databaseURL)
+	poolConfig, err := pgxpool.ParseConfig(databaseURL)
+	if err != nil {
+		return nil, err
+	}
+	poolConfig.ConnConfig.ConnectTimeout = 3 * time.Second
+	poolConfig.ConnConfig.RuntimeParams["statement_timeout"] = "5000"
+	pool, err := pgxpool.NewWithConfig(ctx, poolConfig)
 	if err != nil {
 		return nil, err
 	}

@@ -79,7 +79,7 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
 
 export const getCurrentOrganization = () => request<CoreOrganizationResponse>('/organizations/current')
 export const getOrganizationCapabilities = (organizationID: string) => request<CoreOrganizationCapabilities>(`/organizations/${encodeURIComponent(organizationID)}/capabilities`)
-export const getOrganizationExitPreflight = (organizationID: string) => request<CoreOrganizationExitPreflight>(`/organizations/${encodeURIComponent(organizationID)}/membership/exit-preflight`)
+export const getOrganizationExitPreflight = (organizationID: string, signal?: AbortSignal) => request<CoreOrganizationExitPreflight>(`/organizations/${encodeURIComponent(organizationID)}/membership/exit-preflight`, { signal })
 export const listOrganizationMembers = (organizationID: string) => request<CoreOrganizationMembersResponse>(`/organizations/${encodeURIComponent(organizationID)}/members`)
 export const createOrganizationInvitation = (organizationID: string) => request<CoreInvitationResponse>(`/organizations/${encodeURIComponent(organizationID)}/invitations`, { method: 'POST', body: '{}' })
 export const revokeOrganizationInvitation = (organizationID: string, invitationID: string) => request<void>(`/organizations/${encodeURIComponent(organizationID)}/invitations/${encodeURIComponent(invitationID)}/revoke`, { method: 'POST' })

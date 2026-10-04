@@ -145,7 +145,7 @@
       <p class="confirm-copy">撤销后该链接立即失效，尚未使用链接的用户将无法加入组织。</p>
     </t-dialog>
 
-    <t-dialog v-model:visible="exitDialogVisible" header="退出组织" width="520px" :footer="false">
+    <t-dialog v-model:visible="exitDialogVisible" header="退出组织" width="520px" :footer="false" @close="cancelExitCheck">
       <div class="exit-dialog">
         <div v-if="exitLoading" class="member-loading"><t-loading size="small" text="正在检查退出影响..." /></div>
         <template v-else-if="exitPreflight">
@@ -157,11 +157,11 @@
             <strong>退出前请确认</strong>
             <span v-for="item in exitPreflight.warnings" :key="item">{{ exitWarningLabel(item) }}</span>
           </div>
-          <div class="dialog-actions">
-            <t-button variant="outline" @click="exitDialogVisible = false">取消</t-button>
-            <t-button theme="danger" :disabled="!exitPreflight.allowed || exitSubmitting" :loading="exitSubmitting" @click="confirmLeave">确认退出</t-button>
-          </div>
         </template>
+        <div class="dialog-actions">
+          <t-button variant="outline" @click="cancelExitCheck">取消</t-button>
+          <t-button v-if="exitPreflight" theme="danger" :disabled="!exitPreflight.allowed || exitSubmitting" :loading="exitSubmitting" @click="confirmLeave">确认退出</t-button>
+        </div>
       </div>
     </t-dialog>
 
@@ -191,7 +191,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { MessagePlugin } from 'tdesign-vue-next'
 import { useRouter } from 'vue-router'
 import { CoreAuthError, getCurrentUser } from '@/api/core-auth'
@@ -231,6 +231,9 @@ const exitLoading = ref(false)
 const exitSubmitting = ref(false)
 const exitPreflight = ref<CoreOrganizationExitPreflight | null>(null)
 const memberActionSubmitting = ref(false)
+let exitAbortController: AbortController | null = null
+let exitAbortTimer: number | null = null
+let exitCheckTimedOut = false
 
 const selectedMember = computed(() => members.value.find((item) => item.id === selectedMemberID.value) || null)
 const managementMemberCount = computed(() => members.value.filter((item) => item.roles.length > 0).length)
@@ -269,17 +272,49 @@ function exitWarningLabel(value: string) {
   }
   return labels[value] || value
 }
+function isAbortError(cause: any) {
+  return cause?.name === 'AbortError' || cause?.code === 'ABORT_ERR'
+}
+function clearExitRequest() {
+  if (exitAbortTimer !== null) {
+    window.clearTimeout(exitAbortTimer)
+    exitAbortTimer = null
+  }
+  exitAbortController = null
+}
+function cancelExitCheck() {
+  exitCheckTimedOut = false
+  clearExitRequest()
+  exitLoading.value = false
+  exitPreflight.value = null
+  exitDialogVisible.value = false
+}
 async function openExitDialog() {
   if (!organization.value) return
+  cancelExitCheck()
   exitDialogVisible.value = true
   exitLoading.value = true
   exitPreflight.value = null
+  exitCheckTimedOut = false
+  const controller = new AbortController()
+  exitAbortController = controller
+  exitAbortTimer = window.setTimeout(() => {
+    exitCheckTimedOut = true
+    controller.abort()
+  }, 8000)
   try {
-    exitPreflight.value = await getOrganizationExitPreflight(organization.value.organization.id)
+    exitPreflight.value = await getOrganizationExitPreflight(organization.value.organization.id, controller.signal)
   } catch (cause) {
-    MessagePlugin.error(errorMessage(cause, '退出影响检查失败'))
+    if (isAbortError(cause)) {
+      if (exitCheckTimedOut && exitDialogVisible.value) MessagePlugin.error('退出影响检查超时，请稍后重试')
+    } else {
+      MessagePlugin.error(errorMessage(cause, '退出影响检查失败'))
+    }
   } finally {
-    exitLoading.value = false
+    if (exitAbortController === controller) {
+      clearExitRequest()
+      exitLoading.value = false
+    }
   }
 }
 async function confirmLeave() {
@@ -410,6 +445,7 @@ function removeSelectedMember() {
   void runMemberAction(() => removeOrganizationMember(organization.value!.organization.id, member.user_id), '成员已移除')
 }
 onMounted(() => { void loadOrganization() })
+onBeforeUnmount(cancelExitCheck)
 </script>
 
 <style lang="less" scoped>
