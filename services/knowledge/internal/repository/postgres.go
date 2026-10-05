@@ -1191,7 +1191,7 @@ func (s *PostgresStore) ListConversations(ctx context.Context, userID, platformN
 }
 
 func (s *PostgresStore) populateConversationCounts(ctx context.Context, c *domain.ConversationIngestion) error {
-	if err := s.pool.QueryRow(ctx, `SELECT COUNT(*) FROM knowledge.messages m WHERE m.conversation_ingestion_id=$1 AND m.message_type<>'system' AND btrim(COALESCE(m.normalized_content,'')) <> ''`, c.ID).Scan(&c.MessageCount); err != nil {
+	if err := s.pool.QueryRow(ctx, `SELECT COUNT(*) FROM knowledge.messages m WHERE m.conversation_ingestion_id=$1 AND m.lifecycle_status='active' AND m.message_type<>'system' AND btrim(COALESCE(m.normalized_content,'')) <> ''`, c.ID).Scan(&c.MessageCount); err != nil {
 		return dbError(err)
 	}
 	if err := s.pool.QueryRow(ctx, `SELECT COUNT(*) FROM knowledge.attachments WHERE conversation_ingestion_id=$1`, c.ID).Scan(&c.AttachmentCount); err != nil {
@@ -2501,7 +2501,7 @@ func (s *PostgresStore) ListMessages(ctx context.Context, conversationID string,
 	if metadataErr != nil && !errors.Is(metadataErr, pgx.ErrNoRows) {
 		return nil, dbError(metadataErr)
 	}
-	query := `SELECT m.id::text,m.conversation_ingestion_id::text,m.external_message_id,COALESCE(m.sender_identity_id::text,''),COALESCE(ei.external_user_id,''),COALESCE(NULLIF(ei.display_name,''),NULLIF(m.sender_display_name,''),''),m.message_type,COALESCE(m.normalized_content_ref,''),COALESCE(m.normalized_content,''),m.content_hash,m.content_version,m.sent_at,COALESCE((SELECT MIN(ms.collected_at) FROM knowledge.message_sources ms WHERE ms.message_id=m.id),m.created_at),m.lifecycle_status,CASE WHEN EXISTS (SELECT 1 FROM knowledge.knowledge_items ki WHERE ki.source_message_id=m.id AND ki.source_attachment_id IS NULL AND ki.source_type<>'shared_private_item' AND ki.rag_status='ready' AND ki.rag_content_version=ki.content_version AND ki.rag_acl_version=ki.acl_version) THEN 'ready' WHEN EXISTS (SELECT 1 FROM knowledge.knowledge_items ki WHERE ki.source_message_id=m.id AND ki.source_attachment_id IS NULL AND ki.source_type<>'shared_private_item' AND ki.rag_status='failed') THEN 'failed' ELSE m.vector_status END,m.created_at,m.sensitive,m.classification_status FROM knowledge.messages m LEFT JOIN knowledge.external_identities ei ON ei.id=m.sender_identity_id WHERE m.conversation_ingestion_id=$1`
+	query := `SELECT m.id::text,m.conversation_ingestion_id::text,m.external_message_id,COALESCE(m.sender_identity_id::text,''),COALESCE(ei.external_user_id,''),COALESCE(NULLIF(ei.display_name,''),NULLIF(m.sender_display_name,''),''),m.message_type,COALESCE(m.normalized_content_ref,''),COALESCE(m.normalized_content,''),m.content_hash,m.content_version,m.sent_at,COALESCE((SELECT MIN(ms.collected_at) FROM knowledge.message_sources ms WHERE ms.message_id=m.id),m.created_at),m.lifecycle_status,CASE WHEN EXISTS (SELECT 1 FROM knowledge.knowledge_items ki WHERE ki.source_message_id=m.id AND ki.source_attachment_id IS NULL AND ki.source_type<>'shared_private_item' AND ki.rag_status='ready' AND ki.rag_content_version=ki.content_version AND ki.rag_acl_version=ki.acl_version) THEN 'ready' WHEN EXISTS (SELECT 1 FROM knowledge.knowledge_items ki WHERE ki.source_message_id=m.id AND ki.source_attachment_id IS NULL AND ki.source_type<>'shared_private_item' AND ki.rag_status='failed') THEN 'failed' ELSE m.vector_status END,m.created_at,m.sensitive,m.classification_status FROM knowledge.messages m LEFT JOIN knowledge.external_identities ei ON ei.id=m.sender_identity_id WHERE m.conversation_ingestion_id=$1 AND m.lifecycle_status='active'`
 	args := []any{conversationID}
 	if !cutoff.IsZero() {
 		if cutoffID != "" {
@@ -2649,7 +2649,7 @@ func (s *PostgresStore) ListConversationTimeline(ctx context.Context, conversati
 		return nil, dbError(err)
 	}
 	collectedExpr := `COALESCE((SELECT MIN(ms.collected_at) FROM knowledge.message_sources ms WHERE ms.message_id=m.id),m.created_at)`
-	messageQuery := `SELECT m.id::text,m.conversation_ingestion_id::text,m.external_message_id,COALESCE(m.sender_identity_id::text,''),COALESCE(ei.external_user_id,''),COALESCE(NULLIF(ei.display_name,''),NULLIF(m.sender_display_name,''),''),m.message_type,COALESCE(m.normalized_content_ref,''),COALESCE(m.normalized_content,''),m.content_hash,m.content_version,m.sent_at,` + collectedExpr + `,m.lifecycle_status,CASE WHEN EXISTS (SELECT 1 FROM knowledge.knowledge_items ki WHERE ki.source_message_id=m.id AND ki.source_attachment_id IS NULL AND ki.source_type<>'shared_private_item' AND ki.rag_status='ready' AND ki.rag_content_version=ki.content_version AND ki.rag_acl_version=ki.acl_version) THEN 'ready' WHEN EXISTS (SELECT 1 FROM knowledge.knowledge_items ki WHERE ki.source_message_id=m.id AND ki.source_attachment_id IS NULL AND ki.source_type<>'shared_private_item' AND ki.rag_status='failed') THEN 'failed' ELSE m.vector_status END,m.created_at,m.sensitive,m.classification_status FROM knowledge.messages m LEFT JOIN knowledge.external_identities ei ON ei.id=m.sender_identity_id WHERE m.conversation_ingestion_id=$1`
+	messageQuery := `SELECT m.id::text,m.conversation_ingestion_id::text,m.external_message_id,COALESCE(m.sender_identity_id::text,''),COALESCE(ei.external_user_id,''),COALESCE(NULLIF(ei.display_name,''),NULLIF(m.sender_display_name,''),''),m.message_type,COALESCE(m.normalized_content_ref,''),COALESCE(m.normalized_content,''),m.content_hash,m.content_version,m.sent_at,` + collectedExpr + `,m.lifecycle_status,CASE WHEN EXISTS (SELECT 1 FROM knowledge.knowledge_items ki WHERE ki.source_message_id=m.id AND ki.source_attachment_id IS NULL AND ki.source_type<>'shared_private_item' AND ki.rag_status='ready' AND ki.rag_content_version=ki.content_version AND ki.rag_acl_version=ki.acl_version) THEN 'ready' WHEN EXISTS (SELECT 1 FROM knowledge.knowledge_items ki WHERE ki.source_message_id=m.id AND ki.source_attachment_id IS NULL AND ki.source_type<>'shared_private_item' AND ki.rag_status='failed') THEN 'failed' ELSE m.vector_status END,m.created_at,m.sensitive,m.classification_status FROM knowledge.messages m LEFT JOIN knowledge.external_identities ei ON ei.id=m.sender_identity_id WHERE m.conversation_ingestion_id=$1 AND m.lifecycle_status='active'`
 	messageArgs := []any{conversationID}
 	if before != nil {
 		messageQuery += ` AND (` + collectedExpr + ` < $2 OR (` + collectedExpr + ` = $2 AND ('message' < $3 OR ('message' = $3 AND m.id::text < $4))))`
@@ -3493,11 +3493,11 @@ func (s *PostgresStore) HideDeletionTargets(ctx context.Context, requestID strin
 		return 0, dbError(err)
 	}
 	defer tx.Rollback(ctx)
-	tag, err := tx.Exec(ctx, `UPDATE knowledge.messages m SET lifecycle_status='deleting',deleted_at=COALESCE(m.deleted_at,now()),deleted_by_user_id=COALESCE(m.deleted_by_user_id,dr.requester_user_id),delete_reason=COALESCE(m.delete_reason,dr.reason),delete_request_id=dr.id,updated_at=now() FROM knowledge.deletion_requests dr JOIN knowledge.deletion_targets dt ON dt.deletion_request_id=dr.id WHERE dr.id=$1 AND dt.resource_type='message' AND m.id=dt.resource_id AND m.lifecycle_status='active'`, requestID)
+	tag, err := tx.Exec(ctx, `UPDATE knowledge.messages m SET lifecycle_status='deleting',deleted_at=COALESCE(m.deleted_at,now()),deleted_by_user_id=COALESCE(m.deleted_by_user_id,dr.requester_user_id),delete_reason=COALESCE(m.delete_reason,dr.reason),delete_request_id=dr.id FROM knowledge.deletion_requests dr JOIN knowledge.deletion_targets dt ON dt.deletion_request_id=dr.id WHERE dr.id=$1 AND dt.resource_type='message' AND m.id=dt.resource_id AND m.lifecycle_status='active'`, requestID)
 	if err != nil {
 		return 0, dbError(err)
 	}
-	if _, err = tx.Exec(ctx, `UPDATE knowledge.knowledge_items ki SET lifecycle_status='deleting',deleted_at=COALESCE(ki.deleted_at,now()),deleted_by_user_id=COALESCE(ki.deleted_by_user_id,dr.requester_user_id),delete_reason=COALESCE(ki.delete_reason,dr.reason),delete_request_id=dr.id,updated_at=now() FROM knowledge.deletion_requests dr JOIN knowledge.deletion_targets dt ON dt.deletion_request_id=dr.id WHERE dr.id=$1 AND dt.knowledge_item_id=ki.id AND ki.lifecycle_status='active'`, requestID); err != nil {
+	if _, err = tx.Exec(ctx, `UPDATE knowledge.knowledge_items ki SET lifecycle_status='deleting',deleted_at=COALESCE(ki.deleted_at,now()),deleted_by_user_id=COALESCE(ki.deleted_by_user_id,dr.requester_user_id),delete_reason=COALESCE(ki.delete_reason,dr.reason),delete_request_id=dr.id FROM knowledge.deletion_requests dr JOIN knowledge.deletion_targets dt ON dt.deletion_request_id=dr.id WHERE dr.id=$1 AND dt.knowledge_item_id=ki.id AND ki.lifecycle_status='active'`, requestID); err != nil {
 		return 0, dbError(err)
 	}
 	if _, err = tx.Exec(ctx, `UPDATE knowledge.deletion_targets SET visibility_state='hidden',updated_at=now() WHERE deletion_request_id=$1`, requestID); err != nil {
@@ -3742,8 +3742,9 @@ func (s *PostgresStore) ListKnowledgeLibraries(ctx context.Context, userID, orga
 			args = append(args, organizationID)
 		}
 		if definition.baseType == "private_conversation" {
-			query += ` AND knowledge_base_id IN (SELECT id FROM knowledge.knowledge_bases WHERE base_type='private_conversation' AND owner_user_id=$2)`
-			args = append(args, userID)
+			// The private directory mirrors the private conversation list. Do not
+			// require a particular physical knowledge_base type here: historical
+			// Feishu/WeChat private chats may point at a legacy base row.
 		} else if definition.baseType == "organization_conversation" {
 			query += ` AND knowledge_base_id IN (SELECT id FROM knowledge.knowledge_bases WHERE base_type='organization_conversation' AND organization_id=$2)`
 			args = append(args, organizationID)
@@ -3845,7 +3846,7 @@ func (s *PostgresStore) ListKnowledgeLibraryItems(ctx context.Context, libraryID
 		// provider attachment envelopes as messages. Use the raw message/attachment
 		// tables for private and group conversations; shared-private cards are
 		// restricted to the explicitly shared source rows.
-		messageCountExpr := `(SELECT COUNT(*) FROM knowledge.messages cm WHERE cm.conversation_ingestion_id=ci.id AND cm.message_type<>'system' AND btrim(COALESCE(cm.normalized_content,'')) <> '')`
+		messageCountExpr := `(SELECT COUNT(*) FROM knowledge.messages cm WHERE cm.conversation_ingestion_id=ci.id AND cm.lifecycle_status='active' AND cm.message_type<>'system' AND btrim(COALESCE(cm.normalized_content,'')) <> '')`
 		attachmentCountExpr := `(SELECT COUNT(*) FROM knowledge.attachments ca WHERE ca.conversation_ingestion_id=ci.id)`
 		if strings.HasPrefix(libraryID, orgSharedLibraryPrefix) {
 			sharedOrgArg := conversationAdd(organizationID)
@@ -4141,7 +4142,7 @@ func dbError(err error) error {
 		return appErr
 	}
 	log.Printf("knowledge database error: %v", err)
-	return apperror.Wrap("database_error", "knowledge database operation failed", 503, true, err)
+	return apperror.Wrap("database_error", "知识库数据库操作失败", 503, true, err)
 }
 func isUnique(err error) bool { return err != nil && strings.Contains(err.Error(), "SQLSTATE 23505") }
 func nilString(value string) any {

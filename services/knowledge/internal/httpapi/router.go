@@ -396,6 +396,15 @@ func registerUserRoutes(r *gin.Engine, app *App, prefix string) {
 		}
 		c.JSON(http.StatusOK, gin.H{"items": out})
 	})
+	g.GET("/knowledge/messages/:message_id/deletion-permission", func(c *gin.Context) {
+		p := principal(c)
+		allowed, err := app.Service.CanDeleteMessage(c, p.UserID, c.Param("message_id"))
+		if err != nil {
+			writeError(c, err)
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"can_delete": allowed})
+	})
 	g.POST("/deletion-requests", func(c *gin.Context) {
 		p := principal(c)
 		var body struct {

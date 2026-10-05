@@ -138,11 +138,33 @@
             <t-button variant="outline" @click="downloadMessage">
               <template #icon><t-icon name="download" /></template>下载
             </t-button>
-            <t-button theme="danger" variant="outline" :loading="deletingMessage" :disabled="deletingMessage" @click="requestMessageDeletion">
-              <template #icon><t-icon name="delete" /></template>申请删除
+            <t-button theme="danger" variant="outline" :loading="deletionPreparing" :disabled="deletionPreparing" @click="requestMessageDeletion">
+              <template #icon><t-icon name="delete" /></template>删除
             </t-button>
           </div>
         </footer>
+      </article>
+    </t-dialog>
+
+    <t-dialog
+      v-model:visible="deleteDialogVisible"
+      :header="false"
+      :footer="false"
+      :close-btn="false"
+      width="min(460px, calc(100vw - 32px))"
+      dialog-class-name="info-delete-dialog"
+      placement="center"
+    >
+      <article class="delete-confirm" aria-labelledby="message-delete-title">
+        <span class="delete-confirm__icon"><t-icon name="delete" /></span>
+        <h2 id="message-delete-title">删除这条消息？</h2>
+        <p>删除后将从知识库、搜索和问答中移除。原始飞书或微信消息不会被删除，操作会记录到审计日志。</p>
+        <div class="delete-confirm__actions">
+          <t-button variant="outline" @click="deleteDialogVisible = false">取消</t-button>
+          <t-button theme="danger" :loading="deletingMessage" @click="confirmMessageDeletion">
+            {{ canDeleteMessage ? '确认删除' : '申请删除' }}
+          </t-button>
+        </div>
       </article>
     </t-dialog>
 
@@ -195,7 +217,7 @@
 import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import { createAccessRequest } from '@/api/core-organization'
 import { ApiError } from '@/api/http'
-import { createMessageDeletionRequest, getKnowledgeAttachmentContent, getMessageOriginal } from '@/api/info-knowledge'
+import { createMessageDeletionRequest, getKnowledgeAttachmentContent, getMessageDeletionPermission, getMessageOriginal } from '@/api/info-knowledge'
 import InfoAttachmentPreview from '@/components/InfoAttachmentPreview.vue'
 import type { CollectionStatus, InfoChat, InfoFile, InfoMessage } from '@/mock'
 import { sourceName } from '@/mock'
@@ -228,6 +250,7 @@ const emit = defineEmits<{
   (event: 'back'): void
   (event: 'toggle', chat: InfoChat): void
   (event: 'toast', text: string): void
+  (event: 'error', text: string): void
   (event: 'share', payload: { conversationId: string; messageIDs: string[]; attachmentIDs: string[] }): void
   (event: 'load-more'): void
 }>()
@@ -245,6 +268,9 @@ const originalKnowledgeItemID = ref('')
 const highlightedItemKey = ref<string | null>(null)
 const fileDownloading = ref(false)
 const deletingMessage = ref(false)
+const deletionPreparing = ref(false)
+const deleteDialogVisible = ref(false)
+const canDeleteMessage = ref(false)
 const shareSelecting = ref(false)
 const selectedMessageIDs = ref<string[]>([])
 const selectedAttachmentIDs = ref<string[]>([])
@@ -480,21 +506,49 @@ function downloadMessage() {
   saveBlob(blob, `消息-${activeMessage.value.id}.txt`)
 }
 
+function deletionErrorMessage(error: any, canDelete: boolean) {
+  const code = String(error?.code || error?.error?.code || '')
+  if (code === 'database_error' || code === 'knowledge_database_unavailable') return '知识库数据库暂时不可用，请稍后重试'
+  if (code === 'conversation_not_found' || code === 'message_not_found') return '消息不存在或已被删除'
+  if (code === 'forbidden') return canDelete ? '你没有删除这条消息的权限' : '你没有删除权限，无法提交申请'
+  if (code === 'core_dependency_unavailable') return '权限服务暂不可用，请稍后重试'
+  if (code === 'deletion_request_not_found') return '删除申请不存在'
+  return canDelete ? '删除失败，请稍后重试' : '删除申请提交失败，请稍后重试'
+}
 async function requestMessageDeletion() {
+  if (!activeMessage.value || deletionPreparing.value) return
+  const messageID = activeMessage.value.sourceMessageId || activeMessage.value.id
+  if (!messageID) {
+    emit('toast', '缺少消息标识，无法删除')
+    return
+  }
+  deletionPreparing.value = true
+  try {
+    const permission = await getMessageDeletionPermission(messageID)
+    canDeleteMessage.value = Boolean(permission.can_delete)
+    deleteDialogVisible.value = true
+  } catch (error: any) {
+    emit('error', deletionErrorMessage(error, false))
+  } finally {
+    deletionPreparing.value = false
+  }
+}
+
+async function confirmMessageDeletion() {
   if (!activeMessage.value || deletingMessage.value) return
   const messageID = activeMessage.value.sourceMessageId || activeMessage.value.id
   if (!messageID) {
-    emit('toast', '缺少消息标识，无法提交删除申请')
+    emit('toast', '缺少消息标识，无法删除')
     return
   }
-  if (!window.confirm('删除后将从知识库、搜索和问答中移除，原始平台消息不会被删除。是否继续？')) return
   deletingMessage.value = true
   try {
-    await createMessageDeletionRequest(messageID, `申请删除消息 ${messageID}`)
+    await createMessageDeletionRequest(messageID, canDeleteMessage.value ? `删除消息 ${messageID}` : `申请删除消息 ${messageID}`)
+    deleteDialogVisible.value = false
     messageDialogVisible.value = false
-    emit('toast', '删除申请已提交，内容将停止对外展示')
+    emit('toast', canDeleteMessage.value ? '消息已删除' : '删除申请已提交')
   } catch (error: any) {
-    emit('toast', error?.message || '删除申请提交失败')
+    emit('error', deletionErrorMessage(error, canDeleteMessage.value))
   } finally {
     deletingMessage.value = false
   }
@@ -632,7 +686,11 @@ async function downloadFile() {
 .message-content { width: 100%; max-height: min(68vh, 720px); color: var(--td-text-color-primary); font-size: 14px; line-height: 1.8; overflow: auto; overflow-wrap: anywhere; white-space: pre-wrap; }
 .message-editor { width: 100%; }
 .message-editor :deep(textarea) { max-height: min(68vh, 720px); overflow-y: auto; }
-.detail-modal__footer { display: flex; min-height: 76px; flex: 0 0 auto; align-items: center; justify-content: space-between; gap: 20px; padding: 14px 24px; border-top: 1px solid var(--td-component-stroke); background: var(--td-bg-color-container); }
+.delete-confirm { display: flex; flex-direction: column; align-items: center; padding: 8px 8px 4px; text-align: center; }
+.delete-confirm__icon { display: grid; place-items: center; width: 52px; height: 52px; margin-bottom: 14px; border-radius: 50%; color: var(--td-error-color); background: var(--td-error-color-1); font-size: 24px; }
+.delete-confirm h2 { margin: 0 0 10px; font-size: 18px; }
+.delete-confirm p { margin: 0; color: var(--td-text-color-secondary); font-size: 13px; line-height: 1.7; }
+.delete-confirm__actions { display: flex; justify-content: center; width: 100%; gap: 10px; margin-top: 24px; }.detail-modal__footer { display: flex; min-height: 76px; flex: 0 0 auto; align-items: center; justify-content: space-between; gap: 20px; padding: 14px 24px; border-top: 1px solid var(--td-component-stroke); background: var(--td-bg-color-container); }
 .detail-modal__status { display: flex; min-width: 0; align-items: center; gap: 9px; color: var(--td-text-color-secondary); font-size: 12px; }
 .status-dot { width: 8px; height: 8px; flex: 0 0 8px; border-radius: 50%; background: var(--td-text-color-disabled); }
 .status-dot--success { background: var(--td-success-color); }
@@ -671,7 +729,11 @@ async function downloadFile() {
   .detail-modal__body { flex: 1; min-height: 0; padding: 18px 16px 16px; }
   .message-content { max-height: min(70vh, 620px); font-size: 14px; line-height: 1.75; }
   .message-editor :deep(textarea) { max-height: min(70vh, 620px); font-size: 14px; }
-  .detail-modal__footer { min-height: 72px; flex-wrap: wrap; gap: 12px; padding: 12px 16px; }
+  .delete-confirm { display: flex; flex-direction: column; align-items: center; padding: 8px 8px 4px; text-align: center; }
+.delete-confirm__icon { display: grid; place-items: center; width: 52px; height: 52px; margin-bottom: 14px; border-radius: 50%; color: var(--td-error-color); background: var(--td-error-color-1); font-size: 24px; }
+.delete-confirm h2 { margin: 0 0 10px; font-size: 18px; }
+.delete-confirm p { margin: 0; color: var(--td-text-color-secondary); font-size: 13px; line-height: 1.7; }
+.delete-confirm__actions { display: flex; justify-content: center; width: 100%; gap: 10px; margin-top: 24px; }.detail-modal__footer { min-height: 72px; flex-wrap: wrap; gap: 12px; padding: 12px 16px; }
   .detail-modal__status { max-width: 100%; flex-wrap: wrap; }
   .record-id { max-width: min(70vw, 320px); }
   .detail-modal__actions { margin-left: auto; }

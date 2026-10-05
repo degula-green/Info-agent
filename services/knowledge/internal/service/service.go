@@ -3167,6 +3167,13 @@ func (s *Service) CreateDeletionRequest(ctx context.Context, userID, organizatio
 	return s.Repo.GetDeletionRequest(ctx, request.ID)
 }
 
+func (s *Service) CanDeleteMessage(ctx context.Context, userID, messageID string) (bool, error) {
+	item, err := s.Repo.GetKnowledgeItemByMessage(ctx, strings.TrimSpace(messageID))
+	if err != nil {
+		return false, err
+	}
+	return s.canDeleteKnowledge(ctx, userID, item)
+}
 func (s *Service) canDeleteKnowledge(ctx context.Context, userID string, item *domain.KnowledgeItem) (bool, error) {
 	if item == nil {
 		return false, nil

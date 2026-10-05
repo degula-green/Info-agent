@@ -428,6 +428,9 @@ export async function getKnowledgeLibraryItems(libraryID: string, options: { kin
   return body.items || []
 }
 
+export async function getMessageDeletionPermission(messageID: string) {
+  return knowledgeRequest<{ can_delete: boolean }>(`/knowledge/messages/${encodeURIComponent(messageID)}/deletion-permission`)
+}
 export async function createMessageDeletionRequest(messageID: string, reason: string) {
   return knowledgeRequest<DeletionRequestDTO>('/deletion-requests', {
     method: 'POST',
