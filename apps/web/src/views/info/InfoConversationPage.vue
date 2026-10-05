@@ -125,14 +125,21 @@ async function loadCurrentConversation(platform: string, id: string, force = fal
     // page, briefly turning a valid route into "conversation not found".
     await store.loadConversation(platform as 'feishu' | 'wecom' | 'wechat', id, force, { shared: sharedView.value })
   } catch (error: any) {
-    const code = String(error?.code || error?.error?.code || '')
-    // Polling can hit a transient timeout or upstream blip. Keep the last
-    // usable conversation on screen unless the server says the conversation
-    // is truly gone or no longer visible to this user.
-    if (code === 'forbidden' || code === 'conversation_not_found') {
-      loadError.value = error
-    } else if (!hadChat) {
-      loadError.value = error
+    const initialCode = String(error?.code || error?.error?.code || '')
+    if (!hadChat && initialCode === 'conversation_not_found') {
+      await new Promise((resolve) => window.setTimeout(resolve, 600))
+      try {
+        await store.loadConversation(platform as 'feishu' | 'wecom' | 'wechat', id, true, { shared: sharedView.value })
+      } catch (retryError: any) {
+        loadError.value = retryError
+      }
+    } else {
+      const code = String(error?.code || error?.error?.code || '')
+      if (code === 'forbidden' || code === 'conversation_not_found') {
+        loadError.value = error
+      } else if (!hadChat) {
+        loadError.value = error
+      }
     }
   } finally {
     loading.value = false

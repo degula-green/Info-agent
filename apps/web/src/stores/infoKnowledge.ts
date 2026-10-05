@@ -550,7 +550,15 @@ export const useInfoKnowledgeStore = defineStore('infoKnowledge', () => {
     if (!key) return undefined
     let chat = findConversation(key, id)
     if (!chat) {
-      await ensureSources(true)
+      // Private-library deep links and freshly attached conversations may not
+      // be present in the directory snapshot yet. The detail API is keyed by
+      // the conversation id, so hydrate the directory best-effort and continue
+      // even if that refresh is temporarily unavailable.
+      try {
+        await ensureSources(true)
+      } catch {
+        // The detail request below is still authoritative for this route.
+      }
       chat = findConversation(key, id)
     }
     // The source directory intentionally contains group conversations only.
