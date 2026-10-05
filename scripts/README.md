@@ -24,6 +24,20 @@ scripts/start-platform.cmd
 Agent Knowledge Worker、Agent Task Worker 和 Nginx。首次运行会自动执行 `npm ci`，并用 `uv sync` 分别创建和同步
 RAG、WeChat Collector、Agent 的 `.venv`。
 
+## 同步 OpenFGA 删除权限模型
+
+删除组织消息需要 OpenFGA 模型包含 `organization#information_admin` 和
+`knowledge_item#moderator/delete`。如果 Core 的 `check-batch` 返回
+`AUTHZ_BACKEND_UNAVAILABLE`，而 OpenFGA `/healthz` 正常，通常是远端 store
+仍在使用旧模型。执行：
+
+```powershell
+python .\scripts\sync-openfga-model.py
+```
+
+脚本会基于 store 当前模型补充缺失的删除关系，创建新模型，并把新的
+`CORE_OPENFGA_MODEL_ID` 写回 `services\core\.env`。同步后重启 Core。
+
 其中 Agent 的三个进程是本项目的决策中枢：
 
 | 进程 | 作用 |
