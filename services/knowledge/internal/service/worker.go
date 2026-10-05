@@ -134,6 +134,9 @@ func (w *Worker) Tick(ctx context.Context) error {
 	if contactProfileErr := w.service.ProcessContactProfiles(ctx); contactProfileErr != nil && firstErr == nil {
 		firstErr = contactProfileErr
 	}
+	if purgeErr := w.service.PurgeDeletionRequests(ctx); purgeErr != nil && firstErr == nil {
+		firstErr = purgeErr
+	}
 	if permissionErr := w.service.ProcessPermissions(ctx); permissionErr != nil && firstErr == nil {
 		firstErr = permissionErr
 	}

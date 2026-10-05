@@ -3120,6 +3120,105 @@ func (s *MemoryStore) HideDeletionTargets(_ context.Context, requestID string) (
 	s.deletionRequests[requestID] = value
 	return changed, nil
 }
+func (s *MemoryStore) ListDueDeletionTargets(_ context.Context, now time.Time, limit int) ([]DeletionRequest, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+	out := make([]DeletionRequest, 0)
+	for _, value := range s.deletionRequests {
+		if value.Request.Status != "approved" && value.Request.Status != "executing" {
+			continue
+		}
+		if value.Request.PurgeAfter == nil || value.Request.PurgeAfter.After(now) {
+			continue
+		}
+		out = append(out, cloneDeletionRequest(value.Request))
+		if len(out) >= limit {
+			break
+		}
+	}
+	return out, nil
+}
+
+func (s *MemoryStore) AttachmentObjectRefs(_ context.Context, attachmentIDs []string) ([]AttachmentObjectRef, error) {
+	wanted := map[string]struct{}{}
+	for _, id := range attachmentIDs {
+		if id = strings.TrimSpace(id); id != "" {
+			wanted[id] = struct{}{}
+		}
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]AttachmentObjectRef, 0)
+	for _, attachment := range s.attachments {
+		if _, ok := wanted[attachment.ID]; !ok {
+			continue
+		}
+		out = append(out, AttachmentObjectRef{AttachmentID: attachment.ID, ObjectRef: attachment.ObjectRef, ExtractedOriginalRef: attachment.ExtractedOriginalRef, ExtractedDisplayRef: attachment.ExtractedDisplayRef})
+	}
+	return out, nil
+}
+
+func (s *MemoryStore) MarkDeletionObjectState(_ context.Context, targetID, state, lastError string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for requestID, value := range s.deletionRequests {
+		for index := range value.Request.Targets {
+			target := &value.Request.Targets[index]
+			if target.ID == targetID {
+				target.ObjectState, target.LastError, target.UpdatedAt = state, lastError, time.Now().UTC()
+				s.deletionRequests[requestID] = value
+				return nil
+			}
+		}
+	}
+	return apperror.New("deletion_target_not_found", "deletion target was not found", 404, false)
+}
+
+func (s *MemoryStore) MarkDeletionPurged(_ context.Context, requestID string, now time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	value, ok := s.deletionRequests[requestID]
+	if !ok {
+		return apperror.New("deletion_request_not_found", "deletion request was not found", 404, false)
+	}
+	for _, target := range value.Request.Targets {
+		if target.ResourceType == "message" {
+			for key, message := range s.messages {
+				if message.ID != target.ResourceID {
+					continue
+				}
+				message.LifecycleStatus = "purged"
+				message.Content = ""
+				message.ContentHash = ""
+				message.ContentPurgedAt = &now
+				s.messages[key] = message
+			}
+		}
+		if target.KnowledgeItemID != "" {
+			if item, exists := s.knowledgeItems[target.KnowledgeItemID]; exists {
+				item.LifecycleStatus = "purged"
+				item.ContentPurgedAt = &now
+				item.UpdatedAt = now
+				s.knowledgeItems[target.KnowledgeItemID] = item
+			}
+		}
+		for index := range value.Request.Targets {
+			if value.Request.Targets[index].ID == target.ID {
+				value.Request.Targets[index].ObjectState = "deleted"
+				value.Request.Targets[index].UpdatedAt = now
+			}
+		}
+	}
+	value.Request.Status = "completed"
+	value.Request.CompletedAt = &now
+	value.Request.UpdatedAt = now
+	s.deletionRequests[requestID] = value
+	return nil
+}
+
 func (s *MemoryStore) GetKnowledgeItem(_ context.Context, id string) (*domain.KnowledgeItem, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()

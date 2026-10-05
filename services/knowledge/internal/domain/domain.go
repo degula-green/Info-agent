@@ -643,6 +643,8 @@ type Attachment struct {
 	MIMEType              string        `json:"mime_type"`
 	SizeBytes             int64         `json:"size_bytes"`
 	ObjectRef             string        `json:"object_ref,omitempty"`
+	ExtractedOriginalRef  string        `json:"-" `
+	ExtractedDisplayRef   string        `json:"-" `
 	ContentHash           string        `json:"content_hash,omitempty"`
 	ContentVersion        int           `json:"content_version"`
 	ContentStatus         string        `json:"content_status"`

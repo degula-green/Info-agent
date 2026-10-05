@@ -3272,6 +3272,59 @@ func (s *Service) canReviewDeletion(ctx context.Context, userID, organizationID 
 	return len(decisions) == 1 && decisions[0].Allowed, nil
 }
 
+func (s *Service) PurgeDeletionRequests(ctx context.Context) error {
+	due, err := s.Repo.ListDueDeletionTargets(ctx, s.Now().UTC(), 50)
+	if err != nil {
+		return err
+	}
+	var firstErr error
+	for _, request := range due {
+		attachmentIDs := []string{}
+		for _, target := range request.Targets {
+			if target.ResourceType == "attachment" {
+				attachmentIDs = append(attachmentIDs, target.ResourceID)
+			}
+		}
+		refs, refErr := s.Repo.AttachmentObjectRefs(ctx, attachmentIDs)
+		if refErr != nil {
+			if firstErr == nil {
+				firstErr = refErr
+			}
+			continue
+		}
+		for _, ref := range refs {
+			for _, key := range []string{ref.ObjectRef, ref.ExtractedOriginalRef, ref.ExtractedDisplayRef} {
+				if strings.TrimSpace(key) == "" {
+					continue
+				}
+				if s.Objects == nil {
+					break
+				}
+				if err := s.Objects.Delete(ctx, key); err != nil {
+					_ = s.Repo.MarkDeletionObjectState(ctx, ref.AttachmentID, "failed", err.Error())
+					if firstErr == nil {
+						firstErr = err
+					}
+					continue
+				}
+			}
+		}
+		for _, target := range request.Targets {
+			if err := s.Repo.MarkDeletionObjectState(ctx, target.ID, "deleted", ""); err != nil && firstErr == nil {
+				firstErr = err
+			}
+		}
+		if err := s.Repo.MarkDeletionPurged(ctx, request.ID, s.Now().UTC()); err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		_ = s.Repo.RecordDeletionAudit(ctx, repository.DeletionAuditInput{DeletionRequestID: request.ID, Action: "deletion.purged"})
+	}
+	return firstErr
+}
+
 func (s *Service) GetDeletionRequest(ctx context.Context, userID, id string) (*repository.DeletionRequest, error) {
 	request, err := s.Repo.GetDeletionRequest(ctx, id)
 	if err != nil {

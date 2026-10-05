@@ -642,6 +642,13 @@ type DeletionRequest struct {
 	Targets            []DeletionTarget
 }
 
+type AttachmentObjectRef struct {
+	AttachmentID         string
+	ObjectRef            string
+	ExtractedOriginalRef string
+	ExtractedDisplayRef  string
+}
+
 type DeletionAuditInput struct {
 	DeletionRequestID string
 	ActorUserID       string
@@ -657,6 +664,10 @@ type Repository interface {
 	RecordDeletionAudit(ctx context.Context, input DeletionAuditInput) error
 	ReviewDeletionRequest(ctx context.Context, requestID, reviewerUserID, status, reason string, now time.Time) (*DeletionRequest, error)
 	HideDeletionTargets(ctx context.Context, requestID string) (int, error)
+	ListDueDeletionTargets(ctx context.Context, now time.Time, limit int) ([]DeletionRequest, error)
+	AttachmentObjectRefs(ctx context.Context, attachmentIDs []string) ([]AttachmentObjectRef, error)
+	MarkDeletionObjectState(ctx context.Context, targetID, state, lastError string) error
+	MarkDeletionPurged(ctx context.Context, requestID string, now time.Time) error
 
 	Close() error
 

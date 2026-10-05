@@ -3545,6 +3545,84 @@ func (s *PostgresStore) ReviewDeletionRequest(ctx context.Context, requestID, re
 	return s.GetDeletionRequest(ctx, requestID)
 }
 
+func (s *PostgresStore) ListDueDeletionTargets(ctx context.Context, now time.Time, limit int) ([]DeletionRequest, error) {
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+	rows, err := s.pool.Query(ctx, `SELECT id::text FROM knowledge.deletion_requests WHERE status IN ('approved','executing') AND purge_after IS NOT NULL AND purge_after<=$1 ORDER BY purge_after LIMIT $2`, now, limit)
+	if err != nil {
+		return nil, dbError(err)
+	}
+	defer rows.Close()
+	ids := []string{}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, dbError(err)
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, dbError(err)
+	}
+	out := make([]DeletionRequest, 0, len(ids))
+	for _, id := range ids {
+		value, err := s.GetDeletionRequest(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, *value)
+	}
+	return out, nil
+}
+
+func (s *PostgresStore) AttachmentObjectRefs(ctx context.Context, attachmentIDs []string) ([]AttachmentObjectRef, error) {
+	ids := uniqueSorted(attachmentIDs)
+	if len(ids) == 0 {
+		return []AttachmentObjectRef{}, nil
+	}
+	rows, err := s.pool.Query(ctx, `SELECT id::text,COALESCE(object_ref,''),COALESCE(extracted_original_ref,''),COALESCE(extracted_display_ref,'') FROM knowledge.attachments WHERE id=ANY($1::uuid[])`, ids)
+	if err != nil {
+		return nil, dbError(err)
+	}
+	defer rows.Close()
+	out := []AttachmentObjectRef{}
+	for rows.Next() {
+		var item AttachmentObjectRef
+		if err := rows.Scan(&item.AttachmentID, &item.ObjectRef, &item.ExtractedOriginalRef, &item.ExtractedDisplayRef); err != nil {
+			return nil, dbError(err)
+		}
+		out = append(out, item)
+	}
+	return out, dbError(rows.Err())
+}
+
+func (s *PostgresStore) MarkDeletionObjectState(ctx context.Context, targetID, state, lastError string) error {
+	_, err := s.pool.Exec(ctx, `UPDATE knowledge.deletion_targets SET object_state=$2,last_error=NULLIF($3,''),updated_at=now() WHERE id=$1`, targetID, state, lastError)
+	return dbError(err)
+}
+
+func (s *PostgresStore) MarkDeletionPurged(ctx context.Context, requestID string, now time.Time) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return dbError(err)
+	}
+	defer tx.Rollback(ctx)
+	if _, err = tx.Exec(ctx, `UPDATE knowledge.messages m SET lifecycle_status='purged',normalized_content='',normalized_content_ref=NULL,content_hash='',content_purged_at=$2 FROM knowledge.deletion_targets dt WHERE dt.deletion_request_id=$1 AND dt.resource_type='message' AND m.id=dt.resource_id`, requestID, now); err != nil {
+		return dbError(err)
+	}
+	if _, err = tx.Exec(ctx, `UPDATE knowledge.knowledge_items ki SET lifecycle_status='purged',content_ref='',original_content_ref=NULL,content_hash='',content_purged_at=$2,updated_at=$2 FROM knowledge.deletion_targets dt WHERE dt.deletion_request_id=$1 AND dt.knowledge_item_id=ki.id`, requestID, now); err != nil {
+		return dbError(err)
+	}
+	if _, err = tx.Exec(ctx, `UPDATE knowledge.deletion_targets SET object_state='deleted',updated_at=$2 WHERE deletion_request_id=$1`, requestID, now); err != nil {
+		return dbError(err)
+	}
+	if _, err = tx.Exec(ctx, `UPDATE knowledge.deletion_requests SET status='completed',completed_at=$2,updated_at=$2 WHERE id=$1`, requestID, now); err != nil {
+		return dbError(err)
+	}
+	return dbError(tx.Commit(ctx))
+}
+
 func (s *PostgresStore) HideDeletionTargets(ctx context.Context, requestID string) (int, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
