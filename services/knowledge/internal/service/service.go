@@ -2456,6 +2456,11 @@ func (s *Service) OpenAttachmentWithAction(ctx context.Context, userID, id, acti
 	if err != nil {
 		return nil, nil, err
 	}
+	if attachment.MessageID != "" {
+		if message, messageErr := s.Repo.GetKnowledgeItemByMessage(ctx, attachment.MessageID); messageErr == nil && message != nil && message.LifecycleStatus != "active" {
+			return nil, nil, apperror.New("knowledge_not_found", "attachment content is not available", 404, false)
+		}
+	}
 	if attachment.UploadDestination != "" {
 		if attachment.UploadDestination == "private_local_library" {
 			if attachment.UploadedByUserID != userID {

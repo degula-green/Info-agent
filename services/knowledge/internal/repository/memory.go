@@ -1942,6 +1942,9 @@ func (s *MemoryStore) ListContactMessages(_ context.Context, userID, organizatio
 	defer s.mu.RUnlock()
 	out := []domain.Message{}
 	for _, message := range s.messages {
+		if message.LifecycleStatus != "active" {
+			continue
+		}
 		if _, ok := allowed[message.SenderIdentityID]; !ok {
 			continue
 		}

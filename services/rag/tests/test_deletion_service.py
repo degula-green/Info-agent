@@ -101,5 +101,32 @@ class DeletionServiceTests(unittest.TestCase):
         self.assertEqual(published[0]["status"], "deleted")
         self.assertEqual(published[0]["knowledge_item_id"], "00000000-0000-0000-0000-000000000003")
 
+    def test_deleted_lifecycle_result_is_not_authorized(self) -> None:
+        from app.application.rag_service import RAGRetrievalService
+        from app.domain.rag import SearchRequest, SearchResult
+
+        class _Repository:
+            pass
+
+        class _Indexer:
+            pass
+
+        class _Authorization:
+            def check_batch(self, **kwargs):
+                return [True for _ in kwargs.get("checks", [])]
+
+        request = SearchRequest(
+            user_id="00000000-0000-0000-0000-000000000001",
+            scope_type="organization",
+            scope_id="00000000-0000-0000-0000-000000000002",
+            query="hello",
+        )
+        scope = type("_Scope", (), {"snapshot_id": None})()
+        active = SearchResult(chunk_id="a", content="active", score=1.0, source={"knowledge_item_id": "item-a", "resource_type": "message", "resource_id": "msg-a", "lifecycle_status": "active"})
+        deleted = SearchResult(chunk_id="d", content="deleted", score=1.0, source={"knowledge_item_id": "item-d", "resource_type": "message", "resource_id": "msg-d", "lifecycle_status": "deleted"})
+        service = RAGRetrievalService(repository=_Repository(), indexer=_Indexer(), embedding=object(), authorization=_Authorization())
+        allowed = service._authorize_results(request, [active, deleted], scope)
+        self.assertEqual([item.chunk_id for item in allowed], ["a"])
+
 if __name__ == "__main__":
     unittest.main()
