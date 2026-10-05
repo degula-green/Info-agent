@@ -3439,6 +3439,24 @@ func validDeletionStatus(status string) bool {
 		return false
 	}
 }
+func (s *Service) DeletionMetrics(ctx context.Context) (repository.DeletionMetrics, error) {
+	return s.Repo.DeletionMetrics(ctx, s.Now().UTC())
+}
+
+func (s *Service) DeletionAlerts(metrics repository.DeletionMetrics) []map[string]any {
+	alerts := []map[string]any{}
+	if metrics.Failed > 0 {
+		alerts = append(alerts, map[string]any{"code": "deletion_failed_total", "severity": "critical", "value": metrics.Failed})
+	}
+	if metrics.OldestPendingSeconds > 24*60*60 {
+		alerts = append(alerts, map[string]any{"code": "deletion_oldest_pending_seconds", "severity": "warning", "value": metrics.OldestPendingSeconds})
+	}
+	if metrics.StageStuckMaxSeconds > 60*60 {
+		alerts = append(alerts, map[string]any{"code": "deletion_stage_stuck_seconds", "severity": "warning", "value": metrics.StageStuckMaxSeconds})
+	}
+	return alerts
+}
+
 func (s *Service) GetKnowledgeOriginalByMessage(ctx context.Context, userID, messageID string) (*domain.KnowledgeContent, error) {
 	item, err := s.Repo.GetKnowledgeItemByMessage(ctx, strings.TrimSpace(messageID))
 	if err != nil {

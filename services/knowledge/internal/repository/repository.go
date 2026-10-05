@@ -678,6 +678,19 @@ type DeletionRequestFilter struct {
 	Limit           int
 	Offset          int
 }
+type DeletionMetrics struct {
+	Pending              int
+	Failed               int
+	OldestPendingSeconds float64
+	VisibilityLatencyAvg float64
+	VectorLatencyAvg     float64
+	ObjectLatencyAvg     float64
+	VisibilityLatencyP95 float64
+	VectorLatencyP95     float64
+	ObjectLatencyP95     float64
+	StageStuckMaxSeconds float64
+}
+
 type Repository interface {
 	CreateDeletionRequest(ctx context.Context, input DeletionRequestInput) (*DeletionRequest, error)
 	GetDeletionRequest(ctx context.Context, id string) (*DeletionRequest, error)
@@ -691,6 +704,7 @@ type Repository interface {
 	AttachmentObjectRefs(ctx context.Context, attachmentIDs []string) ([]AttachmentObjectRef, error)
 	MarkDeletionObjectState(ctx context.Context, targetID, state, lastError string) error
 	MarkDeletionPurged(ctx context.Context, requestID string, now time.Time) error
+	DeletionMetrics(ctx context.Context, now time.Time) (DeletionMetrics, error)
 
 	Close() error
 

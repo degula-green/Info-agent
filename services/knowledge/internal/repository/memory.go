@@ -3234,6 +3234,67 @@ func (s *MemoryStore) ListDueDeletionTargets(_ context.Context, now time.Time, l
 	return out, nil
 }
 
+func (s *MemoryStore) DeletionMetrics(_ context.Context, now time.Time) (DeletionMetrics, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	metrics := DeletionMetrics{}
+	visibility := []float64{}
+	vector := []float64{}
+	object := []float64{}
+	stuck := []float64{}
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	for _, value := range s.deletionRequests {
+		request := value.Request
+		if request.Status == "failed" {
+			metrics.Failed++
+		}
+		if request.Status == "pending" || request.Status == "approved" || request.Status == "executing" {
+			metrics.Pending++
+			age := now.Sub(request.RequestedAt).Seconds()
+			if age > metrics.OldestPendingSeconds {
+				metrics.OldestPendingSeconds = age
+			}
+			if metrics.StageStuckMaxSeconds < age {
+				metrics.StageStuckMaxSeconds = age
+			}
+			stuck = append(stuck, age)
+		}
+		for _, target := range request.Targets {
+			if target.VisibilityState == "hidden" && request.ExecutionStartedAt != nil {
+				visibility = append(visibility, target.UpdatedAt.Sub(*request.ExecutionStartedAt).Seconds())
+			}
+			if target.VectorState == "deleted" && request.ExecutionStartedAt != nil {
+				vector = append(vector, target.UpdatedAt.Sub(*request.ExecutionStartedAt).Seconds())
+			}
+			if target.ObjectState == "deleted" && request.ExecutionStartedAt != nil {
+				object = append(object, target.UpdatedAt.Sub(*request.ExecutionStartedAt).Seconds())
+			}
+			if target.LastError != "" {
+				metrics.Failed++
+			}
+		}
+	}
+	metrics.VisibilityLatencyAvg, metrics.VisibilityLatencyP95 = deletionLatency(visibility)
+	metrics.VectorLatencyAvg, metrics.VectorLatencyP95 = deletionLatency(vector)
+	metrics.ObjectLatencyAvg, metrics.ObjectLatencyP95 = deletionLatency(object)
+	_ = stuck
+	return metrics, nil
+}
+
+func deletionLatency(values []float64) (float64, float64) {
+	if len(values) == 0 {
+		return 0, 0
+	}
+	total := 0.0
+	for _, value := range values {
+		total += value
+	}
+	sort.Float64s(values)
+	index := int(float64(len(values)-1) * 0.95)
+	return total / float64(len(values)), values[index]
+}
 func (s *MemoryStore) AttachmentObjectRefs(_ context.Context, attachmentIDs []string) ([]AttachmentObjectRef, error) {
 	wanted := map[string]struct{}{}
 	for _, id := range attachmentIDs {

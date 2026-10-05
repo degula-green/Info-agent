@@ -3617,6 +3617,42 @@ func (s *PostgresStore) ListDueDeletionTargets(ctx context.Context, now time.Tim
 	return out, nil
 }
 
+func (s *PostgresStore) DeletionMetrics(ctx context.Context, now time.Time) (DeletionMetrics, error) {
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	var metrics DeletionMetrics
+	err := s.pool.QueryRow(ctx, `
+		WITH request_stats AS (
+			SELECT
+				COUNT(*) FILTER (WHERE status IN ('pending','approved','executing')) AS pending_count,
+				COUNT(*) FILTER (WHERE status='failed') AS failed_count,
+				COALESCE(EXTRACT(EPOCH FROM ($1 - MIN(requested_at) FILTER (WHERE status IN ('pending','approved','executing')))),0) AS oldest_pending,
+				COALESCE(EXTRACT(EPOCH FROM ($1 - MIN(COALESCE(execution_started_at,requested_at)) FILTER (WHERE status IN ('pending','approved','executing')))),0) AS stuck_max
+			FROM knowledge.deletion_requests
+		), target_stats AS (
+			SELECT
+				COUNT(*) FILTER (WHERE last_error IS NOT NULL AND last_error<>'') AS failed_target_count,
+				COALESCE(AVG(EXTRACT(EPOCH FROM (updated_at - COALESCE(dr.execution_started_at,dr.requested_at)))) FILTER (WHERE dt.visibility_state='hidden'),0) AS visibility_avg,
+				COALESCE(percentile_cont(0.95) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM (dt.updated_at - COALESCE(dr.execution_started_at,dr.requested_at)))) FILTER (WHERE dt.visibility_state='hidden'),0) AS visibility_p95,
+				COALESCE(AVG(EXTRACT(EPOCH FROM (dt.updated_at - COALESCE(dr.execution_started_at,dr.requested_at)))) FILTER (WHERE dt.vector_state='deleted'),0) AS vector_avg,
+				COALESCE(percentile_cont(0.95) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM (dt.updated_at - COALESCE(dr.execution_started_at,dr.requested_at)))) FILTER (WHERE dt.vector_state='deleted'),0) AS vector_p95,
+				COALESCE(AVG(EXTRACT(EPOCH FROM (dt.updated_at - COALESCE(dr.execution_started_at,dr.requested_at)))) FILTER (WHERE dt.object_state='deleted'),0) AS object_avg,
+				COALESCE(percentile_cont(0.95) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM (dt.updated_at - COALESCE(dr.execution_started_at,dr.requested_at)))) FILTER (WHERE dt.object_state='deleted'),0) AS object_p95
+			FROM knowledge.deletion_targets dt
+			JOIN knowledge.deletion_requests dr ON dr.id=dt.deletion_request_id
+		)
+		SELECT rs.pending_count,rs.failed_count+ts.failed_target_count,rs.oldest_pending,ts.visibility_avg,ts.vector_avg,ts.object_avg,ts.visibility_p95,ts.vector_p95,ts.object_p95,rs.stuck_max
+		FROM request_stats rs CROSS JOIN target_stats ts`, now).Scan(
+		&metrics.Pending, &metrics.Failed, &metrics.OldestPendingSeconds,
+		&metrics.VisibilityLatencyAvg, &metrics.VectorLatencyAvg, &metrics.ObjectLatencyAvg,
+		&metrics.VisibilityLatencyP95, &metrics.VectorLatencyP95, &metrics.ObjectLatencyP95, &metrics.StageStuckMaxSeconds,
+	)
+	if err != nil {
+		return DeletionMetrics{}, dbError(err)
+	}
+	return metrics, nil
+}
 func (s *PostgresStore) AttachmentObjectRefs(ctx context.Context, attachmentIDs []string) ([]AttachmentObjectRef, error) {
 	ids := uniqueSorted(attachmentIDs)
 	if len(ids) == 0 {

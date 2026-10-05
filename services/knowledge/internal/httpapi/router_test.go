@@ -45,6 +45,22 @@ func TestHealth(t *testing.T) {
 	}
 }
 
+func TestDeletionMetricsRequireInternalToken(t *testing.T) {
+	app := newApp(config.Config{AllowDevAuth: true, DevUserID: "u1", InternalServiceToken: "internal-token"})
+	unauthorized := httptest.NewRecorder()
+	NewRouterWithApp(app).ServeHTTP(unauthorized, httptest.NewRequest(http.MethodGet, "/api/knowledge/v1/internal/metrics", nil))
+	if unauthorized.Code != http.StatusUnauthorized {
+		t.Fatalf("metrics endpoint without internal token: %d %s", unauthorized.Code, unauthorized.Body.String())
+	}
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/api/knowledge/v1/internal/metrics", nil)
+	request.Header.Set("Authorization", "Bearer internal-token")
+	NewRouterWithApp(app).ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), "deletion_pending_total") || !strings.Contains(recorder.Body.String(), "deletion_oldest_pending_seconds") {
+		t.Fatalf("unexpected deletion metrics response: %d %s", recorder.Code, recorder.Body.String())
+	}
+}
+
 func TestLocalUploadLifecycleAndIdempotency(t *testing.T) {
 	cfg := config.Config{AllowDevAuth: true, DevUserID: "u1", DevOrganizationID: "org-1", MaxAttachmentBytes: 1024}
 	app := newApp(cfg)

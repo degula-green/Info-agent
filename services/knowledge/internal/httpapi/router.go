@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"mime"
@@ -1274,6 +1275,15 @@ func registerInternalRoutes(r *gin.Engine, app *App, prefix string) {
 		c.JSON(http.StatusOK, out)
 	})
 	g.Use(internalMiddleware(app))
+	g.GET("/metrics", func(c *gin.Context) {
+		metrics, err := app.Service.DeletionMetrics(c)
+		if err != nil {
+			writeError(c, err)
+			return
+		}
+		c.Header("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+		c.String(http.StatusOK, renderDeletionMetrics(metrics))
+	})
 	g.GET("/knowledge/access-review-eligibility", func(c *gin.Context) {
 		if !serviceAuthorized(c) || !strings.EqualFold(strings.TrimSpace(c.GetHeader("X-Caller-Service")), "core") {
 			writeError(c, apperror.Clone(apperror.ErrForbidden))
@@ -2080,6 +2090,9 @@ func internalMiddleware(app *App) gin.HandlerFunc {
 }
 
 func serviceTokenPathAllowed(path string) bool {
+	if strings.HasSuffix(path, "/internal/metrics") {
+		return true
+	}
 	if strings.Contains(path, "/internal/knowledge/") || strings.Contains(path, "/internal/attachments/") || strings.Contains(path, "/internal/agent/") {
 		return true
 	}
@@ -2133,6 +2146,40 @@ func deletionPaging(c *gin.Context) (int, int) {
 		offset = 0
 	}
 	return limit, offset
+}
+
+func renderDeletionMetrics(metrics repository.DeletionMetrics) string {
+	return fmt.Sprintf(
+		"# HELP deletion_pending_total Number of deletion requests waiting for execution.\n"+
+			"# TYPE deletion_pending_total gauge\n"+
+			"deletion_pending_total %d\n"+
+			"# HELP deletion_failed_total Number of deletion requests or targets in a failed state.\n"+
+			"# TYPE deletion_failed_total gauge\n"+
+			"deletion_failed_total %d\n"+
+			"# HELP deletion_visibility_latency_seconds Latency from execution start to hidden visibility.\n"+
+			"# TYPE deletion_visibility_latency_seconds summary\n"+
+			"deletion_visibility_latency_seconds{quantile=\"avg\"} %g\n"+
+			"deletion_visibility_latency_seconds{quantile=\"0.95\"} %g\n"+
+			"# HELP deletion_vector_latency_seconds Latency from execution start to vector deletion.\n"+
+			"# TYPE deletion_vector_latency_seconds summary\n"+
+			"deletion_vector_latency_seconds{quantile=\"avg\"} %g\n"+
+			"deletion_vector_latency_seconds{quantile=\"0.95\"} %g\n"+
+			"# HELP deletion_object_latency_seconds Latency from execution start to object deletion.\n"+
+			"# TYPE deletion_object_latency_seconds summary\n"+
+			"deletion_object_latency_seconds{quantile=\"avg\"} %g\n"+
+			"deletion_object_latency_seconds{quantile=\"0.95\"} %g\n"+
+			"# HELP deletion_oldest_pending_seconds Age of the oldest pending deletion request.\n"+
+			"# TYPE deletion_oldest_pending_seconds gauge\n"+
+			"deletion_oldest_pending_seconds %g\n"+
+			"# HELP deletion_stage_stuck_seconds Longest time a request has remained in the same execution stage.\n"+
+			"# TYPE deletion_stage_stuck_seconds gauge\n"+
+			"deletion_stage_stuck_seconds %g\n",
+		metrics.Pending, metrics.Failed,
+		metrics.VisibilityLatencyAvg, metrics.VisibilityLatencyP95,
+		metrics.VectorLatencyAvg, metrics.VectorLatencyP95,
+		metrics.ObjectLatencyAvg, metrics.ObjectLatencyP95,
+		metrics.OldestPendingSeconds, metrics.StageStuckMaxSeconds,
+	)
 }
 
 func principal(c *gin.Context) *auth.Principal {
