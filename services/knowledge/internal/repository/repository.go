@@ -655,6 +655,7 @@ type Repository interface {
 	GetDeletionRequest(ctx context.Context, id string) (*DeletionRequest, error)
 	ListDeletionRequests(ctx context.Context, userID, status string, limit int) ([]DeletionRequest, error)
 	RecordDeletionAudit(ctx context.Context, input DeletionAuditInput) error
+	ReviewDeletionRequest(ctx context.Context, requestID, reviewerUserID, status, reason string, now time.Time) (*DeletionRequest, error)
 	HideDeletionTargets(ctx context.Context, requestID string) (int, error)
 
 	Close() error

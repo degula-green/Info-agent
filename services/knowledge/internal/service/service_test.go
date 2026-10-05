@@ -660,6 +660,76 @@ func TestDeletedMessageCannotBeRevivedByCollectorReplay(t *testing.T) {
 		t.Fatalf("replay revived deleted message: %+v", replayed.Message)
 	}
 }
+func TestDeletionApprovalHidesPendingMessage(t *testing.T) {
+	ctx := context.Background()
+	fixture := newPipelineFixture(t, domain.PlatformWechat)
+	service, repo := fixture.service, fixture.repo
+	ingested, err := repo.IngestMessage(ctx, pipelineInput(fixture, "approve-delete-message", "text", "approve delete"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request, err := service.CreateDeletionRequest(ctx, "owner", "org-1", repository.DeletionRequestInput{
+		ScopeType: "message", ScopeID: ingested.Message.ID, Reason: "approval test", IdempotencyKey: "approve-delete-1", Status: "pending",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if request.Status != "pending" {
+		t.Fatalf("request status = %s, want pending", request.Status)
+	}
+	before, err := repo.GetKnowledgeItemByMessage(ctx, ingested.Message.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if before.LifecycleStatus != "active" {
+		t.Fatalf("pending request hid content: %+v", before)
+	}
+	approved, err := service.ReviewDeletionRequest(ctx, "owner", "org-1", request.ID, "approved", "ok")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if approved.Status != "approved" {
+		t.Fatalf("approved status = %s", approved.Status)
+	}
+	after, err := repo.GetKnowledgeItemByMessage(ctx, ingested.Message.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.LifecycleStatus != "deleting" {
+		t.Fatalf("approved request did not hide content: %+v", after)
+	}
+}
+
+func TestDeletionRejectionKeepsPendingMessageVisible(t *testing.T) {
+	ctx := context.Background()
+	fixture := newPipelineFixture(t, domain.PlatformWechat)
+	service, repo := fixture.service, fixture.repo
+	ingested, err := repo.IngestMessage(ctx, pipelineInput(fixture, "reject-delete-message", "text", "reject delete"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request, err := service.CreateDeletionRequest(ctx, "owner", "org-1", repository.DeletionRequestInput{
+		ScopeType: "message", ScopeID: ingested.Message.ID, Reason: "reject test", IdempotencyKey: "reject-delete-1", Status: "pending",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rejected, err := service.ReviewDeletionRequest(ctx, "owner", "org-1", request.ID, "rejected", "no")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rejected.Status != "rejected" {
+		t.Fatalf("rejected status = %s", rejected.Status)
+	}
+	after, err := repo.GetKnowledgeItemByMessage(ctx, ingested.Message.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.LifecycleStatus != "active" {
+		t.Fatalf("rejected request hid content: %+v", after)
+	}
+}
+
 func TestPairAgentCreatesMappedWechatIdentity(t *testing.T) {
 	service, repo, _ := newServiceForTest(nil)
 	pairing, err := service.CreatePairingForWXID(context.Background(), "u1", "wxid-a", "org-1")

@@ -448,6 +448,32 @@ func registerUserRoutes(r *gin.Engine, app *App, prefix string) {
 		}
 		c.JSON(http.StatusOK, publicDeletionRequest(*out))
 	})
+	g.POST("/deletion-requests/:request_id/approve", func(c *gin.Context) {
+		p := principal(c)
+		var body struct {
+			Reason string `json:"reason"`
+		}
+		_ = c.ShouldBindJSON(&body)
+		out, err := app.Service.ReviewDeletionRequest(c, p.UserID, p.OrganizationID, c.Param("request_id"), "approved", body.Reason)
+		if err != nil {
+			writeError(c, err)
+			return
+		}
+		c.JSON(http.StatusOK, publicDeletionRequest(*out))
+	})
+	g.POST("/deletion-requests/:request_id/reject", func(c *gin.Context) {
+		p := principal(c)
+		var body struct {
+			Reason string `json:"reason"`
+		}
+		_ = c.ShouldBindJSON(&body)
+		out, err := app.Service.ReviewDeletionRequest(c, p.UserID, p.OrganizationID, c.Param("request_id"), "rejected", body.Reason)
+		if err != nil {
+			writeError(c, err)
+			return
+		}
+		c.JSON(http.StatusOK, publicDeletionRequest(*out))
+	})
 	g.GET("/knowledge/items/:knowledge_item_id/original", func(c *gin.Context) {
 		p := principal(c)
 		out, err := app.Service.GetKnowledgeOriginal(c, p.UserID, c.Param("knowledge_item_id"))

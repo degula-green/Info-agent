@@ -3487,6 +3487,54 @@ func (s *PostgresStore) RecordDeletionAudit(ctx context.Context, input DeletionA
 	return dbError(err)
 }
 
+func (s *PostgresStore) ReviewDeletionRequest(ctx context.Context, requestID, reviewerUserID, status, reason string, now time.Time) (*DeletionRequest, error) {
+	requestID = strings.TrimSpace(requestID)
+	reviewerUserID = strings.TrimSpace(reviewerUserID)
+	status = strings.TrimSpace(status)
+	if requestID == "" || reviewerUserID == "" {
+		return nil, apperror.New("invalid_request", "request and reviewer are required", 400, false)
+	}
+	if status != "approved" && status != "rejected" {
+		return nil, apperror.New("invalid_request", "status must be approved or rejected", 400, false)
+	}
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, dbError(err)
+	}
+	defer tx.Rollback(ctx)
+	var currentStatus string
+	err = tx.QueryRow(ctx, "SELECT status FROM knowledge.deletion_requests WHERE id=$1 FOR UPDATE", requestID).Scan(&currentStatus)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, apperror.New("deletion_request_not_found", "deletion request was not found", 404, false)
+	}
+	if err != nil {
+		return nil, dbError(err)
+	}
+	if currentStatus == "rejected" || currentStatus == "completed" || (currentStatus == "approved" && status == "approved") {
+		if err = tx.Commit(ctx); err != nil {
+			return nil, dbError(err)
+		}
+		return s.GetDeletionRequest(ctx, requestID)
+	}
+	if currentStatus != "pending" && currentStatus != "approved" {
+		return nil, apperror.New("deletion_request_not_pending", "deletion request is not pending", 409, false)
+	}
+	if _, err = tx.Exec(ctx, "UPDATE knowledge.deletion_requests SET status=$2,reviewer_user_id=NULLIF($3,'')::uuid,reviewed_at=$4,execution_started_at=CASE WHEN $2='approved' THEN COALESCE(execution_started_at,$4) ELSE execution_started_at END,updated_at=$4,last_error=NULL WHERE id=$1", requestID, status, reviewerUserID, now); err != nil {
+		return nil, dbError(err)
+	}
+	detail, _ := json.Marshal(map[string]any{"status": status, "reason": strings.TrimSpace(reason)})
+	if _, err = tx.Exec(ctx, "INSERT INTO knowledge.deletion_audit_logs (deletion_request_id,actor_user_id,action,detail) VALUES ($1,NULLIF($2,'')::uuid,$3,$4::jsonb)", requestID, reviewerUserID, "deletion."+status, string(detail)); err != nil {
+		return nil, dbError(err)
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return nil, dbError(err)
+	}
+	return s.GetDeletionRequest(ctx, requestID)
+}
+
 func (s *PostgresStore) HideDeletionTargets(ctx context.Context, requestID string) (int, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {

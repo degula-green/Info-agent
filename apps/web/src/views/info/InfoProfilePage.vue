@@ -199,7 +199,7 @@ import { oauthCallbackNotice } from '@/knowledge-mapping'
 import { downloadAvatar, getCurrentUser, updateCurrentUser, uploadAvatar as uploadCoreAvatar } from '@/api/core-auth'
 import { acceptOrganizationInvitation, approveAccessRequest, createOrganization, getCurrentOrganization, listAccessRequests, rejectAccessRequest, type CoreAccessRequest, type CoreOrganizationResponse } from '@/api/core-organization'
 import { CoreAuthError } from '@/api/core-auth'
-import { approvePrivateAccessRequest, createWechatPairing, getWechatPairingStatus, listPrivateAccessRequests, rejectPrivateAccessRequest, type PrivateAccessRequestDTO } from '@/api/info-knowledge'
+import { approveDeletionRequest, approvePrivateAccessRequest, createWechatPairing, getWechatPairingStatus, listDeletionRequests, listPrivateAccessRequests, rejectDeletionRequest, rejectPrivateAccessRequest, type DeletionRequestDTO, type PrivateAccessRequestDTO } from '@/api/info-knowledge'
 import { listLocalWechatAccounts, pairLocalWechatAccount, type LocalWechatAccount } from '@/api/wechat-local-agent'
 
 const store = useInfoMockStore()
@@ -223,7 +223,7 @@ const organization = ref<CoreOrganizationResponse | null>(null)
 const accessScope = ref<'mine' | 'inbox'>(route.query.tab === 'permissions' ? 'inbox' : 'mine')
 type UnifiedAccessRequest = {
   id: string
-  source: 'core' | 'private'
+  source: 'core' | 'private' | 'deletion'
   title: string
   subtitle: string
   excerpt: string
@@ -231,7 +231,7 @@ type UnifiedAccessRequest = {
   status: string
   created_at: string
   contextAvailable: boolean
-  raw: CoreAccessRequest | PrivateAccessRequestDTO
+  raw: CoreAccessRequest | PrivateAccessRequestDTO | DeletionRequestDTO
 }
 const accessRequests = ref<UnifiedAccessRequest[]>([])
 const accessLoading = ref(false)
@@ -317,17 +317,32 @@ async function loadAccessRequests() {
   accessLoading.value = true
   try {
     const organizationID = organization.value?.organization.id || ''
-    const [privateItems, coreItems] = await Promise.all([
+    const [privateItems, coreItems, deletionItems] = await Promise.all([
       listPrivateAccessRequests(accessScope.value).catch(() => [] as PrivateAccessRequestDTO[]),
       organizationID
         ? listAccessRequests(accessScope.value === 'mine' ? 'mine' : 'review', organizationID)
             .then((result) => result.items || [])
             .catch(() => [] as CoreAccessRequest[])
         : Promise.resolve([] as CoreAccessRequest[]),
+      accessScope.value === 'inbox'
+        ? listDeletionRequests('pending').catch(() => [])
+        : Promise.resolve([]),
     ])
     const unified = [
       ...privateItems.map(unifiedPrivateAccessRequest),
       ...coreItems.map(unifiedCoreAccessRequest),
+      ...deletionItems.filter((item) => item.status === 'pending').map((item) => ({
+        id: item.id,
+        source: 'deletion' as const,
+        title: '删除组织消息',
+        subtitle: item.scope_type === 'message' ? '消息删除申请' : item.scope_type,
+        excerpt: item.reason,
+        reason: item.reason,
+        status: item.status,
+        created_at: item.created_at,
+        contextAvailable: false,
+        raw: item,
+      })),
     ].sort((left, right) => Date.parse(right.created_at) - Date.parse(left.created_at))
     if (sequence === accessRequestSequence) accessRequests.value = unified
   } catch (cause) {
@@ -342,6 +357,9 @@ async function reviewAccess(request: UnifiedAccessRequest, action: 'approve' | '
     if (request.source === 'core') {
       if (action === 'approve') await approveAccessRequest(request.id)
       else await rejectAccessRequest(request.id)
+    } else if (request.source === 'deletion') {
+      if (action === 'approve') await approveDeletionRequest(request.id)
+      else await rejectDeletionRequest(request.id)
     } else if (action === 'approve') {
       await approvePrivateAccessRequest(request.id)
     } else {

@@ -3010,6 +3010,50 @@ func (s *MemoryStore) RecordDeletionAudit(_ context.Context, input DeletionAudit
 	return nil
 }
 
+func (s *MemoryStore) ReviewDeletionRequest(_ context.Context, requestID, reviewerUserID, status, reason string, now time.Time) (*DeletionRequest, error) {
+	requestID = strings.TrimSpace(requestID)
+	reviewerUserID = strings.TrimSpace(reviewerUserID)
+	status = strings.TrimSpace(status)
+	if requestID == "" || reviewerUserID == "" {
+		return nil, apperror.New("invalid_request", "request and reviewer are required", 400, false)
+	}
+	if status != "approved" && status != "rejected" {
+		return nil, apperror.New("invalid_request", "status must be approved or rejected", 400, false)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	value, ok := s.deletionRequests[requestID]
+	if !ok {
+		return nil, apperror.New("deletion_request_not_found", "deletion request was not found", 404, false)
+	}
+	if value.Request.Status == "rejected" || value.Request.Status == "completed" {
+		copy := cloneDeletionRequest(value.Request)
+		return &copy, nil
+	}
+	if value.Request.Status != "pending" && value.Request.Status != "approved" {
+		return nil, apperror.New("deletion_request_not_pending", "deletion request is not pending", 409, false)
+	}
+	if value.Request.Status == "approved" && status == "approved" {
+		copy := cloneDeletionRequest(value.Request)
+		return &copy, nil
+	}
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	value.Request.ReviewerUserID = reviewerUserID
+	value.Request.ReviewedAt = &now
+	value.Request.UpdatedAt = now
+	if status == "rejected" {
+		value.Request.Status = "rejected"
+	} else {
+		value.Request.Status = "approved"
+		value.Request.ExecutionStartedAt = &now
+	}
+	s.deletionRequests[requestID] = value
+	copy := cloneDeletionRequest(value.Request)
+	return &copy, nil
+}
+
 func (s *MemoryStore) HideDeletionTargets(_ context.Context, requestID string) (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

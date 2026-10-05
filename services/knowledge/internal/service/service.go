@@ -3196,6 +3196,72 @@ func (s *Service) canDeleteKnowledge(ctx context.Context, userID string, item *d
 	return len(decisions) == 1 && decisions[0].Allowed, nil
 }
 
+func (s *Service) ReviewDeletionRequest(ctx context.Context, userID, organizationID, requestID, status, reason string) (*repository.DeletionRequest, error) {
+	userID = strings.TrimSpace(userID)
+	requestID = strings.TrimSpace(requestID)
+	status = strings.TrimSpace(status)
+	if userID == "" || requestID == "" {
+		return nil, apperror.New("invalid_request", "user and request are required", 400, false)
+	}
+	if status != "approved" && status != "rejected" {
+		return nil, apperror.New("invalid_request", "status must be approved or rejected", 400, false)
+	}
+	request, err := s.Repo.GetDeletionRequest(ctx, requestID)
+	if err != nil {
+		return nil, err
+	}
+	if request.Status == "pending" {
+		allowed, checkErr := s.canReviewDeletion(ctx, userID, organizationID, request)
+		if checkErr != nil {
+			return nil, checkErr
+		}
+		if !allowed {
+			return nil, apperror.Clone(apperror.ErrForbidden)
+		}
+	} else if request.RequesterUserID != userID && request.ReviewerUserID != userID {
+		return nil, apperror.Clone(apperror.ErrForbidden)
+	}
+	reviewed, err := s.Repo.ReviewDeletionRequest(ctx, requestID, userID, status, reason, s.Now().UTC())
+	if err != nil {
+		return nil, err
+	}
+	if status == "approved" && reviewed.Status == "approved" {
+		if _, err := s.Repo.HideDeletionTargets(ctx, requestID); err != nil {
+			return nil, err
+		}
+		if err := s.Repo.RecordDeletionAudit(ctx, repository.DeletionAuditInput{
+			DeletionRequestID: requestID, ActorUserID: userID, Action: "deletion.hidden",
+			Detail: map[string]any{"approved": true},
+		}); err != nil {
+			return nil, err
+		}
+	}
+	return s.Repo.GetDeletionRequest(ctx, requestID)
+}
+
+func (s *Service) canReviewDeletion(ctx context.Context, userID, organizationID string, request *repository.DeletionRequest) (bool, error) {
+	if request == nil {
+		return false, nil
+	}
+	organizationID = strings.TrimSpace(organizationID)
+	if organizationID == "" {
+		organizationID = strings.TrimSpace(request.OrganizationID)
+	}
+	if organizationID == "" {
+		return false, nil
+	}
+	if s.Core == nil {
+		return true, nil
+	}
+	decisions, err := s.Core.CheckBatch(ctx, userID, organizationID, []coreclient.AuthorizationCheck{{
+		ResourceType: "knowledge_item", ResourcePart: "delete", ResourceID: request.ScopeID, Action: "delete",
+	}})
+	if err != nil {
+		return false, err
+	}
+	return len(decisions) == 1 && decisions[0].Allowed, nil
+}
+
 func (s *Service) GetDeletionRequest(ctx context.Context, userID, id string) (*repository.DeletionRequest, error) {
 	request, err := s.Repo.GetDeletionRequest(ctx, id)
 	if err != nil {

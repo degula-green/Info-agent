@@ -443,6 +443,20 @@ export async function createMessageDeletionRequest(messageID: string, reason: st
   })
 }
 
+export async function approveDeletionRequest(requestID: string, reason = '') {
+  return knowledgeRequest<DeletionRequestDTO>(`/deletion-requests/${encodeURIComponent(requestID)}/approve`, {
+    method: 'POST',
+    body: JSON.stringify({ reason }),
+  })
+}
+
+export async function rejectDeletionRequest(requestID: string, reason = '') {
+  return knowledgeRequest<DeletionRequestDTO>(`/deletion-requests/${encodeURIComponent(requestID)}/reject`, {
+    method: 'POST',
+    body: JSON.stringify({ reason }),
+  })
+}
+
 export async function getDeletionRequest(requestID: string) {
   return knowledgeRequest<DeletionRequestDTO>(`/deletion-requests/${encodeURIComponent(requestID)}`)
 }
