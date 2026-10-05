@@ -3254,6 +3254,23 @@ func (s *Service) ReviewDeletionRequest(ctx context.Context, userID, organizatio
 	return s.Repo.GetDeletionRequest(ctx, requestID)
 }
 
+func (s *Service) canGovernDeletions(ctx context.Context, userID, organizationID string) (bool, error) {
+	userID, organizationID = strings.TrimSpace(userID), strings.TrimSpace(organizationID)
+	if userID == "" || organizationID == "" {
+		return false, nil
+	}
+	if s.Core == nil {
+		return true, nil
+	}
+	decisions, err := s.Core.CheckBatch(ctx, userID, organizationID, []coreclient.AuthorizationCheck{{
+		ResourceType: "organization", ResourcePart: "content_governance", ResourceID: organizationID, Action: "view",
+	}})
+	if err != nil {
+		return false, err
+	}
+	return len(decisions) == 1 && decisions[0].Allowed, nil
+}
+
 func (s *Service) canReviewDeletion(ctx context.Context, userID, organizationID string, request *repository.DeletionRequest) (bool, error) {
 	if request == nil {
 		return false, nil
@@ -3330,19 +3347,97 @@ func (s *Service) PurgeDeletionRequests(ctx context.Context) error {
 	return firstErr
 }
 
-func (s *Service) GetDeletionRequest(ctx context.Context, userID, id string) (*repository.DeletionRequest, error) {
+func (s *Service) GetDeletionRequest(ctx context.Context, userID, organizationID, id string) (*repository.DeletionRequest, error) {
+	userID = strings.TrimSpace(userID)
 	request, err := s.Repo.GetDeletionRequest(ctx, id)
 	if err != nil {
 		return nil, err
 	}
-	if request.RequesterUserID != strings.TrimSpace(userID) {
+	if request.RequesterUserID == userID || request.ReviewerUserID == userID {
+		return request, nil
+	}
+	allowed, checkErr := s.canReviewDeletion(ctx, userID, organizationID, request)
+	if checkErr != nil {
+		return nil, checkErr
+	}
+	if !allowed {
 		return nil, apperror.Clone(apperror.ErrForbidden)
 	}
 	return request, nil
 }
 
-func (s *Service) ListDeletionRequests(ctx context.Context, userID, status string) ([]repository.DeletionRequest, error) {
-	return s.Repo.ListDeletionRequests(ctx, strings.TrimSpace(userID), strings.TrimSpace(status), 50)
+func (s *Service) ListDeletionRequests(ctx context.Context, userID, organizationID, status, scopeID string) ([]repository.DeletionRequest, error) {
+	return s.ListDeletionRequestPage(ctx, userID, organizationID, repository.DeletionRequestFilter{Status: status, ScopeID: scopeID, Limit: 50})
+}
+
+func (s *Service) ListDeletionRequestPage(ctx context.Context, userID, organizationID string, filter repository.DeletionRequestFilter) ([]repository.DeletionRequest, error) {
+	userID, organizationID = strings.TrimSpace(userID), strings.TrimSpace(organizationID)
+	filter.Status = strings.TrimSpace(filter.Status)
+	filter.ScopeID = strings.TrimSpace(filter.ScopeID)
+	if filter.Status != "" && !validDeletionStatus(filter.Status) {
+		return nil, apperror.New("invalid_deletion_status", "deletion status is invalid", 400, false)
+	}
+	if organizationID != "" {
+		allowed, err := s.canGovernDeletions(ctx, userID, organizationID)
+		if err != nil {
+			return nil, err
+		}
+		if allowed {
+			filter.OrganizationID = organizationID
+		} else {
+			filter.RequesterUserID = userID
+		}
+	} else {
+		filter.RequesterUserID = userID
+	}
+	return s.Repo.ListDeletionRequests(ctx, filter)
+}
+
+func (s *Service) ListDeletionAudit(ctx context.Context, userID, organizationID, requestID string) ([]repository.DeletionAudit, error) {
+	request, err := s.Repo.GetDeletionRequest(ctx, strings.TrimSpace(requestID))
+	if err != nil {
+		return nil, err
+	}
+	allowed, checkErr := s.canReviewDeletion(ctx, userID, organizationID, request)
+	if checkErr != nil {
+		return nil, checkErr
+	}
+	if !allowed && request.RequesterUserID != strings.TrimSpace(userID) {
+		return nil, apperror.Clone(apperror.ErrForbidden)
+	}
+	return s.Repo.ListDeletionAudit(ctx, request.ID, 200)
+}
+
+func (s *Service) RetryDeletionRequest(ctx context.Context, userID, organizationID, requestID string) (*repository.DeletionRequest, error) {
+	request, err := s.Repo.GetDeletionRequest(ctx, strings.TrimSpace(requestID))
+	if err != nil {
+		return nil, err
+	}
+	allowed, checkErr := s.canReviewDeletion(ctx, userID, organizationID, request)
+	if checkErr != nil {
+		return nil, checkErr
+	}
+	if !allowed {
+		return nil, apperror.Clone(apperror.ErrForbidden)
+	}
+	retried, err := s.Repo.RetryDeletionRequest(ctx, request.ID, s.Now().UTC())
+	if err != nil {
+		return nil, err
+	}
+	_ = s.Repo.RecordDeletionAudit(ctx, repository.DeletionAuditInput{
+		DeletionRequestID: request.ID, ActorUserID: strings.TrimSpace(userID), Action: "deletion.retry_requested",
+		Detail: map[string]any{"targets": retried},
+	})
+	return s.Repo.GetDeletionRequest(ctx, request.ID)
+}
+
+func validDeletionStatus(status string) bool {
+	switch status {
+	case "pending", "approved", "rejected", "executing", "completed", "failed":
+		return true
+	default:
+		return false
+	}
 }
 func (s *Service) GetKnowledgeOriginalByMessage(ctx context.Context, userID, messageID string) (*domain.KnowledgeContent, error) {
 	item, err := s.Repo.GetKnowledgeItemByMessage(ctx, strings.TrimSpace(messageID))
@@ -3384,8 +3479,8 @@ func (s *Service) ApplyRAGResult(ctx context.Context, id string, input repositor
 	if _, err := uuid.Parse(strings.TrimSpace(id)); err != nil {
 		return nil, apperror.New("invalid_rag_result", "knowledge_item_id must be a UUID", 400, false)
 	}
-	if input.Status != "processing" && input.Status != "ready" && input.Status != "metadata_only" && input.Status != "failed" {
-		return nil, apperror.New("invalid_rag_status", "status must be processing, ready, metadata_only, or failed", 400, false)
+	if input.Status != "processing" && input.Status != "ready" && input.Status != "metadata_only" && input.Status != "failed" && input.Status != "deleted" {
+		return nil, apperror.New("invalid_rag_status", "status must be processing, ready, metadata_only, failed, or deleted", 400, false)
 	}
 	if strings.TrimSpace(input.SourceEventID) == "" || strings.TrimSpace(input.RAGJobID) == "" {
 		return nil, apperror.New("invalid_rag_result", "source_event_id and rag_job_id are required", 400, false)

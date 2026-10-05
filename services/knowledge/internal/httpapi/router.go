@@ -428,7 +428,10 @@ func registerUserRoutes(r *gin.Engine, app *App, prefix string) {
 	})
 	g.GET("/deletion-requests", func(c *gin.Context) {
 		p := principal(c)
-		out, err := app.Service.ListDeletionRequests(c, p.UserID, c.Query("status"))
+		limit, offset := deletionPaging(c)
+		out, err := app.Service.ListDeletionRequestPage(c, p.UserID, p.OrganizationID, repository.DeletionRequestFilter{
+			Status: c.Query("status"), ScopeID: c.Query("scope_id"), RequesterUserID: c.Query("requester_user_id"), ReviewerUserID: c.Query("reviewer_user_id"), Limit: limit, Offset: offset,
+		})
 		if err != nil {
 			writeError(c, err)
 			return
@@ -437,11 +440,28 @@ func registerUserRoutes(r *gin.Engine, app *App, prefix string) {
 		for _, item := range out {
 			items = append(items, publicDeletionRequest(item))
 		}
-		c.JSON(http.StatusOK, gin.H{"items": items})
+		hasMore := len(out) == limit
+		c.JSON(http.StatusOK, gin.H{"items": items, "has_more": hasMore, "next_offset": offset + len(out), "limit": limit})
 	})
 	g.GET("/deletion-requests/:request_id", func(c *gin.Context) {
 		p := principal(c)
-		out, err := app.Service.GetDeletionRequest(c, p.UserID, c.Param("request_id"))
+		out, err := app.Service.GetDeletionRequest(c, p.UserID, p.OrganizationID, c.Param("request_id"))
+		if err != nil {
+			writeError(c, err)
+			return
+		}
+		audits, auditErr := app.Service.ListDeletionAudit(c, p.UserID, p.OrganizationID, out.ID)
+		if auditErr != nil {
+			writeError(c, auditErr)
+			return
+		}
+		response := publicDeletionRequest(*out)
+		response.Audit = publicDeletionAudits(audits)
+		c.JSON(http.StatusOK, response)
+	})
+	g.POST("/deletion-requests/:request_id/retry", func(c *gin.Context) {
+		p := principal(c)
+		out, err := app.Service.RetryDeletionRequest(c, p.UserID, p.OrganizationID, c.Param("request_id"))
 		if err != nil {
 			writeError(c, err)
 			return
@@ -2103,6 +2123,18 @@ func requestContext() gin.HandlerFunc {
 		c.Next()
 	}
 }
+func deletionPaging(c *gin.Context) (int, int) {
+	limit, _ := strconv.Atoi(strings.TrimSpace(c.Query("limit")))
+	if limit <= 0 || limit > 100 {
+		limit = 50
+	}
+	offset, _ := strconv.Atoi(strings.TrimSpace(c.Query("offset")))
+	if offset < 0 {
+		offset = 0
+	}
+	return limit, offset
+}
+
 func principal(c *gin.Context) *auth.Principal {
 	value, _ := auth.PrincipalFromContext(c.Request.Context())
 	return value

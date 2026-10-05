@@ -2983,23 +2983,42 @@ func (s *MemoryStore) GetDeletionRequest(_ context.Context, id string) (*Deletio
 	return &copy, nil
 }
 
-func (s *MemoryStore) ListDeletionRequests(_ context.Context, userID, status string, limit int) ([]DeletionRequest, error) {
+func (s *MemoryStore) ListDeletionRequests(_ context.Context, filter DeletionRequestFilter) ([]DeletionRequest, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	limit := filter.Limit
 	if limit <= 0 || limit > 100 {
 		limit = 50
 	}
 	out := make([]DeletionRequest, 0)
 	for _, value := range s.deletionRequests {
-		if userID != "" && value.Request.RequesterUserID != userID {
+		request := value.Request
+		if filter.OrganizationID != "" && request.OrganizationID != filter.OrganizationID {
 			continue
 		}
-		if status != "" && value.Request.Status != status {
+		if filter.RequesterUserID != "" && request.RequesterUserID != filter.RequesterUserID {
 			continue
 		}
-		out = append(out, cloneDeletionRequest(value.Request))
+		if filter.ReviewerUserID != "" && request.ReviewerUserID != filter.ReviewerUserID {
+			continue
+		}
+		if filter.Status != "" && request.Status != filter.Status {
+			continue
+		}
+		if filter.ScopeID != "" && request.ScopeID != filter.ScopeID {
+			continue
+		}
+		out = append(out, cloneDeletionRequest(request))
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].RequestedAt.After(out[j].RequestedAt) })
+	offset := filter.Offset
+	if offset < 0 {
+		offset = 0
+	}
+	if offset >= len(out) {
+		return []DeletionRequest{}, nil
+	}
+	out = out[offset:]
 	if len(out) > limit {
 		out = out[:limit]
 	}
@@ -3011,6 +3030,30 @@ func (s *MemoryStore) RecordDeletionAudit(_ context.Context, input DeletionAudit
 	defer s.mu.Unlock()
 	s.deletionAudit = append(s.deletionAudit, input)
 	return nil
+}
+
+func (s *MemoryStore) ListDeletionAudit(_ context.Context, requestID string, limit int) ([]DeletionAudit, error) {
+	if limit <= 0 || limit > 200 {
+		limit = 100
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]DeletionAudit, 0)
+	for _, item := range s.deletionAudit {
+		if strings.TrimSpace(requestID) != "" && item.DeletionRequestID != requestID {
+			continue
+		}
+		out = append(out, DeletionAudit{
+			ID: uuid.NewString(), DeletionRequestID: item.DeletionRequestID, ActorUserID: item.ActorUserID,
+			Action: item.Action, ResourceType: item.ResourceType, ResourceID: item.ResourceID,
+			Detail: item.Detail, CreatedAt: time.Now().UTC(),
+		})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.After(out[j].CreatedAt) })
+	if len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
 }
 
 func (s *MemoryStore) ReviewDeletionRequest(_ context.Context, requestID, reviewerUserID, status, reason string, now time.Time) (*DeletionRequest, error) {
@@ -3055,6 +3098,52 @@ func (s *MemoryStore) ReviewDeletionRequest(_ context.Context, requestID, review
 	s.deletionRequests[requestID] = value
 	copy := cloneDeletionRequest(value.Request)
 	return &copy, nil
+}
+
+const emptyContentHash = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+
+func (s *MemoryStore) RetryDeletionRequest(_ context.Context, requestID string, now time.Time) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	value, ok := s.deletionRequests[requestID]
+	if !ok {
+		return 0, apperror.New("deletion_request_not_found", "deletion request was not found", 404, false)
+	}
+	if value.Request.Status == "completed" || value.Request.Status == "rejected" || value.Request.Status == "pending" {
+		return 0, apperror.New("deletion_request_not_retryable", "only failed deletion stages can be retried", 409, false)
+	}
+	retried := 0
+	for index := range value.Request.Targets {
+		target := &value.Request.Targets[index]
+		failed := strings.TrimSpace(target.LastError) != "" || target.AuthState == "failed" || target.VectorState == "failed" || target.ObjectState == "failed"
+		if !failed {
+			continue
+		}
+		if target.ObjectState == "failed" {
+			target.ObjectState = "pending"
+		}
+		if target.VectorState == "failed" {
+			target.VectorState = "pending"
+		}
+		if target.AuthState == "failed" {
+			target.AuthState = "pending"
+		}
+		target.AttemptCount++
+		target.LastError = ""
+		target.UpdatedAt = now
+		if target.VisibilityState != "hidden" {
+			target.VisibilityState = "hidden"
+		}
+		retried++
+	}
+	if retried == 0 {
+		return 0, apperror.New("deletion_retry_not_required", "no failed deletion stage requires retry", 409, false)
+	}
+	value.Request.Status = "executing"
+	value.Request.LastError = ""
+	value.Request.UpdatedAt = now
+	s.deletionRequests[requestID] = value
+	return retried, nil
 }
 
 func (s *MemoryStore) HideDeletionTargets(_ context.Context, requestID string) (int, error) {
@@ -3195,7 +3284,7 @@ func (s *MemoryStore) MarkDeletionPurged(_ context.Context, requestID string, no
 				}
 				message.LifecycleStatus = "purged"
 				message.Content = ""
-				message.ContentHash = ""
+				message.ContentHash = emptyContentHash
 				message.ContentPurgedAt = &now
 				s.messages[key] = message
 			}

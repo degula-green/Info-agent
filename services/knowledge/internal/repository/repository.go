@@ -657,12 +657,35 @@ type DeletionAuditInput struct {
 	ResourceID        string
 	Detail            map[string]any
 }
+
+type DeletionAudit struct {
+	ID                string
+	DeletionRequestID string
+	ActorUserID       string
+	Action            string
+	ResourceType      string
+	ResourceID        string
+	Detail            map[string]any
+	CreatedAt         time.Time
+}
+
+type DeletionRequestFilter struct {
+	OrganizationID  string
+	RequesterUserID string
+	Status          string
+	ScopeID         string
+	ReviewerUserID  string
+	Limit           int
+	Offset          int
+}
 type Repository interface {
 	CreateDeletionRequest(ctx context.Context, input DeletionRequestInput) (*DeletionRequest, error)
 	GetDeletionRequest(ctx context.Context, id string) (*DeletionRequest, error)
-	ListDeletionRequests(ctx context.Context, userID, status string, limit int) ([]DeletionRequest, error)
+	ListDeletionRequests(ctx context.Context, filter DeletionRequestFilter) ([]DeletionRequest, error)
 	RecordDeletionAudit(ctx context.Context, input DeletionAuditInput) error
+	ListDeletionAudit(ctx context.Context, requestID string, limit int) ([]DeletionAudit, error)
 	ReviewDeletionRequest(ctx context.Context, requestID, reviewerUserID, status, reason string, now time.Time) (*DeletionRequest, error)
+	RetryDeletionRequest(ctx context.Context, requestID string, now time.Time) (int, error)
 	HideDeletionTargets(ctx context.Context, requestID string) (int, error)
 	ListDueDeletionTargets(ctx context.Context, now time.Time, limit int) ([]DeletionRequest, error)
 	AttachmentObjectRefs(ctx context.Context, attachmentIDs []string) ([]AttachmentObjectRef, error)

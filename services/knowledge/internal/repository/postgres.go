@@ -3446,22 +3446,37 @@ func (s *PostgresStore) GetDeletionRequest(ctx context.Context, id string) (*Del
 	return value, nil
 }
 
-func (s *PostgresStore) ListDeletionRequests(ctx context.Context, userID, status string, limit int) ([]DeletionRequest, error) {
-	if limit <= 0 || limit > 100 {
-		limit = 50
+func (s *PostgresStore) ListDeletionRequests(ctx context.Context, filter DeletionRequestFilter) ([]DeletionRequest, error) {
+	if filter.Limit <= 0 || filter.Limit > 100 {
+		filter.Limit = 50
+	}
+	if filter.Offset < 0 {
+		filter.Offset = 0
 	}
 	conditions := []string{"1=1"}
 	args := []any{}
-	if strings.TrimSpace(userID) != "" {
-		args = append(args, userID)
+	if strings.TrimSpace(filter.OrganizationID) != "" {
+		args = append(args, strings.TrimSpace(filter.OrganizationID))
+		conditions = append(conditions, "organization_id=$"+strconv.Itoa(len(args))+"::uuid")
+	}
+	if strings.TrimSpace(filter.RequesterUserID) != "" {
+		args = append(args, strings.TrimSpace(filter.RequesterUserID))
 		conditions = append(conditions, "requester_user_id=$"+strconv.Itoa(len(args))+"::uuid")
 	}
-	if strings.TrimSpace(status) != "" {
-		args = append(args, status)
+	if strings.TrimSpace(filter.ReviewerUserID) != "" {
+		args = append(args, strings.TrimSpace(filter.ReviewerUserID))
+		conditions = append(conditions, "reviewer_user_id=$"+strconv.Itoa(len(args))+"::uuid")
+	}
+	if strings.TrimSpace(filter.Status) != "" {
+		args = append(args, strings.TrimSpace(filter.Status))
 		conditions = append(conditions, "status=$"+strconv.Itoa(len(args)))
 	}
-	args = append(args, limit)
-	rows, err := s.pool.Query(ctx, `SELECT id::text FROM knowledge.deletion_requests WHERE `+strings.Join(conditions, " AND ")+` ORDER BY requested_at DESC LIMIT $`+strconv.Itoa(len(args)), args...)
+	if strings.TrimSpace(filter.ScopeID) != "" {
+		args = append(args, strings.TrimSpace(filter.ScopeID))
+		conditions = append(conditions, "scope_id=$"+strconv.Itoa(len(args))+"::uuid")
+	}
+	args = append(args, filter.Limit, filter.Offset)
+	rows, err := s.pool.Query(ctx, `SELECT id::text FROM knowledge.deletion_requests WHERE `+strings.Join(conditions, " AND ")+` ORDER BY requested_at DESC LIMIT $`+strconv.Itoa(len(args)-1)+` OFFSET $`+strconv.Itoa(len(args)), args...)
 	if err != nil {
 		return nil, dbError(err)
 	}
@@ -3488,6 +3503,8 @@ func (s *PostgresStore) ListDeletionRequests(ctx context.Context, userID, status
 	return out, nil
 }
 
+const postgresEmptyContentHash = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+
 func (s *PostgresStore) RecordDeletionAudit(ctx context.Context, input DeletionAuditInput) error {
 	detail, err := json.Marshal(input.Detail)
 	if err != nil {
@@ -3495,6 +3512,30 @@ func (s *PostgresStore) RecordDeletionAudit(ctx context.Context, input DeletionA
 	}
 	_, err = s.pool.Exec(ctx, `INSERT INTO knowledge.deletion_audit_logs (deletion_request_id,actor_user_id,action,resource_type,resource_id,detail) VALUES ($1,NULLIF($2,'')::uuid,$3,NULLIF($4,''),NULLIF($5,'')::uuid,$6::jsonb)`, input.DeletionRequestID, input.ActorUserID, input.Action, input.ResourceType, input.ResourceID, string(detail))
 	return dbError(err)
+}
+
+func (s *PostgresStore) ListDeletionAudit(ctx context.Context, requestID string, limit int) ([]DeletionAudit, error) {
+	if limit <= 0 || limit > 200 {
+		limit = 100
+	}
+	rows, err := s.pool.Query(ctx, `SELECT id::text,deletion_request_id::text,COALESCE(actor_user_id::text,''),action,COALESCE(resource_type,''),COALESCE(resource_id::text,''),detail,created_at FROM knowledge.deletion_audit_logs WHERE ($1='' OR deletion_request_id=$1::uuid) ORDER BY created_at DESC LIMIT $2`, strings.TrimSpace(requestID), limit)
+	if err != nil {
+		return nil, dbError(err)
+	}
+	defer rows.Close()
+	out := make([]DeletionAudit, 0)
+	for rows.Next() {
+		var item DeletionAudit
+		var detail []byte
+		if err := rows.Scan(&item.ID, &item.DeletionRequestID, &item.ActorUserID, &item.Action, &item.ResourceType, &item.ResourceID, &detail, &item.CreatedAt); err != nil {
+			return nil, dbError(err)
+		}
+		if len(detail) > 0 {
+			_ = json.Unmarshal(detail, &item.Detail)
+		}
+		out = append(out, item)
+	}
+	return out, dbError(rows.Err())
 }
 
 func (s *PostgresStore) ReviewDeletionRequest(ctx context.Context, requestID, reviewerUserID, status, reason string, now time.Time) (*DeletionRequest, error) {
@@ -3608,10 +3649,10 @@ func (s *PostgresStore) MarkDeletionPurged(ctx context.Context, requestID string
 		return dbError(err)
 	}
 	defer tx.Rollback(ctx)
-	if _, err = tx.Exec(ctx, `UPDATE knowledge.messages m SET lifecycle_status='purged',normalized_content='',normalized_content_ref=NULL,content_hash='',content_purged_at=$2 FROM knowledge.deletion_targets dt WHERE dt.deletion_request_id=$1 AND dt.resource_type='message' AND m.id=dt.resource_id`, requestID, now); err != nil {
+	if _, err = tx.Exec(ctx, `UPDATE knowledge.messages m SET lifecycle_status='purged',normalized_content='',normalized_content_ref=NULL,content_hash=postgresEmptyContentHash,content_purged_at=$2 FROM knowledge.deletion_targets dt WHERE dt.deletion_request_id=$1 AND dt.resource_type='message' AND m.id=dt.resource_id`, requestID, now); err != nil {
 		return dbError(err)
 	}
-	if _, err = tx.Exec(ctx, `UPDATE knowledge.knowledge_items ki SET lifecycle_status='purged',content_ref='',original_content_ref=NULL,content_hash='',content_purged_at=$2,updated_at=$2 FROM knowledge.deletion_targets dt WHERE dt.deletion_request_id=$1 AND dt.knowledge_item_id=ki.id`, requestID, now); err != nil {
+	if _, err = tx.Exec(ctx, `UPDATE knowledge.knowledge_items ki SET lifecycle_status='purged',content_ref='',original_content_ref=NULL,content_hash=postgresEmptyContentHash,content_purged_at=$2,updated_at=$2 FROM knowledge.deletion_targets dt WHERE dt.deletion_request_id=$1 AND dt.knowledge_item_id=ki.id`, requestID, now); err != nil {
 		return dbError(err)
 	}
 	if _, err = tx.Exec(ctx, `UPDATE knowledge.deletion_targets SET object_state='deleted',updated_at=$2 WHERE deletion_request_id=$1`, requestID, now); err != nil {
@@ -3623,6 +3664,46 @@ func (s *PostgresStore) MarkDeletionPurged(ctx context.Context, requestID string
 	return dbError(tx.Commit(ctx))
 }
 
+func (s *PostgresStore) RetryDeletionRequest(ctx context.Context, requestID string, now time.Time) (int, error) {
+	requestID = strings.TrimSpace(requestID)
+	if requestID == "" {
+		return 0, apperror.New("invalid_request", "request is required", 400, false)
+	}
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return 0, dbError(err)
+	}
+	defer tx.Rollback(ctx)
+	var status string
+	err = tx.QueryRow(ctx, "SELECT status FROM knowledge.deletion_requests WHERE id=$1 FOR UPDATE", requestID).Scan(&status)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return 0, apperror.New("deletion_request_not_found", "deletion request was not found", 404, false)
+	}
+	if err != nil {
+		return 0, dbError(err)
+	}
+	if status == "completed" || status == "rejected" || status == "pending" {
+		return 0, apperror.New("deletion_request_not_retryable", "only failed deletion stages can be retried", 409, false)
+	}
+	tag, err := tx.Exec(ctx, `UPDATE knowledge.deletion_targets SET attempt_count=attempt_count+1,last_error=NULL,vector_state=CASE WHEN vector_state='failed' THEN 'pending' ELSE vector_state END,object_state=CASE WHEN object_state='failed' THEN 'pending' ELSE object_state END,auth_state=CASE WHEN auth_state='failed' THEN 'pending' ELSE auth_state END,updated_at=$2 WHERE deletion_request_id=$1 AND (visibility_state='active' OR auth_state='failed' OR vector_state='failed' OR object_state='failed' OR last_error IS NOT NULL)`, requestID, now)
+	if err != nil {
+		return 0, dbError(err)
+	}
+	retried := int(tag.RowsAffected())
+	if retried == 0 {
+		return 0, apperror.New("deletion_retry_not_required", "no failed deletion stage requires retry", 409, false)
+	}
+	if _, err = tx.Exec(ctx, "UPDATE knowledge.deletion_requests SET status='executing',last_error=NULL,updated_at=$2 WHERE id=$1", requestID, now); err != nil {
+		return 0, dbError(err)
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return 0, dbError(err)
+	}
+	return retried, nil
+}
 func (s *PostgresStore) HideDeletionTargets(ctx context.Context, requestID string) (int, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
