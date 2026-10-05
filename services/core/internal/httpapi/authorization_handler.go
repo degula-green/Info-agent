@@ -239,6 +239,44 @@ func (h *AuthorizationHandler) listObjects(c *gin.Context, subjectID, organizati
 	return application.ListObjectsResult{Objects: objects}, err
 }
 
+type resourceRelationRevokeRequest struct {
+	KnowledgeItemID string `json:"knowledge_item_id" binding:"required"`
+	AttachmentID    string `json:"attachment_id"`
+}
+
+func (h *PermissionSyncHandler) Revoke(c *gin.Context) {
+	parts := strings.Fields(c.GetHeader("Authorization"))
+	if h == nil || h.service == nil || h.token == "" {
+		writeError(c, http.StatusServiceUnavailable, "AUTHZ_NOT_CONFIGURED", "authorization service is not configured", true)
+		return
+	}
+	if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") || parts[1] != h.token || c.GetHeader("X-Caller-Service") != "knowledge" {
+		writeError(c, http.StatusForbidden, "AUTHZ_CALLER_FORBIDDEN", "caller is not authorized", false)
+		return
+	}
+	var req resourceRelationRevokeRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		writeError(c, http.StatusBadRequest, "AUTHZ_INVALID_REQUEST", "invalid relation revoke request", false)
+		return
+	}
+	if _, err := uuid.Parse(req.KnowledgeItemID); err != nil {
+		writeError(c, http.StatusBadRequest, "AUTHZ_INVALID_REQUEST", "knowledge_item_id must be a UUID", false)
+		return
+	}
+	if synchronizer, ok := h.service.(interface {
+		RevokeResourceRelations(ctx context.Context, knowledgeItemID, attachmentID string) (int, error)
+	}); ok {
+		count, err := synchronizer.RevokeResourceRelations(c.Request.Context(), req.KnowledgeItemID, req.AttachmentID)
+		if err != nil {
+			writeError(c, http.StatusServiceUnavailable, "AUTHZ_REVOKE_FAILED", "permission revoke failed", true)
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"knowledge_item_id": req.KnowledgeItemID, "attachment_id": req.AttachmentID, "relation_count": count, "status": "revoked"})
+		return
+	}
+	writeError(c, http.StatusServiceUnavailable, "AUTHZ_REVOKE_UNAVAILABLE", "relation revoke is unavailable", true)
+}
+
 type permissionSyncRequest struct {
 	KnowledgeItemID       string   `json:"knowledge_item_id" binding:"required"`
 	AttachmentID          string   `json:"attachment_id"`

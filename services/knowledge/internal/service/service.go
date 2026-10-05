@@ -3226,6 +3226,16 @@ func (s *Service) ReviewDeletionRequest(ctx context.Context, userID, organizatio
 		return nil, err
 	}
 	if status == "approved" && reviewed.Status == "approved" {
+		if s.Core != nil {
+			for _, target := range reviewed.Targets {
+				if target.KnowledgeItemID == "" {
+					continue
+				}
+				if err := s.Core.RevokeKnowledgeRelations(ctx, target.KnowledgeItemID, ""); err != nil {
+					return nil, apperror.Wrap("core_dependency_unavailable", "authorization revoke failed", 503, true, err)
+				}
+			}
+		}
 		if _, err := s.Repo.HideDeletionTargets(ctx, requestID); err != nil {
 			return nil, err
 		}

@@ -318,6 +318,33 @@ func (c *Client) SyncKnowledgePermissions(ctx context.Context, item domain.Knowl
 	return result, nil
 }
 
+func (c *Client) RevokeKnowledgeRelations(ctx context.Context, knowledgeItemID, attachmentID string) error {
+	if c == nil || c.BaseURL == "" || c.ServiceToken == "" {
+		return errors.New("core permission service is not configured")
+	}
+	body, err := json.Marshal(map[string]string{"knowledge_item_id": strings.TrimSpace(knowledgeItemID), "attachment_id": strings.TrimSpace(attachmentID)})
+	if err != nil {
+		return err
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, c.BaseURL+"/internal/v1/authorization/resource-relations/revoke", bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Authorization", "Bearer "+c.ServiceToken)
+	request.Header.Set("X-Caller-Service", "knowledge")
+	propagateTraceHeaders(ctx, request)
+	response, err := c.HTTP.Do(request)
+	if err != nil {
+		return err
+	}
+	defer response.Body.Close()
+	if response.StatusCode >= 400 {
+		return fmt.Errorf("core relation revoke failed: status %d", response.StatusCode)
+	}
+	return nil
+}
+
 func propagateTraceHeaders(ctx context.Context, request *http.Request) {
 	if requestID := trace.RequestID(ctx); requestID != "" {
 		request.Header.Set("X-Request-ID", requestID)

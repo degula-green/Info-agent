@@ -60,7 +60,7 @@ class MVPWorkerRuntime:
     def handle(self, envelope: dict[str, Any]) -> None:
         validate_envelope(envelope)
         if envelope.get("event_type") == "knowledge.deletion.requested":
-            service = self.deletion_service or DeletionService(repository=self.repository, indexer=self.index_service.indexer)
+            service = self.deletion_service or DeletionService(repository=self.repository, indexer=self.index_service.indexer, callback_lane=self.callback_lane)
             service.handle(envelope)
             return
         job = self.repository.create_or_get_job(envelope)

@@ -2864,13 +2864,13 @@ func (s *PostgresStore) ApplyRAGResult(ctx context.Context, id string, input RAG
 	if input.ContentVersion < contentVersion || input.ACLVersion < aclVersion || input.ContentVersion < ragContentVersion || (input.ContentVersion == ragContentVersion && input.ACLVersion < ragACLVersion) {
 		return &RAGResultApply{Applied: false, Status: status, Reason: "stale_version"}, nil
 	}
-	if input.ContentVersion != contentVersion || input.ACLVersion != aclVersion {
+	if input.Status != "deleted" && (input.ContentVersion != contentVersion || input.ACLVersion != aclVersion) {
 		return nil, apperror.New("rag_version_mismatch", "RAG result version does not match knowledge item", 409, false)
 	}
 	if sourceEventID == input.SourceEventID && jobID == input.RAGJobID && status == input.Status {
 		return &RAGResultApply{Applied: false, Status: status, Reason: "duplicate"}, nil
 	}
-	if (status == "ready" || status == "metadata_only") && ragContentVersion == input.ContentVersion && ragACLVersion == input.ACLVersion && !(status == "metadata_only" && input.Status == "ready") {
+	if (status == "ready" || status == "metadata_only") && input.Status != "deleted" && ragContentVersion == input.ContentVersion && ragACLVersion == input.ACLVersion && !(status == "metadata_only" && input.Status == "ready") {
 		return &RAGResultApply{Applied: false, Status: status, Reason: "terminal_state"}, nil
 	}
 	if status == "failed" && input.Status == "processing" && jobID == input.RAGJobID {
@@ -2884,11 +2884,21 @@ func (s *PostgresStore) ApplyRAGResult(ctx context.Context, id string, input RAG
 	messageVectorStatus := "processing"
 	if input.Status == "ready" || input.Status == "metadata_only" {
 		messageVectorStatus = "ready"
+	} else if input.Status == "deleted" {
+		messageVectorStatus = "deleted"
 	} else if input.Status == "failed" {
 		messageVectorStatus = "failed"
 	}
 	if _, err = tx.Exec(ctx, `UPDATE knowledge.messages AS message SET vector_status=$2 FROM knowledge.knowledge_items AS item WHERE item.id=$1 AND message.id=item.source_message_id`, id, messageVectorStatus); err != nil {
 		return nil, dbError(err)
+	}
+	if input.Status == "deleted" {
+		if _, err = tx.Exec(ctx, `UPDATE knowledge.messages AS message SET vector_delete_status='deleted' FROM knowledge.knowledge_items AS item WHERE item.id=$1 AND message.id=item.source_message_id`, id); err != nil {
+			return nil, dbError(err)
+		}
+		if _, err = tx.Exec(ctx, `UPDATE knowledge.knowledge_items SET vector_delete_status='deleted',deleted_at=COALESCE(deleted_at,now()),lifecycle_status='deleted',updated_at=now() WHERE id=$1`, id); err != nil {
+			return nil, dbError(err)
+		}
 	}
 	if err = tx.Commit(ctx); err != nil {
 		return nil, dbError(err)

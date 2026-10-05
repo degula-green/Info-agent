@@ -183,6 +183,10 @@ func (c *Client) SyncRelations(ctx context.Context, managedObjects []string, tup
 	return c.writeChanges(ctx, writes, deletes)
 }
 
+func (c *Client) ReadRelations(ctx context.Context, object string) ([]application.RelationTuple, error) {
+	return c.readObjectRelations(ctx, object)
+}
+
 func (c *Client) readObjectRelations(ctx context.Context, object string) ([]application.RelationTuple, error) {
 	body := map[string]any{"tuple_key": map[string]string{"object": object}, "page_size": 100}
 	var response struct {

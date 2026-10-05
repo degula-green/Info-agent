@@ -69,5 +69,37 @@ class DeletionServiceTests(unittest.TestCase):
         self.assertEqual(repository.list_chunks(), [])
 
 
+    def test_delete_event_emits_deleted_callback(self) -> None:
+        from app.infrastructure.persistence.mvp import InMemoryRagMVPRepository
+        from app.application.callback_service import CallbackLane
+
+        repository = InMemoryRagMVPRepository()
+        published: list[dict] = []
+
+        class _Publisher:
+            def send(self, payload: dict) -> None:
+                published.append(payload)
+
+        callback = CallbackLane(repository=repository, publisher=_Publisher())
+        indexer = _Indexer()
+        service = DeletionService(repository=repository, indexer=indexer, callback_lane=callback)
+        result = service.handle({
+            "event_id": "00000000-0000-0000-0000-000000000099",
+            "payload": {
+                "knowledge_item_id": "00000000-0000-0000-0000-000000000003",
+                "resource_id": "00000000-0000-0000-0000-000000000004",
+                "deletion_request_id": "00000000-0000-0000-0000-000000000010",
+                "deletion_target_id": "00000000-0000-0000-0000-000000000011",
+                "content_version": 1,
+                "acl_version": 1,
+                "scope_type": "organization",
+                "scope_id": "00000000-0000-0000-0000-000000000001",
+            },
+        })
+        self.assertEqual(result["status"], "deleted")
+        self.assertEqual(len(published), 1)
+        self.assertEqual(published[0]["status"], "deleted")
+        self.assertEqual(published[0]["knowledge_item_id"], "00000000-0000-0000-0000-000000000003")
+
 if __name__ == "__main__":
     unittest.main()

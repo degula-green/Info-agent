@@ -74,6 +74,7 @@ func newRouter(authentication Authentication, cookies RefreshCookieConfig, logge
 		if authorization.PermissionSync != nil {
 			permissionHandler := NewPermissionSyncHandler(authorization.PermissionSync, authorization.KnowledgeToken)
 			authz.POST("/resource-relations/sync", permissionHandler.Sync)
+			authz.POST("/resource-relations/revoke", permissionHandler.Revoke)
 		}
 	}
 	if len(accessRequests) > 0 && accessRequests[0] != nil {

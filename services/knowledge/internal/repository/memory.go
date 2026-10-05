@@ -3159,7 +3159,7 @@ func (s *MemoryStore) ApplyRAGResult(_ context.Context, id string, input RAGResu
 	if input.ContentVersion < item.ContentVersion || input.ACLVersion < item.ACLVersion || input.ContentVersion < item.RAGContentVersion || (input.ContentVersion == item.RAGContentVersion && input.ACLVersion < item.RAGACLVersion) {
 		return &RAGResultApply{Applied: false, Status: status, Reason: "stale_version"}, nil
 	}
-	if input.ContentVersion != item.ContentVersion || input.ACLVersion != item.ACLVersion {
+	if input.Status != "deleted" && (input.ContentVersion != item.ContentVersion || input.ACLVersion != item.ACLVersion) {
 		return nil, apperror.New("rag_version_mismatch", "RAG result version does not match knowledge item", 409, false)
 	}
 	if item.RAGSourceEventID == input.SourceEventID && item.RAGJobID == input.RAGJobID && status == input.Status {
@@ -3195,15 +3195,29 @@ func (s *MemoryStore) ApplyRAGResult(_ context.Context, id string, input RAGResu
 	messageStatus := "processing"
 	if input.Status == "ready" || input.Status == "metadata_only" {
 		messageStatus = "ready"
+	} else if input.Status == "deleted" {
+		messageStatus = "deleted"
 	} else if input.Status == "failed" {
 		messageStatus = "failed"
 	}
 	for key, message := range s.messages {
 		if message.ID == item.SourceMessageID {
 			message.VectorStatus = messageStatus
+			if input.Status == "deleted" {
+				message.VectorDeleteStatus = "deleted"
+			}
 			s.messages[key] = message
 			break
 		}
+	}
+	if input.Status == "deleted" {
+		item.LifecycleStatus = "deleted"
+		item.VectorDeleteStatus = "deleted"
+		deletedAt := input.OccurredAt
+		if deletedAt.IsZero() {
+			deletedAt = time.Now().UTC()
+		}
+		item.DeletedAt = &deletedAt
 	}
 	item.UpdatedAt = time.Now().UTC()
 	s.knowledgeItems[id] = item
