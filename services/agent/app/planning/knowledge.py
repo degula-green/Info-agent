@@ -8,6 +8,7 @@ Capability plan before the configured planner gets a chance to drift.
 
 from __future__ import annotations
 
+import hashlib
 import inspect
 import re
 from dataclasses import dataclass
@@ -23,6 +24,7 @@ from app.capabilities.knowledge import (
 )
 from app.capabilities.answer import CAPABILITY_NAME as ANSWER_COMPOSE_NAME
 from app.capabilities.web_research import CAPABILITY_NAME as WEB_RESEARCH_NAME
+from app.infrastructure.web.url_tools import extract_http_urls
 from app.kernel.models import (
     CapabilityDescriptor,
     Observation,
@@ -37,8 +39,40 @@ from app.planning.conversation_memory import (
     build_conversation_memory_plan,
     decide_conversation_memory_plan,
 )
+from app.planning.routing import resolve_evidence_sources
 
 KnowledgeMode = Literal["sources", "content", "content_with_sources"]
+
+COMPLIANCE_ASSESS_INTENT = "compliance.assess"
+COMPLIANCE_OBJECTIVE = "对照外部协议评估公司材料"
+FORM_COMPLETE_INTENT = "form.complete"
+FORM_PREVIEW_NAME = "form.preview"
+FORM_APPLY_NAME = "form.apply"
+_NO_SUBMIT_MARKERS = (
+    "不要提交",
+    "不用提交",
+    "先不提交",
+    "不提交",
+    "别提交",
+    "仅填写",
+    "只填写",
+)
+_COMPLIANCE_WEB_MARKERS = (
+    "协议",
+    "标准",
+    "法规",
+    "条例",
+    "规范",
+    "网上",
+    "公网",
+    "互联网",
+    "公开信息",
+    "新闻",
+    "最新",
+)
+_COMPLIANCE_CONTEXT_TERMS = (
+    "公司 制度 流程 数据 安全 合规 服务器 账号 密码 合同 部署"
+)
 
 _CONTENT_MARKERS = (
     "说了什么",
@@ -547,6 +581,78 @@ class KnowledgeRoutingPlanner:
         if memory_plan is not None:
             self._last_call_count = 0
             return memory_plan
+        if _explicit_web_research(understanding):
+            # The classifier can name a public-web intent with high confidence
+            # ("搜索一下飞书开放平台"). The generic internal-object words
+            # ("平台"/"系统") must not override that: doing so turns a web
+            # lookup into an internal search that has no matching evidence.
+            built = _call_plan(
+                self.base.create_plan,
+                task,
+                capabilities,
+                observations,
+                constraints,
+                understanding,
+                conversation_context=conversation_context,
+            )
+            self._last_call_count = max(
+                int(getattr(self.base, "last_call_count", 0) or 0),
+                0,
+            )
+            return augment_personal_knowledge_sources(
+                built,
+                task,
+                capabilities,
+            )
+        sources = resolve_evidence_sources(task, understanding)
+        if _requests_compliance_assessment(understanding) or _requests_document_comparison(
+            task
+        ):
+            compliance_plan = build_compliance_plan(
+                task,
+                capabilities,
+                sources=sources,
+            )
+            if compliance_plan is not None:
+                self._last_call_count = 0
+                return compliance_plan
+        if "attachment" in sources:
+            # The instruction judged the attachment to be evidence, so the
+            # knowledge classifier must not turn wording like "图片里是什么"
+            # into a company-document search. Retrieval still joins when the
+            # turn also judged the knowledge source to be needed.
+            attachment_plan = build_attachment_answer_plan(
+                task,
+                capabilities,
+                sources,
+            )
+            if attachment_plan is not None:
+                self._last_call_count = 0
+                return attachment_plan
+        if _explicit_action_task(task, understanding):
+            built = _call_plan(
+                self.base.create_plan,
+                task,
+                capabilities,
+                observations,
+                constraints,
+                understanding,
+                conversation_context=conversation_context,
+            )
+            self._last_call_count = max(
+                int(getattr(self.base, "last_call_count", 0) or 0),
+                0,
+            )
+            return augment_personal_knowledge_sources(
+                built,
+                task,
+                capabilities,
+            )
+        if _requests_form_completion(understanding):
+            form_plan = build_form_plan(task, capabilities)
+            if form_plan is not None:
+                self._last_call_count = 0
+                return form_plan
         route = classify_knowledge_question(
             _task_instruction_text(task),
             timezone_name=self.default_timezone,
@@ -772,8 +878,391 @@ def _decide_knowledge_plan(
 def _is_knowledge_plan(plan: Plan) -> bool:
     if not plan.steps:
         return False
-    knowledge = {SEARCH_SOURCES_NAME, SEARCH_CONTENT_NAME, KNOWLEDGE_ANSWER_NAME}
+    # answer.compose is the generic composition step. An LLM-authored knowledge
+    # plan may end with it instead of knowledge.answer, and that plan is just as
+    # deterministic to close out: after the retrieval succeeded the only work
+    # left is the answer step. Without this the runtime paid for a second LLM
+    # decision on a result that needed none.
+    knowledge = {
+        SEARCH_SOURCES_NAME,
+        SEARCH_CONTENT_NAME,
+        KNOWLEDGE_ANSWER_NAME,
+        ANSWER_COMPOSE_NAME,
+    }
     return all(step.capability in knowledge for step in plan.steps)
+
+
+def build_compliance_plan(
+    task: TaskEnvelope,
+    capabilities: list[CapabilityDescriptor],
+    *,
+    sources: tuple[str, ...] | None = None,
+) -> Plan | None:
+    """Compose the comparison the compliance intent actually asks for.
+
+    ``compliance.assess`` has no single capability: the work is retrieve the
+    company's own material, read the external protocol, and compare them. When
+    those capabilities are registered the deterministic pipeline can build the
+    whole plan without a model guessing at step shapes.
+    """
+
+    registered = {descriptor.name for descriptor in capabilities}
+    if ANSWER_COMPOSE_NAME not in registered:
+        return None
+    text = _task_instruction_text(task)
+    attachment_excerpt = str(task.input.get("_attachment_excerpt") or "").strip()
+    judged = set(sources or ())
+    if judged:
+        has_attachment = bool(attachment_excerpt) and "attachment" in judged
+        has_knowledge = SEARCH_CONTENT_NAME in registered and "knowledge" in judged
+    else:
+        # No source verdict: keep the historical behaviour, which assumed the
+        # attachment replaced retrieval instead of joining it.
+        has_attachment = bool(attachment_excerpt)
+        has_knowledge = SEARCH_CONTENT_NAME in registered and not has_attachment
+    urls = extract_http_urls(text)
+    has_web = WEB_RESEARCH_NAME in registered and (
+        bool(urls) or _contains_any(text.lower(), _COMPLIANCE_WEB_MARKERS)
+    )
+    if not has_knowledge and not has_web:
+        return None
+
+    plan_id = str(uuid4())
+    steps: list[PlanStep] = []
+    knowledge_step: PlanStep | None = None
+    web_step: PlanStep | None = None
+    if has_knowledge:
+        knowledge_step = PlanStep(
+            step_id=f"{plan_id}-step-{len(steps) + 1}",
+            plan_id=plan_id,
+            order=len(steps) + 1,
+            capability=SEARCH_CONTENT_NAME,
+            arguments={
+                "query": _compliance_query(text),
+                "include_personal": True,
+            },
+        )
+        steps.append(knowledge_step)
+    if has_web:
+        web_step = PlanStep(
+            step_id=f"{plan_id}-step-{len(steps) + 1}",
+            plan_id=plan_id,
+            order=len(steps) + 1,
+            capability=WEB_RESEARCH_NAME,
+            arguments={
+                "request": text,
+                "urls": urls,
+                "queries": [] if urls else [_compliance_web_query(text)],
+            },
+        )
+        steps.append(web_step)
+
+    answer_arguments: dict[str, Any] = {"question": text[:2000]}
+    if has_attachment:
+        # Inline evidence needs its own slot: knowledge_evidence is claimed by
+        # the knowledge_evidence_refs binding when retrieval also runs.
+        answer_arguments["attachment_evidence"] = [
+            _attachment_evidence(task, attachment_excerpt)
+        ]
+    if web_step is not None:
+        answer_arguments["evidence_refs"] = [
+            {"step": web_step.order, "output": "evidence"}
+        ]
+    if knowledge_step is not None:
+        answer_arguments["knowledge_evidence_refs"] = [
+            {"step": knowledge_step.order, "output": "evidence"}
+        ]
+    steps.append(
+        PlanStep(
+            step_id=f"{plan_id}-step-{len(steps) + 1}",
+            plan_id=plan_id,
+            order=len(steps) + 1,
+            capability=ANSWER_COMPOSE_NAME,
+            arguments=answer_arguments,
+        )
+    )
+    return Plan(
+        plan_id=plan_id,
+        task_id=task.task_id,
+        objective=COMPLIANCE_OBJECTIVE,
+        steps=steps,
+    )
+
+
+def build_attachment_answer_plan(
+    task: TaskEnvelope,
+    capabilities: list[CapabilityDescriptor],
+    sources: tuple[str, ...],
+) -> Plan | None:
+    """Answer from the parsed attachment, adding retrieval when it was judged.
+
+    The attachment body is already in the task input, so it needs no step of
+    its own: it is handed straight to ``answer.compose``. Retrieval, when the
+    turn judged the knowledge source necessary, runs as its own step and is
+    merged in by reference.
+    """
+
+    registered = {descriptor.name for descriptor in capabilities}
+    if ANSWER_COMPOSE_NAME not in registered:
+        return None
+    excerpt = str(task.input.get("_attachment_excerpt") or "").strip()
+    if not excerpt:
+        return None
+
+    text = _task_instruction_text(task)
+    wants_knowledge = (
+        "knowledge" in sources and SEARCH_CONTENT_NAME in registered
+    )
+    plan_id = str(uuid4())
+    steps: list[PlanStep] = []
+    knowledge_step: PlanStep | None = None
+    if wants_knowledge:
+        knowledge_step = PlanStep(
+            step_id=f"{plan_id}-step-1",
+            plan_id=plan_id,
+            order=1,
+            capability=SEARCH_CONTENT_NAME,
+            arguments={"query": text[:500]},
+        )
+        steps.append(knowledge_step)
+
+    answer_arguments: dict[str, Any] = {
+        "question": text[:2000],
+        "attachment_evidence": [_attachment_evidence(task, excerpt)],
+    }
+    if knowledge_step is not None:
+        answer_arguments["knowledge_evidence_refs"] = [
+            {"step": knowledge_step.order, "output": "evidence"}
+        ]
+    steps.append(
+        PlanStep(
+            step_id=f"{plan_id}-step-{len(steps) + 1}",
+            plan_id=plan_id,
+            order=len(steps) + 1,
+            capability=ANSWER_COMPOSE_NAME,
+            arguments=answer_arguments,
+        )
+    )
+    return Plan(
+        plan_id=plan_id,
+        task_id=task.task_id,
+        objective=(
+            "根据附件和知识库回答" if knowledge_step is not None else "根据附件回答"
+        ),
+        steps=steps,
+    )
+
+
+def build_form_plan(
+    task: TaskEnvelope,
+    capabilities: list[CapabilityDescriptor],
+) -> Plan | None:
+    """The fixed preview -> apply pipeline for a user-provided form URL."""
+
+    registered = {descriptor.name for descriptor in capabilities}
+    if FORM_PREVIEW_NAME not in registered or FORM_APPLY_NAME not in registered:
+        return None
+    text = _task_instruction_text(task)
+    urls = extract_http_urls(text)
+    if not urls:
+        return None
+    plan_id = str(uuid4())
+    wants_submit = "提交" in text and not any(
+        marker in text for marker in _NO_SUBMIT_MARKERS
+    )
+    action = "fill_and_submit" if wants_submit else "fill_only"
+    return Plan(
+        plan_id=plan_id,
+        task_id=task.task_id,
+        objective="填写并提交表单" if wants_submit else "填写表单",
+        steps=[
+            PlanStep(
+                step_id=f"{plan_id}-step-1",
+                plan_id=plan_id,
+                order=1,
+                capability=FORM_PREVIEW_NAME,
+                arguments={"request": text, "url": urls[0]},
+            ),
+            PlanStep(
+                step_id=f"{plan_id}-step-2",
+                plan_id=plan_id,
+                order=2,
+                capability=FORM_APPLY_NAME,
+                arguments={
+                    "request": text,
+                    "draft_ref": {"step": 1, "output": "form"},
+                    "action": action,
+                },
+            ),
+        ],
+    )
+
+
+def _compliance_query(text: str) -> str:
+    """A broad company-fact query, independent of the external document."""
+
+    subject = " ".join(_URL_PATTERN.sub(" ", str(text or "")).split())[:120]
+    return f"{subject} {_COMPLIANCE_CONTEXT_TERMS}".strip()[:500]
+
+
+def _compliance_web_query(text: str) -> str:
+    """The protocol name, without the "combine with our material" clause."""
+
+    value = str(text or "")
+    for marker in (
+        "然后结合",
+        "并结合",
+        "请结合",
+        "结合我们",
+        "我们公司",
+        "请说明",
+        "并说明",
+        "哪些符合",
+    ):
+        index = value.find(marker)
+        if index > 0:
+            value = value[:index]
+            break
+    return " ".join(value.split())[:200] or " ".join(str(text or "").split())[:200]
+
+
+def _attachment_evidence(task: TaskEnvelope, excerpt: str) -> dict[str, Any]:
+    digest = hashlib.sha256(excerpt.encode("utf-8")).hexdigest()
+    file_names = [
+        str(item)
+        for item in (task.input.get("_attachment_file_names") or [])
+        if str(item).strip()
+    ]
+    return {
+        "evidence_id": f"att-{digest[:16]}",
+        "source_type": "document",
+        "title": file_names[0] if file_names else "附件",
+        "url": None,
+        "quote": excerpt[:500],
+        "text": excerpt,
+        "content_hash": digest,
+        "retrieved_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "fetch_method": "attachment",
+        "version": 1,
+    }
+
+
+def _explicit_web_research(understanding: TaskUnderstanding | None) -> bool:
+    """Whether the classifier named public-web research with real confidence.
+
+    Only a confident candidate counts: an uncertain one still falls through to
+    the deterministic internal-knowledge route, which is the guard for
+    company-owned names such as "青云官网".
+    """
+
+    if understanding is None or not understanding.is_task:
+        return False
+    return any(
+        item.name == WEB_RESEARCH_NAME and item.confidence >= 0.9
+        for item in understanding.intent_candidates
+    )
+
+
+def _requests_compliance_assessment(
+    understanding: TaskUnderstanding | None,
+) -> bool:
+    if understanding is None or not understanding.is_task:
+        return False
+    return any(
+        item.name == COMPLIANCE_ASSESS_INTENT and item.confidence >= 0.7
+        for item in understanding.intent_candidates
+    )
+
+
+def _requests_form_completion(
+    understanding: TaskUnderstanding | None,
+) -> bool:
+    if understanding is None or not understanding.is_task:
+        return False
+    return any(
+        item.name == FORM_COMPLETE_INTENT and item.confidence >= 0.7
+        for item in understanding.intent_candidates
+    )
+
+
+def _requests_document_comparison(task: TaskEnvelope) -> bool:
+    """An uploaded document plus an external link plus a compliance verdict."""
+
+    if not task.input.get("attachment_ids"):
+        return False
+    text = _task_instruction_text(task)
+    if not extract_http_urls(text):
+        return False
+    return any(
+        marker in text
+        for marker in ("符合", "不符合", "对比", "比较", "是否", "合规", "评估")
+    )
+
+
+def _explicit_action_task(
+    task: TaskEnvelope,
+    understanding: TaskUnderstanding | None,
+) -> bool:
+    """An unlabelled but clear action phrase belongs to the action planner."""
+
+    if understanding is None or not understanding.is_task:
+        return False
+    if understanding.intent_candidates:
+        return False
+    text = _task_instruction_text(task)
+    if any(
+        marker in text
+        for marker in ("是什么", "什么是", "怎么", "如何", "为什么", "是否", "哪些")
+    ):
+        return False
+    if any(
+        marker in text
+        for marker in (
+            "表单",
+            "表格",
+            "填表",
+            "填写",
+            "预览",
+            "上传",
+            "附件",
+            "网址",
+            "http://",
+            "https://",
+            "协议",
+            "对比",
+            "比较",
+            "搜索",
+            "查询",
+            "检索",
+            "总结",
+            "分析",
+        )
+    ):
+        return False
+    return any(
+        marker in text
+        for marker in (
+            "完成",
+            "写",
+            "提交",
+            "开发",
+            "修复",
+            "处理",
+            "准备",
+            "整理",
+            "买",
+            "取",
+            "做",
+            "安排",
+            "跟进",
+            "联系",
+            "发送",
+            "回复",
+            "提醒",
+            "创建",
+            "新建",
+        )
+    )
 
 
 def _is_composite_source_plan(plan: Plan) -> bool:

@@ -922,6 +922,29 @@ func registerUserRoutes(r *gin.Engine, app *App, prefix string) {
 		}
 		c.JSON(http.StatusOK, gin.H{"status": "removed"})
 	})
+	setOwnCollectorPaused := func(c *gin.Context, paused bool) {
+		p := principal(c)
+		collectors, err := app.Service.SetCollectorPaused(c, p.UserID, c.Param("conversation_id"), paused)
+		if err != nil {
+			writeError(c, err)
+			return
+		}
+		out := make([]publicCollector, 0, len(collectors))
+		for _, collector := range collectors {
+			out = append(out, publicCollectorFromDomain(collector))
+		}
+		status := domain.CollectorActive
+		if paused {
+			status = domain.CollectorPaused
+		}
+		c.JSON(http.StatusOK, gin.H{"status": status, "collectors": out})
+	}
+	g.POST("/conversations/:conversation_id/collectors/me/pause", func(c *gin.Context) {
+		setOwnCollectorPaused(c, true)
+	})
+	g.POST("/conversations/:conversation_id/collectors/me/resume", func(c *gin.Context) {
+		setOwnCollectorPaused(c, false)
+	})
 	g.POST("/conversations/:conversation_id/pause", func(c *gin.Context) {
 		p := principal(c)
 		if err := app.Service.PauseResume(c, p.UserID, c.Param("conversation_id"), false); err != nil {

@@ -246,6 +246,11 @@ type publicKnowledgeLibraryItem struct {
 	MessageCount           int        `json:"message_count,omitempty"`
 	AttachmentCount        int        `json:"attachment_count,omitempty"`
 	MemberCount            int        `json:"member_count,omitempty"`
+	CurrentCollectorID     string     `json:"current_collector_id,omitempty"`
+	CurrentCollectorStatus string     `json:"current_collector_status,omitempty"`
+	PrimaryCollectorUserID string     `json:"primary_collector_user_id,omitempty"`
+	PrimaryCollectorName   string     `json:"primary_collector_name,omitempty"`
+	PrimaryCollectorStatus string     `json:"primary_collector_status,omitempty"`
 	SentAt                 *time.Time `json:"sent_at,omitempty"`
 	CreatedAt              time.Time  `json:"created_at"`
 	UpdatedAt              time.Time  `json:"updated_at"`
@@ -471,7 +476,7 @@ func publicKnowledgeLibraryFromDomain(value domain.KnowledgeLibrary) publicKnowl
 }
 
 func publicKnowledgeLibraryItemFromDomain(value domain.KnowledgeLibraryItem) publicKnowledgeLibraryItem {
-	return publicKnowledgeLibraryItem{ID: value.ID, LibraryID: value.LibraryID, Kind: value.Kind, Title: value.Title, Excerpt: value.Excerpt, Platform: value.Platform, ConversationID: value.ConversationID, ExternalConversationID: value.ExternalConversationID, ConversationType: value.ConversationType, ConversationName: value.ConversationName, CollectionStatus: value.CollectionStatus, SourceType: value.SourceType, SourceMessageID: value.SourceMessageID, SourceAttachmentID: value.SourceAttachmentID, ContentType: value.ContentType, ContentVisibility: value.ContentVisibility, AccessScope: value.AccessScope, ProcessingStatus: value.ProcessingStatus, ContentStatus: value.ContentStatus, FileName: value.FileName, MIMEType: value.MIMEType, SizeBytes: value.SizeBytes, MessageCount: value.MessageCount, AttachmentCount: value.AttachmentCount, MemberCount: value.MemberCount, SentAt: value.SentAt, CreatedAt: value.CreatedAt, UpdatedAt: value.UpdatedAt, SharedAt: value.SharedAt, ShareBatchID: value.ShareBatchID, CanView: value.CanView, CanDownload: value.CanDownload, ContentAccessRequired: value.ContentAccessRequired, RAGStatus: value.RAGStatus, RAGContentVersion: value.RAGContentVersion, RAGACLVersion: value.RAGACLVersion, RAGLastError: value.RAGLastError, Searchable: value.Searchable}
+	return publicKnowledgeLibraryItem{ID: value.ID, LibraryID: value.LibraryID, Kind: value.Kind, Title: value.Title, Excerpt: value.Excerpt, Platform: value.Platform, ConversationID: value.ConversationID, ExternalConversationID: value.ExternalConversationID, ConversationType: value.ConversationType, ConversationName: value.ConversationName, CollectionStatus: value.CollectionStatus, SourceType: value.SourceType, SourceMessageID: value.SourceMessageID, SourceAttachmentID: value.SourceAttachmentID, ContentType: value.ContentType, ContentVisibility: value.ContentVisibility, AccessScope: value.AccessScope, ProcessingStatus: value.ProcessingStatus, ContentStatus: value.ContentStatus, FileName: value.FileName, MIMEType: value.MIMEType, SizeBytes: value.SizeBytes, MessageCount: value.MessageCount, AttachmentCount: value.AttachmentCount, MemberCount: value.MemberCount, CurrentCollectorID: value.CurrentCollectorID, CurrentCollectorStatus: value.CurrentCollectorStatus, PrimaryCollectorUserID: value.PrimaryCollectorUserID, PrimaryCollectorName: value.PrimaryCollectorName, PrimaryCollectorStatus: value.PrimaryCollectorStatus, SentAt: value.SentAt, CreatedAt: value.CreatedAt, UpdatedAt: value.UpdatedAt, SharedAt: value.SharedAt, ShareBatchID: value.ShareBatchID, CanView: value.CanView, CanDownload: value.CanDownload, ContentAccessRequired: value.ContentAccessRequired, RAGStatus: value.RAGStatus, RAGContentVersion: value.RAGContentVersion, RAGACLVersion: value.RAGACLVersion, RAGLastError: value.RAGLastError, Searchable: value.Searchable}
 }
 
 func publicKnowledgeOriginalFromDomain(value domain.KnowledgeContent) publicKnowledgeOriginal {

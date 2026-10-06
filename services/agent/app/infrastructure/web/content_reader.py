@@ -10,6 +10,7 @@ asking a renderer about a page that does not exist only wastes the budget.
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -89,7 +90,16 @@ class ContentReader:
             static_error = exc
 
         if document is not None:
-            self._reject_unsupported(document.content_type, url)
+            if self._unsupported_kind(document.content_type) is not None:
+                if self.renderer is not None:
+                    try:
+                        return self._render(url)
+                    except RenderError as exc:
+                        raise UnsupportedDocument(
+                            f"cannot render {url}: {exc}",
+                            code="unsupported_document",
+                        ) from exc
+                self._reject_unsupported(document.content_type, url)
             title, text, links = extract_document(document.content, url=document.final_url or url)
             if len(text) >= self.min_text_chars or self.renderer is None:
                 return ReadResult(
@@ -124,7 +134,19 @@ class ContentReader:
                 )
 
         assert static_error is not None
-        self._reject_unsupported(str(getattr(static_error, "content_type", "") or ""), url)
+        static_content_type = str(getattr(static_error, "content_type", "") or "")
+        if self.renderer is not None and (
+            self._unsupported_kind(static_content_type) is not None
+            or _looks_like_document(static_error, url)
+        ):
+            try:
+                return self._render(url)
+            except RenderError as exc:
+                raise UnsupportedDocument(
+                    f"cannot render {url}: {exc}",
+                    code="unsupported_document",
+                ) from exc
+        self._reject_unsupported(static_content_type, url)
         if not self._worth_rendering(static_error):
             raise ContentReadError(
                 f"cannot read {url}: {static_error}", code=static_error.code
@@ -158,19 +180,31 @@ class ContentReader:
         )
 
     @staticmethod
-    def _reject_unsupported(content_type: str, url: str) -> None:
-        """PDF and media are other components' job, not this capability's."""
-
+    def _unsupported_kind(content_type: str) -> str | None:
         kind = str(content_type or "").split(";")[0].strip().lower()
         if not kind:
-            return
+            return None
         if kind in _DOCUMENT_TYPES:
+            return "document"
+        if kind.startswith(_MEDIA_PREFIXES):
+            return "media"
+        return None
+
+    @classmethod
+    def _reject_unsupported(cls, content_type: str, url: str) -> None:
+        """PDF and media are other components' job, not this capability's."""
+
+        kind = cls._unsupported_kind(content_type)
+        if kind == "document":
             raise UnsupportedDocument(
                 f"{url} is a document for the RAG pipeline, not a web page",
                 code="document_not_web_page",
             )
-        if kind.startswith(_MEDIA_PREFIXES):
-            raise UnsupportedDocument(f"{url} is media, which is not supported", code="unsupported_media")
+        if kind == "media":
+            raise UnsupportedDocument(
+                f"{url} is media, which is not supported",
+                code="unsupported_media",
+            )
 
     @staticmethod
     def _worth_rendering(error: PageFetchError) -> bool:
@@ -188,3 +222,16 @@ class ContentReader:
             "unsupported_content_type",
             "page_not_found",
         }
+
+
+def _looks_like_document(error: PageFetchError, url: str) -> bool:
+    """Whether a fetch rejection is a document the renderer may still extract."""
+
+    if str(getattr(error, "code", "")) == "unsupported_content_type":
+        message = str(error).lower()
+        if any(
+            kind in message
+            for kind in ("application/pdf", "audio/", "video/")
+        ):
+            return True
+    return urlsplit(str(url or "")).path.lower().endswith(".pdf")

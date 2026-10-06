@@ -23,6 +23,7 @@ const (
 	CollectorPrimary      = "primary"
 	CollectorSupplemental = "supplemental"
 	CollectorActive       = "active"
+	CollectorPaused       = "paused"
 	CollectorUnavailable  = "unavailable"
 	CollectorRemoved      = "removed"
 )
@@ -297,6 +298,7 @@ type Collector struct {
 	LastError           string     `json:"last_error,omitempty"`
 	JoinedAt            time.Time  `json:"joined_at"`
 	RemovedAt           *time.Time `json:"removed_at,omitempty"`
+	UpdatedAt           time.Time  `json:"updated_at,omitempty"`
 	AgentOnline         bool       `json:"agent_online,omitempty"`
 	LastHeartbeatAt     *time.Time `json:"last_heartbeat_at,omitempty"`
 }
@@ -516,6 +518,11 @@ type KnowledgeLibraryItem struct {
 	MessageCount           int        `json:"message_count,omitempty"`
 	AttachmentCount        int        `json:"attachment_count,omitempty"`
 	MemberCount            int        `json:"member_count,omitempty"`
+	CurrentCollectorID     string     `json:"current_collector_id,omitempty"`
+	CurrentCollectorStatus string     `json:"current_collector_status,omitempty"`
+	PrimaryCollectorUserID string     `json:"primary_collector_user_id,omitempty"`
+	PrimaryCollectorName   string     `json:"primary_collector_name,omitempty"`
+	PrimaryCollectorStatus string     `json:"primary_collector_status,omitempty"`
 	SentAt                 *time.Time `json:"sent_at,omitempty"`
 	CreatedAt              time.Time  `json:"created_at"`
 	UpdatedAt              time.Time  `json:"updated_at"`

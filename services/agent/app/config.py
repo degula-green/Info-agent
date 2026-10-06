@@ -608,6 +608,15 @@ class Settings:
         "AGENT_RAG_INTERNAL_TOKEN",
         "agent_RAG_INTERNAL_TOKEN"
     )
+    # Relevance floor for knowledge chunks handed to the answer layer. RRF
+    # scores carry no absolute meaning across deployments, so the code default
+    # keeps every hit; a real deployment samples its own distribution and then
+    # sets this to drop the unrelated tail.
+    knowledge_min_answer_score: float = _float(
+        0.0,
+        "AGENT_KNOWLEDGE_MIN_ANSWER_SCORE",
+        "agent_KNOWLEDGE_MIN_ANSWER_SCORE",
+    )
 
     @property
     def retry_backoff_seconds(self) -> list[float]:

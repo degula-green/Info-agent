@@ -4,10 +4,18 @@ from typing import Any
 import httpx
 from dataclasses import dataclass, field
 import logging
+import time
 
 from app.ingress.vocabulary import references_attachment
 
 logger = logging.getLogger("agent.attachment")
+
+# A RAG restart can answer with a transient 5xx or drop the connection.
+# Parsing is idempotent, so retry transport and server errors before giving up
+# on the file; a client error (missing object, bad request) raises immediately.
+_PARSE_ATTEMPTS = 5
+_PARSE_RETRY_BACKOFF_SECONDS = 1.0
+
 
 @dataclass
 class EnrichedContext:
@@ -79,15 +87,25 @@ class AttachmentContextEnricher:
                     "page_count": parsed.get("page_count", 0)
                 })
                 metadata_list.append(metadata)
-                if content and not content.startswith("[文档解析失败"):
+                # A failed parse still belongs in the excerpt. Dropping it let
+                # the planner fall back to knowledge retrieval, which then
+                # answered "your company" from an unrelated document; carrying
+                # the failure lets the answer say the file could not be read.
+                if content:
                     excerpt_parts.append(f"【{metadata['file_name']}】\n{content}")
             except Exception as e:
-                logger.error(f"附件解析失败 {attachment_id}: {str(e)}")
+                detail = _describe_error(e)
+                logger.error(f"附件解析失败 {attachment_id}: {detail}")
+                failure_note = f"[文档解析失败: {detail}]"
                 parsed_contents.append({
                     "file_name": metadata["file_name"],
-                    "content": f"[文档解析失败: {str(e)}]",
+                    "content": failure_note,
                     "page_count": 0
                 })
+                # Keep the failure as the turn's evidence so the planner answers
+                # from "the file could not be read" instead of searching the
+                # knowledge base for words that merely describe the file.
+                excerpt_parts.append(f"【{metadata['file_name']}】\n{failure_note}")
 
         # 2. 构造增强上下文
         if not parsed_contents:
@@ -108,22 +126,46 @@ class AttachmentContextEnricher:
         )
 
     def _call_rag_parse(self, attachment_id: str, metadata: dict) -> dict:
-        """调用RAG内部解析API"""
-        with httpx.Client(timeout=420) as client:
-            response = client.post(
-                f"{self.rag_service_url}/internal/v1/parse-attachment",
-                json={
-                    "attachment_id": attachment_id,
-                    "owner_id": metadata["owner_id"],
-                    "file_name": metadata["file_name"],
-                    "mime_type": metadata["mime_type"]
-                },
-                headers={
-                    "x-rag-internal-token": self.rag_internal_token
-                }
-            )
-            response.raise_for_status()
-            return response.json()
+        """调用RAG内部解析API。
+
+        RAG 重启期间的一次瞬时 5xx 或连接中断不该让整份附件作废：解析本身
+        是幂等的，所以对传输错误和服务端错误重试，客户端的 4xx 直接抛出。
+        """
+
+        attempts = _PARSE_ATTEMPTS
+        last_error: Exception | None = None
+        for attempt in range(attempts):
+            try:
+                # Internal service calls must not inherit a system proxy: the
+                # host may route everything through a fake-IP proxy that cannot
+                # carry loopback traffic, which shows up as a spurious 5xx.
+                with httpx.Client(timeout=420, trust_env=False) as client:
+                    response = client.post(
+                        f"{self.rag_service_url}/internal/v1/parse-attachment",
+                        json={
+                            "attachment_id": attachment_id,
+                            "owner_id": metadata["owner_id"],
+                            "file_name": metadata["file_name"],
+                            "mime_type": metadata["mime_type"]
+                        },
+                        headers={
+                            "x-rag-internal-token": self.rag_internal_token
+                        }
+                    )
+                    response.raise_for_status()
+                    return response.json()
+            except httpx.HTTPStatusError as exc:
+                last_error = exc
+                if exc.response.status_code < 500:
+                    raise
+            except httpx.TransportError as exc:
+                last_error = exc
+            if attempt + 1 < attempts:
+                # Exponential backoff: the observed failures are short windows
+                # (a service restart or a dropped connection), so a few seconds
+                # of waiting is what actually gets the attachment through.
+                time.sleep(_PARSE_RETRY_BACKOFF_SECONDS * (2**attempt))
+        raise last_error if last_error is not None else RuntimeError("attachment parse failed")
 
     def _build_full_content(self, blocks: list[dict]) -> str:
         """Bounded full body, preserving page numbers and heading paths."""
@@ -132,10 +174,21 @@ class AttachmentContextEnricher:
         total = 0
         for block in blocks:
             text = str(block.get("text") or "").strip()
-            if not text and block.get("type") != "image":
-                continue
             page = block.get("page_number") or "?"
             kind = str(block.get("type") or "text")
+            if not text:
+                # An image-only page parses to an empty text block. Say so
+                # explicitly so the planner knows the attachment was seen but
+                # carries no machine-readable text instead of reading a blank.
+                if kind == "image":
+                    text = "[图片：未识别到文字内容]"
+                else:
+                    continue
+            elif kind == "image":
+                # A picture described by the vision model. Label it so the
+                # planner reads this as a description of the image, not as text
+                # printed in the document.
+                text = f"[图片内容] {text}"
             heading_path = [str(item) for item in (block.get("heading_path") or []) if str(item).strip()]
             if kind in {"title", "heading"}:
                 line = f"\n## [第{page}页] {text}"
@@ -227,3 +280,22 @@ class AttachmentContextEnricher:
             page = b["page_number"] or "?"
             parts.append(f"[第{page}页] {b['text'][:200]}...")
         return "\n".join(parts)
+
+
+def _describe_error(exc: Exception) -> str:
+    """The failure cause, including the service's own detail when it sent one.
+
+    An HTTP status alone ("500 Internal Server Error") hides whether the file
+    was unreadable or the upstream parser was briefly unavailable, and that
+    difference is the whole diagnosis.
+    """
+
+    response = getattr(exc, "response", None)
+    if response is not None:
+        try:
+            body = str(response.text or "").strip()
+        except Exception:  # noqa: BLE001 - a broken body must not mask the cause
+            body = ""
+        if body:
+            return f"{exc} -> {body[:300]}"
+    return str(exc)

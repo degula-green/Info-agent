@@ -163,6 +163,9 @@ class RAGRetrievalService:
             limit=max(request.top_k * 3, anchor_max_per_resource),
         )
         authorized_anchors = self._authorize_results(request, anchor_candidates, scope)
+        authorized_anchors = self._upgrade_protected_variants(
+            request, authorized_anchors, scope
+        )
         neighbors: list[SearchResult] = []
         expandable_anchors = [
             item for item in authorized_anchors
@@ -313,6 +316,80 @@ class RAGRetrievalService:
         if len(decisions) != len(values):
             return []
         return [item for item, allowed in zip(values, decisions) if allowed]
+
+    def _upgrade_protected_variants(
+        self,
+        request: SearchRequest,
+        values: list[SearchResult],
+        scope: AuthorizationScope,
+    ) -> list[SearchResult]:
+        """Replace display hits with the protected original when allowed.
+
+        The protected-object list from Core is an optimization, not a source of
+        truth: OpenFGA can return a capped, unstable subset. Authorization is
+        therefore decided per candidate with an exact check, and only then is
+        the protected chunk loaded and swapped in.
+        """
+
+        if not request.include_protected or not values:
+            return values
+        fetch = getattr(self.indexer, "search_protected_variants", None)
+        if not callable(fetch):
+            return values
+        item_ids = tuple(
+            dict.fromkeys(
+                str(item.source.get("knowledge_item_id") or "")
+                for item in values
+                if item.source.get("content_variant") != "protected"
+            )
+        )
+        item_ids = tuple(value for value in item_ids if value)
+        if not item_ids:
+            return values
+        checks = [
+            AccessCheck("knowledge_item", "original", item_id, "view")
+            for item_id in item_ids
+        ]
+        try:
+            decisions = self.authorization.check_batch(
+                user_id=request.user_id,
+                scope_type=request.scope_type,
+                scope_id=request.scope_id,
+                checks=checks,
+                snapshot_id=scope.snapshot_id,
+            )
+        except Exception:
+            return values
+        if len(decisions) != len(item_ids):
+            return values
+        allowed_ids = {
+            item_id for item_id, allowed in zip(item_ids, decisions) if allowed
+        }
+        if not allowed_ids:
+            return values
+        try:
+            protected = fetch(request, tuple(allowed_ids))
+        except Exception:
+            return values
+        if not protected:
+            return values
+
+        selected: dict[str, SearchResult] = {}
+        order: list[str] = []
+        for item in values:
+            key = str(item.source.get("logical_position_key") or item.chunk_id)
+            if key not in selected:
+                order.append(key)
+            selected[key] = item
+        for item in protected:
+            knowledge_item_id = str(item.source.get("knowledge_item_id") or "")
+            if knowledge_item_id not in allowed_ids:
+                continue
+            key = str(item.source.get("logical_position_key") or item.chunk_id)
+            if key not in selected:
+                order.append(key)
+            selected[key] = item
+        return [selected[key] for key in order]
 
 
 def _access_check(result: SearchResult) -> AccessCheck:

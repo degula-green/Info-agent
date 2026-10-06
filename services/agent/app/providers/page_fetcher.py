@@ -110,6 +110,12 @@ def _assert_public_host(host: str, port: int, *, allow_private: bool = False) ->
     try:
         infos = socket.getaddrinfo(host, port, proto=socket.IPPROTO_TCP)
     except socket.gaierror as exc:
+        if allow_private:
+            # The operator explicitly allowed non-public addresses (fake-IP
+            # proxies commonly answer only the application's own resolver).
+            # Let the fetch report the real failure instead of blocking it
+            # here with a guard that is meant for the public-address rule.
+            return
         raise PageFetchRetryable(f"cannot resolve host: {host}") from exc
     addresses = {info[4][0] for info in infos if info[4]}
     if not addresses:

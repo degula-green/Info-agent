@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from contextvars import ContextVar, Token
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Iterator
 
 from app.kernel.models import ConversationContext, Plan, PlanStep, TaskRecord
@@ -19,6 +19,7 @@ class ExecutionContext:
     trace_id: str
     source_type: str
     source_ref: dict[str, Any]
+    task_input: dict[str, Any] = field(default_factory=dict)
     conversation_context: ConversationContext | None = None
 
     @classmethod
@@ -48,6 +49,7 @@ class ExecutionContext:
             trace_id=trace_id,
             source_type=task.source_type,
             source_ref=source_ref,
+            task_input=dict(task.input),
             conversation_context=conversation_context,
         )
 

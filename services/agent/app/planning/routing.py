@@ -34,6 +34,57 @@ from app.planning.conversation_memory import (
 WEB_RESEARCH_INTENT = "web.research"
 KNOWLEDGE_ANSWER_INTENT = "knowledge.answer"
 FORM_COMPLETE_INTENT = "form.complete"
+
+
+EVIDENCE_SOURCES = frozenset({"attachment", "knowledge"})
+
+
+def resolve_evidence_sources(
+    task: TaskEnvelope, understanding: TaskUnderstanding | None
+) -> tuple[str, ...]:
+    """Which evidence sources this turn should draw on.
+
+    The understanding step judges this from the user's instruction. When it
+    did not judge (an older caller, a backend without the source question, or a
+    verdict below its threshold), an attachment-bearing message defaults to
+    using both sources: one extra retrieval is cheaper than silently answering
+    from half the material.
+    """
+
+    if understanding is not None:
+        judged = tuple(
+            item
+            for item in (understanding.evidence_sources or [])
+            if item in EVIDENCE_SOURCES
+        )
+        if judged:
+            return _with_referenced_attachment(task, judged)
+    if task.input.get("attachment_ids"):
+        return ("attachment", "knowledge")
+    return ()
+
+
+def _with_referenced_attachment(
+    task: TaskEnvelope, judged: tuple[str, ...]
+) -> tuple[str, ...]:
+    """Keep the file the instruction pointed at from being judged away.
+
+    A source verdict may add context, but when the user's own words point at an
+    attachment and the Runtime produced evidence from it, dropping the
+    attachment would answer a question about the file from something else.
+    """
+
+    if "attachment" in judged:
+        return judged
+    if not task.input.get("attachment_ids"):
+        return judged
+    if not task.input.get("_attachment_referenced"):
+        return judged
+    if not str(task.input.get("_attachment_excerpt") or "").strip():
+        return judged
+    return ("attachment",)
+
+
 # Intents whose plan has to be composed from several capabilities. The
 # container adds ``knowledge.answer`` when the internal knowledge tools are
 # registered; otherwise the deterministic planner is the only one that can
@@ -74,6 +125,13 @@ class RoutingPlanner:
         """The planner for this Task; collection never reaches the LLM planner."""
 
         if str(task.source_type or "") in self.deterministic_source_types:
+            return self.deterministic
+        if "attachment" in resolve_evidence_sources(task, understanding):
+            # The instruction judged the attachment to be evidence, so its
+            # already-parsed body belongs in the answer. A model-planned
+            # retrieval would search company data for the words the user used
+            # to describe the file, which is how a question about an image
+            # ended up answered from unrelated document chunks.
             return self.deterministic
         if understanding is None:
             return self.deterministic
@@ -169,7 +227,12 @@ def _build_web_research_plan(
     if WEB_RESEARCH_CAPABILITY not in registered:
         return None
 
-    request = str(task.input.get("text") or "").strip()
+    # The user's own sentence, never the merged attachment body. ``text``
+    # carries the parsed attachment once the Runtime has enriched the task, and
+    # using it here would send a whole document as the search query. The
+    # knowledge pipeline guards against this the same way.
+    instruction = str(task.input.get("_original_text") or "").strip()
+    request = instruction or str(task.input.get("text") or "").strip()
     if not request:
         return None
     # Explicit URLs always use the fixed web pipeline. Sending a URL to the LLM
@@ -193,9 +256,28 @@ def _build_web_research_plan(
         "网上",
         "新闻",
         "最新",
+        # Analysis and comparison requests need a composed answer, not just the
+        # raw evidence: "说明我们公司是否符合…" / "哪些符合、哪些不符合".
+        "说明",
+        "分析",
+        "比较",
+        "对比",
+        "评估",
+        "符合",
+        "哪些",
+        "依据",
+        "结论",
     )
     urls = extract_http_urls(request)
-    wants_answer = any(marker in request for marker in answer_markers)
+    # A link followed by a question is itself a request for an answer. The
+    # marker list can never cover every phrasing ("…我的公司是否是独角兽企业呢？"),
+    # and a retrieval-only plan leaves the Task with nothing to say once the
+    # page has been read -- the replan that follows is where it used to fail.
+    wants_answer = (
+        any(marker in request for marker in answer_markers)
+        or "？" in request
+        or "?" in request
+    )
     if not urls and not wants_answer:
         return None
     plan_id = str(uuid4())

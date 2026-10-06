@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from app.capabilities.answer import AnswerComposeCapability
 from app.capabilities.web_research import WebResearchCapability
 from app.kernel.models import (
+    CapabilityDescriptor,
     Plan,
     PlannerDecision,
     PlanningConstraints,
@@ -19,6 +20,7 @@ from app.kernel.models import (
     TaskUnderstanding,
     UnderstandingIntent,
 )
+from app.planning.knowledge import KnowledgeRoutingPlanner
 from app.planning.routing import RoutingPlanner
 
 
@@ -59,6 +61,65 @@ def envelope(*, text: str = "随便一句", source_type: str = "chat") -> TaskEn
         input={"text": text},
         created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
     )
+
+
+def _descriptor(name: str) -> CapabilityDescriptor:
+    return CapabilityDescriptor(
+        name=name,
+        description=name,
+        risk_level="read_only",
+        side_effect=False,
+        requires_approval=False,
+        idempotent=True,
+        timeout_seconds=90,
+    )
+
+
+def test_url_with_compliance_analysis_combines_web_and_private_knowledge() -> None:
+    class NeverPlanner:
+        name = "never"
+
+        def create_plan(self, *args, **kwargs):  # pragma: no cover
+            raise AssertionError("the fixed web pipeline must not call this planner")
+
+    capabilities = [
+        _descriptor("web.research"),
+        _descriptor("answer.compose"),
+        _descriptor("knowledge.search_content"),
+    ]
+    task = envelope(
+        text=(
+            "请阅读 https://example.com/protocol.pdf 并说明我们公司是否符合该协议，"
+            "哪些符合哪些不符合"
+        )
+    )
+    understanding = TaskUnderstanding(
+        is_task=True,
+        goal="合规对比",
+        task_kind="mixed",
+        intent_candidates=[
+            UnderstandingIntent(name="web.research", confidence=0.95)
+        ],
+        confidence=0.95,
+    )
+    routing = RoutingPlanner(deterministic=NeverPlanner(), llm=NeverPlanner())
+
+    web_plan = routing.create_plan(
+        task, capabilities, [], PlanningConstraints(), understanding
+    )
+    assert [step.capability for step in web_plan.steps] == [
+        "web.research",
+        "answer.compose",
+    ]
+
+    combined = KnowledgeRoutingPlanner(routing).create_plan(
+        task, capabilities, [], PlanningConstraints(), understanding
+    )
+    assert [step.capability for step in combined.steps] == [
+        "knowledge.search_content",
+        "web.research",
+        "answer.compose",
+    ]
 
 
 def understanding(*names: str, is_task: bool = True) -> TaskUnderstanding:
@@ -132,6 +193,55 @@ def test_an_explicit_url_question_uses_the_fixed_web_pipeline() -> None:
         "web.research",
         "answer.compose",
     ]
+    assert (deterministic.plans, llm.plans) == (0, 0)
+
+
+def test_a_url_followed_by_a_question_still_composes_an_answer() -> None:
+    """A question mark after a link asks for an answer, not just for a fetch."""
+
+    planner, deterministic, llm = router()
+
+    plan = planner.create_plan(
+        envelope(
+            text=(
+                "https://baike.baidu.com/item/%E7%8B%AC%E8%A7%92%E5%85%BD%E4%BC%81"
+                "%E4%B8%9A/22449491，我的公司是否是独角兽企业呢？"
+            )
+        ),
+        [
+            WebResearchCapability.descriptor,
+            AnswerComposeCapability.descriptor,
+        ],
+        [],
+        PlanningConstraints(),
+        understanding("web.research"),
+    )
+
+    # A retrieval-only plan leaves nothing to answer with, and the replan that
+    # follows is where this used to fail with an unresolvable reference.
+    assert plan.objective == "检索公开网页并回答"
+    assert [step.capability for step in plan.steps] == [
+        "web.research",
+        "answer.compose",
+    ]
+    assert (deterministic.plans, llm.plans) == (0, 0)
+
+
+def test_a_bare_link_without_a_question_stays_a_single_fetch() -> None:
+    planner, deterministic, llm = router()
+
+    plan = planner.create_plan(
+        envelope(text="https://example.com/standup"),
+        [
+            WebResearchCapability.descriptor,
+            AnswerComposeCapability.descriptor,
+        ],
+        [],
+        PlanningConstraints(),
+        understanding("web.research"),
+    )
+
+    assert [step.capability for step in plan.steps] == ["web.research"]
     assert (deterministic.plans, llm.plans) == (0, 0)
 
 

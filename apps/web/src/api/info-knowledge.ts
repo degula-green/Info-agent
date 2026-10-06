@@ -98,6 +98,11 @@ export interface KnowledgeLibraryItemDTO {
   message_count?: number
   attachment_count?: number
   member_count?: number
+  current_collector_id?: string
+  current_collector_status?: 'active' | 'paused' | 'unavailable' | string
+  primary_collector_user_id?: string
+  primary_collector_name?: string
+  primary_collector_status?: 'active' | 'paused' | 'unavailable' | string
   sent_at?: string | null
   created_at: string
   updated_at: string
@@ -332,6 +337,11 @@ export async function addConversationCollector(conversationID: string) {
 
 export async function removeConversationCollector(conversationID: string, collectorID: string) {
   return knowledgeRequest<{ status: string }>(`/conversations/${encodeURIComponent(conversationID)}/collectors/${encodeURIComponent(collectorID)}`, { method: 'DELETE' })
+}
+
+export async function setConversationCollectorPaused(conversationID: string, paused: boolean) {
+  const action = paused ? 'pause' : 'resume'
+  return knowledgeRequest<{ status: string; collectors: CollectorDTO[] }>(`/conversations/${encodeURIComponent(conversationID)}/collectors/me/${action}`, { method: 'POST' })
 }
 
 export async function setConversationStatus(conversationID: string, status: 'pause' | 'resume') {

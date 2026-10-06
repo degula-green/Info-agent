@@ -170,6 +170,8 @@ async def open_url(session_id: str, body: OpenRequest) -> PageInfo:
     info = await _page_info(session.page)
     session.url = info.final_url
     session.login_required = info.login_required
+    if not info.login_required:
+        await manager.persist_state(session)
     return info
 
 
@@ -292,6 +294,9 @@ async def takeover_state(session_id: str) -> TakeoverState:
     except SessionNotFound as exc:
         raise HTTPException(status_code=404, detail="unknown session") from exc
     info = await _page_info(session.page)
+    session.login_required = info.login_required
+    if not info.login_required:
+        await manager.persist_state(session)
     return TakeoverState(
         required=info.login_required,
         reason="登录后才能编辑该文档" if info.login_required else "",

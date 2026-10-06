@@ -1411,7 +1411,19 @@ func (s *MemoryStore) AddCollector(_ context.Context, input CollectorInput) (*do
 	}
 	for _, c := range s.collectors {
 		if c.ConversationID == input.ConversationID && c.ConnectorAccountID == input.ConnectorAccountID && c.Status != domain.CollectorRemoved {
-			return nil, apperror.New("collector_already_exists", "collector already exists", 409, false)
+			if c.CollectorUserID != input.CollectorUserID {
+				return nil, apperror.New("collector_already_exists", "collector already exists", 409, false)
+			}
+			c.Status = domain.CollectorActive
+			c.NextPollAt = nil
+			c.LastError = ""
+			c.UpdatedAt = time.Now().UTC()
+			s.collectors[c.ID] = c
+			conversation.Status = domain.ConversationActive
+			conversation.PauseReason = ""
+			conversation.UpdatedAt = c.UpdatedAt
+			s.conversations[conversation.ID] = conversation
+			return cloneCollectorPtr(c), nil
 		}
 	}
 	if input.Role == domain.CollectorPrimary {
@@ -1488,6 +1500,44 @@ func (s *MemoryStore) RemoveCollector(_ context.Context, conversationID, collect
 		s.conversations[conversationID] = conv
 	}
 	return nil
+}
+
+func (s *MemoryStore) SetCollectorStatus(_ context.Context, conversationID, collectorID, status string, now time.Time) (*domain.Collector, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	c, ok := s.collectors[collectorID]
+	if !ok || c.ConversationID != conversationID || c.Status == domain.CollectorRemoved {
+		return nil, apperror.New("collector_not_found", "collector not found", 404, false)
+	}
+	c.Status = status
+	c.NextPollAt = nil
+	if status == domain.CollectorActive {
+		c.LastError = ""
+	}
+	c.UpdatedAt = now
+	s.collectors[collectorID] = c
+	conversation := s.conversations[conversationID]
+	if status == domain.CollectorPaused {
+		active := false
+		for _, other := range s.collectors {
+			if other.ConversationID == conversationID && other.Status == domain.CollectorActive {
+				active = true
+				break
+			}
+		}
+		if !active {
+			conversation.Status = domain.ConversationPaused
+			conversation.PauseReason = "no_available_collector"
+			conversation.UpdatedAt = now
+			s.conversations[conversationID] = conversation
+		}
+	} else if status == domain.CollectorActive && conversation.Status == domain.ConversationPaused && conversation.PauseReason == "no_available_collector" {
+		conversation.Status = domain.ConversationActive
+		conversation.PauseReason = ""
+		conversation.UpdatedAt = now
+		s.conversations[conversationID] = conversation
+	}
+	return cloneCollectorPtr(c), nil
 }
 
 func (s *MemoryStore) SetConversationStatus(_ context.Context, conversationID, status, reason string) error {
@@ -3462,7 +3512,32 @@ func (s *MemoryStore) memoryLibraryConversationsLocked(libraryID, userID, organi
 		conversation.Collectors = s.collectorsForLocked(id)
 		conversation.Memberships = s.membershipsForLocked(id)
 		conversation.MessageCount, conversation.AttachmentCount = s.conversationCountsLocked(id)
-		entry := domain.KnowledgeLibraryItem{ID: conversation.ID, LibraryID: libraryID, Kind: "conversation", Title: conversation.Name, Platform: conversation.Platform, ConversationID: conversation.ID, ExternalConversationID: conversation.ExternalConversationID, ConversationType: conversation.ConversationType, ConversationName: conversation.Name, CollectionStatus: memoryCollectionStatus(conversation), SourceType: "platform_conversation", MessageCount: conversation.MessageCount, AttachmentCount: conversation.AttachmentCount, MemberCount: len(conversation.Memberships), CreatedAt: conversation.CreatedAt, UpdatedAt: conversation.UpdatedAt, CanView: true}
+		var currentCollectorID, currentCollectorStatus, primaryCollectorUserID, primaryCollectorName, primaryCollectorStatus string
+		for _, collector := range conversation.Collectors {
+			if collector.Status == domain.CollectorRemoved {
+				continue
+			}
+			if collector.CollectorUserID == userID {
+				if currentCollectorID == "" || collector.Status == domain.CollectorActive {
+					currentCollectorID = collector.ID
+					currentCollectorStatus = collector.Status
+				}
+			}
+			if collector.CollectorRole == domain.CollectorPrimary {
+				if primaryCollectorUserID == "" || collector.Status == domain.CollectorActive {
+					primaryCollectorUserID = collector.CollectorUserID
+					primaryCollectorName = ""
+					if connector, ok := s.connectors[collector.ConnectorAccountID]; ok {
+						primaryCollectorName = connector.DisplayName
+						if primaryCollectorName == "" {
+							primaryCollectorName = connector.ExternalAccountID
+						}
+					}
+					primaryCollectorStatus = collector.Status
+				}
+			}
+		}
+		entry := domain.KnowledgeLibraryItem{ID: conversation.ID, LibraryID: libraryID, Kind: "conversation", Title: conversation.Name, Platform: conversation.Platform, ConversationID: conversation.ID, ExternalConversationID: conversation.ExternalConversationID, ConversationType: conversation.ConversationType, ConversationName: conversation.Name, CollectionStatus: memoryCollectionStatus(conversation), SourceType: "platform_conversation", MessageCount: conversation.MessageCount, AttachmentCount: conversation.AttachmentCount, MemberCount: len(conversation.Memberships), CurrentCollectorID: currentCollectorID, CurrentCollectorStatus: currentCollectorStatus, PrimaryCollectorUserID: primaryCollectorUserID, PrimaryCollectorName: primaryCollectorName, PrimaryCollectorStatus: primaryCollectorStatus, CreatedAt: conversation.CreatedAt, UpdatedAt: conversation.UpdatedAt, CanView: true}
 		if strings.HasPrefix(libraryID, orgSharedLibraryPrefix) {
 			entry.SourceType = "shared_private_item"
 		}

@@ -54,6 +54,7 @@ class CreateTaskBody(BaseModel):
 class InputBody(BaseModel):
     text: str = Field(default="", max_length=8000)
     fields: dict[str, Any] = Field(default_factory=dict)
+    resume: bool = False
 
 
 class DecisionBody(BaseModel):
@@ -260,7 +261,10 @@ def submit_input(
     payload.update(body.fields)
     try:
         task = container.task_service.submit_input(
-            task_id, owner_user_id=owner_user_id, payload=payload
+            task_id,
+            owner_user_id=owner_user_id,
+            payload=payload,
+            resume=body.resume,
         )
     except (TaskNotFoundError, TaskPermissionError, TaskStateError) as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc

@@ -56,6 +56,80 @@ CHAT_REPLY_TEXT_LIMIT = 4000
 DEFAULT_MIN_CONFIDENCE = DEFAULT_MIN_CONFIDENCE
 _TRIM = " \t\r\n，。,.!！?？、:：;；\"'“”‘’()（）[]【】<>《》…~-_"
 
+# A clear action phrase that the classifier could only label "other_task".
+# When there is no question wording and the deployment has todo.create, that is
+# still a to-do the owner asked for. This is the deterministic safety net for
+# the known classifier recall gap on time-less work items.
+_ACTION_REQUEST_MARKERS = (
+    "完成",
+    "写完",
+    "写一下",
+    "提交",
+    "开发",
+    "修复",
+    "处理",
+    "准备",
+    "整理",
+    "买",
+    "取",
+    "做",
+    "安排",
+    "跟进",
+    "联系",
+    "发送",
+    "回复",
+    "提醒",
+    "创建",
+    "新建",
+)
+_QUESTION_MARKERS = (
+    "是什么",
+    "什么是",
+    "怎么",
+    "如何",
+    "为什么",
+    "是否",
+    "有没有",
+    "哪些",
+    "多少",
+    "吗？",
+    "吗?",
+)
+# Action words that actually belong to another capability. Without this a
+# "提交表单" boundary case becomes a to-do.
+_NON_TODO_MARKERS = (
+    "表单",
+    "表格",
+    "申请表",
+    "填表",
+    "填写",
+    "预览",
+    "上传",
+    "附件",
+    "网址",
+    "http://",
+    "https://",
+    "协议",
+    "对比",
+    "比较",
+    "搜索",
+    "查询",
+    "检索",
+    "总结",
+    "分析",
+)
+
+
+def looks_like_action_request(text: str | None) -> bool:
+    """A non-question action phrase ("完成登录模块代码") is a to-do."""
+
+    value = str(text or "").strip()
+    if not value or any(marker in value for marker in _QUESTION_MARKERS):
+        return False
+    if any(marker in value for marker in _NON_TODO_MARKERS):
+        return False
+    return any(marker in value for marker in _ACTION_REQUEST_MARKERS)
+
 # A bare "下周" / "早上" carries a due hint without a resolvable moment. It is
 # not a deadline the Agent can commit to, so it is only stripped from the title.
 _COARSE_TIME = re.compile(
@@ -168,6 +242,14 @@ class DeterministicPlanner:
                 if answer_plan is not None:
                     return answer_plan
             wants_todo = bool(understanding.is_task and best == INTENT_NAME)
+            if (
+                not wants_todo
+                and understanding.is_task
+                and not understanding.intent_candidates
+                and self.capability_name in registered
+                and looks_like_action_request(instruction_text)
+            ):
+                wants_todo = True
             if understanding.is_task:
                 unsupported = [item.name for item in accepted if item.name != best]
                 if best is not None and best != INTENT_NAME:

@@ -15,9 +15,9 @@
           <p>{{ sourceName(chat.source) }} · {{ chat.isDirect ? '私聊' : `${chat.members} 位成员` }} · 最近同步 {{ chat.lastSync }}</p>
         </div>
         <span class="chat-status" :class="`chat-status--${chat.collectionStatus}`"><i />{{ statusLabel(chat.collectionStatus) }}</span>
-        <t-button v-if="!sharedView" variant="outline" :theme="chat.collectionStatus === 'collecting' ? 'warning' : 'primary'" :disabled="chat.collectionStatus === 'detached'" @click="emit('toggle', chat)">
-          <template #icon><t-icon :name="chat.collectionStatus === 'detached' ? 'stop-circle' : chat.collectionStatus === 'collecting' ? 'pause-circle' : 'play-circle'" /></template>
-          {{ chat.collectionStatus === 'detached' ? '已解除接入' : chat.collectionStatus === 'collecting' ? '停止采集' : chat.collectionStatus === 'missing' || chat.collectionStatus === 'paused' ? '继续采集' : '开始采集' }}
+        <t-button v-if="!sharedView" variant="outline" :theme="myCollectorStatus === 'active' ? 'warning' : 'primary'" :disabled="chat.collectionStatus === 'detached'" @click="emit('toggle', chat)">
+          <template #icon><t-icon :name="chat.collectionStatus === 'detached' ? 'stop-circle' : myCollectorStatus === 'active' ? 'pause-circle' : 'play-circle'" /></template>
+          {{ chat.collectionStatus === 'detached' ? '已解除接入' : myCollectorStatus === 'active' ? '停止我的采集' : myCollectorStatus === 'paused' ? '恢复我的采集' : '加入我的采集' }}
         </t-button>
         <t-button v-if="chat.isDirect && !sharedView" variant="outline" theme="primary" :disabled="shareSelecting && !selectedCount" @click="shareConversation">
           <template #icon><t-icon :name="shareSelecting ? 'check' : 'share'" /></template>
@@ -218,6 +218,7 @@ type ConversationItem = {
 const props = defineProps<{
   chat: InfoChat
   sharedView?: boolean
+  myCollectorStatus?: string
   targetMessageId?: string | null
   targetAttachmentId?: string | null
 }>()
