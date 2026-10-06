@@ -109,7 +109,7 @@ func TestCheckBatchUsesKnowledgeCallerAndPreservesDecisionOrder(t *testing.T) {
 	}
 }
 
-func TestSyncKnowledgePermissionsSendsProtectedViewers(t *testing.T) {
+func TestSyncKnowledgePermissionsDoesNotPromoteParticipantsToOriginalViewers(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/internal/v1/authorization/resource-relations/sync" {
 			t.Fatalf("unexpected path: %s", r.URL.Path)
@@ -125,8 +125,8 @@ func TestSyncKnowledgePermissionsSendsProtectedViewers(t *testing.T) {
 		if body.KnowledgeItemID != "item-1" {
 			t.Fatalf("unexpected knowledge item: %+v", body)
 		}
-		if len(body.OriginalViewerUserIDs) != 1 || body.OriginalViewerUserIDs[0] != "member-1" {
-			t.Fatalf("original viewers missing: %+v", body)
+		if len(body.OriginalViewerUserIDs) != 0 {
+			t.Fatalf("participants were promoted to explicit original viewers: %+v", body)
 		}
 		if len(body.ContentViewerUserIDs) != 1 || body.ContentViewerUserIDs[0] != "member-1" {
 			t.Fatalf("content viewers missing for protected attachment: %+v", body)
@@ -143,5 +143,27 @@ func TestSyncKnowledgePermissionsSendsProtectedViewers(t *testing.T) {
 	}, []string{"member-1"})
 	if err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestFindUsersByIDsUsesInternalKnowledgeContract(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/internal/users" || r.URL.Query().Get("ids") != "user-1,user-2" {
+			t.Fatalf("unexpected user lookup request: %s", r.URL.String())
+		}
+		if r.Header.Get("Authorization") != "Bearer service-token" || r.Header.Get("X-Caller-Service") != "knowledge" {
+			t.Fatalf("core caller identity was not propagated")
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"items":[{"id":"user-1","nickname":"张三","email":"zhangsan@example.com"}]}`))
+	}))
+	defer server.Close()
+
+	users, err := New(server.URL, "service-token").FindUsersByIDs(context.Background(), []string{"user-1", "user-2", "user-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if users["user-1"].Nickname != "张三" || users["user-1"].Email != "zhangsan@example.com" {
+		t.Fatalf("unexpected user lookup result: %+v", users)
 	}
 }

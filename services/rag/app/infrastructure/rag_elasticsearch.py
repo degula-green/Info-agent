@@ -82,9 +82,7 @@ class RagChunkIndex:
     def delete_resource(self, *, resource_id: str) -> int:
         total = 0
         for alias in (
-            settings.elasticsearch_display_write_index,
-            settings.elasticsearch_read_index,
-            settings.elasticsearch_protected_write_index,
+            settings.elasticsearch_index,
             settings.elasticsearch_protected_read_index,
         ):
             try:

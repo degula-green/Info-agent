@@ -3156,6 +3156,9 @@ func (s *Service) CreateDeletionRequest(ctx context.Context, userID, organizatio
 		return nil, err
 	}
 	if input.Status != "pending" {
+		if err := s.revokeDeletionAuthorization(ctx, request); err != nil {
+			return nil, err
+		}
 		if _, err := s.Repo.HideDeletionTargets(ctx, request.ID); err != nil {
 			return nil, err
 		}
@@ -3190,7 +3193,7 @@ func (s *Service) canDeleteKnowledge(ctx context.Context, userID string, item *d
 		return false, nil
 	}
 	if s.Core == nil {
-		return true, nil
+		return false, apperror.New("core_dependency_unavailable", "authorization service is unavailable", 503, true)
 	}
 	decisions, err := s.Core.CheckBatch(ctx, userID, item.OrganizationID, []coreclient.AuthorizationCheck{{
 		ResourceType: "knowledge_item", ResourcePart: "delete", ResourceID: item.ID, Action: "delete",
@@ -3231,15 +3234,8 @@ func (s *Service) ReviewDeletionRequest(ctx context.Context, userID, organizatio
 		return nil, err
 	}
 	if status == "approved" && reviewed.Status == "approved" {
-		if s.Core != nil {
-			for _, target := range reviewed.Targets {
-				if target.KnowledgeItemID == "" {
-					continue
-				}
-				if err := s.Core.RevokeKnowledgeRelations(ctx, target.KnowledgeItemID, ""); err != nil {
-					return nil, apperror.Wrap("core_dependency_unavailable", "authorization revoke failed", 503, true, err)
-				}
-			}
+		if err := s.revokeDeletionAuthorization(ctx, reviewed); err != nil {
+			return nil, err
 		}
 		if _, err := s.Repo.HideDeletionTargets(ctx, requestID); err != nil {
 			return nil, err
@@ -3254,6 +3250,24 @@ func (s *Service) ReviewDeletionRequest(ctx context.Context, userID, organizatio
 	return s.Repo.GetDeletionRequest(ctx, requestID)
 }
 
+func (s *Service) revokeDeletionAuthorization(ctx context.Context, request *repository.DeletionRequest) error {
+	if request == nil {
+		return apperror.New("invalid_request", "deletion request is required", 400, false)
+	}
+	for _, target := range request.Targets {
+		if strings.TrimSpace(target.KnowledgeItemID) == "" {
+			continue
+		}
+		if s.Core == nil {
+			return apperror.New("core_dependency_unavailable", "authorization service is unavailable", 503, true)
+		}
+		if err := s.Core.RevokeKnowledgeRelations(ctx, target.KnowledgeItemID, ""); err != nil {
+			return apperror.Wrap("core_dependency_unavailable", "authorization revoke failed", 503, true, err)
+		}
+	}
+	return s.Repo.MarkDeletionAuthorizationRevoked(ctx, request.ID, s.Now().UTC())
+}
+
 func (s *Service) canReviewDeletion(ctx context.Context, userID, organizationID string, request *repository.DeletionRequest) (bool, error) {
 	if request == nil {
 		return false, nil
@@ -3266,7 +3280,7 @@ func (s *Service) canReviewDeletion(ctx context.Context, userID, organizationID 
 		return false, nil
 	}
 	if s.Core == nil {
-		return true, nil
+		return false, apperror.New("core_dependency_unavailable", "authorization service is unavailable", 503, true)
 	}
 	decisions, err := s.Core.CheckBatch(ctx, userID, organizationID, []coreclient.AuthorizationCheck{{
 		ResourceType: "knowledge_item", ResourcePart: "delete", ResourceID: request.ScopeID, Action: "delete",
@@ -3284,40 +3298,45 @@ func (s *Service) PurgeDeletionRequests(ctx context.Context) error {
 	}
 	var firstErr error
 	for _, request := range due {
-		attachmentIDs := []string{}
-		for _, target := range request.Targets {
-			if target.ResourceType == "attachment" {
-				attachmentIDs = append(attachmentIDs, target.ResourceID)
-			}
-		}
-		refs, refErr := s.Repo.AttachmentObjectRefs(ctx, attachmentIDs)
+		refs, refErr := s.Repo.DeletionObjectRefs(ctx, request.ID)
 		if refErr != nil {
 			if firstErr == nil {
 				firstErr = refErr
 			}
 			continue
 		}
-		for _, ref := range refs {
-			for _, key := range []string{ref.ObjectRef, ref.ExtractedOriginalRef, ref.ExtractedDisplayRef} {
-				if strings.TrimSpace(key) == "" {
-					continue
-				}
-				if s.Objects == nil {
-					break
-				}
-				if err := s.Objects.Delete(ctx, key); err != nil {
-					_ = s.Repo.MarkDeletionObjectState(ctx, ref.AttachmentID, "failed", err.Error())
-					if firstErr == nil {
-						firstErr = err
+		failedTargets := map[string]struct{}{}
+		if s.Objects != nil {
+			for _, ref := range refs {
+				for _, key := range []string{ref.ObjectRef, ref.OriginalRef, ref.ExtractedOriginalRef, ref.ExtractedDisplayRef, ref.NormalizedRef} {
+					if strings.TrimSpace(key) == "" {
+						continue
 					}
-					continue
+					if err := s.Objects.Delete(ctx, key); err != nil {
+						_ = s.Repo.MarkDeletionObjectState(ctx, ref.TargetID, "failed", err.Error())
+						failedTargets[ref.TargetID] = struct{}{}
+						if firstErr == nil {
+							firstErr = err
+						}
+						break
+					}
 				}
 			}
 		}
 		for _, target := range request.Targets {
-			if err := s.Repo.MarkDeletionObjectState(ctx, target.ID, "deleted", ""); err != nil && firstErr == nil {
+			if _, failed := failedTargets[target.ID]; failed {
+				continue
+			}
+			state := "deleted"
+			if s.Objects == nil {
+				state = "skipped"
+			}
+			if err := s.Repo.MarkDeletionObjectState(ctx, target.ID, state, ""); err != nil && firstErr == nil {
 				firstErr = err
 			}
+		}
+		if len(failedTargets) > 0 {
+			continue
 		}
 		if err := s.Repo.MarkDeletionPurged(ctx, request.ID, s.Now().UTC()); err != nil {
 			if firstErr == nil {
@@ -3326,6 +3345,45 @@ func (s *Service) PurgeDeletionRequests(ctx context.Context) error {
 			continue
 		}
 		_ = s.Repo.RecordDeletionAudit(ctx, repository.DeletionAuditInput{DeletionRequestID: request.ID, Action: "deletion.purged"})
+	}
+	return firstErr
+}
+
+func (s *Service) ProcessDeletionAuthorizationRevocations(ctx context.Context) error {
+	work, err := s.Repo.ListDeletionRequestsPendingAuthorization(ctx, 50)
+	if err != nil {
+		return err
+	}
+	var firstErr error
+	for index := range work {
+		if err := s.revokeDeletionAuthorization(ctx, &work[index]); err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+		}
+	}
+	return firstErr
+}
+
+func (s *Service) RepairStaleDeletionRequests(ctx context.Context) error {
+	work, err := s.Repo.ListStalePendingDeletionRequests(ctx, 50)
+	if err != nil {
+		return err
+	}
+	var firstErr error
+	for index := range work {
+		request := &work[index]
+		if err := s.revokeDeletionAuthorization(ctx, request); err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		if err := s.Repo.RepairStalePendingDeletionRequest(ctx, request.ID, s.Now().UTC()); err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+		}
 	}
 	return firstErr
 }
@@ -3341,8 +3399,211 @@ func (s *Service) GetDeletionRequest(ctx context.Context, userID, id string) (*r
 	return request, nil
 }
 
-func (s *Service) ListDeletionRequests(ctx context.Context, userID, status string) ([]repository.DeletionRequest, error) {
-	return s.Repo.ListDeletionRequests(ctx, strings.TrimSpace(userID), strings.TrimSpace(status), 50)
+func (s *Service) ListDeletionRequests(ctx context.Context, userID, organizationID, scope, view, status string) ([]repository.DeletionRequest, error) {
+	userID = strings.TrimSpace(userID)
+	organizationID = strings.TrimSpace(organizationID)
+	scope = strings.TrimSpace(scope)
+	view = strings.TrimSpace(view)
+	status = strings.TrimSpace(status)
+	if view == "" {
+		view = "active"
+	}
+	if view != "active" && view != "history" && view != "all" {
+		return nil, apperror.New("invalid_deletion_view", "view must be active, history, or all", 400, false)
+	}
+	if scope == "" || scope == "mine" {
+		requests, err := s.Repo.ListDeletionRequests(ctx, userID, "", 100)
+		if err != nil {
+			return nil, err
+		}
+		filtered := make([]repository.DeletionRequest, 0, len(requests))
+		for _, request := range requests {
+			if status != "" && request.Status != status {
+				continue
+			}
+			if status == "" && !deletionRequestMatchesView(request.Status, view) {
+				continue
+			}
+			filtered = append(filtered, request)
+		}
+		return s.enrichDeletionRequests(ctx, userID, false, filtered), nil
+	}
+	if scope != "inbox" {
+		return nil, apperror.New("invalid_deletion_scope", "scope must be mine or inbox", 400, false)
+	}
+	if organizationID == "" {
+		return nil, apperror.New("organization_required", "organization is required for deletion review", 400, false)
+	}
+	requests, err := s.Repo.ListDeletionRequestsByOrganization(ctx, organizationID, "pending", 100)
+	if err != nil {
+		return nil, err
+	}
+	allowed := make([]repository.DeletionRequest, 0, len(requests))
+	for _, request := range requests {
+		if request.OrganizationID != organizationID {
+			continue
+		}
+		canReview, checkErr := s.canReviewDeletion(ctx, userID, organizationID, &request)
+		if checkErr != nil {
+			return nil, checkErr
+		}
+		if canReview {
+			allowed = append(allowed, request)
+		}
+	}
+	return s.enrichDeletionRequests(ctx, userID, true, allowed), nil
+}
+
+func deletionRequestMatchesView(status, view string) bool {
+	switch view {
+	case "active":
+		return status == "pending" || status == "approved" || status == "executing"
+	case "history":
+		return status == "cancelled" || status == "completed" || status == "failed" ||
+			status == "rejected" || status == "superseded" || status == "expired" || status == "revoked"
+	default:
+		return true
+	}
+}
+
+func (s *Service) enrichDeletionRequests(ctx context.Context, userID string, canReview bool, requests []repository.DeletionRequest) []repository.DeletionRequest {
+	requesterIDs := make([]string, 0, len(requests))
+	for _, request := range requests {
+		if strings.TrimSpace(request.RequesterUserID) != "" {
+			requesterIDs = append(requesterIDs, request.RequesterUserID)
+		}
+	}
+	users := map[string]coreclient.UserSummary{}
+	if s.Core != nil && len(requesterIDs) > 0 {
+		loaded, err := s.Core.FindUsersByIDs(ctx, requesterIDs)
+		if err != nil {
+			slog.WarnContext(ctx, "deletion requester lookup failed", "error", err)
+		} else {
+			users = loaded
+		}
+	}
+	for index := range requests {
+		request := &requests[index]
+		if user, ok := users[request.RequesterUserID]; ok {
+			request.RequesterDisplayName = strings.TrimSpace(user.Nickname)
+			request.RequesterEmail = strings.TrimSpace(user.Email)
+		}
+		request.StatusLabel = deletionStatusLabel(request.Status)
+		request.CanReview = canReview && request.Status == "pending"
+		request.CanCancel = request.RequesterUserID == userID && request.Status == "pending"
+		request.TargetSummary = s.deletionTargetSummary(ctx, *request)
+		request.StageSummary = deletionStageSummary(*request)
+	}
+	return requests
+}
+
+func (s *Service) deletionTargetSummary(ctx context.Context, request repository.DeletionRequest) string {
+	item, err := s.Repo.GetKnowledgeItemByMessage(ctx, request.ScopeID)
+	if err != nil || item == nil {
+		return "消息 " + shortDisplayID(request.ScopeID)
+	}
+	parts := make([]string, 0, 4)
+	if item.Message != nil {
+		if sender := strings.TrimSpace(item.Message.SenderDisplayName); sender != "" {
+			parts = append(parts, "发送人 "+sender)
+		}
+		if excerpt := compactDisplayText(item.Message.Content, 42); excerpt != "" {
+			parts = append(parts, excerpt)
+		}
+	}
+	if conversationID := strings.TrimSpace(item.ConversationID); conversationID != "" {
+		parts = append(parts, "会话 "+shortDisplayID(conversationID))
+	}
+	if len(parts) == 0 {
+		return "消息 " + shortDisplayID(request.ScopeID)
+	}
+	return strings.Join(parts, " · ")
+}
+
+func deletionStageSummary(request repository.DeletionRequest) string {
+	switch request.Status {
+	case "pending":
+		return "等待审批"
+	case "rejected":
+		return "审批已拒绝"
+	case "cancelled":
+		return "申请已关闭"
+	case "superseded":
+		return "已合并到规范申请"
+	case "completed":
+		return "全部清理已完成"
+	case "failed":
+		return "清理阶段失败"
+	}
+	if len(request.Targets) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, 4)
+	target := request.Targets[0]
+	if target.VisibilityState == "hidden" {
+		parts = append(parts, "已隐藏")
+	}
+	switch target.VectorState {
+	case "deleted":
+		parts = append(parts, "向量已清理")
+	case "not_required":
+		parts = append(parts, "无需清理向量")
+	case "failed":
+		parts = append(parts, "向量清理失败")
+	}
+	if target.AuthState == "revoked" {
+		parts = append(parts, "权限已撤销")
+	}
+	switch target.ObjectState {
+	case "deleted":
+		parts = append(parts, "对象已清理")
+	case "skipped":
+		parts = append(parts, "无需清理对象")
+	case "failed":
+		parts = append(parts, "对象清理失败")
+	default:
+		parts = append(parts, "对象保留中")
+	}
+	return strings.Join(parts, " · ")
+}
+
+func deletionStatusLabel(status string) string {
+	labels := map[string]string{
+		"pending":    "待审批",
+		"approved":   "已通过",
+		"executing":  "处理中",
+		"completed":  "已完成",
+		"rejected":   "已拒绝",
+		"failed":     "执行失败",
+		"cancelled":  "已关闭",
+		"superseded": "已合并",
+		"expired":    "已过期",
+		"revoked":    "已撤销",
+	}
+	if label := labels[status]; label != "" {
+		return label
+	}
+	return status
+}
+
+func shortDisplayID(value string) string {
+	value = strings.TrimSpace(value)
+	if len(value) <= 8 {
+		return value
+	}
+	return value[:8] + "…"
+}
+
+func compactDisplayText(value string, maxRunes int) string {
+	value = strings.Join(strings.Fields(value), " ")
+	if value == "" || maxRunes <= 0 {
+		return value
+	}
+	runes := []rune(value)
+	if len(runes) <= maxRunes {
+		return value
+	}
+	return string(runes[:maxRunes]) + "…"
 }
 func (s *Service) GetKnowledgeOriginalByMessage(ctx context.Context, userID, messageID string) (*domain.KnowledgeContent, error) {
 	item, err := s.Repo.GetKnowledgeItemByMessage(ctx, strings.TrimSpace(messageID))
@@ -3384,8 +3645,8 @@ func (s *Service) ApplyRAGResult(ctx context.Context, id string, input repositor
 	if _, err := uuid.Parse(strings.TrimSpace(id)); err != nil {
 		return nil, apperror.New("invalid_rag_result", "knowledge_item_id must be a UUID", 400, false)
 	}
-	if input.Status != "processing" && input.Status != "ready" && input.Status != "metadata_only" && input.Status != "failed" {
-		return nil, apperror.New("invalid_rag_status", "status must be processing, ready, metadata_only, or failed", 400, false)
+	if input.Status != "processing" && input.Status != "ready" && input.Status != "metadata_only" && input.Status != "failed" && input.Status != "deleted" {
+		return nil, apperror.New("invalid_rag_status", "status must be processing, ready, metadata_only, failed, or deleted", 400, false)
 	}
 	if strings.TrimSpace(input.SourceEventID) == "" || strings.TrimSpace(input.RAGJobID) == "" {
 		return nil, apperror.New("invalid_rag_result", "source_event_id and rag_job_id are required", 400, false)

@@ -607,6 +607,7 @@ func TestAttachValidatesHistoryAndDerivesWorkspace(t *testing.T) {
 func TestDeletionRequestHidesMessageAndIsIdempotent(t *testing.T) {
 	ctx := context.Background()
 	fixture := newPipelineFixture(t, domain.PlatformWechat)
+	fixture.service.Core = allowAllCoreClient(t)
 	service, repo := fixture.service, fixture.repo
 	ingested, err := fixture.repo.IngestMessage(ctx, pipelineInput(fixture, "delete-message", "text", "sensitive delete target"))
 	if err != nil {
@@ -641,6 +642,7 @@ func TestDeletionRequestHidesMessageAndIsIdempotent(t *testing.T) {
 func TestDeletedMessageCannotBeRevivedByCollectorReplay(t *testing.T) {
 	ctx := context.Background()
 	fixture := newPipelineFixture(t, domain.PlatformWechat)
+	fixture.service.Core = allowAllCoreClient(t)
 	service, repo := fixture.service, fixture.repo
 	input := pipelineInput(fixture, "replay-delete-message", "text", "delete me")
 	ingested, err := repo.IngestMessage(ctx, input)
@@ -663,6 +665,7 @@ func TestDeletedMessageCannotBeRevivedByCollectorReplay(t *testing.T) {
 func TestDeletionApprovalHidesPendingMessage(t *testing.T) {
 	ctx := context.Background()
 	fixture := newPipelineFixture(t, domain.PlatformWechat)
+	fixture.service.Core = allowAllCoreClient(t)
 	service, repo := fixture.service, fixture.repo
 	ingested, err := repo.IngestMessage(ctx, pipelineInput(fixture, "approve-delete-message", "text", "approve delete"))
 	if err != nil {
@@ -703,6 +706,7 @@ func TestDeletionApprovalHidesPendingMessage(t *testing.T) {
 func TestDeletionRejectionKeepsPendingMessageVisible(t *testing.T) {
 	ctx := context.Background()
 	fixture := newPipelineFixture(t, domain.PlatformWechat)
+	fixture.service.Core = allowAllCoreClient(t)
 	service, repo := fixture.service, fixture.repo
 	ingested, err := repo.IngestMessage(ctx, pipelineInput(fixture, "reject-delete-message", "text", "reject delete"))
 	if err != nil {
@@ -727,6 +731,207 @@ func TestDeletionRejectionKeepsPendingMessageVisible(t *testing.T) {
 	}
 	if after.LifecycleStatus != "active" {
 		t.Fatalf("rejected request hid content: %+v", after)
+	}
+}
+
+func TestDeletionRequestIsUniquePerMessageAcrossUsers(t *testing.T) {
+	ctx := context.Background()
+	fixture := newPipelineFixture(t, domain.PlatformWechat)
+	fixture.service.Core = allowAllCoreClient(t)
+	service, repo := fixture.service, fixture.repo
+	ingested, err := repo.IngestMessage(ctx, pipelineInput(fixture, "dedup-delete-message", "text", "dedup delete"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := service.CreateDeletionRequest(ctx, "owner", "org-1", repository.DeletionRequestInput{
+		ScopeType: "message", ScopeID: ingested.Message.ID, Reason: "first", IdempotencyKey: "first-key",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := service.CreateDeletionRequest(ctx, "u1", "org-1", repository.DeletionRequestInput{
+		ScopeType: "message", ScopeID: ingested.Message.ID, Reason: "second", IdempotencyKey: "second-key",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.ID != first.ID {
+		t.Fatalf("message-level deletion was duplicated: first=%s second=%s", first.ID, second.ID)
+	}
+	requests, err := repo.ListDeletionRequests(ctx, "owner", "", 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(requests) != 1 || requests[0].ID != first.ID {
+		t.Fatalf("canonical deletion list was not deduplicated: %+v", requests)
+	}
+}
+
+func TestDeletionPipelineConvergesAfterVectorAndObjectStages(t *testing.T) {
+	ctx := context.Background()
+	fixture := newPipelineFixture(t, domain.PlatformWechat)
+	fixture.service.Core = allowAllCoreClient(t)
+	service, repo := fixture.service, fixture.repo
+	ingested, err := repo.IngestMessage(ctx, pipelineInput(fixture, "converge-delete-message", "text", "converge delete"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request, err := service.CreateDeletionRequest(ctx, "owner", "org-1", repository.DeletionRequestInput{
+		ScopeType: "message", ScopeID: ingested.Message.ID, Reason: "converge", IdempotencyKey: "converge-key",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var deletionEvent bool
+	events, err := repo.GetOutbox(ctx, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range events {
+		if event.EventType == "knowledge.deletion.requested" {
+			deletionEvent = true
+			break
+		}
+	}
+	if !deletionEvent {
+		t.Fatal("deletion request did not create a publishable outbox event")
+	}
+	fixture.service.Config.RedisOutboundStream = "test:knowledge:events"
+	if err := fixture.service.PublishOutbox(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var publishedDeletion bool
+	for _, event := range fixture.store.published {
+		if event.EventType == "knowledge.deletion.requested" {
+			publishedDeletion = true
+			break
+		}
+	}
+	if !publishedDeletion {
+		t.Fatalf("deletion outbox event was not published: %+v", fixture.store.published)
+	}
+	target := request.Targets[0]
+	if _, err := service.ApplyRAGResult(ctx, target.KnowledgeItemID, repository.RAGResultInput{
+		SourceEventID:  "00000000-0000-0000-0000-000000000101",
+		RAGJobID:       target.ID,
+		ContentVersion: target.ContentVersion,
+		ACLVersion:     target.ACLVersion,
+		Status:         "deleted",
+		OccurredAt:     time.Now().UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	pending, err := repo.GetDeletionRequest(ctx, request.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pending.Status != "executing" || pending.Targets[0].VectorState != "deleted" || pending.Targets[0].ObjectState != "pending" {
+		t.Fatalf("vector stage did not advance correctly: %+v", pending)
+	}
+	if err := repo.MarkDeletionPurged(ctx, request.ID, time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	completed, err := repo.GetDeletionRequest(ctx, request.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if completed.Status != "completed" || completed.CompletedAt == nil {
+		t.Fatalf("deletion request did not converge: %+v", completed)
+	}
+}
+
+func TestHistoricalDeletionRequestRevokesAuthorization(t *testing.T) {
+	ctx := context.Background()
+	fixture := newPipelineFixture(t, domain.PlatformWechat)
+	fixture.service.Core = allowAllCoreClient(t)
+	service, repo := fixture.service, fixture.repo
+	ingested, err := repo.IngestMessage(ctx, pipelineInput(fixture, "historical-auth-message", "text", "historical delete"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request, err := repo.CreateDeletionRequest(ctx, repository.DeletionRequestInput{
+		OrganizationID: "org-1", RequesterUserID: "owner", ScopeType: "message",
+		ScopeID: ingested.Message.ID, Reason: "historical", IdempotencyKey: "historical-key",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if request.Targets[0].AuthState != "pending" {
+		t.Fatalf("test fixture did not start with pending authorization: %+v", request)
+	}
+	if err := service.ProcessDeletionAuthorizationRevocations(ctx); err != nil {
+		t.Fatal(err)
+	}
+	updated, err := repo.GetDeletionRequest(ctx, request.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Targets[0].AuthState != "revoked" {
+		t.Fatalf("historical deletion authorization was not revoked: %+v", updated)
+	}
+}
+
+func TestDeletionRequestViewsSeparateActiveAndHistory(t *testing.T) {
+	ctx := context.Background()
+	fixture := newPipelineFixture(t, domain.PlatformWechat)
+	fixture.service.Core = allowAllCoreClient(t)
+	service, repo := fixture.service, fixture.repo
+	ingested, err := repo.IngestMessage(ctx, pipelineInput(fixture, "view-filter-message", "text", "view filter target"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.CreateDeletionRequest(ctx, "owner", "org-1", repository.DeletionRequestInput{
+		ScopeType: "message", ScopeID: ingested.Message.ID, Reason: "view filter", IdempotencyKey: "view-filter",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	active, err := service.ListDeletionRequests(ctx, "owner", "org-1", "mine", "active", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(active) != 1 || active[0].CanReview || active[0].CanCancel {
+		t.Fatalf("unexpected active deletion view: %+v", active)
+	}
+	if active[0].RequesterDisplayName != "测试用户" || active[0].TargetSummary == "" || active[0].StageSummary == "" {
+		t.Fatalf("deletion request was not enriched: %+v", active[0])
+	}
+	history, err := service.ListDeletionRequests(ctx, "owner", "org-1", "mine", "history", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(history) != 0 {
+		t.Fatalf("active request leaked into history: %+v", history)
+	}
+}
+
+func TestRepairStalePendingDeletionRequestConvergesHiddenTarget(t *testing.T) {
+	ctx := context.Background()
+	fixture := newPipelineFixture(t, domain.PlatformWechat)
+	fixture.service.Core = allowAllCoreClient(t)
+	service, repo := fixture.service, fixture.repo
+	ingested, err := repo.IngestMessage(ctx, pipelineInput(fixture, "stale-repair-message", "text", "stale repair target"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request, err := repo.CreateDeletionRequest(ctx, repository.DeletionRequestInput{
+		OrganizationID: "org-1", RequesterUserID: "owner", ScopeType: "message",
+		ScopeID: ingested.Message.ID, Status: "pending", Reason: "stale repair", IdempotencyKey: "stale-repair",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repo.HideDeletionTargets(ctx, request.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.RepairStaleDeletionRequests(ctx); err != nil {
+		t.Fatal(err)
+	}
+	repaired, err := repo.GetDeletionRequest(ctx, request.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if repaired.Status != "executing" || repaired.Targets[0].VisibilityState != "hidden" || repaired.Targets[0].AuthState != "revoked" {
+		t.Fatalf("stale deletion request was not repaired: %+v", repaired)
 	}
 }
 

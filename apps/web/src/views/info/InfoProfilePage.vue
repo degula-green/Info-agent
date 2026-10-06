@@ -76,19 +76,21 @@
         <t-tabs v-model="accessScope" @change="loadAccessRequests">
           <t-tab-panel value="mine" label="我发起的" />
           <t-tab-panel value="inbox" label="待我审批" />
+          <t-tab-panel value="history" label="历史记录" />
         </t-tabs>
         <div class="access-request-list">
           <div v-if="accessLoading" class="access-request-state"><t-icon name="loading" />正在加载权限申请…</div>
-          <div v-else-if="!accessRequests.length" class="access-request-state">{{ accessScope === 'mine' ? '暂无我发起的申请' : '暂无待我审批的申请' }}</div>
+          <div v-else-if="!accessRequests.length" class="access-request-state">{{ accessEmptyText }}</div>
           <article v-for="request in accessRequests" v-else :key="request.id" class="access-request">
             <div class="access-request__main">
               <strong>{{ request.title }}</strong>
               <small>{{ request.subtitle }}</small>
               <small v-if="request.excerpt" class="access-request__excerpt">{{ request.excerpt }}</small>
+              <small v-if="request.stageSummary" class="access-request__stage">{{ request.stageSummary }}</small>
               <small>{{ request.reason || '未填写申请说明' }} · {{ formatDateTime(request.created_at) }}</small>
             </div>
-            <t-tag :theme="accessStatusTheme(request.status)" variant="light">{{ accessStatusLabel(request.status) }}</t-tag>
-            <div v-if="accessScope === 'inbox' && request.status === 'pending'" class="access-request__actions">
+            <t-tag :theme="accessStatusTheme(request.status)" variant="light">{{ request.statusLabel || accessStatusLabel(request.status) }}</t-tag>
+            <div v-if="request.canReview" class="access-request__actions">
               <t-button v-if="request.source === 'core' && request.contextAvailable" size="small" variant="text" @click="openAccessContext(request)">查看上下文</t-button>
               <t-button size="small" theme="primary" @click="reviewAccess(request, 'approve')">通过</t-button>
               <t-button size="small" theme="danger" variant="outline" @click="reviewAccess(request, 'reject')">拒绝</t-button>
@@ -220,7 +222,7 @@ const organizationSubmitting = ref(false)
 const organizationName = ref('')
 const invitationToken = ref('')
 const organization = ref<CoreOrganizationResponse | null>(null)
-const accessScope = ref<'mine' | 'inbox'>(route.query.tab === 'permissions' ? 'inbox' : 'mine')
+const accessScope = ref<'mine' | 'inbox' | 'history'>(route.query.tab === 'permissions' ? 'inbox' : 'mine')
 type UnifiedAccessRequest = {
   id: string
   source: 'core' | 'private' | 'deletion'
@@ -229,13 +231,17 @@ type UnifiedAccessRequest = {
   excerpt: string
   reason: string
   status: string
+  statusLabel?: string
   created_at: string
   contextAvailable: boolean
+  canReview: boolean
+  stageSummary?: string
   raw: CoreAccessRequest | PrivateAccessRequestDTO | DeletionRequestDTO
 }
 const accessRequests = ref<UnifiedAccessRequest[]>([])
 const accessLoading = ref(false)
 let accessRequestSequence = 0
+const currentUserID = ref('')
 const wechatPairingID = ref('')
 const wechatPairingCode = ref('')
 const wechatAccounts = ref<LocalWechatAccount[]>([])
@@ -264,6 +270,11 @@ const wechatConfirmButton = computed(() => {
   }
   return { content: '重新检测', loading: wechatBinding.value, disabled: wechatBinding.value }
 })
+const accessEmptyText = computed(() => {
+  if (accessScope.value === 'inbox') return '当前没有需要你审批的申请'
+  if (accessScope.value === 'history') return '暂无历史申请记录'
+  return '暂无进行中的申请'
+})
 
 function maskedWechatID(value: string) {
   const text = String(value || '').trim()
@@ -288,6 +299,7 @@ async function loadPage() {
   // This also recovers sessions after a Core restart when the refresh cookie is valid.
   try { await authStore.refresh() } catch { /* API calls below will report the auth state */ }
   const coreProfileRequest = getCurrentUser().then(async (user) => {
+    currentUserID.value = String(user.id || '')
     const avatarURL = user.avatar_url ? await downloadAvatar().catch(() => null) : null
     syncProfile({ id: Number(user.id) || 0, username: user.email.split('@')[0], nickname: user.nickname, email: user.email, avatar_url: avatarURL, updated_at: '' })
   }).catch((cause) => {
@@ -317,32 +329,22 @@ async function loadAccessRequests() {
   accessLoading.value = true
   try {
     const organizationID = organization.value?.organization.id || ''
+    const sourceScope = accessScope.value === 'inbox' ? 'inbox' : 'mine'
+    const deletionView = accessScope.value === 'history' ? 'history' : 'active'
     const [privateItems, coreItems, deletionItems] = await Promise.all([
-      listPrivateAccessRequests(accessScope.value).catch(() => [] as PrivateAccessRequestDTO[]),
+      listPrivateAccessRequests(sourceScope).catch(() => [] as PrivateAccessRequestDTO[]),
       organizationID
-        ? listAccessRequests(accessScope.value === 'mine' ? 'mine' : 'review', organizationID)
+        ? listAccessRequests(sourceScope === 'inbox' ? 'review' : 'mine', organizationID)
             .then((result) => result.items || [])
             .catch(() => [] as CoreAccessRequest[])
         : Promise.resolve([] as CoreAccessRequest[]),
-      accessScope.value === 'inbox'
-        ? listDeletionRequests('pending').catch(() => [])
-        : Promise.resolve([]),
+      listDeletionRequests(sourceScope, deletionView)
+        .catch(() => [] as DeletionRequestDTO[]),
     ])
     const unified = [
-      ...privateItems.map(unifiedPrivateAccessRequest),
-      ...coreItems.map(unifiedCoreAccessRequest),
-      ...deletionItems.filter((item) => item.status === 'pending').map((item) => ({
-        id: item.id,
-        source: 'deletion' as const,
-        title: '删除组织消息',
-        subtitle: item.scope_type === 'message' ? '消息删除申请' : item.scope_type,
-        excerpt: item.reason,
-        reason: item.reason,
-        status: item.status,
-        created_at: item.created_at,
-        contextAvailable: false,
-        raw: item,
-      })),
+      ...privateItems.filter((item) => matchesAccessView(item.status)).map(unifiedPrivateAccessRequest),
+      ...coreItems.filter((item) => matchesAccessView(item.status)).map(unifiedCoreAccessRequest),
+      ...deletionItems.map(unifiedDeletionRequest),
     ].sort((left, right) => Date.parse(right.created_at) - Date.parse(left.created_at))
     if (sequence === accessRequestSequence) accessRequests.value = unified
   } catch (cause) {
@@ -354,12 +356,12 @@ async function loadAccessRequests() {
 }
 async function reviewAccess(request: UnifiedAccessRequest, action: 'approve' | 'reject') {
   try {
-    if (request.source === 'core') {
-      if (action === 'approve') await approveAccessRequest(request.id)
-      else await rejectAccessRequest(request.id)
-    } else if (request.source === 'deletion') {
+    if (request.source === 'deletion') {
       if (action === 'approve') await approveDeletionRequest(request.id)
       else await rejectDeletionRequest(request.id)
+    } else if (request.source === 'core') {
+      if (action === 'approve') await approveAccessRequest(request.id)
+      else await rejectAccessRequest(request.id)
     } else if (action === 'approve') {
       await approvePrivateAccessRequest(request.id)
     } else {
@@ -384,6 +386,7 @@ function unifiedPrivateAccessRequest(request: PrivateAccessRequestDTO): UnifiedA
     status: request.status,
     created_at: request.created_at,
     contextAvailable: false,
+    canReview: accessScope.value === 'inbox' && request.status === 'pending',
     raw: request,
   }
 }
@@ -404,8 +407,42 @@ function unifiedCoreAccessRequest(request: CoreAccessRequest): UnifiedAccessRequ
     status: request.status,
     created_at: request.created_at,
     contextAvailable: Boolean(request.source_conversation_id),
+    canReview: accessScope.value === 'inbox' && request.status === 'pending',
     raw: request,
   }
+}
+
+function unifiedDeletionRequest(request: DeletionRequestDTO): UnifiedAccessRequest {
+  const requester = request.requester_display_name || request.requester_email ||
+    (request.requester_user_id === currentUserID.value ? '我' : `用户 ${shortID(request.requester_user_id)}`)
+  return {
+    id: request.id,
+    source: 'deletion',
+    title: `${requester} 申请删除消息`,
+    subtitle: request.target_summary || `消息 ${shortID(request.scope_id)}`,
+    excerpt: '',
+    reason: request.reason || '',
+    status: request.status,
+    statusLabel: request.status_label,
+    created_at: request.created_at,
+    contextAvailable: false,
+    canReview: Boolean(request.can_review),
+    stageSummary: request.stage_summary,
+    raw: request,
+  }
+}
+
+function matchesAccessView(status: string) {
+  if (accessScope.value === 'inbox') return status === 'pending'
+  if (accessScope.value === 'history') {
+    return ['cancelled', 'completed', 'failed', 'rejected', 'superseded', 'expired', 'revoked'].includes(status)
+  }
+  return ['pending', 'approved', 'executing'].includes(status)
+}
+
+function shortID(value?: string) {
+  const text = String(value || '').trim()
+  return text.length > 8 ? `${text.slice(0, 8)}…` : text || '未知资源'
 }
 
 function platformLabel(value?: string) {
@@ -422,12 +459,13 @@ function openAccessContext(request: UnifiedAccessRequest) {
 }
 
 function accessStatusLabel(status: string) {
-  return ({ pending: '待处理', approved: '已通过', rejected: '已拒绝', expired: '已过期', revoked: '已撤销' } as Record<string, string>)[status] || status
+  return ({ pending: '待审批', approved: '已通过', executing: '处理中', completed: '已完成', rejected: '已拒绝', failed: '执行失败', cancelled: '已关闭', superseded: '已合并', expired: '已过期', revoked: '已撤销' } as Record<string, string>)[status] || status
 }
 function accessStatusTheme(status: string) {
-  if (status === 'approved') return 'success'
-  if (status === 'rejected') return 'danger'
+  if (status === 'approved' || status === 'completed') return 'success'
+  if (status === 'rejected' || status === 'failed') return 'danger'
   if (status === 'pending') return 'warning'
+  if (status === 'executing') return 'primary'
   return 'default'
 }
 function formatDateTime(value?: string) { if (!value) return ''; return new Date(value).toLocaleString('zh-CN', { dateStyle: 'short', timeStyle: 'short' }) }
@@ -1002,6 +1040,10 @@ onMounted(async () => {
 .access-request__main .access-request__excerpt {
   color: var(--td-text-color-primary);
   font-weight: 500;
+}
+
+.access-request__main .access-request__stage {
+  color: var(--td-brand-color);
 }
 
 .access-request__actions {

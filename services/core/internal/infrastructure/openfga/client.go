@@ -26,6 +26,45 @@ func NewClient(cfg config.Config) *Client {
 	return &Client{baseURL: strings.TrimRight(cfg.OpenFGAURL, "/"), storeID: cfg.OpenFGAStoreID, modelID: cfg.OpenFGAModelID, token: cfg.OpenFGAAPIToken, http: &http.Client{Timeout: 2 * time.Second}}
 }
 
+func (c *Client) ValidateModel(ctx context.Context) error {
+	if c == nil || c.baseURL == "" || c.storeID == "" || c.modelID == "" {
+		return fmt.Errorf("OpenFGA URL, store ID and model ID are required")
+	}
+	var response struct {
+		AuthorizationModel struct {
+			ID              string `json:"id"`
+			SchemaVersion   string `json:"schema_version"`
+			TypeDefinitions []struct {
+				Type      string                     `json:"type"`
+				Relations map[string]json.RawMessage `json:"relations"`
+			} `json:"type_definitions"`
+		} `json:"authorization_model"`
+	}
+	if err := c.get(ctx, "/authorization-models/"+c.modelID, &response); err != nil {
+		return err
+	}
+	if response.AuthorizationModel.ID != c.modelID || response.AuthorizationModel.SchemaVersion != "1.1" {
+		return fmt.Errorf("configured OpenFGA model is missing or incompatible")
+	}
+	required := map[string][]string{
+		"conversation_group": {"member"},
+		"knowledge_item":     {"moderator", "original_viewer"},
+		"knowledge_original": {"eligible_viewer"},
+	}
+	for _, definition := range response.AuthorizationModel.TypeDefinitions {
+		for _, relation := range required[definition.Type] {
+			if _, ok := definition.Relations[relation]; !ok {
+				return fmt.Errorf("OpenFGA model is missing %s#%s", definition.Type, relation)
+			}
+		}
+		delete(required, definition.Type)
+	}
+	if len(required) > 0 {
+		return fmt.Errorf("OpenFGA model is missing required resource types")
+	}
+	return nil
+}
+
 func (c *Client) Check(ctx context.Context, subjectID, organizationID string, check application.AuthorizationCheck) (bool, error) {
 	objectType, relation, objectID, err := mapResource(check)
 	if err != nil {
@@ -118,6 +157,13 @@ func (c *Client) SyncOrganizationRole(ctx context.Context, organizationID, userI
 		}
 		return c.writeChanges(ctx, []map[string]string{relationMap(tuple)}, nil)
 	}
+	exists, err := c.relationExists(ctx, tuple)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return nil
+	}
 	return c.writeChanges(ctx, nil, []map[string]string{relationMap(tuple)})
 }
 func (c *Client) WriteRelations(ctx context.Context, tuples []application.RelationTuple) error {
@@ -138,6 +184,14 @@ func (c *Client) WriteRelations(ctx context.Context, tuples []application.Relati
 }
 
 func (c *Client) SyncRelations(ctx context.Context, managedObjects []string, tuples []application.RelationTuple) error {
+	return c.syncRelations(ctx, managedObjects, tuples, nil)
+}
+
+func (c *Client) SyncRelationsPreserving(ctx context.Context, managedObjects []string, tuples []application.RelationTuple, preserved map[string][]string) error {
+	return c.syncRelations(ctx, managedObjects, tuples, preserved)
+}
+
+func (c *Client) syncRelations(ctx context.Context, managedObjects []string, tuples []application.RelationTuple, preserved map[string][]string) error {
 	desired := make(map[string]application.RelationTuple, len(tuples))
 	for _, tuple := range tuples {
 		desired[relationKey(tuple)] = tuple
@@ -162,6 +216,9 @@ func (c *Client) SyncRelations(ctx context.Context, managedObjects []string, tup
 	deletes := make([]map[string]string, 0)
 	for key, tuple := range current {
 		if _, keep := desired[key]; !keep {
+			if relationPreserved(preserved, tuple) {
+				continue
+			}
 			deletes = append(deletes, relationMap(tuple))
 		}
 	}
@@ -181,6 +238,15 @@ func (c *Client) SyncRelations(ctx context.Context, managedObjects []string, tup
 		}
 	}
 	return c.writeChanges(ctx, writes, deletes)
+}
+
+func relationPreserved(preserved map[string][]string, tuple application.RelationTuple) bool {
+	for _, relation := range preserved[tuple.Object] {
+		if relation == tuple.Relation {
+			return true
+		}
+	}
+	return false
 }
 
 func (c *Client) ReadRelations(ctx context.Context, object string) ([]application.RelationTuple, error) {
@@ -270,6 +336,34 @@ func (c *Client) post(ctx context.Context, endpoint string, body any, output any
 		io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
 		return nil
 	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+		return fmt.Errorf("OpenFGA request failed: %s", resp.Status)
+	}
+	if err := json.NewDecoder(resp.Body).Decode(output); err != nil {
+		return fmt.Errorf("invalid OpenFGA response: %w", err)
+	}
+	return nil
+}
+
+func (c *Client) get(ctx context.Context, endpoint string, output any) error {
+	if c.storeID == "" {
+		return fmt.Errorf("OpenFGA store is not configured")
+	}
+	url := c.baseURL + "/stores/" + c.storeID + endpoint
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Accept", "application/json")
+	if c.token != "" {
+		req.Header.Set("Authorization", "Bearer "+c.token)
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
 		return fmt.Errorf("OpenFGA request failed: %s", resp.Status)

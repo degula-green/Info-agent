@@ -16,6 +16,7 @@ type AccessRequestRepository interface {
 	ListPendingAccessRequestsForReview(ctx context.Context, organizationID string) ([]domain.AccessRequest, error)
 	MarkAccessRequestApproved(ctx context.Context, id, reviewerUserID, reviewerBasis, note string) (domain.AccessRequest, error)
 	MarkAccessRequestRejected(ctx context.Context, id, reviewerUserID, reviewerBasis, note string) (domain.AccessRequest, error)
+	MarkAccessRequestCancelled(ctx context.Context, id, reason string) (domain.AccessRequest, error)
 	MarkAccessRequestFGASynced(ctx context.Context, id, tupleKey string) error
 	MarkAccessRequestFGAFailed(ctx context.Context, id, message string) error
 }

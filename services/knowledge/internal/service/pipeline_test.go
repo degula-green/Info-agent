@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -125,6 +126,59 @@ func newPipelineFixture(t *testing.T, platformName string) pipelineFixture {
 	store := &capturingKV{Store: kv.NewMemory()}
 	service := &Service{Repo: repo, KV: store, Objects: objectstore.NewMemory(), Config: config.Config{MaxAttachmentBytes: 1024 * 1024}, Now: func() time.Time { return time.Now().UTC() }}
 	return pipelineFixture{service: service, repo: repo, store: store, conversation: conversation, collector: conversation.Collectors[0]}
+}
+
+func allowAllCoreClient(t *testing.T) *coreclient.Client {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/authorization/check-batch"):
+			var body struct {
+				Checks []struct {
+					CheckID string `json:"check_id"`
+				} `json:"checks"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			decisions := make([]map[string]any, 0, len(body.Checks))
+			for _, check := range body.Checks {
+				decisions = append(decisions, map[string]any{"check_id": check.CheckID, "allowed": true})
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"decisions": decisions})
+		case strings.HasSuffix(r.URL.Path, "/authorization/resource-relations/sync"):
+			var body struct {
+				KnowledgeItemID string `json:"knowledge_item_id"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"knowledge_item_id": body.KnowledgeItemID,
+				"acl_version":       1,
+				"relation_count":    1,
+				"status":            "synced",
+			})
+		case strings.HasSuffix(r.URL.Path, "/authorization/resource-relations/revoke"):
+			_ = json.NewEncoder(w).Encode(map[string]any{"status": "revoked"})
+		case strings.HasSuffix(r.URL.Path, "/internal/users"):
+			ids := strings.Split(r.URL.Query().Get("ids"), ",")
+			items := make([]map[string]any, 0, len(ids))
+			for _, id := range ids {
+				id = strings.TrimSpace(id)
+				if id == "" {
+					continue
+				}
+				items = append(items, map[string]any{
+					"id":       id,
+					"nickname": "测试用户",
+					"email":    "tester@example.com",
+				})
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"items": items})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(server.Close)
+	return coreclient.New(server.URL, "test-token")
 }
 
 func pipelineInput(f pipelineFixture, id, messageType, content string, attachments ...repository.AttachmentInput) repository.IngestMessageInput {

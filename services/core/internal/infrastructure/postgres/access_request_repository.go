@@ -77,6 +77,15 @@ func (r *AccessRequestRepository) MarkAccessRequestRejected(ctx context.Context,
 	return scanAccessRequest(row)
 }
 
+func (r *AccessRequestRepository) MarkAccessRequestCancelled(ctx context.Context, id, reason string) (domain.AccessRequest, error) {
+	row := r.pool.QueryRow(ctx, `UPDATE iam.access_requests
+		SET status='cancelled',review_note=NULLIF($2,''),reviewed_at=now(),
+			fga_sync_status='not_started',updated_at=now()
+		WHERE id=$1::uuid AND status='pending'
+		RETURNING `+accessRequestColumns, id, reason)
+	return scanAccessRequest(row)
+}
+
 func (r *AccessRequestRepository) MarkAccessRequestFGASynced(ctx context.Context, id, tupleKey string) error {
 	tag, err := r.pool.Exec(ctx, `UPDATE iam.access_requests
 		SET fga_sync_status='synced',fga_tuple_key=NULLIF($2,''),granted_at=now(),last_error=NULL,updated_at=now()

@@ -36,11 +36,16 @@ class _Client:
         self.aliases = set()
         self.mappings = {}
         self.bulk_calls = []
+        self.delete_calls = []
         self.indices = _Indices(self)
 
     def bulk(self, *, operations, refresh):
         self.bulk_calls.append(operations)
         return {"errors": False}
+
+    def delete_by_query(self, *, index, query, conflicts="proceed"):
+        self.delete_calls.append((index, query))
+        return {"deleted": 1}
 
 
 def _context() -> ResourceContext:
@@ -114,6 +119,16 @@ class ElasticsearchContractTests(unittest.TestCase):
         self.assertEqual(document["source_conversation_name"], "财务项目群")
         self.assertEqual(document["source_platform"], "feishu")
         self.assertEqual(document["message_type"], "text")
+
+    def test_delete_resource_uses_configured_read_and_write_aliases(self) -> None:
+        client = _Client()
+        store = RagChunkIndex(client=client)
+        deleted = store.delete_resource(resource_id=_context().resource_id)
+        self.assertEqual(deleted, 2)
+        indexes = {index for index, _ in client.delete_calls}
+        self.assertIn(settings.elasticsearch_index, indexes)
+        self.assertIn(settings.elasticsearch_protected_read_index, indexes)
+        self.assertEqual(len(client.delete_calls), 2)
 
 
 if __name__ == "__main__":

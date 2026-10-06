@@ -78,6 +78,14 @@ type RelationSynchronizer interface {
 	SyncRelations(ctx context.Context, managedObjects []string, tuples []RelationTuple) error
 }
 
+// RelationSynchronizerWithPreservedRelations reconciles an object while
+// leaving selected relations under the ownership of another workflow. Access
+// grants are the important case: temporary knowledge_original.viewer tuples
+// are written by access-request review and must survive resource ACL sync.
+type RelationSynchronizerWithPreservedRelations interface {
+	SyncRelationsPreserving(ctx context.Context, managedObjects []string, tuples []RelationTuple, preserved map[string][]string) error
+}
+
 type ACLVersionRepository interface {
 	ResolveACLVersion(ctx context.Context, resourceID, fingerprint string) (int64, error)
 }
@@ -114,7 +122,14 @@ func (s *PermissionSyncService) Sync(ctx context.Context, input ResourcePermissi
 	}
 	managedObjects := permissionManagedObjects(input)
 	var writeErr error
-	if synchronizer, ok := s.writer.(RelationSynchronizer); ok {
+	if synchronizer, ok := s.writer.(RelationSynchronizerWithPreservedRelations); ok {
+		writeErr = synchronizer.SyncRelationsPreserving(
+			ctx,
+			managedObjects,
+			tuples,
+			map[string][]string{"knowledge_original:" + input.KnowledgeItemID: {"viewer"}},
+		)
+	} else if synchronizer, ok := s.writer.(RelationSynchronizer); ok {
 		writeErr = synchronizer.SyncRelations(ctx, managedObjects, tuples)
 	} else {
 		writeErr = s.writer.WriteRelations(ctx, tuples)

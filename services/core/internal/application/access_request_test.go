@@ -34,6 +34,12 @@ func (s *accessRequestRepoStub) ListPendingAccessRequestsForReview(context.Conte
 	return []domain.AccessRequest{s.request}, nil
 }
 
+func (s *accessRequestRepoStub) MarkAccessRequestCancelled(_ context.Context, id, reason string) (domain.AccessRequest, error) {
+	s.request.Status = "cancelled"
+	s.request.ReviewNote = reason
+	return s.request, nil
+}
+
 func (s *accessRequestRepoStub) MarkAccessRequestApproved(_ context.Context, _, reviewerUserID, reviewerBasis, note string) (domain.AccessRequest, error) {
 	s.request.Status = "approved"
 	s.request.ReviewedByUserID = reviewerUserID
@@ -100,6 +106,20 @@ type accessContextReaderStub struct {
 
 func (s accessContextReaderStub) LoadAccessRequestContexts(context.Context, []AccessRequestResource) ([]AccessRequestContext, error) {
 	return s.items, nil
+}
+
+type permissionWriterStub struct {
+	allowed bool
+	check   AuthorizationCheck
+}
+
+func (s *permissionWriterStub) WriteRelations(context.Context, []RelationTuple) error {
+	return nil
+}
+
+func (s *permissionWriterStub) Check(_ context.Context, _, _ string, check AuthorizationCheck) (bool, error) {
+	s.check = check
+	return s.allowed, nil
 }
 
 func TestAccessRequestApprovalWritesViewerTuple(t *testing.T) {
@@ -191,5 +211,27 @@ func TestAccessRequestListIncludesRequesterAndSafeContext(t *testing.T) {
 	}
 	if item.SourceConversationName != "aims群" || item.MaskedExcerpt != "密码[已脱敏]" || !item.OriginalAccessRequired {
 		t.Fatalf("safe context was not enriched: %+v", item)
+	}
+}
+
+func TestAccessRequestListCancelsPendingRequestWhenPermissionAlreadyExists(t *testing.T) {
+	repo := &accessRequestRepoStub{request: domain.AccessRequest{
+		ID: "request-1", OrganizationID: "org-1", RequesterUserID: "requester-1",
+		ResourceType: "knowledge_original", ResourceID: "00000000-0000-0000-0000-000000000004",
+		Action: "view", Status: "pending", CreatedAt: time.Now(),
+	}}
+	writer := &permissionWriterStub{allowed: true}
+	service := NewAccessRequestService(
+		repo, writer, accessReviewerStub{member: true}, collectorReviewerStub{}, nil, nil, time.Now,
+	)
+	items, err := service.ListMine(context.Background(), "requester-1", "org-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 || items[0].Status != "cancelled" || items[0].ReviewNote != "current_permission_granted" {
+		t.Fatalf("pending request was not reconciled: %+v", items)
+	}
+	if writer.check.ResourceType != "knowledge_item" || writer.check.ResourcePart != "original" || writer.check.Action != "view" {
+		t.Fatalf("unexpected authorization check: %+v", writer.check)
 	}
 }

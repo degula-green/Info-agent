@@ -2861,7 +2861,7 @@ func (s *PostgresStore) ApplyRAGResult(ctx context.Context, id string, input RAG
 	if err != nil {
 		return nil, dbError(err)
 	}
-	if input.ContentVersion < contentVersion || input.ACLVersion < aclVersion || input.ContentVersion < ragContentVersion || (input.ContentVersion == ragContentVersion && input.ACLVersion < ragACLVersion) {
+	if input.Status != "deleted" && (input.ContentVersion < contentVersion || input.ACLVersion < aclVersion || input.ContentVersion < ragContentVersion || (input.ContentVersion == ragContentVersion && input.ACLVersion < ragACLVersion)) {
 		return &RAGResultApply{Applied: false, Status: status, Reason: "stale_version"}, nil
 	}
 	if input.Status != "deleted" && (input.ContentVersion != contentVersion || input.ACLVersion != aclVersion) {
@@ -2899,9 +2899,29 @@ func (s *PostgresStore) ApplyRAGResult(ctx context.Context, id string, input RAG
 		if _, err = tx.Exec(ctx, `UPDATE knowledge.knowledge_items SET vector_delete_status='deleted',deleted_at=COALESCE(deleted_at,now()),lifecycle_status='deleted',updated_at=now() WHERE id=$1`, id); err != nil {
 			return nil, dbError(err)
 		}
+		if _, err = tx.Exec(ctx, `UPDATE knowledge.deletion_targets SET vector_state='deleted',last_error=NULL,updated_at=$2 WHERE knowledge_item_id=$1 AND vector_state<>'deleted'`, id, input.OccurredAt); err != nil {
+			return nil, dbError(err)
+		}
 	}
 	if err = tx.Commit(ctx); err != nil {
 		return nil, dbError(err)
+	}
+	if input.Status == "deleted" {
+		if _, err = s.pool.Exec(ctx, `UPDATE knowledge.deletion_requests AS request
+			SET status='completed',completed_at=COALESCE(request.completed_at,$2),updated_at=$2,last_error=NULL
+			WHERE request.id IN (SELECT deletion_request_id FROM knowledge.deletion_targets WHERE knowledge_item_id=$1)
+			  AND request.status IN ('approved','executing')
+			  AND NOT EXISTS (
+				SELECT 1 FROM knowledge.deletion_targets target
+				WHERE target.deletion_request_id=request.id
+				  AND (
+					target.vector_state NOT IN ('deleted','not_required')
+					OR target.object_state NOT IN ('deleted','skipped')
+					OR target.auth_state<>'revoked'
+				  )
+			  )`, id, input.OccurredAt); err != nil {
+			return nil, dbError(err)
+		}
 	}
 	return &RAGResultApply{Applied: true, Status: input.Status}, nil
 }
@@ -3372,6 +3392,17 @@ func (s *PostgresStore) CreateDeletionRequest(ctx context.Context, input Deletio
 		return nil, dbError(err)
 	}
 	var requestID string
+	err = tx.QueryRow(ctx, `SELECT id::text FROM knowledge.deletion_requests WHERE scope_type=$1 AND scope_id=$2::uuid AND status IN ('pending','approved','executing') ORDER BY requested_at LIMIT 1`, input.ScopeType, input.ScopeID).Scan(&requestID)
+	if err == nil {
+		request, loadErr := s.GetDeletionRequest(ctx, requestID)
+		if loadErr != nil {
+			return nil, loadErr
+		}
+		return request, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return nil, dbError(err)
+	}
 	err = tx.QueryRow(ctx, `SELECT id::text FROM knowledge.deletion_requests WHERE requester_user_id=$1 AND idempotency_key=$2`, input.RequesterUserID, input.IdempotencyKey).Scan(&requestID)
 	if err == nil {
 		request, loadErr := s.GetDeletionRequest(ctx, requestID)
@@ -3392,7 +3423,11 @@ func (s *PostgresStore) CreateDeletionRequest(ctx context.Context, input Deletio
 	if err != nil {
 		if isUnique(err) {
 			var existingID string
-			if lookupErr := s.pool.QueryRow(ctx, `SELECT id::text FROM knowledge.deletion_requests WHERE requester_user_id=$1 AND idempotency_key=$2`, input.RequesterUserID, input.IdempotencyKey).Scan(&existingID); lookupErr == nil {
+			lookupErr := s.pool.QueryRow(ctx, `SELECT id::text FROM knowledge.deletion_requests WHERE scope_type=$1 AND scope_id=$2::uuid AND status IN ('pending','approved','executing') ORDER BY requested_at LIMIT 1`, input.ScopeType, input.ScopeID).Scan(&existingID)
+			if lookupErr != nil {
+				lookupErr = s.pool.QueryRow(ctx, `SELECT id::text FROM knowledge.deletion_requests WHERE requester_user_id=$1 AND idempotency_key=$2`, input.RequesterUserID, input.IdempotencyKey).Scan(&existingID)
+			}
+			if lookupErr == nil {
 				return s.GetDeletionRequest(ctx, existingID)
 			}
 		}
@@ -3405,7 +3440,7 @@ func (s *PostgresStore) CreateDeletionRequest(ctx context.Context, input Deletio
 		return nil, dbError(itemErr)
 	}
 	targetID := uuid.NewString()
-	_, err = tx.Exec(ctx, `INSERT INTO knowledge.deletion_targets (id,deletion_request_id,resource_type,resource_id,knowledge_item_id,conversation_ingestion_id,content_version,acl_version,visibility_state,vector_state,object_state,auth_state,created_at,updated_at) VALUES ($1,$2,'message',$3,NULLIF($4,'')::uuid,$5,$6,$7,'hidden','pending','pending','pending',$8,$8)`, targetID, requestID, message.ID, itemID, message.ConversationID, message.ContentVersion, aclVersion, now)
+	_, err = tx.Exec(ctx, `INSERT INTO knowledge.deletion_targets (id,deletion_request_id,resource_type,resource_id,knowledge_item_id,conversation_ingestion_id,content_version,acl_version,visibility_state,vector_state,object_state,auth_state,created_at,updated_at) VALUES ($1,$2,'message',$3,NULLIF($4,'')::uuid,$5,$6,$7,'hidden',CASE WHEN NULLIF($4,'') IS NULL THEN 'not_required' ELSE 'pending' END,'pending',CASE WHEN NULLIF($4,'') IS NULL THEN 'revoked' ELSE 'pending' END,$8,$8)`, targetID, requestID, message.ID, itemID, message.ConversationID, message.ContentVersion, aclVersion, now)
 	if err != nil {
 		return nil, dbError(err)
 	}
@@ -3447,21 +3482,48 @@ func (s *PostgresStore) GetDeletionRequest(ctx context.Context, id string) (*Del
 }
 
 func (s *PostgresStore) ListDeletionRequests(ctx context.Context, userID, status string, limit int) ([]DeletionRequest, error) {
+	return s.listDeletionRequests(ctx, "requester_user_id", userID, status, limit)
+}
+
+func (s *PostgresStore) ListDeletionRequestsByOrganization(ctx context.Context, organizationID, status string, limit int) ([]DeletionRequest, error) {
+	return s.listDeletionRequests(ctx, "organization_id", organizationID, status, limit)
+}
+
+func (s *PostgresStore) listDeletionRequests(ctx context.Context, userField, userValue, status string, limit int) ([]DeletionRequest, error) {
 	if limit <= 0 || limit > 100 {
 		limit = 50
 	}
-	conditions := []string{"1=1"}
+	innerConditions := []string{"1=1"}
 	args := []any{}
-	if strings.TrimSpace(userID) != "" {
-		args = append(args, userID)
-		conditions = append(conditions, "requester_user_id=$"+strconv.Itoa(len(args))+"::uuid")
-	}
 	if strings.TrimSpace(status) != "" {
 		args = append(args, status)
-		conditions = append(conditions, "status=$"+strconv.Itoa(len(args)))
+		innerConditions = append(innerConditions, "status=$"+strconv.Itoa(len(args)))
+	}
+	outerConditions := []string{"row_number=1"}
+	if strings.TrimSpace(userValue) != "" {
+		args = append(args, userValue)
+		outerConditions = append(outerConditions, "requester_user_id=$"+strconv.Itoa(len(args))+"::uuid")
+		if userField == "organization_id" {
+			outerConditions[len(outerConditions)-1] = "organization_id=$" + strconv.Itoa(len(args)) + "::uuid"
+		}
 	}
 	args = append(args, limit)
-	rows, err := s.pool.Query(ctx, `SELECT id::text FROM knowledge.deletion_requests WHERE `+strings.Join(conditions, " AND ")+` ORDER BY requested_at DESC LIMIT $`+strconv.Itoa(len(args)), args...)
+	rows, err := s.pool.Query(ctx, `SELECT id::text FROM (
+		SELECT id,requester_user_id,scope_type,scope_id,requested_at,
+			ROW_NUMBER() OVER (
+				PARTITION BY scope_type,scope_id
+				ORDER BY CASE status
+					WHEN 'executing' THEN 0
+					WHEN 'approved' THEN 1
+					WHEN 'pending' THEN 2
+					WHEN 'failed' THEN 3
+					WHEN 'superseded' THEN 4
+					ELSE 5
+				END, requested_at DESC
+			) AS row_number
+		FROM knowledge.deletion_requests
+		WHERE `+strings.Join(innerConditions, " AND ")+`
+	) ranked WHERE `+strings.Join(outerConditions, " AND ")+` ORDER BY requested_at DESC LIMIT $`+strconv.Itoa(len(args)), args...)
 	if err != nil {
 		return nil, dbError(err)
 	}
@@ -3597,9 +3659,187 @@ func (s *PostgresStore) AttachmentObjectRefs(ctx context.Context, attachmentIDs 
 	return out, dbError(rows.Err())
 }
 
+func (s *PostgresStore) DeletionObjectRefs(ctx context.Context, requestID string) ([]DeletionObjectRef, error) {
+	rows, err := s.pool.Query(ctx, `SELECT
+			target.id::text,
+			COALESCE(item.content_ref,''),
+			COALESCE(item.original_content_ref,''),
+			COALESCE(attachment.extracted_original_ref,''),
+			COALESCE(attachment.extracted_display_ref,''),
+			COALESCE(message.normalized_content_ref,'')
+		FROM knowledge.deletion_targets target
+		LEFT JOIN knowledge.knowledge_items item ON item.id=target.knowledge_item_id
+		LEFT JOIN knowledge.attachments attachment ON attachment.id=target.resource_id
+		LEFT JOIN knowledge.messages message ON message.id=target.resource_id
+		WHERE target.deletion_request_id=$1
+		ORDER BY target.created_at`, requestID)
+	if err != nil {
+		return nil, dbError(err)
+	}
+	defer rows.Close()
+	out := []DeletionObjectRef{}
+	for rows.Next() {
+		var ref DeletionObjectRef
+		if err := rows.Scan(&ref.TargetID, &ref.ObjectRef, &ref.OriginalRef, &ref.ExtractedOriginalRef, &ref.ExtractedDisplayRef, &ref.NormalizedRef); err != nil {
+			return nil, dbError(err)
+		}
+		out = append(out, ref)
+	}
+	return out, dbError(rows.Err())
+}
+
 func (s *PostgresStore) MarkDeletionObjectState(ctx context.Context, targetID, state, lastError string) error {
 	_, err := s.pool.Exec(ctx, `UPDATE knowledge.deletion_targets SET object_state=$2,last_error=NULLIF($3,''),updated_at=now() WHERE id=$1`, targetID, state, lastError)
 	return dbError(err)
+}
+
+func (s *PostgresStore) MarkDeletionAuthorizationRevoked(ctx context.Context, requestID string, now time.Time) error {
+	if _, err := s.pool.Exec(ctx, `UPDATE knowledge.deletion_targets SET auth_state='revoked',last_error=NULL,updated_at=$2 WHERE deletion_request_id=$1 AND auth_state<>'revoked'`, requestID, now); err != nil {
+		return dbError(err)
+	}
+	return s.reconcileDeletionCompletion(ctx, requestID, now)
+}
+
+func (s *PostgresStore) ListDeletionRequestsPendingAuthorization(ctx context.Context, limit int) ([]DeletionRequest, error) {
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+	rows, err := s.pool.Query(ctx, `SELECT DISTINCT request.id::text
+		FROM knowledge.deletion_requests request
+		JOIN knowledge.deletion_targets target ON target.deletion_request_id=request.id
+		WHERE request.status IN ('approved','executing')
+		  AND target.auth_state<>'revoked'
+		ORDER BY 1
+		LIMIT $1`, limit)
+	if err != nil {
+		return nil, dbError(err)
+	}
+	defer rows.Close()
+	ids := make([]string, 0)
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, dbError(err)
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, dbError(err)
+	}
+	out := make([]DeletionRequest, 0, len(ids))
+	for _, id := range ids {
+		value, err := s.GetDeletionRequest(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, *value)
+	}
+	return out, nil
+}
+
+func (s *PostgresStore) ListStalePendingDeletionRequests(ctx context.Context, limit int) ([]DeletionRequest, error) {
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+	rows, err := s.pool.Query(ctx, `SELECT DISTINCT request.id::text
+		FROM knowledge.deletion_requests request
+		JOIN knowledge.deletion_targets target ON target.deletion_request_id=request.id
+		JOIN knowledge.messages message ON message.id=request.scope_id
+		WHERE request.status='pending'
+		  AND message.delete_request_id=request.id
+		  AND message.lifecycle_status IN ('deleting','deleted')
+		  AND target.visibility_state='hidden'
+		ORDER BY 1
+		LIMIT $1`, limit)
+	if err != nil {
+		return nil, dbError(err)
+	}
+	defer rows.Close()
+	ids := make([]string, 0)
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, dbError(err)
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, dbError(err)
+	}
+	out := make([]DeletionRequest, 0, len(ids))
+	for _, id := range ids {
+		value, err := s.GetDeletionRequest(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, *value)
+	}
+	return out, nil
+}
+
+func (s *PostgresStore) RepairStalePendingDeletionRequest(ctx context.Context, requestID string, now time.Time) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return dbError(err)
+	}
+	defer tx.Rollback(ctx)
+	tag, err := tx.Exec(ctx, `UPDATE knowledge.deletion_requests
+		SET status='executing',execution_started_at=COALESCE(execution_started_at,$2),
+		    updated_at=$2,last_error=NULL
+		WHERE id=$1 AND status='pending'`, requestID, now)
+	if err != nil {
+		return dbError(err)
+	}
+	if tag.RowsAffected() == 0 {
+		return apperror.New("deletion_request_not_pending", "deletion request is not pending", 409, false)
+	}
+	if _, err = tx.Exec(ctx, `UPDATE knowledge.deletion_targets
+		SET auth_state='revoked',visibility_state='hidden',last_error=NULL,updated_at=$2
+		WHERE deletion_request_id=$1`, requestID, now); err != nil {
+		return dbError(err)
+	}
+	tag, err = tx.Exec(ctx, `UPDATE knowledge.outbox_events
+		SET status='pending',published_at=NULL,retry_count=0,last_error=NULL,
+		    available_at=$2,publish_attempts=0
+		WHERE trace_id=$1 AND event_type='knowledge.deletion.requested'`, requestID, now)
+	if err != nil {
+		return dbError(err)
+	}
+	if tag.RowsAffected() == 0 {
+		if _, err = tx.Exec(ctx, `INSERT INTO knowledge.outbox_events
+			(id,aggregate_type,aggregate_id,event_type,event_version,schema_version,trace_id,
+			 organization_id,payload,status,retry_count,available_at)
+			SELECT gen_random_uuid(),'knowledge_item',target.knowledge_item_id,
+			       'knowledge.deletion.requested',target.content_version,1,request.id,
+			       request.organization_id,
+			       jsonb_build_object(
+				       'deletion_request_id',request.id::text,
+				       'deletion_target_id',target.id::text,
+				       'knowledge_item_id',target.knowledge_item_id::text,
+				       'resource_type',target.resource_type,
+				       'resource_id',target.resource_id::text,
+				       'content_version',target.content_version,
+				       'acl_version',target.acl_version,
+				       'scope_type','organization',
+				       'scope_id',COALESCE(request.organization_id::text,''),
+				       'requested_by',request.requester_user_id::text,
+				       'reason',request.reason
+			       ),'pending',0,$2
+			FROM knowledge.deletion_requests request
+			JOIN knowledge.deletion_targets target ON target.deletion_request_id=request.id
+			WHERE request.id=$1 AND target.knowledge_item_id IS NOT NULL
+			ON CONFLICT DO NOTHING`, requestID, now); err != nil {
+			return dbError(err)
+		}
+	}
+	if _, err = tx.Exec(ctx, `INSERT INTO knowledge.deletion_audit_logs
+		(deletion_request_id,actor_user_id,action,resource_type,resource_id,detail)
+		SELECT request.id,NULL,'deletion.state_repaired',request.scope_type,request.scope_id,
+		       jsonb_build_object('reason','pending request target was already hidden')
+		FROM knowledge.deletion_requests request WHERE request.id=$1`, requestID); err != nil {
+		return dbError(err)
+	}
+	return dbError(tx.Commit(ctx))
 }
 
 func (s *PostgresStore) MarkDeletionPurged(ctx context.Context, requestID string, now time.Time) error {
@@ -3617,10 +3857,28 @@ func (s *PostgresStore) MarkDeletionPurged(ctx context.Context, requestID string
 	if _, err = tx.Exec(ctx, `UPDATE knowledge.deletion_targets SET object_state='deleted',updated_at=$2 WHERE deletion_request_id=$1`, requestID, now); err != nil {
 		return dbError(err)
 	}
-	if _, err = tx.Exec(ctx, `UPDATE knowledge.deletion_requests SET status='completed',completed_at=$2,updated_at=$2 WHERE id=$1`, requestID, now); err != nil {
+	if err = tx.Commit(ctx); err != nil {
 		return dbError(err)
 	}
-	return dbError(tx.Commit(ctx))
+	return s.reconcileDeletionCompletion(ctx, requestID, now)
+}
+
+func (s *PostgresStore) reconcileDeletionCompletion(ctx context.Context, requestID string, now time.Time) error {
+	_, err := s.pool.Exec(ctx, `UPDATE knowledge.deletion_requests AS request
+		SET status='completed',completed_at=COALESCE(request.completed_at,$2),updated_at=$2,last_error=NULL
+		WHERE request.id=$1
+		  AND request.status IN ('approved','executing')
+		  AND EXISTS (SELECT 1 FROM knowledge.deletion_targets target WHERE target.deletion_request_id=request.id)
+		  AND NOT EXISTS (
+			SELECT 1 FROM knowledge.deletion_targets target
+			WHERE target.deletion_request_id=request.id
+			  AND (
+				target.vector_state NOT IN ('deleted','not_required')
+				OR target.object_state NOT IN ('deleted','skipped')
+				OR target.auth_state<>'revoked'
+			  )
+		  )`, requestID, now)
+	return dbError(err)
 }
 
 func (s *PostgresStore) HideDeletionTargets(ctx context.Context, requestID string) (int, error) {
@@ -3637,6 +3895,9 @@ func (s *PostgresStore) HideDeletionTargets(ctx context.Context, requestID strin
 		return 0, dbError(err)
 	}
 	if _, err = tx.Exec(ctx, `UPDATE knowledge.deletion_targets SET visibility_state='hidden',updated_at=now() WHERE deletion_request_id=$1`, requestID); err != nil {
+		return 0, dbError(err)
+	}
+	if _, err = tx.Exec(ctx, `UPDATE knowledge.deletion_requests SET status='executing',updated_at=now() WHERE id=$1 AND status='approved'`, requestID); err != nil {
 		return 0, dbError(err)
 	}
 	if _, err = tx.Exec(ctx, `INSERT INTO knowledge.outbox_events (id,aggregate_type,aggregate_id,event_type,event_version,schema_version,trace_id,organization_id,payload,status,retry_count,available_at) SELECT gen_random_uuid(),'knowledge_item',dt.knowledge_item_id,'knowledge.deletion.requested',dt.content_version,1,dr.id,dr.organization_id,jsonb_build_object('deletion_request_id',dr.id::text,'deletion_target_id',dt.id::text,'knowledge_item_id',dt.knowledge_item_id::text,'resource_type',dt.resource_type,'resource_id',dt.resource_id::text,'content_version',dt.content_version,'acl_version',dt.acl_version,'scope_type','organization','scope_id',COALESCE(dr.organization_id::text,''),'requested_by',dr.requester_user_id::text,'reason',dr.reason),'pending',0,now() FROM knowledge.deletion_requests dr JOIN knowledge.deletion_targets dt ON dt.deletion_request_id=dr.id WHERE dr.id=$1 AND dt.knowledge_item_id IS NOT NULL ON CONFLICT DO NOTHING`, requestID); err != nil {
@@ -4061,7 +4322,7 @@ func (s *PostgresStore) GetOutbox(ctx context.Context, limit int) ([]domain.Outb
 	if limit <= 0 || limit > 100 {
 		limit = 100
 	}
-	rows, err := s.pool.Query(ctx, `SELECT id::text,event_type,schema_version,created_at,COALESCE(trace_id,''),COALESCE(organization_id::text,''),'module-2',payload,retry_count,COALESCE(last_error,''),available_at,published_at FROM knowledge.outbox_events WHERE event_type='knowledge.ready' AND published_at IS NULL AND status IN ('pending','failed') AND available_at<=now() ORDER BY created_at LIMIT $1`, limit)
+	rows, err := s.pool.Query(ctx, `SELECT id::text,event_type,schema_version,created_at,COALESCE(trace_id,''),COALESCE(organization_id::text,''),'module-2',payload,retry_count,COALESCE(last_error,''),available_at,published_at FROM knowledge.outbox_events WHERE event_type IN ('knowledge.ready','knowledge.deletion.requested') AND published_at IS NULL AND status IN ('pending','failed') AND available_at<=now() ORDER BY created_at LIMIT $1`, limit)
 	if err != nil {
 		return nil, dbError(err)
 	}
@@ -4080,12 +4341,12 @@ func (s *PostgresStore) GetOutbox(ctx context.Context, limit int) ([]domain.Outb
 	return out, dbError(rows.Err())
 }
 func (s *PostgresStore) MarkOutboxPublished(ctx context.Context, id string, publishedAt time.Time) error {
-	_, err := s.pool.Exec(ctx, `UPDATE knowledge.outbox_events SET status='published',published_at=$2,last_error=NULL WHERE id=$1 AND event_type='knowledge.ready'`, id, publishedAt)
+	_, err := s.pool.Exec(ctx, `UPDATE knowledge.outbox_events SET status='published',published_at=$2,last_error=NULL WHERE id=$1 AND published_at IS NULL`, id, publishedAt)
 	return dbError(err)
 }
 
 func (s *PostgresStore) MarkOutboxFailed(ctx context.Context, id, failure string, availableAt time.Time) error {
-	_, err := s.pool.Exec(ctx, `UPDATE knowledge.outbox_events SET status='failed',retry_count=retry_count+1,publish_attempts=COALESCE(publish_attempts,0)+1,last_error=$2,available_at=$3 WHERE id=$1 AND event_type='knowledge.ready' AND published_at IS NULL`, id, safeError(failure), availableAt.UTC())
+	_, err := s.pool.Exec(ctx, `UPDATE knowledge.outbox_events SET status='failed',retry_count=retry_count+1,publish_attempts=COALESCE(publish_attempts,0)+1,last_error=$2,available_at=$3 WHERE id=$1 AND published_at IS NULL`, id, safeError(failure), availableAt.UTC())
 	return dbError(err)
 }
 func localAttachmentQuery() string {

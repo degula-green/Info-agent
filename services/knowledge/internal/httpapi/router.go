@@ -428,7 +428,7 @@ func registerUserRoutes(r *gin.Engine, app *App, prefix string) {
 	})
 	g.GET("/deletion-requests", func(c *gin.Context) {
 		p := principal(c)
-		out, err := app.Service.ListDeletionRequests(c, p.UserID, c.Query("status"))
+		out, err := app.Service.ListDeletionRequests(c, p.UserID, p.OrganizationID, c.Query("scope"), c.Query("view"), c.Query("status"))
 		if err != nil {
 			writeError(c, err)
 			return

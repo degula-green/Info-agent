@@ -68,6 +68,10 @@ type AccessRequestContextReader interface {
 	LoadAccessRequestContexts(ctx context.Context, resources []AccessRequestResource) ([]AccessRequestContext, error)
 }
 
+type AuthorizationCheckProvider interface {
+	Check(ctx context.Context, subjectID, organizationID string, check AuthorizationCheck) (bool, error)
+}
+
 type AccessRequestService struct {
 	repo         repository.AccessRequestRepository
 	writer       RelationWriter
@@ -149,6 +153,10 @@ func (s *AccessRequestService) ListMine(ctx context.Context, userID, organizatio
 	if err != nil {
 		return nil, err
 	}
+	requests, err = s.reconcileCurrentPermissions(ctx, requests)
+	if err != nil {
+		return nil, err
+	}
 	return s.enrichMany(ctx, requests)
 }
 
@@ -160,6 +168,13 @@ func (s *AccessRequestService) ListPendingForReview(ctx context.Context, reviewe
 	requests, err := s.repo.ListPendingAccessRequestsForReview(ctx, organizationID)
 	if err != nil {
 		return nil, err
+	}
+	requests, err = s.reconcileCurrentPermissions(ctx, requests)
+	if err != nil {
+		return nil, err
+	}
+	if len(requests) == 0 {
+		return []domain.AccessRequest{}, nil
 	}
 	if allowed && basis == "information_admin" {
 		return s.enrichMany(ctx, requests)
@@ -181,6 +196,74 @@ func (s *AccessRequestService) ListPendingForReview(ctx context.Context, reviewe
 		return nil, ErrAccessRequestForbidden
 	}
 	return s.enrichMany(ctx, filtered)
+}
+
+func (s *AccessRequestService) reconcileCurrentPermissions(ctx context.Context, requests []domain.AccessRequest) ([]domain.AccessRequest, error) {
+	checker, ok := s.writer.(AuthorizationCheckProvider)
+	if !ok || len(requests) == 0 {
+		return requests, nil
+	}
+	for index := range requests {
+		request := requests[index]
+		if request.Status != "pending" {
+			continue
+		}
+		check, ok := authorizationCheckForAccessRequest(request)
+		if !ok {
+			continue
+		}
+		allowed, err := checker.Check(ctx, request.RequesterUserID, request.OrganizationID, check)
+		if err != nil {
+			// Permission lookup failures must not hide an otherwise valid
+			// pending request.
+			continue
+		}
+		if !allowed {
+			continue
+		}
+		cancelled, err := s.repo.MarkAccessRequestCancelled(ctx, request.ID, "current_permission_granted")
+		if err != nil {
+			if errors.Is(err, repository.ErrAccessRequestNotFound) {
+				// A concurrent reviewer changed the request after it was listed.
+				continue
+			}
+			return nil, err
+		}
+		requests[index] = cancelled
+	}
+	return requests, nil
+}
+
+func authorizationCheckForAccessRequest(request domain.AccessRequest) (AuthorizationCheck, bool) {
+	resourceID := strings.TrimSpace(request.ResourceID)
+	action := strings.TrimSpace(request.Action)
+	if resourceID == "" || action == "" {
+		return AuthorizationCheck{}, false
+	}
+	switch request.ResourceType {
+	case "knowledge_original":
+		if action != "view" {
+			return AuthorizationCheck{}, false
+		}
+		return AuthorizationCheck{
+			ResourceType: "knowledge_item",
+			ResourcePart: "original",
+			ResourceID:   resourceID,
+			Action:       "view",
+		}, true
+	case "attachment_content":
+		if action != "view" && action != "download" {
+			return AuthorizationCheck{}, false
+		}
+		return AuthorizationCheck{
+			ResourceType: "attachment",
+			ResourcePart: "content",
+			ResourceID:   resourceID,
+			Action:       action,
+		}, true
+	default:
+		return AuthorizationCheck{}, false
+	}
 }
 
 func (s *AccessRequestService) Review(ctx context.Context, reviewerUserID, requestID string, approve bool, note string) (domain.AccessRequest, error) {

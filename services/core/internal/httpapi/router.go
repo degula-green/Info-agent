@@ -67,6 +67,9 @@ func newRouter(authentication Authentication, cookies RefreshCookieConfig, logge
 		}
 	}
 	if authorization != nil && authorization.Provider != nil {
+		if authorization.UserLookup != nil {
+			router.GET("/internal/users", NewInternalUserHandler(authorization.UserLookup, authorization.KnowledgeToken).List)
+		}
 		authzHandler := NewAuthorizationHandler(authorization.Provider, authorization.Token, organization, authorization.KnowledgeToken)
 		authz := router.Group("/internal/v1/authorization")
 		authz.POST("/search-scope", authzHandler.Scope)
@@ -93,6 +96,7 @@ type AuthorizationConfig struct {
 	Token          string
 	KnowledgeToken string
 	PermissionSync PermissionSyncApplication
+	UserLookup     UserLookup
 }
 
 func firstOrganization(values []OrganizationApplication) OrganizationApplication {

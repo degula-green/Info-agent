@@ -209,6 +209,7 @@ type publicDeletionTargetDTO struct {
 	ID              string `json:"id"`
 	ResourceType    string `json:"resource_type"`
 	ResourceID      string `json:"resource_id"`
+	ConversationID  string `json:"conversation_id,omitempty"`
 	KnowledgeItemID string `json:"knowledge_item_id,omitempty"`
 	ContentVersion  int    `json:"content_version"`
 	ACLVersion      int64  `json:"acl_version"`
@@ -223,34 +224,44 @@ type publicDeletionTargetDTO struct {
 }
 
 type publicDeletionRequestDTO struct {
-	ID                 string                    `json:"id"`
-	OrganizationID     string                    `json:"organization_id,omitempty"`
-	RequesterUserID    string                    `json:"requester_user_id"`
-	ReviewerUserID     string                    `json:"reviewer_user_id,omitempty"`
-	ScopeType          string                    `json:"scope_type"`
-	ScopeID            string                    `json:"scope_id"`
-	Status             string                    `json:"status"`
-	Reason             string                    `json:"reason"`
-	IdempotencyKey     string                    `json:"idempotency_key"`
-	RequestedAt        string                    `json:"requested_at"`
-	ReviewedAt         *string                   `json:"reviewed_at,omitempty"`
-	ExecutionStartedAt *string                   `json:"execution_started_at,omitempty"`
-	CompletedAt        *string                   `json:"completed_at,omitempty"`
-	PurgeAfter         *string                   `json:"purge_after,omitempty"`
-	LastError          string                    `json:"last_error,omitempty"`
-	CreatedAt          string                    `json:"created_at"`
-	UpdatedAt          string                    `json:"updated_at"`
-	Targets            []publicDeletionTargetDTO `json:"targets"`
+	ID                   string                    `json:"id"`
+	OrganizationID       string                    `json:"organization_id,omitempty"`
+	RequesterUserID      string                    `json:"requester_user_id"`
+	RequesterDisplayName string                    `json:"requester_display_name,omitempty"`
+	RequesterEmail       string                    `json:"requester_email,omitempty"`
+	ReviewerUserID       string                    `json:"reviewer_user_id,omitempty"`
+	ScopeType            string                    `json:"scope_type"`
+	ScopeID              string                    `json:"scope_id"`
+	Status               string                    `json:"status"`
+	StatusLabel          string                    `json:"status_label,omitempty"`
+	Reason               string                    `json:"reason"`
+	IdempotencyKey       string                    `json:"idempotency_key"`
+	RequestedAt          string                    `json:"requested_at"`
+	ReviewedAt           *string                   `json:"reviewed_at,omitempty"`
+	ExecutionStartedAt   *string                   `json:"execution_started_at,omitempty"`
+	CompletedAt          *string                   `json:"completed_at,omitempty"`
+	PurgeAfter           *string                   `json:"purge_after,omitempty"`
+	LastError            string                    `json:"last_error,omitempty"`
+	CreatedAt            string                    `json:"created_at"`
+	UpdatedAt            string                    `json:"updated_at"`
+	Targets              []publicDeletionTargetDTO `json:"targets"`
+	TargetSummary        string                    `json:"target_summary,omitempty"`
+	StageSummary         string                    `json:"stage_summary,omitempty"`
+	CanReview            bool                      `json:"can_review"`
+	CanCancel            bool                      `json:"can_cancel"`
 }
 
 func publicDeletionRequest(value repository.DeletionRequest) publicDeletionRequestDTO {
 	out := publicDeletionRequestDTO{
 		ID: value.ID, OrganizationID: value.OrganizationID, RequesterUserID: value.RequesterUserID,
+		RequesterDisplayName: value.RequesterDisplayName, RequesterEmail: value.RequesterEmail,
 		ReviewerUserID: value.ReviewerUserID, ScopeType: value.ScopeType, ScopeID: value.ScopeID,
-		Status: value.Status, Reason: value.Reason, IdempotencyKey: value.IdempotencyKey,
+		Status: value.Status, StatusLabel: value.StatusLabel, Reason: value.Reason, IdempotencyKey: value.IdempotencyKey,
 		RequestedAt: value.RequestedAt.UTC().Format(time.RFC3339Nano),
 		LastError:   value.LastError, CreatedAt: value.CreatedAt.UTC().Format(time.RFC3339Nano),
-		UpdatedAt: value.UpdatedAt.UTC().Format(time.RFC3339Nano),
+		UpdatedAt:     value.UpdatedAt.UTC().Format(time.RFC3339Nano),
+		TargetSummary: value.TargetSummary, StageSummary: value.StageSummary,
+		CanReview: value.CanReview, CanCancel: value.CanCancel,
 	}
 	if value.ReviewedAt != nil {
 		formatted := value.ReviewedAt.UTC().Format(time.RFC3339Nano)
@@ -272,6 +283,7 @@ func publicDeletionRequest(value repository.DeletionRequest) publicDeletionReque
 	for _, target := range value.Targets {
 		out.Targets = append(out.Targets, publicDeletionTargetDTO{
 			ID: target.ID, ResourceType: target.ResourceType, ResourceID: target.ResourceID,
+			ConversationID:  target.ConversationID,
 			KnowledgeItemID: target.KnowledgeItemID, ContentVersion: target.ContentVersion,
 			ACLVersion: target.ACLVersion, VisibilityState: target.VisibilityState,
 			VectorState: target.VectorState, ObjectState: target.ObjectState, AuthState: target.AuthState,

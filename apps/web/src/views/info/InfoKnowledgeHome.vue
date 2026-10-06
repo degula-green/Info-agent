@@ -6,7 +6,7 @@
         <h1>知识库</h1>
         <p class="knowledge-home__intro">按归属查看团队资料与个人采集内容。也可在此跨库检索消息与附件。</p>
       </div>
-      <t-button variant="outline" :loading="store.loading" @click="refresh">
+      <t-button variant="outline" :loading="store.librariesLoading" @click="refresh">
         <template #icon><t-icon name="refresh" /></template>
         刷新目录
       </t-button>
@@ -51,7 +51,7 @@
       <div v-else class="library-empty">{{ searchEmptyText }}</div>
     </div>
 
-    <div v-if="store.loading && !store.libraries.length" class="knowledge-loading"><t-loading text="正在加载知识库目录..." /></div>
+    <div v-if="store.librariesLoading && !store.libraries.length" class="knowledge-loading"><t-loading text="正在加载知识库目录..." /></div>
 
     <template v-else>
       <section class="library-section">

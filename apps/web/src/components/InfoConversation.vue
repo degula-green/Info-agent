@@ -517,7 +517,7 @@ function deletionErrorMessage(error: any, canDelete: boolean) {
 }
 async function requestMessageDeletion() {
   if (!activeMessage.value || deletionPreparing.value) return
-  const messageID = activeMessage.value.sourceMessageId || activeMessage.value.id
+  const messageID = activeMessage.value.id
   if (!messageID) {
     emit('toast', '缺少消息标识，无法删除')
     return
@@ -536,14 +536,18 @@ async function requestMessageDeletion() {
 
 async function confirmMessageDeletion() {
   if (!activeMessage.value || deletingMessage.value) return
-  const messageID = activeMessage.value.sourceMessageId || activeMessage.value.id
+  const messageID = activeMessage.value.id
   if (!messageID) {
     emit('toast', '缺少消息标识，无法删除')
     return
   }
   deletingMessage.value = true
   try {
-    await createMessageDeletionRequest(messageID, canDeleteMessage.value ? `删除消息 ${messageID}` : `申请删除消息 ${messageID}`)
+    await createMessageDeletionRequest(
+      messageID,
+      canDeleteMessage.value ? `删除消息 ${messageID}` : `申请删除消息 ${messageID}`,
+      activeMessage.value.contentVersion,
+    )
     deleteDialogVisible.value = false
     messageDialogVisible.value = false
     emit('toast', canDeleteMessage.value ? '消息已删除' : '删除申请已提交')
