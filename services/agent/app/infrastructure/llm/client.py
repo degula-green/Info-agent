@@ -5,9 +5,10 @@ from __future__ import annotations
 import json
 import logging
 from contextvars import ContextVar
-from typing import Any, Mapping
+from typing import Any, Callable, Iterator, Mapping
 
 from app.infrastructure.http import HttpClient, IntegrationError, join_url
+from app.infrastructure.llm.stream_http import StreamCancelled, stream_request
 
 logger = logging.getLogger("agent.llm")
 
@@ -29,6 +30,10 @@ class LLMUnavailable(LLMError):
     classification = "retryable_error"
 
 
+class LLMStreamCancelled(LLMError):
+    classification = "cancelled"
+
+
 class OpenAIChatClient:
     def __init__(
         self,
@@ -41,6 +46,7 @@ class OpenAIChatClient:
         response_format: str = "json_object",
         json_schema_fallback: bool = True,
         http: HttpClient | None = None,
+        stream_transport: Callable[..., Iterator[str]] | None = None,
     ) -> None:
         self.base_url = (base_url or "").rstrip("/")
         self.api_key = api_key
@@ -50,6 +56,7 @@ class OpenAIChatClient:
         self.response_format = response_format
         self.json_schema_fallback = json_schema_fallback
         self.http = http or HttpClient()
+        self._stream_transport = stream_transport or stream_request
         # Concurrent read-only Steps may share this client. Each worker thread
         # gets its own context, so call accounting belongs there.
         self._call_count: ContextVar[int] = ContextVar(
@@ -69,6 +76,61 @@ class OpenAIChatClient:
 
     def complete(self, messages: list[dict[str, str]]) -> str:
         return self._complete(messages, response_format=self._plain_response_format())
+
+    def stream_complete(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        should_cancel: Callable[[], bool] | None = None,
+        idle_timeout: float | None = None,
+        total_timeout: float | None = None,
+    ) -> Iterator[str]:
+        """Yield content deltas from one streamed chat completion."""
+
+        if not self.base_url or not self.model:
+            raise LLMUnavailable("LLM base URL and model are required")
+        self.last_call_count = 1
+        payload: dict[str, Any] = {
+            "model": self.model,
+            "messages": messages,
+            "temperature": 0.1,
+            "max_tokens": self.max_output_tokens,
+            "stream": True,
+        }
+        response_format = self._plain_response_format()
+        if response_format:
+            payload["response_format"] = response_format
+        url = (
+            self.base_url
+            if self.base_url.endswith("/chat/completions")
+            else join_url(self.base_url, "chat/completions")
+        )
+        try:
+            lines = self._stream_transport(
+                "POST",
+                url,
+                body=payload,
+                token=self.api_key or None,
+                timeout=self.timeout_seconds,
+                idle_timeout=(
+                    self.timeout_seconds if idle_timeout is None else idle_timeout
+                ),
+                total_timeout=total_timeout,
+                should_cancel=should_cancel,
+            )
+            for line in lines:
+                for value in _iter_sse_data(line):
+                    delta = _extract_delta(value)
+                    if delta:
+                        yield delta
+        except StreamCancelled as exc:
+            raise LLMStreamCancelled(str(exc)) from exc
+        except IntegrationError as exc:
+            error_type = LLMUnavailable if exc.retryable else LLMError
+            error = error_type(str(exc))
+            error.status = exc.status  # type: ignore[attr-defined]
+            error.error_code = exc.error_code  # type: ignore[attr-defined]
+            raise error from exc
 
     def complete_structured(
         self,
@@ -208,6 +270,41 @@ def _extract_content(body: Any) -> str:
         if joined:
             return joined
     raise LLMError("LLM message content is empty")
+
+
+def _iter_sse_data(line: str) -> Iterator[str]:
+    text = str(line or "").strip()
+    if not text.startswith("data:"):
+        return
+    value = text[5:].strip()
+    if not value or value == "[DONE]":
+        return
+    yield value
+
+
+def _extract_delta(value: Any) -> str:
+    body = value
+    if isinstance(value, str):
+        try:
+            body = json.loads(value)
+        except (TypeError, ValueError):
+            return ""
+    if not isinstance(body, Mapping):
+        return ""
+    choices = body.get("choices")
+    if (
+        not isinstance(choices, list)
+        or not choices
+        or not isinstance(choices[0], Mapping)
+    ):
+        return ""
+    first = choices[0]
+    delta = first.get("delta")
+    if isinstance(delta, Mapping) and isinstance(delta.get("content"), str):
+        return str(delta["content"])
+    if isinstance(first.get("text"), str):
+        return str(first["text"])
+    return ""
 
 
 def parse_json_object(raw: str) -> dict[str, Any]:

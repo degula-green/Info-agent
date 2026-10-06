@@ -7,6 +7,7 @@ which keeps local development and tests runnable.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 
 from app.application.execution_service import ExecutionService
@@ -63,6 +64,8 @@ from app.policy.descriptor import DescriptorPolicy
 from app.testing.in_memory_runtime_store import InMemoryAgentStore
 from app.testing.in_memory_todo_store import InMemoryTodoStore
 
+logger = logging.getLogger("agent.container")
+
 
 class NullPublisher(TaskEventPublisher):
     """Used when Redis is not configured; the outbox keeps the signal durable."""
@@ -88,6 +91,9 @@ class AgentContainer:
     knowledge_client: KnowledgeClient
     knowledge_events: KnowledgeEventService
     core_client: CoreClient
+    # Transient Redis channel for streaming answer previews; None when Redis
+    # is not configured. The SSE endpoint reads from it when present.
+    answer_stream: object | None = None
     # Present only when the form-browser sidecar is configured; the takeover
     # endpoints proxy to it so the browser stays off the public surface.
     form_browser: FormBrowserClient | None = None
@@ -566,6 +572,25 @@ def build_publisher(settings: Settings) -> TaskEventPublisher:
     return NullPublisher()
 
 
+def build_answer_stream(settings: Settings):
+    """Build the transient answer-delta channel, or None when unavailable."""
+
+    if not settings.redis_url:
+        return None
+    try:
+        from app.infrastructure.redis.answer_stream import RedisAnswerStream
+        from app.infrastructure.redis.connection import build_redis
+
+        return RedisAnswerStream(
+            build_redis(settings),
+            ttl_seconds=settings.answer_stream_ttl_seconds,
+            max_len=settings.answer_stream_max_len,
+            snapshot_every=settings.answer_stream_snapshot_every,
+        )
+    except Exception:  # noqa: BLE001 - Redis is an optional accelerator
+        return None
+
+
 def build_container(
     settings: Settings | None = None,
     *,
@@ -580,6 +605,7 @@ def build_container(
     rag_client: RAGClient | None = None,
     ingress: KnowledgeEventIngress | None = None,
     understanding_provider=None,
+    answer_stream=None,
 ) -> AgentContainer:
     resolved = settings or default_settings
     if store is None and todo_store is None and resolved.database_url:
@@ -631,6 +657,14 @@ def build_container(
         )
     resolved_policy = policy or DescriptorPolicy(registry)
     resolved_publisher = publisher or build_publisher(resolved)
+    resolved_answer_stream = (
+        answer_stream if answer_stream is not None else build_answer_stream(resolved)
+    )
+    logger.info(
+        "answer streaming enabled=%s channel=%s",
+        bool(resolved.answer_streaming_enabled),
+        type(resolved_answer_stream).__name__ if resolved_answer_stream else "none",
+    )
     resolved_understanding = understanding_provider
     if resolved_understanding is None and resolved.understanding_mode.strip().lower() != "off":
         resolved_understanding = build_understanding_provider(resolved)
@@ -714,6 +748,7 @@ def build_container(
             summary_service=summary_service,
             title_service=title_service,
             memory_extraction_service=memory_extraction_service,
+            answer_stream=resolved_answer_stream,
         ),
         knowledge_ingress=resolved_ingress,
         knowledge_client=resolved_knowledge,
@@ -723,5 +758,6 @@ def build_container(
             task_service=task_service,
         ),
         core_client=core or build_core_client(resolved),
+        answer_stream=resolved_answer_stream,
         form_browser=resolved_form_client,
     )

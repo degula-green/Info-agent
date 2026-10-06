@@ -196,6 +196,9 @@ class TaskService:
         status = message.status
         content = message.content
         citations = list(message.citations)
+        partial = ""
+        if isinstance(task.result, dict):
+            partial = str(task.result.get("partial_answer") or "").strip()
         if task.status == "succeeded":
             status = "completed"
             result = task.result if isinstance(task.result, dict) else {}
@@ -212,14 +215,14 @@ class TaskService:
         elif task.status in {"failed", "unknown"}:
             status = "failed"
             error = task.last_error if isinstance(task.last_error, dict) else {}
-            content = str(
+            content = partial or str(
                 error.get("message")
                 or error.get("classification")
                 or "任务执行失败"
             )
         elif task.status == "cancelled":
             status = "cancelled"
-            content = content or "任务已取消"
+            content = partial or content or "任务已取消"
         else:
             return
 

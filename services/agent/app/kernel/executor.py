@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
@@ -12,6 +13,7 @@ from app.kernel.execution_context import (
     bind_execution_context,
     current_conversation_context,
 )
+from app.kernel.events import new_task_event
 from app.kernel.models import (
     CapabilityCallRecord,
     Observation,
@@ -21,6 +23,10 @@ from app.kernel.models import (
 )
 from app.kernel.protocols import AgentStore
 from app.kernel.registry import CapabilityRegistry
+from app.kernel.states import EVENT_ANSWER_COMPLETED, EVENT_ANSWER_STARTED
+from app.kernel.streaming import AnswerStreamChannel, TaskCancellationProbe
+
+logger = logging.getLogger("agent.executor")
 
 
 def _now() -> datetime:
@@ -38,6 +44,22 @@ class CapabilityExecutor:
     def __init__(self, registry: CapabilityRegistry, store: AgentStore) -> None:
         self.registry = registry
         self.store = store
+        self.streaming_enabled = False
+        self.answer_channel: AnswerStreamChannel | None = None
+
+    @classmethod
+    def with_streaming(
+        cls,
+        registry: CapabilityRegistry,
+        store: AgentStore,
+        *,
+        answer_channel: AnswerStreamChannel | None = None,
+        enabled: bool = False,
+    ) -> "CapabilityExecutor":
+        executor = cls(registry, store)
+        executor.streaming_enabled = bool(enabled)
+        executor.answer_channel = answer_channel
+        return executor
 
     @staticmethod
     def idempotency_key(task_id: str, plan_id: str, step_id: str) -> str:
@@ -113,6 +135,7 @@ class CapabilityExecutor:
         )
         self.store.save_capability_call(call)
 
+        sink = None
         try:
             arguments = capability.validate(step.arguments)
             execution_context = ExecutionContext.from_task(
@@ -122,9 +145,54 @@ class CapabilityExecutor:
                 request_id=call.request_id,
                 conversation_context=current_conversation_context(),
             )
+            should_stream = (
+                self.streaming_enabled
+                and self.answer_channel is not None
+                and hasattr(capability, "execute_streaming")
+            )
+            logger.debug(
+                "executor streaming check capability=%s enabled=%s channel=%s "
+                "has_method=%s -> %s",
+                step.capability,
+                self.streaming_enabled,
+                self.answer_channel is not None,
+                hasattr(capability, "execute_streaming"),
+                should_stream,
+            )
+            if should_stream:
+                answer_id = str(uuid4())
+                sink = self.answer_channel.open(
+                    task_id=task.task_id,
+                    answer_id=answer_id,
+                    step_id=step.step_id,
+                    attempt=attempt,
+                )
+                self.store.append_event(
+                    new_task_event(
+                        task.task_id,
+                        EVENT_ANSWER_STARTED,
+                        {
+                            "answer_id": answer_id,
+                            "step_id": step.step_id,
+                            "attempt": attempt,
+                            "next_seq": 1,
+                        },
+                    )
+                )
             with bind_execution_context(execution_context):
-                output = capability.execute(arguments)
+                if sink is not None:
+                    output = capability.execute_streaming(
+                        arguments,
+                        sink=sink,
+                        should_cancel=TaskCancellationProbe(
+                            self.store, task.task_id
+                        ),
+                    )
+                else:
+                    output = capability.execute(arguments)
         except Exception as exc:  # noqa: BLE001 - normalized into a classified error
+            if sink is not None:
+                sink.interrupt(type(exc).__name__)
             classification = classify_error(exc)
             call.status = "unknown" if classification == "unknown_external_result" else "failed"
             call.error = {
@@ -132,9 +200,35 @@ class CapabilityExecutor:
                 "type": type(exc).__name__,
                 "message": str(exc),
             }
+            if sink is not None and sink.answer:
+                call.error["partial_answer"] = sink.answer
+                call.error["answer_id"] = sink.answer_id
             call.finished_at = _now()
             self.store.save_capability_call(call)
             return call
+
+        if sink is not None:
+            if not sink.completed:
+                result = output if isinstance(output, dict) else {}
+                sink.complete(
+                    answer=str(result.get("answer") or result.get("reply") or ""),
+                    citations=list(result.get("citations") or []),
+                    warnings=list(result.get("warnings") or []),
+                )
+            self.store.append_event(
+                new_task_event(
+                    task.task_id,
+                    EVENT_ANSWER_COMPLETED,
+                    {
+                        "answer_id": sink.answer_id,
+                        "step_id": sink.step_id,
+                        "attempt": sink.attempt,
+                        "final_seq": sink.final_seq,
+                        "citations_count": len(sink.citations),
+                        "warnings": list(sink.warnings),
+                    },
+                )
+            )
 
         call.finished_at = _now()
         # A capability that blew its own budget is a failure even though it

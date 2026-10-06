@@ -689,6 +689,20 @@ class PostgresAgentStore:
                     (task_id, owner),
                 )
 
+    def renew_lease(self, task_id: str, owner: str, seconds: float) -> bool:
+        with self.pool.connection() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    f"UPDATE {self._tasks} SET lease_expires_at = %s "
+                    "WHERE task_id = %s AND lease_owner = %s RETURNING task_id",
+                    (
+                        datetime.now(timezone.utc) + timedelta(seconds=seconds),
+                        task_id,
+                        owner,
+                    ),
+                )
+                return cursor.fetchone() is not None
+
     # -- inputs -----------------------------------------------------------
 
     def add_input(self, item: TaskInput) -> None:
@@ -1318,6 +1332,26 @@ class PostgresAgentStore:
                 )
                 row = cursor.fetchone()
         return int(row[0]) if row else 0
+
+    def count_messages_by_conversation(
+        self, conversation_ids: list[str]
+    ) -> dict[str, int]:
+        ids = [str(item) for item in conversation_ids if item]
+        if not ids:
+            return {}
+        with self.pool.connection() as connection:
+            with connection.cursor(row_factory=dict_row) as cursor:
+                cursor.execute(
+                    f"SELECT conversation_id::text AS conversation_id, "
+                    f"COUNT(*) AS message_count FROM {self._messages} "
+                    "WHERE conversation_id = ANY(%s::uuid[]) "
+                    "GROUP BY conversation_id",
+                    (ids,),
+                )
+                rows = cursor.fetchall()
+        return {
+            str(row["conversation_id"]): int(row["message_count"]) for row in rows
+        }
 
     def list_completed_messages_after_boundary(
         self,

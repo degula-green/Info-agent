@@ -127,10 +127,13 @@ export interface AgentTaskEvent {
 export interface AgentTaskEventHandlers {
   onEvent: (event: AgentTaskEvent) => boolean | void
   onReconnect?: (attempt: number) => void
+  onAnswerCursor?: (state: { answerId: string; answerAfter: number }) => void
 }
 
 export interface AgentTaskEventStreamOptions {
   after?: number
+  answerId?: string
+  answerAfter?: number
   signal?: AbortSignal
   timeoutSeconds?: number
   maxReconnects?: number
@@ -195,12 +198,35 @@ export async function streamAgentTaskEvents(
   const timeoutSeconds = Math.max(1, Number(options.timeoutSeconds || 30))
   const maxReconnects = Math.max(0, Number(options.maxReconnects ?? 20))
   let cursor = Math.max(0, Number(options.after || 0))
+  let answerId = String(options.answerId || '')
+  let answerAfter = Math.max(0, Number(options.answerAfter || 0))
   let reconnects = 0
 
   while (!signal?.aborted) {
     try {
+      const dispatch = (event: AgentTaskEvent): boolean => {
+        // The handler must see the pre-event cursor: moving answerNextSeq
+        // before it runs would make the handler treat every delta as already
+        // applied.
+        if (event.event_type !== 'answer.delta') {
+          cursor = Math.max(cursor, event.sequence)
+        }
+        const stopped = handlers.onEvent(event) === false
+        if (event.event_type === 'answer.delta') {
+          answerAfter = Math.max(answerAfter, Number(event.payload?.seq || 0))
+          handlers.onAnswerCursor?.({ answerId, answerAfter })
+        } else if (event.event_type === 'answer.started') {
+          const nextId = String(event.payload?.answer_id || '')
+          if (nextId && nextId !== answerId) {
+            answerId = nextId
+            answerAfter = 0
+          }
+          handlers.onAnswerCursor?.({ answerId, answerAfter })
+        }
+        return stopped
+      }
       const response = await authenticatedFetch(
-        `${baseURL}/tasks/${encodeURIComponent(taskID)}/events?after=${cursor}&timeout_seconds=${timeoutSeconds}`,
+        `${baseURL}/tasks/${encodeURIComponent(taskID)}/events?after=${cursor}&answer_id=${encodeURIComponent(answerId)}&answer_after=${answerAfter}&timeout_seconds=${timeoutSeconds}`,
         { headers: agentHeaders(), signal },
       )
       if (!response.ok || !response.body) {
@@ -225,8 +251,7 @@ export async function streamAgentTaskEvents(
         for (const block of blocks) {
           const event = parseAgentTaskEvent(block)
           if (!event) continue
-          cursor = Math.max(cursor, event.sequence)
-          if (handlers.onEvent(event) === false) {
+          if (dispatch(event)) {
             stopped = true
             break
           }
@@ -235,8 +260,7 @@ export async function streamAgentTaskEvents(
       if (!stopped && buffer.trim()) {
         const event = parseAgentTaskEvent(buffer)
         if (event) {
-          cursor = Math.max(cursor, event.sequence)
-          stopped = handlers.onEvent(event) === false
+          stopped = dispatch(event)
         }
       }
       if (stopped) await reader.cancel().catch(() => undefined)
@@ -256,6 +280,25 @@ export async function streamAgentTaskEvents(
     }
   }
   return cursor
+}
+
+export interface AgentAnswerSnapshot {
+  answer_id: string
+  text: string
+  next_seq: number
+  completed: boolean
+  final_seq: number
+  citations?: any[]
+  warnings?: string[]
+}
+
+export function getAgentAnswerSnapshot(
+  taskID: string,
+  answerID: string,
+): Promise<AgentAnswerSnapshot> {
+  return agentRequest<AgentAnswerSnapshot>(
+    `/tasks/${encodeURIComponent(taskID)}/answers/${encodeURIComponent(answerID)}`,
+  )
 }
 
 export function isTerminalAgentTaskStatus(status: string): boolean {

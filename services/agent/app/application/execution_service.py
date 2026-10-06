@@ -37,6 +37,7 @@ class ExecutionService:
         summary_service=None,
         title_service=None,
         memory_extraction_service=None,
+        answer_stream=None,
     ) -> None:
         self.store = store
         self.settings = settings
@@ -44,6 +45,7 @@ class ExecutionService:
         self.summary_service = summary_service
         self.title_service = title_service
         self.memory_extraction_service = memory_extraction_service
+        self.answer_stream = answer_stream
         # The lease must identify this driver, not a fixed role name: two drivers
         # sharing "worker" would both pass the lease check and drive the same Task
         # concurrently (the API's /run racing the worker process).
@@ -52,12 +54,18 @@ class ExecutionService:
         self.approval_gateway = ApprovalGateway(
             store, expires_seconds=limits.approval_expires_seconds
         )
+        executor = CapabilityExecutor.with_streaming(
+            registry,
+            store,
+            answer_channel=answer_stream,
+            enabled=bool(getattr(settings, "answer_streaming_enabled", False)),
+        )
         self.runtime = AgentRuntime(
             store=store,
             registry=registry,
             planner=planner,
             policy=policy,
-            executor=CapabilityExecutor(registry, store),
+            executor=executor,
             approval_gateway=self.approval_gateway,
             limits=limits,
             understanding_provider=understanding_provider,

@@ -85,6 +85,7 @@ def classify_error(exc: BaseException) -> str:
     classification = getattr(exc, "classification", None)
     if classification in {
         "validation_error",
+        "cancelled",
         "policy_denied",
         "retryable_error",
         "permanent_error",

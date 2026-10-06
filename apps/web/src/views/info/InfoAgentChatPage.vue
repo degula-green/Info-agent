@@ -33,6 +33,15 @@
             </header>
             <div class="agent-answer">
 
+              <div
+                v-for="(attempt, index) in message.interruptedAnswers || []"
+                :key="`${message.id}-interrupted-${index}`"
+                class="agent-answer__interrupted"
+              >
+                <span class="agent-answer__interrupted-label">{{ attempt.reason }}</span>
+                <AgentAnswerContent :content="attempt.text" />
+              </div>
+
               <AgentAnswerContent v-if="primaryAnswer(message)" :content="primaryAnswer(message)" />
               <div v-else-if="showsEmptyKnowledgeResult(message)" class="agent-empty-result">
                 <strong>没有找到满足条件的内容。</strong>
@@ -341,6 +350,7 @@ import {
   createAgentTask,
   dayOfISO,
   fetchTakeoverFrame,
+  getAgentAnswerSnapshot,
   getAgentConversation,
   getAgentPlan,
   getAgentTask,
@@ -451,6 +461,16 @@ type AgentMessage = {
   steps: Step[]
   blocks: AgentResultBlock[]
   answer?: string
+  /** Throttled display buffer while an answer is streaming. */
+  streamText?: string
+  answerId?: string
+  answerStepId?: string
+  answerAttempt?: number
+  answerNextSeq?: number
+  answerStreaming?: boolean
+  answerStreamError?: string
+  /** Earlier attempts preserved as "generation interrupted" history. */
+  interruptedAnswers?: { text: string; reason: string }[]
   citations: Citation[]
   error?: string
   todo?: TodoResult
@@ -688,7 +708,65 @@ function handleTaskEvent(message: AgentMessage, event: AgentTaskEvent): boolean 
       message.statusText = '审批已拒绝'
       message.error = '审批已拒绝，任务不会执行'
       return false
+    case 'answer.started': {
+      const nextId = String(payload.answer_id || '')
+      if (
+        nextId
+        && message.answerId
+        && nextId !== message.answerId
+        && (message.streamText || message.answer || '').trim()
+      ) {
+        flushStreamText(message)
+        message.interruptedAnswers = [
+          ...(message.interruptedAnswers || []),
+          {
+            text: message.streamText || message.answer || '',
+            reason: message.answerStreamError === 'cancelled' ? '已取消' : '生成中断',
+          },
+        ]
+        message.streamText = ''
+        message.answer = ''
+      }
+      if (nextId) message.answerId = nextId
+      message.answerStepId = String(payload.step_id || '')
+      message.answerAttempt = Number(payload.attempt || 0)
+      message.answerNextSeq = Math.max(1, Number(payload.next_seq || 1))
+      message.answerStreaming = true
+      message.answerStreamError = ''
+      message.status = 'executing'
+      message.statusText = '正在生成回答'
+      break
+    }
+    case 'answer.delta': {
+      if (!ANSWER_STREAMING_ENABLED) break
+      const seq = Number(payload.seq || 0)
+      const next = Math.max(1, Number(message.answerNextSeq || 1))
+      if (seq < next) break
+      if (seq > next) {
+        void recoverAnswerSnapshot(message)
+        break
+      }
+      appendStreamText(message, String(payload.delta || ''))
+      message.answerNextSeq = seq + 1
+      message.answerStreaming = true
+      break
+    }
+    case 'answer.completed': {
+      flushStreamText(message)
+      if (typeof payload.answer === 'string' && payload.answer) {
+        message.answer = payload.answer
+        message.streamText = payload.answer
+      }
+      if (Array.isArray(payload.citations)) {
+        message.citations = payload.citations.map(mapCitation)
+      }
+      message.answerStreaming = false
+      message.answerNextSeq = Number(payload.final_seq || 0) + 1
+      break
+    }
     case 'task.completed':
+      flushStreamText(message)
+      message.answerStreaming = false
       stopTakeover(message)
       message.status = 'succeeded'
       message.statusText = '任务已完成'
@@ -698,12 +776,16 @@ function handleTaskEvent(message: AgentMessage, event: AgentTaskEvent): boolean 
       void hydrateTerminal(message)
       return false
     case 'task.failed':
+      message.answerStreaming = false
+      message.answerStreamError = 'interrupted'
       stopTakeover(message)
       message.status = payload.task_status === 'unknown' ? 'unknown' : 'failed'
       message.statusText = payload.task_status === 'unknown' ? '外部结果未知' : '任务失败'
       message.error = String(payload.error?.message || '任务执行失败')
       return false
     case 'task.cancelled':
+      message.answerStreaming = false
+      message.answerStreamError = 'cancelled'
       stopTakeover(message)
       message.status = 'cancelled'
       message.statusText = '任务已取消'
@@ -744,7 +826,58 @@ function previewSummary(value: unknown): string {
   return typeof summary === 'string' ? summary.trim() : ''
 }
 
+const ANSWER_STREAMING_ENABLED = String(
+  (import.meta as ImportMeta & { env?: Record<string, string> }).env
+    ?.VITE_AGENT_ANSWER_STREAMING_ENABLED || 'false',
+).toLowerCase() === 'true'
+
+/** Deltas are buffered and flushed on a timer so Markdown is not re-rendered
+ * once per network chunk. */
+const streamBuffers = new Map<string, string>()
+const streamTimers = new Map<string, number>()
+
+function appendStreamText(message: AgentMessage, delta: string): void {
+  if (!delta) return
+  const buffered = (streamBuffers.get(message.id) ?? message.streamText ?? '') + delta
+  streamBuffers.set(message.id, buffered)
+  if (streamTimers.has(message.id)) return
+  const timer = window.setTimeout(() => {
+    streamTimers.delete(message.id)
+    const value = streamBuffers.get(message.id)
+    if (value !== undefined) message.streamText = value
+  }, 40)
+  streamTimers.set(message.id, timer)
+}
+
+function flushStreamText(message: AgentMessage): void {
+  const timer = streamTimers.get(message.id)
+  if (timer) window.clearTimeout(timer)
+  streamTimers.delete(message.id)
+  const value = streamBuffers.get(message.id)
+  streamBuffers.delete(message.id)
+  if (value !== undefined) message.streamText = value
+}
+
+async function recoverAnswerSnapshot(message: AgentMessage): Promise<void> {
+  if (!message.taskId || !message.answerId || message.answerStreamError === 'recovering') return
+  message.answerStreamError = 'recovering'
+  try {
+    const snapshot = await getAgentAnswerSnapshot(message.taskId, message.answerId)
+    message.streamText = snapshot.text || message.streamText || ''
+    message.answerNextSeq = Number(snapshot.next_seq || 0) + 1
+    message.answerStreamError = ''
+    activeController?.abort()
+    void watchTask(message, message.lastEventId)
+  } catch {
+    message.answerStreamError = '回答恢复失败'
+  }
+}
+
 function primaryAnswer(message: AgentMessage): string {
+  if (message.answerStreaming && typeof message.streamText === 'string') {
+    const streaming = message.streamText.trim()
+    if (streaming) return streaming
+  }
   const block = message.blocks.find((item) => item.type === 'answer')
   const text = (message.answer || (block?.type === 'answer' ? block.text : '') || '').trim()
   if (!text || text === '没有找到满足条件的内容。') return ''
@@ -1210,7 +1343,9 @@ async function restoreAssistantMessage(
     citations: Array.isArray(historyMessage.citations)
       ? historyMessage.citations.map(mapCitation)
       : [],
-    error: historyMessage.status === 'failed' ? historyMessage.content : undefined,
+    // Failed messages may carry the partial answer in content now; the error
+    // text lives in task.last_error and is loaded below.
+    error: undefined,
     lastEventId: 0,
   }
   if (!message.taskId) return message
@@ -1260,6 +1395,9 @@ async function restoreAssistantMessage(
     if (task.last_error?.message) message.error = String(task.last_error.message)
   } catch {
     // The persisted message remains usable even if its execution detail is gone.
+  }
+  if (!message.error && historyMessage.status === 'failed') {
+    message.error = '任务执行失败'
   }
   return message
 }
@@ -1385,8 +1523,17 @@ async function watchTask(message: AgentMessage, after = message.lastEventId): Pr
         onReconnect: (attempt) => {
           message.statusText = `正在恢复连接（${attempt}）`
         },
+        onAnswerCursor: ({ answerId, answerAfter }) => {
+          if (answerId) message.answerId = answerId
+          message.answerNextSeq = Math.max(1, Number(answerAfter || 0) + 1)
+        },
       },
-      { after, signal: activeController.signal },
+      {
+        after,
+        answerId: message.answerId,
+        answerAfter: Math.max(0, Number(message.answerNextSeq || 1) - 1),
+        signal: activeController.signal,
+      },
     )
   } catch (error) {
     if (!(error instanceof DOMException && error.name === 'AbortError')) {
@@ -1878,6 +2025,9 @@ onBeforeUnmount(() => {
 .agent-response__identity { display: flex; align-items: baseline; gap: 9px; min-width: 0; }
 .agent-response__identity strong { color: var(--td-text-color-primary); font-size: 13px; font-weight: 600; }
 .agent-answer { display: grid; width: min(820px, calc(100% - 38px)); gap: 14px; margin-left: 38px; }
+.agent-answer__interrupted { display: grid; gap: 8px; padding: 10px 12px; border: 1px dashed var(--td-component-stroke); border-radius: 10px; opacity: .72; }
+.agent-answer__interrupted-label { justify-self: start; color: var(--td-text-color-secondary); font-size: 12px; }
+.agent-answer__interrupted :deep(.agent-answer-content) { font-size: 14px; line-height: 1.7; }
 .agent-user-actions, .agent-answer__actions { display: flex; align-items: center; gap: 7px; margin-top: 12px; opacity: 0; pointer-events: none; transition: opacity .15s ease; }
 .agent-answer__actions { justify-content: flex-end; margin-top: 4px; }
 .agent-user-actions { justify-content: flex-end; margin-top: 0; gap: 4px; }

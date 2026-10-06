@@ -405,6 +405,61 @@ class KnowledgeAnswerCapability:
             model_calls=max(int(getattr(draft, "model_calls", 0) or 0), 0),
         ).model_dump()
 
+    def execute_streaming(
+        self,
+        arguments: KnowledgeAnswerInput,
+        *,
+        sink,
+        should_cancel=None,
+    ) -> dict[str, Any]:
+        evidence = _answer_evidence(arguments.results, arguments.timezone)
+        if not evidence:
+            evidence = _source_evidence(arguments.sources, arguments.timezone)
+        if not evidence:
+            answer = "没有找到满足条件的内容。"
+            sink.push(answer)
+            sink.complete(answer=answer, citations=[], warnings=[])
+            return KnowledgeAnswerOutput(
+                answer=answer,
+                citations=[],
+                metadata_coverage=arguments.metadata_coverage,
+                model_calls=0,
+            ).model_dump()
+
+        stream_compose = getattr(self.provider, "stream_compose", None)
+        if stream_compose is None:
+            result = self.execute(arguments)
+            sink.push(str(result.get("answer") or ""))
+            sink.complete(
+                answer=str(result.get("answer") or ""),
+                citations=list(result.get("citations") or []),
+                warnings=[],
+            )
+            return result
+
+        kwargs: dict[str, Any] = {
+            "on_delta": sink.push,
+            "should_cancel": should_cancel,
+        }
+        if arguments.time_range:
+            kwargs["time_range"] = arguments.time_range
+        draft = stream_compose(arguments.query, evidence, **kwargs)
+        citations = _known_knowledge_citations(draft.citations, evidence)
+        warnings: list[str] = []
+        if draft.citations and not citations:
+            warnings.append("citation_selection_failed")
+        sink.complete(
+            answer=str(draft.answer),
+            citations=citations,
+            warnings=warnings,
+        )
+        return KnowledgeAnswerOutput(
+            answer=str(draft.answer),
+            citations=citations,
+            metadata_coverage=arguments.metadata_coverage,
+            model_calls=max(int(getattr(draft, "model_calls", 0) or 0), 0),
+        ).model_dump()
+
 
 def _scope_requests(
     *,

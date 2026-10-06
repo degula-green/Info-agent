@@ -425,6 +425,28 @@ class Settings:
     answer_max_output_tokens: int = _int(
         1200, "AGENT_ANSWER_MAX_OUTPUT_TOKENS", "agent_ANSWER_MAX_OUTPUT_TOKENS"
     )
+    # Stream answer text as it is generated. Off by default so the existing
+    # one-shot path stays the fallback until the streaming path is verified.
+    answer_streaming_enabled: bool = _bool(
+        False,
+        "AGENT_ANSWER_STREAMING_ENABLED",
+        "agent_ANSWER_STREAMING_ENABLED",
+    )
+    answer_stream_ttl_seconds: int = _int(
+        3600,
+        "AGENT_ANSWER_STREAM_TTL_SECONDS",
+        "agent_ANSWER_STREAM_TTL_SECONDS",
+    )
+    answer_stream_max_len: int = _int(
+        2000,
+        "AGENT_ANSWER_STREAM_MAX_LEN",
+        "agent_ANSWER_STREAM_MAX_LEN",
+    )
+    answer_stream_snapshot_every: int = _int(
+        50,
+        "AGENT_ANSWER_STREAM_SNAPSHOT_EVERY",
+        "agent_ANSWER_STREAM_SNAPSHOT_EVERY",
+    )
     # Conversation memory Phase 1: inject the recent tail plus a rolling
     # summary for the same conversation only. No cross-session memory.
     conversation_context_enabled: bool = _bool(

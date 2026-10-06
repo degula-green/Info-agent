@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import inspect
 import logging
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
@@ -182,6 +183,25 @@ class AgentRuntime:
             )
         if not self.store.acquire_lease(task_id, lease_owner, self.limits.lease_seconds):
             return self._result(task, waiting_for="lease")
+        stop_heartbeat = threading.Event()
+        heartbeat: threading.Thread | None = None
+        renew = getattr(self.store, "renew_lease", None)
+        if callable(renew):
+            interval = max(0.2, float(self.limits.lease_seconds) / 3.0)
+
+            def beat() -> None:
+                while not stop_heartbeat.wait(interval):
+                    try:
+                        renew(task_id, lease_owner, self.limits.lease_seconds)
+                    except Exception:  # noqa: BLE001 - a lease hiccup must not kill the Task
+                        logger.exception("lease renewal failed for task %s", task_id)
+
+            heartbeat = threading.Thread(
+                target=beat,
+                name=f"agent-lease-{task_id[:8]}",
+                daemon=True,
+            )
+            heartbeat.start()
         conversation_context = None
         if self._conversation_context_loader is not None:
             try:
@@ -194,6 +214,9 @@ class AgentRuntime:
             with bind_conversation_context(conversation_context):
                 return self._drive(task_id)
         finally:
+            stop_heartbeat.set()
+            if heartbeat is not None:
+                heartbeat.join(timeout=1.0)
             self.store.release_lease(task_id, lease_owner)
 
     # -- main loop --------------------------------------------------------
@@ -1980,6 +2003,35 @@ class AgentRuntime:
         )
 
         call = self.executor.execute(task, plan, step, attempt)
+        if (
+            call.status != "succeeded"
+            and isinstance(call.error, dict)
+            and call.error.get("partial_answer")
+        ):
+            # Persist the text that was already shown so a refresh can restore
+            # it. The status stays failed/cancelled, so memory and summary only
+            # see the final successful answer.
+            current = self.store.get_task(task.task_id)
+            if current is not None:
+                result = dict(current.result or {})
+                result["partial_answer"] = str(call.error.get("partial_answer") or "")
+                result["partial_answer_id"] = str(call.error.get("answer_id") or "")
+                current.result = result
+                current.updated_at = utcnow()
+                self.store.commit(current)
+        if (
+            call.status != "succeeded"
+            and isinstance(call.error, dict)
+            and call.error.get("classification") == "cancelled"
+        ):
+            # The owner cancelled the Task while the answer stream was in
+            # flight. The terminal status is already persisted by the cancel
+            # endpoint; do not try to move a terminal Task back to ready.
+            if step.status == "running":
+                ensure_step_transition(step.status, "ready")
+                step.status = "ready"
+                self.store.update_step(step)
+            return self._result(self.store.get_task(task.task_id), executed=executed)
         observation = self.executor.to_observation(call)
         # Only a fresh execution reports provenance and spend: a call row that
         # was reused unchanged already paid for itself the first time.

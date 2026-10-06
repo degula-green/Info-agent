@@ -107,6 +107,11 @@ EVENT_TASK_CANCELLED = "task.cancelled"
 EVENT_TASK_INPUT_RECEIVED = "task.input_received"
 EVENT_APPROVAL_APPROVED = "approval.approved"
 EVENT_APPROVAL_REJECTED = "approval.rejected"
+# Streaming answer events. answer.delta is delivered over Redis only; the
+# started/completed markers are persisted so reconnects can find the attempt.
+EVENT_ANSWER_STARTED = "answer.started"
+EVENT_ANSWER_DELTA = "answer.delta"
+EVENT_ANSWER_COMPLETED = "answer.completed"
 
 KNOWN_EVENT_TYPES = (
     EVENT_PREVIEW_CONFIRMED,
@@ -128,6 +133,9 @@ KNOWN_EVENT_TYPES = (
     EVENT_TASK_INPUT_RECEIVED,
     EVENT_APPROVAL_APPROVED,
     EVENT_APPROVAL_REJECTED,
+    EVENT_ANSWER_STARTED,
+    EVENT_ANSWER_DELTA,
+    EVENT_ANSWER_COMPLETED,
 )
 
 

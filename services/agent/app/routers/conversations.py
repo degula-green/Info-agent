@@ -103,6 +103,9 @@ def list_conversations(
         owner_user_id,
         statuses=statuses or None,
     )
+    message_counts = container.store.count_messages_by_conversation(
+        [item.conversation_id for item in items]
+    )
     return {
         "items": [
             {
@@ -110,9 +113,7 @@ def list_conversations(
                 "title": item.title,
                 "status": item.status,
                 "last_message_at": item.last_message_at,
-                "message_count": container.store.count_messages(
-                    item.conversation_id
-                ),
+                "message_count": message_counts.get(item.conversation_id, 0),
             }
             for item in items
         ],
