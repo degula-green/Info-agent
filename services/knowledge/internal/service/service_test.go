@@ -610,12 +610,20 @@ func TestPairAgentCreatesMappedWechatIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	exchange, err := service.PairAgent(context.Background(), pairing.PairingID, pairing.PairingCode, "wxid-a", "fingerprint", "agent")
+	fingerprint := hashForTest("local-path")
+	exchange, err := service.PairAgent(context.Background(), pairing.PairingID, pairing.PairingCode, "wxid-a", fingerprint, "agent")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if exchange.DeviceID == "" || exchange.DeviceKey == "" || exchange.ConnectorID == "" || exchange.Platform != domain.PlatformWechat {
 		t.Fatalf("pair exchange did not return the minimal agent contract: %+v", exchange)
+	}
+	consumed, err := repo.GetPairing(context.Background(), pairing.PairingID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if consumed.DatabaseRef != fingerprint {
+		t.Fatalf("pairing did not persist the path fingerprint: %q", consumed.DatabaseRef)
 	}
 	if _, err := repo.UpsertExternalIdentity(context.Background(), repository.ExternalIdentityInput{Platform: domain.PlatformWechat, ExternalUserID: "wxid-a", MappedUserID: "u2"}); apperror.From(err).Code != "external_id_conflict" {
 		t.Fatalf("expected mapped wxid conflict, got %v", err)

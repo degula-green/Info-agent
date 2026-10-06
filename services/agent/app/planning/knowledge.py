@@ -158,6 +158,31 @@ _FILE_MARKERS = (
     "docx",
 )
 _MESSAGE_MARKERS = ("消息", "聊天记录", "群聊", "群里", "私聊")
+_CONTENT_OBJECT_MARKERS = (
+    "配置",
+    "参数",
+    "设置",
+    "数据库",
+    "账号",
+    "密码",
+    "地址",
+    "方案",
+    "资料",
+    "文档",
+    "流程",
+    "规范",
+    "标准",
+)
+_UNKNOWN_SOURCE_MARKERS = (
+    "忘了在哪个群",
+    "忘了哪个群",
+    "不记得在哪个群",
+    "不记得哪个群",
+    "不知道在哪个群",
+    "不知道哪个群",
+    "忘了在哪个聊天",
+    "不记得在哪个聊天",
+)
 _ACTION_MARKERS = ("提醒我", "创建待办", "新建待办", "日程", "预约", "安排会议", "加个提醒")
 _INTERNAL_OBJECT_MARKERS = (
     "官网",
@@ -281,11 +306,16 @@ def classify_knowledge_question(
     has_search = _contains_any(normalized, _SEARCH_MARKERS)
     has_file = _contains_any(normalized, _FILE_MARKERS)
     has_message = _contains_any(normalized, _MESSAGE_MARKERS)
+    has_content_object = _contains_any(normalized, _CONTENT_OBJECT_MARKERS)
+    has_unknown_source = _contains_any(normalized, _UNKNOWN_SOURCE_MARKERS)
     has_action = _contains_any(normalized, _ACTION_MARKERS)
     has_internal_object = _contains_any(normalized, _INTERNAL_OBJECT_MARKERS)
     has_status = _contains_any(normalized, _STATUS_MARKERS)
     has_explicit_web = _contains_any(normalized, _WEB_MARKERS)
     has_internal_status = has_internal_object and has_status
+    looks_like_unknown_source_lookup = (
+        has_search and has_content_object and has_unknown_source
+    )
 
     if has_explicit_web:
         return None
@@ -300,6 +330,7 @@ def classify_knowledge_question(
     if not (
         has_source
         or has_content
+        or looks_like_unknown_source_lookup
         or has_internal_status
         or has_internal_object
         or (has_search and (has_file or has_message))
@@ -327,7 +358,9 @@ def classify_knowledge_question(
     content_arguments: dict[str, Any] = {"query": query}
 
     mode: KnowledgeMode
-    if has_internal_status:
+    if looks_like_unknown_source_lookup:
+        mode = "content_with_sources" if sender_names else "content"
+    elif has_internal_status:
         route_to_sources = bool(
             sender_names
             or conversation_names
@@ -459,10 +492,9 @@ def build_knowledge_plan(
                 "step": search_content_step.order,
                 "output": "results",
             },
-            "metadata_coverage_ref": {
-                "step": search_content_step.order,
-                "output": "metadata_coverage",
-            },
+            "metadata_coverage": (
+                f"$steps.{search_content_step.step_id}.output.metadata_coverage"
+            ),
         }
     elif sources_step is not None:
         # A metadata question ("which platform is this group on") is answered
@@ -473,10 +505,9 @@ def build_knowledge_plan(
                 "step": sources_step.order,
                 "output": "sources",
             },
-            "metadata_coverage_ref": {
-                "step": sources_step.order,
-                "output": "metadata_coverage",
-            },
+            "metadata_coverage": (
+                f"$steps.{sources_step.step_id}.output.metadata_coverage"
+            ),
         }
 
     if reference is not None and KNOWLEDGE_ANSWER_NAME in registered:
@@ -1274,13 +1305,24 @@ def _clean_person_name(value: str) -> str:
 
 def _conversation_names(text: str) -> list[str]:
     names: list[str] = []
+    generic = {
+        "哪个",
+        "哪个群",
+        "哪个群聊",
+        "哪个聊天",
+        "什么群",
+        "啥群",
+        "这个群",
+        "那个群",
+        "某个群",
+    }
     for match in _CONVERSATION_PATTERN.finditer(text):
         name = str(match.group("name") or "").strip().rsplit("在", 1)[-1]
         # "昨天晚上10点aims群" carries the time phrase in front of the group
         # name; keeping it would filter for a conversation that does not exist.
         name = _LEADING_TIME_PREFIX.sub("", name).strip()
         for candidate in _conversation_candidates(name):
-            if candidate and candidate not in names:
+            if candidate and candidate not in generic and candidate not in names:
                 names.append(candidate)
     return names[:10]
 

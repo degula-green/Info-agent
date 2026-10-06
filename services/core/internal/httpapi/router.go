@@ -16,11 +16,11 @@ func NewRouterWithAuthorization(authentication Authentication, cookies RefreshCo
 	return newRouter(authentication, cookies, logger, organization, &authorization, nil)
 }
 
-func NewRouterWithRegistration(authentication Authentication, cookies RefreshCookieConfig, logger *slog.Logger, registration Registration, organization OrganizationApplication, authorization *AuthorizationConfig) *gin.Engine {
-	return newRouter(authentication, cookies, logger, organization, authorization, registration)
+func NewRouterWithRegistration(authentication Authentication, cookies RefreshCookieConfig, logger *slog.Logger, registration Registration, organization OrganizationApplication, authorization *AuthorizationConfig, accessRequests ...AccessRequestApplication) *gin.Engine {
+	return newRouter(authentication, cookies, logger, organization, authorization, registration, accessRequests...)
 }
 
-func newRouter(authentication Authentication, cookies RefreshCookieConfig, logger *slog.Logger, organization OrganizationApplication, authorization *AuthorizationConfig, registration Registration) *gin.Engine {
+func newRouter(authentication Authentication, cookies RefreshCookieConfig, logger *slog.Logger, organization OrganizationApplication, authorization *AuthorizationConfig, registration Registration, accessRequests ...AccessRequestApplication) *gin.Engine {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -47,7 +47,14 @@ func newRouter(authentication Authentication, cookies RefreshCookieConfig, logge
 		org := router.Group("/organizations", RequireAuthentication(authentication, logger))
 		org.POST("", orgHandler.Create)
 		org.GET("/current", orgHandler.Current)
+		org.GET("/:organization_id/capabilities", orgHandler.Capabilities)
+		org.GET("/:organization_id/membership/exit-preflight", orgHandler.ExitPreflight)
+		org.POST("/:organization_id/leave", orgHandler.Leave)
+		org.POST("/:organization_id/transfer-owner", orgHandler.TransferOwner)
 		org.GET("/:organization_id/members", orgHandler.Members)
+		org.POST("/:organization_id/members/:user_id/suspend", orgHandler.SuspendMember)
+		org.POST("/:organization_id/members/:user_id/reactivate", orgHandler.ReactivateMember)
+		org.DELETE("/:organization_id/members/:user_id", orgHandler.RemoveMember)
 		org.POST("/:organization_id/invitations", orgHandler.CreateInvitation)
 		org.POST("/:organization_id/invitations/:invitation_id/revoke", orgHandler.RevokeInvitation)
 		org.POST("/:organization_id/members/:user_id/roles", orgHandler.GrantRole)
@@ -68,6 +75,14 @@ func newRouter(authentication Authentication, cookies RefreshCookieConfig, logge
 			permissionHandler := NewPermissionSyncHandler(authorization.PermissionSync, authorization.KnowledgeToken)
 			authz.POST("/resource-relations/sync", permissionHandler.Sync)
 		}
+	}
+	if len(accessRequests) > 0 && accessRequests[0] != nil {
+		handler := NewAccessRequestHandler(accessRequests[0])
+		requests := router.Group("/access-requests", RequireAuthentication(authentication, logger))
+		requests.POST("", handler.Create)
+		requests.GET("", handler.List)
+		requests.POST("/:id/approve", handler.Approve)
+		requests.POST("/:id/reject", handler.Reject)
 	}
 	return router
 }

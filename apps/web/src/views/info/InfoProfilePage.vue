@@ -82,11 +82,14 @@
           <div v-else-if="!accessRequests.length" class="access-request-state">{{ accessScope === 'mine' ? '暂无我发起的申请' : '暂无待我审批的申请' }}</div>
           <article v-for="request in accessRequests" v-else :key="request.id" class="access-request">
             <div class="access-request__main">
-              <strong>{{ accessResourceLabel(request) }} · {{ accessActionLabel(request) }}</strong>
+              <strong>{{ request.title }}</strong>
+              <small>{{ request.subtitle }}</small>
+              <small v-if="request.excerpt" class="access-request__excerpt">{{ request.excerpt }}</small>
               <small>{{ request.reason || '未填写申请说明' }} · {{ formatDateTime(request.created_at) }}</small>
             </div>
             <t-tag :theme="accessStatusTheme(request.status)" variant="light">{{ accessStatusLabel(request.status) }}</t-tag>
             <div v-if="accessScope === 'inbox' && request.status === 'pending'" class="access-request__actions">
+              <t-button v-if="request.source === 'core' && request.contextAvailable" size="small" variant="text" @click="openAccessContext(request)">查看上下文</t-button>
               <t-button size="small" theme="primary" @click="reviewAccess(request, 'approve')">通过</t-button>
               <t-button size="small" theme="danger" variant="outline" @click="reviewAccess(request, 'reject')">拒绝</t-button>
             </div>
@@ -120,7 +123,7 @@
     </t-dialog>
     <t-dialog v-model:visible="wechatDialogVisible" header="绑定个人微信" :confirm-btn="wechatConfirmButton" cancel-btn="取消" :confirm-loading="wechatBinding" :close-on-overlay-click="!wechatBinding" @confirm="confirmWechatBind">
       <div class="wechat-pairing">
-        <template v-if="!wechatManualMode">
+        <template v-if="!wechatManualMode && !wechatPathMode">
           <p>{{ wechatAccounts.length ? '检测到本机微信账号，请选择一个用于采集。' : '正在检测本机微信账号…' }}</p>
           <div v-if="wechatAccounts.length" class="wechat-pairing__accounts">
             <button
@@ -140,6 +143,19 @@
             </button>
           </div>
           <t-alert v-else-if="wechatAgentError" theme="warning" :message="wechatAgentError" :close="false" />
+          <t-button variant="text" :disabled="wechatBinding" @click="enableWechatPathMode">找不到？手动指定微信目录</t-button>
+        </template>
+        <template v-else-if="wechatPathMode">
+          <p>请输入本机微信账号和数据目录，仍然使用当前配对信息完成绑定。</p>
+          <t-form :data="wechatPathForm" label-align="top">
+            <t-form-item label="微信 ID">
+              <t-input v-model="wechatPathForm.wxid" placeholder="例如 wxid_xxx" />
+            </t-form-item>
+            <t-form-item label="本机微信数据目录">
+              <t-input v-model="wechatPathForm.db_dir" placeholder="例如 C:\\Users\\...\\xwechat_files\\wxid_xxx_abcd" />
+            </t-form-item>
+          </t-form>
+          <t-button variant="text" :disabled="wechatBinding" @click="disableWechatPathMode">返回自动检测</t-button>
         </template>
         <template v-else>
           <t-alert theme="warning" :message="wechatAgentError || '未检测到本机微信 Agent。'" :close="false" />
@@ -181,7 +197,7 @@ import { useAuthStore } from '@/stores/auth'
 import { connectorCatalog, getConnectors, getFeishuAuthorizeURL, type Connector, type ConnectorPlatform, type Profile, unbindConnector } from '@/api/info-profile'
 import { oauthCallbackNotice } from '@/knowledge-mapping'
 import { downloadAvatar, getCurrentUser, updateCurrentUser, uploadAvatar as uploadCoreAvatar } from '@/api/core-auth'
-import { acceptOrganizationInvitation, createOrganization, getCurrentOrganization, type CoreOrganizationResponse } from '@/api/core-organization'
+import { acceptOrganizationInvitation, approveAccessRequest, createOrganization, getCurrentOrganization, listAccessRequests, rejectAccessRequest, type CoreAccessRequest, type CoreOrganizationResponse } from '@/api/core-organization'
 import { CoreAuthError } from '@/api/core-auth'
 import { approvePrivateAccessRequest, createWechatPairing, getWechatPairingStatus, listPrivateAccessRequests, rejectPrivateAccessRequest, type PrivateAccessRequestDTO } from '@/api/info-knowledge'
 import { listLocalWechatAccounts, pairLocalWechatAccount, type LocalWechatAccount } from '@/api/wechat-local-agent'
@@ -204,8 +220,20 @@ const organizationSubmitting = ref(false)
 const organizationName = ref('')
 const invitationToken = ref('')
 const organization = ref<CoreOrganizationResponse | null>(null)
-const accessScope = ref<'mine' | 'inbox'>('mine')
-const accessRequests = ref<PrivateAccessRequestDTO[]>([])
+const accessScope = ref<'mine' | 'inbox'>(route.query.tab === 'permissions' ? 'inbox' : 'mine')
+type UnifiedAccessRequest = {
+  id: string
+  source: 'core' | 'private'
+  title: string
+  subtitle: string
+  excerpt: string
+  reason: string
+  status: string
+  created_at: string
+  contextAvailable: boolean
+  raw: CoreAccessRequest | PrivateAccessRequestDTO
+}
+const accessRequests = ref<UnifiedAccessRequest[]>([])
 const accessLoading = ref(false)
 let accessRequestSequence = 0
 const wechatPairingID = ref('')
@@ -213,6 +241,8 @@ const wechatPairingCode = ref('')
 const wechatAccounts = ref<LocalWechatAccount[]>([])
 const selectedWechatWXID = ref('')
 const wechatManualMode = ref(false)
+const wechatPathMode = ref(false)
+const wechatPathForm = reactive({ wxid: '', db_dir: '' })
 const wechatAgentError = ref('')
 const connectorPending = reactive<Record<ConnectorPlatform, boolean>>({ feishu: false, wecom: false, wechat: false })
 const feishuBinding = ref(false)
@@ -222,6 +252,10 @@ const selectedWechatAccount = computed(() => (
   wechatAccounts.value.find((item) => item.wxid === selectedWechatWXID.value) || null
 ))
 const wechatConfirmButton = computed(() => {
+  if (wechatPathMode.value) {
+    const ready = Boolean(wechatPathForm.wxid.trim() && wechatPathForm.db_dir.trim())
+    return { content: '绑定指定目录', loading: wechatBinding.value, disabled: wechatBinding.value || !ready }
+  }
   if (selectedWechatAccount.value) {
     return { content: '绑定选中的微信', loading: wechatBinding.value, disabled: wechatBinding.value }
   }
@@ -274,16 +308,28 @@ async function loadPage() {
     if (cause instanceof CoreAuthError && cause.status === 401) return
     MessagePlugin.error(errorMessage(cause, '组织信息加载失败'))
   })
-  const accessRequest = loadAccessRequests()
-  await Promise.all([coreProfileRequest, connectorRequest, organizationRequest, accessRequest])
+  await Promise.all([coreProfileRequest, connectorRequest, organizationRequest])
   organizationLoading.value = false
+  await loadAccessRequests()
 }
 async function loadAccessRequests() {
   const sequence = ++accessRequestSequence
   accessLoading.value = true
   try {
-    const items = await listPrivateAccessRequests(accessScope.value)
-    if (sequence === accessRequestSequence) accessRequests.value = items
+    const organizationID = organization.value?.organization.id || ''
+    const [privateItems, coreItems] = await Promise.all([
+      listPrivateAccessRequests(accessScope.value).catch(() => [] as PrivateAccessRequestDTO[]),
+      organizationID
+        ? listAccessRequests(accessScope.value === 'mine' ? 'mine' : 'review', organizationID)
+            .then((result) => result.items || [])
+            .catch(() => [] as CoreAccessRequest[])
+        : Promise.resolve([] as CoreAccessRequest[]),
+    ])
+    const unified = [
+      ...privateItems.map(unifiedPrivateAccessRequest),
+      ...coreItems.map(unifiedCoreAccessRequest),
+    ].sort((left, right) => Date.parse(right.created_at) - Date.parse(left.created_at))
+    if (sequence === accessRequestSequence) accessRequests.value = unified
   } catch (cause) {
     if (sequence === accessRequestSequence) accessRequests.value = []
     MessagePlugin.error(errorMessage(cause, '权限申请加载失败'))
@@ -291,18 +337,72 @@ async function loadAccessRequests() {
     if (sequence === accessRequestSequence) accessLoading.value = false
   }
 }
-async function reviewAccess(request: PrivateAccessRequestDTO, action: 'approve' | 'reject') {
+async function reviewAccess(request: UnifiedAccessRequest, action: 'approve' | 'reject') {
   try {
-    if (action === 'approve') await approvePrivateAccessRequest(request.id)
-    else await rejectPrivateAccessRequest(request.id)
+    if (request.source === 'core') {
+      if (action === 'approve') await approveAccessRequest(request.id)
+      else await rejectAccessRequest(request.id)
+    } else if (action === 'approve') {
+      await approvePrivateAccessRequest(request.id)
+    } else {
+      await rejectPrivateAccessRequest(request.id)
+    }
     await loadAccessRequests()
     MessagePlugin.success(action === 'approve' ? '已通过权限申请' : '已拒绝权限申请')
   } catch (cause) {
     MessagePlugin.error(errorMessage(cause, action === 'approve' ? '审批失败' : '拒绝失败'))
   }
 }
-function accessResourceLabel(request: PrivateAccessRequestDTO) { return request.resource_type === 'attachment' ? '附件' : '信息条目' }
-function accessActionLabel(request: PrivateAccessRequestDTO) { return request.requested_action === 'download' ? '下载' : '查看' }
+function unifiedPrivateAccessRequest(request: PrivateAccessRequestDTO): UnifiedAccessRequest {
+  const resource = request.resource_type === 'attachment' ? '附件' : '私聊信息'
+  const action = request.requested_action === 'download' ? '下载' : '查看'
+  return {
+    id: request.id,
+    source: 'private',
+    title: `${resource} · ${action}`,
+    subtitle: '私聊共享权限',
+    excerpt: '',
+    reason: request.reason || '',
+    status: request.status,
+    created_at: request.created_at,
+    contextAvailable: false,
+    raw: request,
+  }
+}
+
+function unifiedCoreAccessRequest(request: CoreAccessRequest): UnifiedAccessRequest {
+  const requester = request.requester_nickname || request.requester_email || request.requester_user_id
+  const resource = request.resource_type === 'attachment_content' ? (request.action === 'download' ? '附件下载' : '附件查看') : '消息原文查看'
+  const source = [platformLabel(request.source_platform), request.source_conversation_name].filter(Boolean).join(' · ')
+  const sender = request.sender_display_name ? `发送人 ${request.sender_display_name}` : ''
+  const sent = request.sent_at ? formatDateTime(request.sent_at) : ''
+  return {
+    id: request.id,
+    source: 'core',
+    title: `${requester} 申请${resource}`,
+    subtitle: [source, sender, sent].filter(Boolean).join(' · ') || '来源上下文不可用',
+    excerpt: request.file_name || request.masked_excerpt || '',
+    reason: request.reason || '',
+    status: request.status,
+    created_at: request.created_at,
+    contextAvailable: Boolean(request.source_conversation_id),
+    raw: request,
+  }
+}
+
+function platformLabel(value?: string) {
+  return value === 'feishu' ? '飞书' : value === 'wechat' ? '个人微信' : value === 'wecom' ? '企业微信' : value || ''
+}
+
+function openAccessContext(request: UnifiedAccessRequest) {
+  if (request.source !== 'core') return
+  const raw = request.raw as CoreAccessRequest
+  if (!raw.source_conversation_id || !raw.source_platform) return
+  const query = new URLSearchParams({ return: '/profile' })
+  if (raw.source_message_id) query.set('message', raw.source_message_id)
+  void router.push(`/knowledge/${encodeURIComponent(raw.source_platform)}/conversations/${encodeURIComponent(raw.source_conversation_id)}?${query}`)
+}
+
 function accessStatusLabel(status: string) {
   return ({ pending: '待处理', approved: '已通过', rejected: '已拒绝', expired: '已过期', revoked: '已撤销' } as Record<string, string>)[status] || status
 }
@@ -440,6 +540,10 @@ async function confirmFeishuBind() {
 }
 async function confirmWechatBind() {
   if (wechatBinding.value) return
+  if (wechatPathMode.value) {
+    await bindManualWechatAccount()
+    return
+  }
   if (selectedWechatAccount.value) {
     await bindSelectedWechatAccount()
     return
@@ -449,6 +553,44 @@ async function confirmWechatBind() {
     return
   }
   await checkWechatPairingStatus()
+}
+function enableWechatPathMode() {
+  wechatPathMode.value = true
+  wechatPathForm.wxid = selectedWechatAccount.value?.wxid || ''
+  wechatPathForm.db_dir = selectedWechatAccount.value?.db_dir || ''
+  wechatAgentError.value = ''
+}
+function disableWechatPathMode() {
+  wechatPathMode.value = false
+  wechatAgentError.value = ''
+}
+async function bindManualWechatAccount() {
+  const wxid = wechatPathForm.wxid.trim()
+  const dbDir = wechatPathForm.db_dir.trim()
+  if (!wxid || !dbDir) {
+    MessagePlugin.warning('请填写微信 ID 和本机微信数据目录')
+    return
+  }
+  if (!wechatPairingID.value || !wechatPairingCode.value) {
+    MessagePlugin.error('配对信息不完整，请重新检测')
+    return
+  }
+  wechatBinding.value = true
+  try {
+    await pairLocalWechatAccount(wechatPairingID.value, wechatPairingCode.value, wxid, dbDir)
+    const result = await getWechatPairingStatus(wechatPairingID.value)
+    if (result.connector_id) {
+      wechatDialogVisible.value = false
+      await refreshConnectors()
+      MessagePlugin.success('个人微信已绑定到当前设备')
+      return
+    }
+    MessagePlugin.info('本机 Agent 已提交配对，正在等待服务端确认')
+  } catch (cause) {
+    MessagePlugin.error(errorMessage(cause, '手动绑定微信失败'))
+  } finally {
+    wechatBinding.value = false
+  }
 }
 async function bindSelectedWechatAccount() {
   const account = selectedWechatAccount.value
@@ -501,6 +643,7 @@ async function beginWechatPairing() {
   wechatAccounts.value = []
   selectedWechatWXID.value = ''
   wechatManualMode.value = false
+  wechatPathMode.value = false
   wechatAgentError.value = ''
   try {
     const pairing = await createWechatPairing()
@@ -836,6 +979,11 @@ onMounted(async () => {
   font-size: 12px;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.access-request__main .access-request__excerpt {
+  color: var(--td-text-color-primary);
+  font-weight: 500;
 }
 
 .access-request__actions {

@@ -55,13 +55,15 @@ func TestPermissionSyncBuildsOrganizationAttachmentRelationsAndStableVersion(t *
 	if err != nil {
 		t.Fatal(err)
 	}
-	if first.ACLVersion != 1 || first.RelationCount != 8 {
+	if first.ACLVersion != 1 || first.RelationCount != 10 {
 		t.Fatalf("unexpected first sync: %+v tuples=%+v", first, writer.tuples)
 	}
 	if len(writer.managedObjects) != 4 || writer.managedObjects[3] != "attachment_content:att-1" {
 		t.Fatalf("permission sync did not own the complete resource set: %+v", writer.managedObjects)
 	}
 	want := map[RelationTuple]bool{
+		{User: "organization:org-1", Relation: "organization", Object: "knowledge_item:ki-1"}:                        true,
+		{User: "organization:org-1", Relation: "organization", Object: "attachment_meta:att-1"}:                      true,
 		{User: "user:member-1", Relation: "member", Object: "organization:org-1"}:                                    true,
 		{User: "user:participant-1", Relation: "participant", Object: "conversation_group:conversation-1"}:           true,
 		{User: "conversation_group:conversation-1", Relation: "conversation_group", Object: "knowledge_item:ki-1"}:   true,
@@ -93,5 +95,34 @@ func TestPermissionSyncRequiresOwnershipContext(t *testing.T) {
 	service := NewPermissionSyncService(&recordingRelationWriter{}, &memoryACLVersions{})
 	if _, err := service.Sync(context.Background(), ResourcePermission{KnowledgeItemID: "ki", KnowledgeScope: "private"}); err == nil {
 		t.Fatal("private permission sync accepted without owner")
+	}
+}
+
+func TestPermissionSyncWritesOriginalAndContentViewers(t *testing.T) {
+	writer := &recordingRelationWriter{}
+	service := NewPermissionSyncService(writer, &memoryACLVersions{})
+	input := ResourcePermission{
+		KnowledgeItemID: "ki-1", AttachmentID: "att-1", KnowledgeScope: "organization",
+		OrganizationID: "org-1", ConversationID: "conversation-1",
+		ParticipantUserIDs: []string{"participant-1"}, OriginalViewerUserIDs: []string{"participant-1"},
+		ContentViewerUserIDs: []string{"participant-1"}, ContentAccessRequired: true,
+	}
+	if _, err := service.Sync(context.Background(), input); err != nil {
+		t.Fatal(err)
+	}
+	want := map[RelationTuple]bool{
+		{User: "user:participant-1", Relation: "viewer", Object: "knowledge_original:ki-1"}:  true,
+		{User: "user:participant-1", Relation: "viewer", Object: "attachment_content:att-1"}: true,
+	}
+	for _, tuple := range writer.tuples {
+		delete(want, tuple)
+	}
+	if len(want) != 0 {
+		t.Fatalf("required protected viewers missing: %+v", want)
+	}
+	for _, tuple := range writer.tuples {
+		if tuple.Object == "attachment_content:att-1" && tuple.Relation == "accessor" {
+			t.Fatalf("protected attachment retained broad accessor: %+v", tuple)
+		}
 	}
 }

@@ -117,8 +117,8 @@
         </header>
 
         <main class="detail-modal__body">
-          <div v-if="isRichMessage(displayMessageContent(activeMessage.content))" class="message-content message-content--rich" v-html="sanitizeHTML(displayMessageContent(activeMessage.content))"></div>
-          <pre v-else class="message-content">{{ displayMessageContent(activeMessage.content) || '（空消息）' }}</pre>
+          <div v-if="isRichMessage(visibleMessageContent)" class="message-content message-content--rich" v-html="sanitizeHTML(visibleMessageContent)"></div>
+          <pre v-else class="message-content">{{ visibleMessageContent || '（空消息）' }}</pre>
         </main>
 
         <footer class="detail-modal__footer">
@@ -128,6 +128,13 @@
             <span class="record-id">消息 ID: {{ activeMessage.sourceMessageId || activeMessage.id }}</span>
           </div>
           <div class="detail-modal__actions">
+            <t-button v-if="activeMessage.sensitive && originalStatus !== 'loaded'" variant="outline" theme="primary" :loading="originalLoading || originalRequesting" :disabled="originalStatus === 'requested'" @click="originalStatus === 'approval_required' ? requestOriginalAccess() : loadMessageOriginal()">
+              <template #icon><t-icon :name="originalStatus === 'approval_required' ? 'lock-on' : 'browse'" /></template>
+              {{ originalStatus === 'approval_required' ? '申请查看原文' : originalStatus === 'requested' ? '权限申请已提交' : '查看原文' }}
+            </t-button>
+            <t-button v-else-if="originalStatus === 'loaded'" variant="text" @click="showMaskedOriginal">
+              <template #icon><t-icon name="rollback" /></template>返回脱敏版本
+            </t-button>
             <t-button variant="outline" @click="downloadMessage">
               <template #icon><t-icon name="download" /></template>下载
             </t-button>
@@ -183,13 +190,16 @@
 
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
-import { getKnowledgeAttachmentContent } from '@/api/info-knowledge'
+import { createAccessRequest } from '@/api/core-organization'
+import { ApiError } from '@/api/http'
+import { getKnowledgeAttachmentContent, getMessageOriginal } from '@/api/info-knowledge'
 import InfoAttachmentPreview from '@/components/InfoAttachmentPreview.vue'
 import type { CollectionStatus, InfoChat, InfoFile, InfoMessage } from '@/mock'
 import { sourceName } from '@/mock'
 import { knowledgeDisplayLabel, mapKnowledgeDisplayStatus, type KnowledgeDisplayStatus } from '@/knowledge-mapping'
 import { sanitizeHTML } from '@/utils/security'
 import { isDisplayableTextMessage } from '@/utils/message-visibility'
+import { resolveOrganizationId } from '@/utils/info-search-scope'
 
 type ConversationItem = {
   key: string
@@ -225,6 +235,11 @@ const messageDialogVisible = ref(false)
 const fileDialogVisible = ref(false)
 const activeMessage = ref<InfoMessage | null>(null)
 const activeFile = ref<InfoFile | null>(null)
+const originalLoading = ref(false)
+const originalRequesting = ref(false)
+const originalStatus = ref<'idle' | 'approval_required' | 'requested' | 'loaded' | 'denied'>('idle')
+const originalText = ref('')
+const originalKnowledgeItemID = ref('')
 const highlightedItemKey = ref<string | null>(null)
 const fileDownloading = ref(false)
 const shareSelecting = ref(false)
@@ -234,6 +249,9 @@ let highlightTimer: number | undefined
 const displayCount = computed(() => chat.value.messageCount != null && chat.value.attachmentCount != null
   ? chat.value.messageCount + chat.value.attachmentCount
   : items.value.length)
+const visibleMessageContent = computed(() => originalStatus.value === 'loaded'
+  ? originalText.value
+  : displayMessageContent(activeMessage.value?.content))
 
 const items = computed<ConversationItem[]>(() => [
     ...chat.value.messages.filter((message) => !isAttachmentOnlyMessage(message)).map((message) => ({
@@ -303,7 +321,16 @@ onBeforeUnmount(() => {
   if (highlightTimer != null) window.clearTimeout(highlightTimer)
 })
 function openItem(item: ConversationItem) { if (item.kind === 'message' && item.message) openMessage(item.message); if (item.kind === 'file' && item.file) openFile(item.file) }
-function openMessage(message: InfoMessage) { activeMessage.value = message; activeFile.value = null; messageDialogVisible.value = true }
+function openMessage(message: InfoMessage) {
+  activeMessage.value = message
+  activeFile.value = null
+  originalLoading.value = false
+  originalRequesting.value = false
+  originalStatus.value = 'idle'
+  originalText.value = ''
+  originalKnowledgeItemID.value = ''
+  messageDialogVisible.value = true
+}
 function openFile(file: InfoFile) { activeFile.value = file; activeMessage.value = null; fileDialogVisible.value = true }
 const selectedCount = computed(() => selectedMessageIDs.value.length + selectedAttachmentIDs.value.length)
 
@@ -446,8 +473,63 @@ function saveBlob(blob: Blob, fileName: string) {
 
 function downloadMessage() {
   if (!activeMessage.value) return
-  const blob = new Blob([activeMessage.value.content || ''], { type: 'text/plain;charset=utf-8' })
+  const blob = new Blob([visibleMessageContent.value || ''], { type: 'text/plain;charset=utf-8' })
   saveBlob(blob, `消息-${activeMessage.value.id}.txt`)
+}
+
+async function loadMessageOriginal() {
+  if (!activeMessage.value || originalLoading.value || originalRequesting.value) return
+  originalLoading.value = true
+  try {
+    const original = await getMessageOriginal(activeMessage.value.id)
+    originalText.value = original.content
+    originalStatus.value = 'loaded'
+  } catch (error: any) {
+    if (error instanceof ApiError && error.code === 'original_access_required') {
+      originalKnowledgeItemID.value = String(error.details?.knowledge_item_id || error.details?.resource_id || '')
+      originalStatus.value = 'approval_required'
+      emit('toast', '当前账号暂无原文权限，可提交权限申请')
+    } else {
+      originalStatus.value = 'denied'
+      emit('toast', error?.message || '原文暂不可用')
+    }
+  } finally {
+    originalLoading.value = false
+  }
+}
+
+async function requestOriginalAccess() {
+  if (!activeMessage.value || originalRequesting.value) return
+  if (!originalKnowledgeItemID.value) {
+    emit('toast', '缺少原文资源标识，无法提交申请')
+    return
+  }
+  const organizationID = await resolveOrganizationId()
+  if (!organizationID) {
+    emit('toast', '无法确认当前组织，请稍后重试')
+    return
+  }
+  originalRequesting.value = true
+  try {
+    await createAccessRequest({
+      organizationID,
+      resourceType: 'knowledge_original',
+      resourceID: originalKnowledgeItemID.value,
+      action: 'view',
+      reason: `申请查看消息 ${activeMessage.value.id} 的原文`,
+    })
+    originalStatus.value = 'requested'
+    emit('toast', '权限申请已提交')
+  } catch (error: any) {
+    emit('toast', error?.message || '权限申请提交失败')
+  } finally {
+    originalRequesting.value = false
+  }
+}
+
+function showMaskedOriginal() {
+  originalStatus.value = 'idle'
+  originalText.value = ''
 }
 
 async function downloadFile() {

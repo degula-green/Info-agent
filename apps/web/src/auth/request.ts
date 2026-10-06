@@ -1,6 +1,22 @@
 import { CoreAuthError } from '../api/core-auth.ts'
 import { ensureFreshToken, markSessionExpired, refreshSession } from './session.ts'
 
+const authenticatedRequestTimeoutMs = 8_000
+
+function boundedSignal(signal: AbortSignal | null | undefined, timeoutMs: number) {
+  const controller = new AbortController()
+  const abort = () => controller.abort()
+  signal?.addEventListener('abort', abort, { once: true })
+  const timer = setTimeout(abort, timeoutMs)
+  return {
+    signal: controller.signal,
+    cleanup: () => {
+      clearTimeout(timer)
+      signal?.removeEventListener('abort', abort)
+    },
+  }
+}
+
 export async function authenticatedFetch(
   input: RequestInfo | URL,
   init: RequestInit = {},
@@ -10,11 +26,22 @@ export async function authenticatedFetch(
   const run = async (token: string) => {
     const headers = new Headers(init.headers)
     if (token) headers.set('Authorization', `Bearer ${token}`)
-    return fetch(input, {
-      ...init,
-      credentials: init.credentials || 'include',
-      headers,
-    })
+    const bounded = boundedSignal(init.signal, authenticatedRequestTimeoutMs)
+    try {
+      return await fetch(input, {
+        ...init,
+        credentials: init.credentials || 'include',
+        headers,
+        signal: bounded.signal,
+      })
+    } catch (error) {
+      if (error instanceof Error && error.name === 'AbortError') {
+        throw new CoreAuthError('authenticated request timed out', 'request_timeout', 504, true)
+      }
+      throw error
+    } finally {
+      bounded.cleanup()
+    }
   }
 
   const token = await ensureFreshToken()

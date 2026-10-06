@@ -35,12 +35,14 @@ class ExecutionService:
         message_sync=None,
         conversation_context_loader=None,
         summary_service=None,
+        title_service=None,
         memory_extraction_service=None,
     ) -> None:
         self.store = store
         self.settings = settings
         self.message_sync = message_sync
         self.summary_service = summary_service
+        self.title_service = title_service
         self.memory_extraction_service = memory_extraction_service
         # The lease must identify this driver, not a fixed role name: two drivers
         # sharing "worker" would both pass the lease check and drive the same Task
@@ -74,6 +76,19 @@ class ExecutionService:
         result = self.runtime.run_task(task_id, lease_owner=self.lease_owner)
         if self.message_sync is not None:
             self.message_sync(task_id)
+        if self.title_service is not None and result.status in {
+            "succeeded",
+            "failed",
+            "cancelled",
+            "unknown",
+        }:
+            try:
+                self.title_service.maybe_generate_after_task(task_id)
+            except Exception:  # noqa: BLE001 - title generation must not fail a Task
+                logger.exception(
+                    "conversation title generation failed for task %s",
+                    task_id,
+                )
         if self.memory_extraction_service is not None and result.status in {
             "succeeded",
             "failed",

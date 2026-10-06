@@ -150,10 +150,22 @@ func (r *OrganizationRepository) AcceptInvitation(ctx context.Context, userID, h
 	if err != nil {
 		return domain.Organization{}, domain.OrganizationMember{}, mapDBError(err)
 	}
+	if _, err = tx.Exec(ctx, `
+		UPDATE iam.membership_roles
+		SET revoked_by_user_id=$1::uuid,
+		    revoked_at=COALESCE(revoked_at,$2)
+		WHERE membership_id=$3::uuid
+		  AND revoked_at IS NULL`,
+		userID, now, m.ID); err != nil {
+		return domain.Organization{}, domain.OrganizationMember{}, mapDBError(err)
+	}
 	if _, err = tx.Exec(ctx, `UPDATE iam.organization_invitations SET status='accepted',accepted_by_user_id=$1::uuid,accepted_at=$2 WHERE id=$3::uuid`, userID, now, i.ID); err != nil {
 		return domain.Organization{}, domain.OrganizationMember{}, err
 	}
 	if _, err = tx.Exec(ctx, `INSERT INTO iam.audit_logs(actor_user_id,organization_id,action,resource_type,resource_id) VALUES($1::uuid,$2::uuid,'organization.invitation_accepted','organization_invitation',$3::uuid)`, userID, o.ID, i.ID); err != nil {
+		return domain.Organization{}, domain.OrganizationMember{}, err
+	}
+	if err = enqueueOrganizationEvent(ctx, tx, "organization.membership.activated", o.ID, userID, m.ID, domain.MembershipStatusActive, ""); err != nil {
 		return domain.Organization{}, domain.OrganizationMember{}, err
 	}
 	if err = tx.Commit(ctx); err != nil {
@@ -280,6 +292,302 @@ func (r *OrganizationRepository) RevokeRole(ctx context.Context, actorID, orgID,
 		return err
 	}
 	return tx.Commit(ctx)
+}
+
+func (r *OrganizationRepository) ChangeMembershipStatus(
+	ctx context.Context,
+	input repository.MembershipStatusChange,
+) (domain.Membership, error) {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return domain.Membership{}, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	var lockedOrganizationID string
+	if err = tx.QueryRow(ctx, `SELECT id::text FROM iam.organizations WHERE id=$1::uuid FOR UPDATE`, input.OrganizationID).Scan(&lockedOrganizationID); errors.Is(err, pgx.ErrNoRows) {
+		return domain.Membership{}, repository.ErrOrganizationNotFound
+	} else if err != nil {
+		return domain.Membership{}, err
+	}
+
+	var m domain.Membership
+	err = tx.QueryRow(ctx, `
+		SELECT id::text,organization_id::text,user_id::text,status,joined_via,invitation_id::text,joined_at
+		FROM iam.organization_memberships
+		WHERE organization_id=$1::uuid AND user_id=$2::uuid
+		FOR UPDATE`,
+		input.OrganizationID, input.UserID).Scan(
+		&m.ID, &m.OrganizationID, &m.UserID, &m.Status, &m.JoinedVia, &m.InvitationID, &m.JoinedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return domain.Membership{}, repository.ErrMembershipNotFound
+	}
+	if err != nil {
+		return domain.Membership{}, err
+	}
+
+	if m.Status == input.Status {
+		if err = tx.Commit(ctx); err != nil {
+			return domain.Membership{}, err
+		}
+		return m, nil
+	}
+	{
+		valid := false
+		switch input.Status {
+		case domain.MembershipStatusSuspended:
+			valid = m.Status == domain.MembershipStatusActive
+		case domain.MembershipStatusActive:
+			valid = m.Status == domain.MembershipStatusSuspended
+		case domain.MembershipStatusLeft:
+			valid = m.Status == domain.MembershipStatusActive || m.Status == domain.MembershipStatusSuspended
+		}
+		if !valid {
+			return domain.Membership{}, repository.ErrMembershipStateInvalid
+		}
+		if input.Status != domain.MembershipStatusActive {
+			var isOwner bool
+			if err = tx.QueryRow(ctx, `
+				SELECT EXISTS (
+					SELECT 1
+					FROM iam.membership_roles
+					WHERE membership_id=$1::uuid
+					  AND role_code='owner'
+					  AND revoked_at IS NULL
+				)`,
+				m.ID).Scan(&isOwner); err != nil {
+				return domain.Membership{}, err
+			}
+			if isOwner {
+				var ownerCount int
+				if err = tx.QueryRow(ctx, `
+					SELECT count(*)
+					FROM iam.membership_roles mr
+					JOIN iam.organization_memberships m ON m.id=mr.membership_id
+					WHERE m.organization_id=$1::uuid
+					  AND m.status='active'
+					  AND mr.role_code='owner'
+					  AND mr.revoked_at IS NULL`,
+					input.OrganizationID).Scan(&ownerCount); err != nil {
+					return domain.Membership{}, err
+				}
+				if ownerCount <= 1 {
+					return domain.Membership{}, repository.ErrLastOwner
+				}
+			}
+		}
+	}
+
+	err = tx.QueryRow(ctx, `
+		UPDATE iam.organization_memberships
+		SET status=$1::varchar,
+		    exit_reason=NULLIF($2::text,''),
+		    suspended_at=CASE WHEN $1::varchar='suspended' THEN $3::timestamptz ELSE NULL::timestamptz END,
+		    left_at=CASE WHEN $1::varchar='left' THEN $3::timestamptz ELSE NULL::timestamptz END,
+		    updated_at=$3::timestamptz
+		WHERE id=$4::uuid
+		RETURNING id::text,organization_id::text,user_id::text,status,joined_via,invitation_id::text,joined_at,
+		          COALESCE(exit_reason,''),COALESCE(exit_review_note,''),exit_reviewed_by_user_id::text,
+		          exit_requested_at,exit_reviewed_at,left_at,suspended_at`,
+		input.Status, input.Reason, input.Now, m.ID).Scan(
+		&m.ID, &m.OrganizationID, &m.UserID, &m.Status, &m.JoinedVia, &m.InvitationID, &m.JoinedAt,
+		&m.ExitReason, &m.ExitReviewNote, &m.ExitReviewedBy, &m.ExitRequestedAt, &m.ExitReviewedAt, &m.LeftAt, &m.SuspendedAt)
+	if err != nil {
+		return domain.Membership{}, mapDBError(err)
+	}
+
+	if input.Status == domain.MembershipStatusLeft {
+		if _, err = tx.Exec(ctx, `
+			UPDATE iam.membership_roles
+			SET revoked_by_user_id=$1::uuid,
+			    revoked_at=COALESCE(revoked_at,$2)
+			WHERE membership_id=$3::uuid
+			  AND revoked_at IS NULL`,
+			input.ActorID, input.Now, m.ID); err != nil {
+			return domain.Membership{}, mapDBError(err)
+		}
+	}
+
+	eventType := ""
+	switch input.Status {
+	case domain.MembershipStatusSuspended:
+		eventType = "organization.membership.suspended"
+	case domain.MembershipStatusActive:
+		eventType = "organization.membership.reactivated"
+	case domain.MembershipStatusLeft:
+		eventType = "organization.membership.deactivated"
+	}
+	if eventType != "" {
+		if err = enqueueOrganizationEvent(ctx, tx, eventType, input.OrganizationID, input.UserID, m.ID, input.Status, input.Reason); err != nil {
+			return domain.Membership{}, err
+		}
+	}
+
+	if _, err = tx.Exec(ctx, `
+		INSERT INTO iam.audit_logs(actor_user_id,organization_id,action,resource_type,resource_id,detail)
+		VALUES($1::uuid,$2::uuid,$3,'membership',$4::uuid,jsonb_build_object('reason',$5::text))`,
+		input.ActorID, input.OrganizationID, input.AuditAction, m.ID, input.Reason); err != nil {
+		return domain.Membership{}, err
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return domain.Membership{}, err
+	}
+	return m, nil
+}
+
+func (r *OrganizationRepository) TransferOwner(ctx context.Context, actorID, orgID, targetUserID string, now time.Time) error {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	var lockedOrganizationID string
+	if err = tx.QueryRow(ctx, `SELECT id::text FROM iam.organizations WHERE id=$1::uuid FOR UPDATE`, orgID).Scan(&lockedOrganizationID); errors.Is(err, pgx.ErrNoRows) {
+		return repository.ErrOrganizationNotFound
+	} else if err != nil {
+		return err
+	}
+
+	var actorMembershipID string
+	err = tx.QueryRow(ctx, `
+		SELECT id::text
+		FROM iam.organization_memberships
+		WHERE organization_id=$1::uuid AND user_id=$2::uuid AND status='active'
+		FOR UPDATE`,
+		orgID, actorID).Scan(&actorMembershipID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return repository.ErrMembershipNotFound
+	}
+	if err != nil {
+		return err
+	}
+	var actorIsOwner bool
+	if err = tx.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM iam.membership_roles
+			WHERE membership_id=$1::uuid AND role_code='owner' AND revoked_at IS NULL
+		)`,
+		actorMembershipID).Scan(&actorIsOwner); err != nil {
+		return err
+	}
+	if !actorIsOwner {
+		return repository.ErrMembershipStateInvalid
+	}
+
+	var targetMembershipID string
+	err = tx.QueryRow(ctx, `
+		SELECT id::text
+		FROM iam.organization_memberships
+		WHERE organization_id=$1::uuid AND user_id=$2::uuid AND status='active'
+		FOR UPDATE`,
+		orgID, targetUserID).Scan(&targetMembershipID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return repository.ErrMembershipNotFound
+	}
+	if err != nil {
+		return err
+	}
+	var ownerRoleID string
+	if err = tx.QueryRow(ctx, `SELECT id::text FROM iam.roles WHERE code='owner'`).Scan(&ownerRoleID); err != nil {
+		return repository.ErrRoleNotFound
+	}
+	if _, err = tx.Exec(ctx, `
+		INSERT INTO iam.membership_roles(membership_id,role_id,role_code,granted_by_user_id)
+		VALUES($1::uuid,$2::uuid,'owner',$3::uuid)
+		ON CONFLICT DO NOTHING`,
+		targetMembershipID, ownerRoleID, actorID); err != nil {
+		return mapDBError(err)
+	}
+	if _, err = tx.Exec(ctx, `
+		INSERT INTO iam.audit_logs(actor_user_id,organization_id,action,resource_type,resource_id,detail)
+		VALUES($1::uuid,$2::uuid,'organization.owner_transferred','membership',$3::uuid,jsonb_build_object('target_user_id',$4::text))`,
+		actorID, orgID, targetMembershipID, targetUserID); err != nil {
+		return err
+	}
+	if err = enqueueOrganizationEvent(ctx, tx, "organization.membership.role_changed", orgID, targetUserID, targetMembershipID, domain.MembershipStatusActive, "owner_transferred"); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+func (r *OrganizationRepository) CountActiveOwners(ctx context.Context, organizationID string) (int, error) {
+	var count int
+	err := r.pool.QueryRow(ctx, `
+		SELECT count(*)
+		FROM iam.membership_roles mr
+		JOIN iam.organization_memberships m ON m.id=mr.membership_id
+		WHERE m.organization_id=$1::uuid
+		  AND m.status='active'
+		  AND mr.role_code='owner'
+		  AND mr.revoked_at IS NULL`,
+		organizationID).Scan(&count)
+	return count, err
+}
+
+func (r *OrganizationRepository) ListPendingOrganizationEvents(ctx context.Context, limit int) ([]domain.OrganizationEvent, error) {
+	if limit <= 0 || limit > 200 {
+		limit = 100
+	}
+	rows, err := r.pool.Query(ctx, `
+		SELECT id::text,event_type,organization_id::text,user_id::text,
+		       COALESCE(payload->>'membership_id',''),COALESCE(payload->>'status',''),
+		       COALESCE(payload->>'reason',''),created_at
+		FROM iam.outbox_events
+		WHERE status IN ('pending','failed') AND available_at <= now()
+		ORDER BY created_at
+		LIMIT $1`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var events []domain.OrganizationEvent
+	for rows.Next() {
+		var event domain.OrganizationEvent
+		if err := rows.Scan(
+			&event.ID, &event.EventType, &event.OrganizationID, &event.UserID,
+			&event.MembershipID, &event.Status, &event.Reason, &event.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		events = append(events, event)
+	}
+	return events, rows.Err()
+}
+
+func (r *OrganizationRepository) MarkOrganizationEventPublished(ctx context.Context, eventID string, now time.Time) error {
+	_, err := r.pool.Exec(ctx, `
+		UPDATE iam.outbox_events
+		SET status='published',published_at=$2,last_error=NULL
+		WHERE id=$1::uuid`,
+		eventID, now)
+	return err
+}
+
+func (r *OrganizationRepository) MarkOrganizationEventFailed(ctx context.Context, eventID, reason string, availableAt, now time.Time) error {
+	_, err := r.pool.Exec(ctx, `
+		UPDATE iam.outbox_events
+		SET status='failed',publish_attempts=publish_attempts+1,last_error=$2,available_at=$3
+		WHERE id=$1::uuid`,
+		eventID, strings.TrimSpace(reason), availableAt)
+	return err
+}
+
+func enqueueOrganizationEvent(
+	ctx context.Context,
+	tx pgx.Tx,
+	eventType, organizationID, userID, membershipID, status, reason string,
+) error {
+	_, err := tx.Exec(ctx, `
+		INSERT INTO iam.outbox_events(event_type,aggregate_type,aggregate_id,organization_id,user_id,payload)
+		VALUES($1,'organization_membership',$2::uuid,$3::uuid,$4::uuid,
+		       jsonb_build_object(
+		           'membership_id',$2::text,
+		           'status',$5::text,
+		           'reason',$6::text
+		       ))`,
+		eventType, membershipID, organizationID, userID, status, reason)
+	return err
 }
 
 func (r *OrganizationRepository) PermissionsForRoles(ctx context.Context, roleCodes []string) (map[string]struct{}, error) {

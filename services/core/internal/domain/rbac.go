@@ -5,7 +5,11 @@ const (
 	PermissionOrganizationInvitationCreate  = "organization.invitation.create"
 	PermissionOrganizationInvitationRevoke  = "organization.invitation.revoke"
 	PermissionOrganizationRoleManage        = "organization.role.manage"
+	PermissionOrganizationMemberSuspend     = "organization.member.suspend"
+	PermissionOrganizationMemberRemove      = "organization.member.remove"
+	PermissionOrganizationOwnerTransfer     = "organization.owner.transfer"
 	PermissionOrganizationInformationManage = "organization.information.manage"
+	PermissionOrganizationAuditRead         = "organization.audit.read"
 )
 
 var FixedManagementRoleCodes = map[string]struct{}{
@@ -52,7 +56,11 @@ func EffectivePermissions(m Membership, roles []MembershipRole) map[string]struc
 			permissions[PermissionOrganizationInvitationCreate] = struct{}{}
 			permissions[PermissionOrganizationInvitationRevoke] = struct{}{}
 			permissions[PermissionOrganizationRoleManage] = struct{}{}
+			permissions[PermissionOrganizationMemberSuspend] = struct{}{}
+			permissions[PermissionOrganizationMemberRemove] = struct{}{}
+			permissions[PermissionOrganizationOwnerTransfer] = struct{}{}
 			permissions[PermissionOrganizationInformationManage] = struct{}{}
+			permissions[PermissionOrganizationAuditRead] = struct{}{}
 		case RoleInformationAdmin:
 			permissions[PermissionOrganizationInformationManage] = struct{}{}
 		case RoleMembershipApprover:

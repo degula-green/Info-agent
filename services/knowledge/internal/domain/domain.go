@@ -416,6 +416,7 @@ type KnowledgeItem struct {
 	OriginalAccessRequired bool           `json:"original_access_required"`
 	SecurityStatus         string         `json:"security_status"`
 	Sensitivity            string         `json:"sensitivity,omitempty"`
+	SecurityPolicyVersion  string         `json:"security_policy_version,omitempty"`
 	ContentSaved           bool           `json:"content_saved"`
 	OwnershipReady         bool           `json:"ownership_ready"`
 	SecurityReady          bool           `json:"security_ready"`
@@ -543,6 +544,24 @@ type KnowledgeContent struct {
 	ContentVariant  string `json:"content_variant"`
 	ContentHash     string `json:"content_hash"`
 	Text            string `json:"text"`
+}
+
+type AccessRequestContext struct {
+	ResourceType           string     `json:"resource_type"`
+	ResourceID             string     `json:"resource_id"`
+	KnowledgeItemID        string     `json:"knowledge_item_id,omitempty"`
+	SourceConversationID   string     `json:"source_conversation_id,omitempty"`
+	SourceConversationName string     `json:"source_conversation_name,omitempty"`
+	SourcePlatform         string     `json:"source_platform,omitempty"`
+	SourceMessageID        string     `json:"source_message_id,omitempty"`
+	SenderDisplayName      string     `json:"sender_display_name,omitempty"`
+	SentAt                 *time.Time `json:"sent_at,omitempty"`
+	MaskedExcerpt          string     `json:"masked_excerpt,omitempty"`
+	ContentVisibility      string     `json:"content_visibility,omitempty"`
+	OriginalAccessRequired bool       `json:"original_access_required"`
+	FileName               string     `json:"file_name,omitempty"`
+	MIMEType               string     `json:"mime_type,omitempty"`
+	SizeBytes              int64      `json:"size_bytes,omitempty"`
 }
 
 type PrivateShareReference struct {

@@ -16,6 +16,59 @@ export interface CoreOrganizationMember {
 }
 export interface CoreOrganizationMembersResponse { members: CoreOrganizationMember[] }
 export interface CoreInvitationResponse { invitation_id: string; organization_id: string; token: string; expires_at: string }
+export interface CoreOrganizationCapabilities {
+  can_invite: boolean
+  can_manage_roles: boolean
+  can_manage_members: boolean
+  can_transfer_owner: boolean
+  can_read_audit: boolean
+  can_leave: boolean
+  leave_blocked_reason?: string
+}
+export interface CoreOrganizationExitPreflight {
+  allowed: boolean
+  blockers: string[]
+  warnings: string[]
+}
+
+export function normalizeOrganizationExitPreflight(value: Partial<CoreOrganizationExitPreflight> | null | undefined): CoreOrganizationExitPreflight {
+  return {
+    allowed: Boolean(value?.allowed),
+    blockers: Array.isArray(value?.blockers) ? value.blockers : [],
+    warnings: Array.isArray(value?.warnings) ? value.warnings : [],
+  }
+}
+export interface CoreAccessRequest {
+  id: string
+  organization_id: string
+  requester_user_id: string
+  requester_nickname?: string
+  requester_email?: string
+  resource_scope: 'organization' | 'private' | string
+  resource_type: 'knowledge_original' | 'attachment_content' | string
+  resource_id: string
+  source_conversation_id?: string
+  source_conversation_name?: string
+  source_platform?: string
+  source_message_id?: string
+  sender_display_name?: string
+  sent_at?: string | null
+  masked_excerpt?: string
+  content_visibility?: string
+  original_access_required?: boolean
+  file_name?: string
+  mime_type?: string
+  size_bytes?: number
+  action: 'view' | 'download' | string
+  reason?: string
+  status: 'pending' | 'approved' | 'rejected' | 'cancelled' | 'expired' | 'revoked' | string
+  reviewed_by_user_id?: string
+  review_note?: string
+  grant_expires_at?: string | null
+  fga_sync_status?: string
+  created_at: string
+  reviewed_at?: string | null
+}
 
 const env = ((import.meta as ImportMeta & { env?: Record<string, string> }).env || {})
 const baseURL = String(env.VITE_CORE_BASE_URL || '/api/core').replace(/\/$/, '')
@@ -33,6 +86,11 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
 }
 
 export const getCurrentOrganization = () => request<CoreOrganizationResponse>('/organizations/current')
+export const getOrganizationCapabilities = (organizationID: string) => request<CoreOrganizationCapabilities>(`/organizations/${encodeURIComponent(organizationID)}/capabilities`)
+export const getOrganizationExitPreflight = async (organizationID: string, signal?: AbortSignal) => {
+  const result = await request<CoreOrganizationExitPreflight>(`/organizations/${encodeURIComponent(organizationID)}/membership/exit-preflight`, { signal })
+  return normalizeOrganizationExitPreflight(result)
+}
 export const listOrganizationMembers = (organizationID: string) => request<CoreOrganizationMembersResponse>(`/organizations/${encodeURIComponent(organizationID)}/members`)
 export const createOrganizationInvitation = (organizationID: string) => request<CoreInvitationResponse>(`/organizations/${encodeURIComponent(organizationID)}/invitations`, { method: 'POST', body: '{}' })
 export const revokeOrganizationInvitation = (organizationID: string, invitationID: string) => request<void>(`/organizations/${encodeURIComponent(organizationID)}/invitations/${encodeURIComponent(invitationID)}/revoke`, { method: 'POST' })
@@ -40,3 +98,42 @@ export const grantOrganizationRole = (organizationID: string, userID: string, ro
 export const revokeOrganizationRole = (organizationID: string, userID: string, roleCode: string) => request<void>(`/organizations/${encodeURIComponent(organizationID)}/members/${encodeURIComponent(userID)}/roles/${encodeURIComponent(roleCode)}`, { method: 'DELETE' })
 export const createOrganization = (name: string) => request<CoreOrganizationResponse>('/organizations', { method: 'POST', body: JSON.stringify({ name }) })
 export const acceptOrganizationInvitation = (token: string) => request<CoreOrganizationResponse>(`/organization-invitations/${encodeURIComponent(token)}/accept`, { method: 'POST', body: '{}' })
+export const leaveOrganization = (organizationID: string, reason = '') => request<void>(`/organizations/${encodeURIComponent(organizationID)}/leave`, { method: 'POST', body: JSON.stringify({ reason }) })
+export const suspendOrganizationMember = (organizationID: string, userID: string, reason = '') => request<void>(`/organizations/${encodeURIComponent(organizationID)}/members/${encodeURIComponent(userID)}/suspend`, { method: 'POST', body: JSON.stringify({ reason }) })
+export const reactivateOrganizationMember = (organizationID: string, userID: string) => request<void>(`/organizations/${encodeURIComponent(organizationID)}/members/${encodeURIComponent(userID)}/reactivate`, { method: 'POST', body: '{}' })
+export const removeOrganizationMember = (organizationID: string, userID: string, reason = '') => request<void>(`/organizations/${encodeURIComponent(organizationID)}/members/${encodeURIComponent(userID)}`, { method: 'DELETE', body: JSON.stringify({ reason }) })
+export const transferOrganizationOwner = (organizationID: string, targetUserID: string) => request<void>(`/organizations/${encodeURIComponent(organizationID)}/transfer-owner`, { method: 'POST', body: JSON.stringify({ target_user_id: targetUserID }) })
+
+export const createAccessRequest = (input: {
+  organizationID: string
+  resourceScope?: 'organization'
+  resourceType: 'knowledge_original' | 'attachment_content'
+  resourceID: string
+  action: 'view' | 'download'
+  reason?: string
+}) => request<CoreAccessRequest>('/access-requests', {
+  method: 'POST',
+  body: JSON.stringify({
+    organization_id: input.organizationID,
+    resource_scope: input.resourceScope || 'organization',
+    resource_type: input.resourceType,
+    resource_id: input.resourceID,
+    action: input.action,
+    reason: input.reason || '',
+  }),
+})
+
+export const listAccessRequests = (scope: 'mine' | 'review', organizationID: string) => {
+  const query = new URLSearchParams({ scope, organization_id: organizationID })
+  return request<{ items: CoreAccessRequest[] }>(`/access-requests?${query}`)
+}
+
+export const approveAccessRequest = (id: string, note = '') => request<CoreAccessRequest>(`/access-requests/${encodeURIComponent(id)}/approve`, {
+  method: 'POST',
+  body: JSON.stringify({ note }),
+})
+
+export const rejectAccessRequest = (id: string, note = '') => request<CoreAccessRequest>(`/access-requests/${encodeURIComponent(id)}/reject`, {
+  method: 'POST',
+  body: JSON.stringify({ note }),
+})

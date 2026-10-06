@@ -217,6 +217,8 @@ export interface MessageDTO {
   sender_display_name?: string
   message_type: string
   content?: string
+  sensitive?: boolean
+  classification_status?: string
   normalized_content_ref?: string
   content_hash: string
   content_version: number
@@ -226,6 +228,14 @@ export interface MessageDTO {
   vector_status?: string
   attachments?: AttachmentDTO[]
   created_at: string
+}
+
+export interface KnowledgeOriginalDTO {
+  knowledge_item_id: string
+  content: string
+  content_variant: 'display' | 'original' | string
+  content_version: number
+  content_hash: string
 }
 
 export interface ConversationDTO {
@@ -389,6 +399,10 @@ export async function getKnowledgeLibraryItems(libraryID: string, options: { kin
   const suffix = params.toString() ? `?${params.toString()}` : ''
   const body = await knowledgeRequest<{ items: KnowledgeLibraryItemDTO[] }>(`/knowledge/libraries/${encodeURIComponent(libraryID)}/items${suffix}`)
   return body.items || []
+}
+
+export async function getMessageOriginal(messageID: string) {
+  return knowledgeRequest<KnowledgeOriginalDTO>(`/knowledge/messages/${encodeURIComponent(messageID)}/original`)
 }
 
 export async function createLocalUploadTask(input: { requestID: string; traceID?: string; uploadDestination: 'private_local_library' | 'organization_file_library'; fileName: string; mimeType: string; sizeBytes: number; contentHash: string }) {

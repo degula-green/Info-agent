@@ -91,6 +91,27 @@ func (r *AuthRepository) FindByID(ctx context.Context, userID string) (domain.Us
 	return user, nil
 }
 
+func (r *AuthRepository) FindUsersByIDs(ctx context.Context, userIDs []string) (map[string]domain.User, error) {
+	if len(userIDs) == 0 {
+		return map[string]domain.User{}, nil
+	}
+	rows, err := r.pool.Query(ctx, `SELECT id::text,email,nickname,COALESCE(avatar_object_key,''),status,deleted_at
+		FROM iam.users WHERE id=ANY($1::uuid[]) AND deleted_at IS NULL`, userIDs)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	users := make(map[string]domain.User, len(userIDs))
+	for rows.Next() {
+		var user domain.User
+		if err := rows.Scan(&user.ID, &user.Email, &user.Nickname, &user.AvatarObjectKey, &user.Status, &user.DeletedAt); err != nil {
+			return nil, err
+		}
+		users[user.ID] = user
+	}
+	return users, rows.Err()
+}
+
 func (r *AuthRepository) UpdateNickname(ctx context.Context, userID, nickname string) (domain.User, error) {
 	const query = `UPDATE iam.users SET nickname=$2, updated_at=NOW() WHERE id=$1::uuid AND deleted_at IS NULL RETURNING id::text,email,nickname,COALESCE(avatar_object_key, ''),status,deleted_at`
 	var user domain.User

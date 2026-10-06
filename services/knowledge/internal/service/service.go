@@ -11,7 +11,6 @@ import (
 	"io"
 	"log/slog"
 	"mime"
-	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
@@ -57,62 +56,6 @@ func (s *Service) WechatCollector() *wechatclient.Client {
 	return wechatclient.New(s.Config.WechatCollectorURL, s.Config.CollectorInternalToken)
 }
 
-func (s *Service) BindWechat(ctx context.Context, userID, wxid, dbDir, organizationID string, rebind bool) (map[string]any, error) {
-	if strings.TrimSpace(dbDir) != "" {
-		return nil, apperror.New(
-			"device_pairing_required",
-			"use device pairing instead of submitting a local path",
-			http.StatusGone,
-			false,
-		)
-	}
-	if strings.TrimSpace(wxid) == "" || strings.TrimSpace(dbDir) == "" {
-		return nil, apperror.New("invalid_request", "wxid and db_dir are required", 400, false)
-	}
-	wxid, dbDir = strings.TrimSpace(wxid), strings.TrimSpace(dbDir)
-	previous, previousErr := s.Repo.GetConnectorForOAuth(ctx, userID, domain.PlatformWechat)
-	if previousErr != nil && apperror.From(previousErr).Code != "connector_not_found" {
-		return nil, previousErr
-	}
-	if previous != nil && previous.LastError == "wechat_stop_failed" {
-		return nil, apperror.New("wechat_cleanup_pending", "微信采集器尚未停止，请先重试解绑", 409, true)
-	}
-	if existing, findErr := s.Repo.FindConnectorByExternal(ctx, domain.PlatformWechat, "", wxid); findErr == nil && (previous == nil || existing.ID != previous.ID) {
-		return nil, apperror.New("connector_already_bound", "该微信账号已被其他账号绑定", 409, false)
-	} else if findErr != nil && apperror.From(findErr).Code != "connector_not_found" {
-		return nil, findErr
-	}
-	if previous != nil && previous.Status != domain.ConnectorRevoked && !strings.EqualFold(previous.ExternalAccountID, wxid) && !rebind {
-		return nil, apperror.New("connector_already_bound", "个人微信平台已经绑定其他账号，请先解绑", 409, false)
-	}
-	out, err := s.WechatCollector().Bind(ctx, wxid, dbDir, rebind)
-	if err != nil {
-		return nil, apperror.Wrap("wechat_collector_unavailable", "wechat collector binding failed", 502, true, err)
-	}
-	now := s.Now()
-	account := domain.ConnectorAccount{OwnerUserID: userID, Platform: domain.PlatformWechat, ExternalAccountID: wxid, DisplayName: wxid, DatabaseRef: dbDir, DefaultOrganizationID: strings.TrimSpace(organizationID), Status: domain.ConnectorActive, CreatedAt: now, UpdatedAt: now}
-	if previous != nil && strings.EqualFold(previous.ExternalAccountID, wxid) {
-		account.ID, account.CreatedAt = previous.ID, previous.CreatedAt
-		if organizationID == "" {
-			account.DefaultOrganizationID = previous.DefaultOrganizationID
-		}
-	}
-	saved, saveErr := s.Repo.SaveConnector(ctx, account)
-	if saveErr != nil {
-		return nil, saveErr
-	}
-	out["connector_id"] = saved.ID
-	if previous != nil && previous.ID == saved.ID {
-		if err := s.Repo.RestoreAuthorizationCollectors(ctx, saved.ID, now); err != nil {
-			return nil, err
-		}
-	} else {
-		_, _ = s.Repo.SaveWechatConfig(ctx, domain.WechatCollectionConfig{ConnectorID: saved.ID, SelectedConversations: []string{}, Enabled: true, ListenMode: "whitelist"})
-	}
-	_, _ = s.Repo.UpsertWechatRuntime(ctx, domain.WechatCollectorRuntime{ConnectorID: saved.ID, Status: "running"})
-	_, _ = s.WechatCollector().SaveConfig(ctx, map[string]any{"connector_id": saved.ID})
-	return out, nil
-}
 func (s *Service) WechatStatus(ctx context.Context, userID string) (map[string]any, error) {
 	account, err := s.Repo.GetConnector(ctx, userID, domain.PlatformWechat)
 	if err != nil {
@@ -695,7 +638,7 @@ func (s *Service) PairAgent(ctx context.Context, id, code, wxid, databaseRef, ag
 	}
 	plainKey := randomToken(32)
 	now := s.Now()
-	result, err := s.Repo.CompleteAgentPairing(ctx, repository.AgentPairingInput{PairingID: id, CodeHash: hash(code), WXID: strings.TrimSpace(wxid), DatabaseRef: "", AgentVersion: strings.TrimSpace(agentVersion), DeviceID: uuid.NewString(), DeviceKeyHash: hash(plainKey), DeviceExpiresAt: now.Add(s.Config.DeviceTTL), Now: now})
+	result, err := s.Repo.CompleteAgentPairing(ctx, repository.AgentPairingInput{PairingID: id, CodeHash: hash(code), WXID: strings.TrimSpace(wxid), DatabaseRef: safeDatabaseRef(databaseRef), AgentVersion: strings.TrimSpace(agentVersion), DeviceID: uuid.NewString(), DeviceKeyHash: hash(plainKey), DeviceExpiresAt: now.Add(s.Config.DeviceTTL), Now: now})
 	if err != nil {
 		return PairExchange{}, err
 	}
@@ -2078,6 +2021,14 @@ func (s *Service) ReviewPrivateAccessRequest(ctx context.Context, userID, reques
 	return s.Repo.ReviewPrivateAccessRequest(ctx, requestID, userID, status, note, s.Now())
 }
 
+func (s *Service) ApplyOrganizationMembershipEvent(ctx context.Context, input repository.OrganizationMembershipEventInput) error {
+	return s.Repo.ApplyOrganizationMembershipEvent(ctx, input)
+}
+
+func (s *Service) OrganizationExitImpact(ctx context.Context, organizationID, userID string) (repository.OrganizationExitImpact, error) {
+	return s.Repo.OrganizationExitImpact(ctx, organizationID, userID)
+}
+
 func normalizeMessageCandidate(input repository.IngestMessageInput, rawContent, sourcePayloadHash string, account domain.ConnectorAccount, collectedAt time.Time) (domain.UnifiedMessage, error) {
 	// Platform adapters already extracted source identities and attachment
 	// metadata. This is the first point at which they become the shared domain
@@ -2760,7 +2711,11 @@ func (s *Service) ProcessPrivacy(ctx context.Context) error {
 		return err
 	}
 	for _, item := range pending {
-		sensitive, display := privacy.Scan(item.OriginalContent)
+		sensitive, display := false, item.OriginalContent
+		if item.KnowledgeScope != "private" {
+			decision := privacy.Analyze(item.OriginalContent)
+			sensitive, display = decision.Sensitive, decision.Redacted
+		}
 		// Media payloads are stored in message_private_content for audit, but
 		// their provider XML is not message text. The attachment is the separate
 		// resource shown to users and processed by RAG; never promote the XML
@@ -2778,6 +2733,31 @@ func (s *Service) ProcessPrivacy(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+// ReprocessPrivacy reapplies the current privacy policy to existing
+// organization group messages whose stored policy version is stale.
+func (s *Service) ReprocessPrivacy(ctx context.Context, limit int) (int, error) {
+	items, err := s.Repo.ListPrivacyReprocessingMessages(ctx, privacy.PolicyVersion, limit)
+	if err != nil {
+		return 0, err
+	}
+	changedCount := 0
+	for _, item := range items {
+		decision := privacy.Analyze(item.OriginalContent)
+		sensitive, display := decision.Sensitive, decision.Redacted
+		if isMediaMessageEnvelope(item.Message.MessageType, item.OriginalContent) {
+			sensitive, display = false, ""
+		}
+		changed, err := s.Repo.ReprocessMessageClassification(ctx, item.Message.ID, display, sensitive, privacy.PolicyVersion)
+		if err != nil {
+			return changedCount, err
+		}
+		if changed {
+			changedCount++
+		}
+	}
+	return changedCount, nil
 }
 
 func (s *Service) ProcessContactFacts(ctx context.Context) error {
@@ -3102,6 +3082,107 @@ func (s *Service) GetKnowledgeForRAG(ctx context.Context, id string, contentVers
 		return nil, apperror.New("knowledge_acl_version_mismatch", "ACL version does not match", 409, false)
 	}
 	return item, nil
+}
+
+// GetKnowledgeOriginal returns the user-facing original message after the
+// resource-level authorization check. Non-sensitive content is served from the
+// display projection so the original projection is only used after an explicit
+// protected-resource grant.
+func (s *Service) GetKnowledgeOriginal(ctx context.Context, userID, knowledgeItemID string) (*domain.KnowledgeContent, error) {
+	userID = strings.TrimSpace(userID)
+	knowledgeItemID = strings.TrimSpace(knowledgeItemID)
+	if userID == "" || knowledgeItemID == "" {
+		return nil, apperror.New("invalid_request", "user and knowledge item are required", 400, false)
+	}
+	item, err := s.Repo.GetKnowledgeItem(ctx, knowledgeItemID)
+	if err != nil {
+		return nil, err
+	}
+	if item.LifecycleStatus != "active" && item.LifecycleStatus != "ready" {
+		return nil, apperror.New("knowledge_not_found", "knowledge item is not active", 404, false)
+	}
+	if item.SourceMessageID == "" {
+		return nil, apperror.New("knowledge_original_unavailable", "knowledge item has no message original", 409, false)
+	}
+	part, action := "display", "view"
+	if item.OriginalAccessRequired {
+		part = "original"
+	}
+	if s.Core == nil {
+		return nil, apperror.New("core_dependency_unavailable", "authorization service is unavailable", 503, true)
+	}
+	decisions, checkErr := s.Core.CheckBatch(ctx, userID, item.OrganizationID, []coreclient.AuthorizationCheck{{
+		ResourceType: "knowledge_item", ResourcePart: part, ResourceID: item.ID, Action: action,
+	}})
+	if checkErr != nil {
+		return nil, apperror.Wrap("core_dependency_unavailable", "authorization service is unavailable", 503, true, checkErr)
+	}
+	allowed := len(decisions) == 1 && decisions[0].Allowed
+	auditVariant := "display"
+	if part == "original" {
+		auditVariant = "original"
+	}
+	if auditErr := s.Repo.RecordRAGSourceAudit(ctx, repository.RAGSourceAuditInput{
+		CallerService: "knowledge-ui", Purpose: "view", KnowledgeItemID: item.ID,
+		ResourceID: item.SourceMessageID, ContentVersion: item.ContentVersion, ACLVersion: item.ACLVersion,
+		ContentVariant: auditVariant, TraceID: trace.TraceID(ctx),
+		Result: map[bool]string{true: "success", false: "denied"}[allowed],
+	}); auditErr != nil {
+		return nil, apperror.New("knowledge_audit_unavailable", "original access audit is unavailable", 503, true)
+	}
+	if !allowed {
+		if item.OriginalAccessRequired {
+			return nil, apperror.WithDetails(
+				apperror.New("original_access_required", "original content requires approval", 403, false),
+				map[string]any{
+					"knowledge_item_id": item.ID,
+					"resource_type":     "knowledge_original",
+					"resource_id":       item.ID,
+					"action":            "view",
+				},
+			)
+		}
+		return nil, apperror.Clone(apperror.ErrForbidden)
+	}
+	content, err := s.Repo.GetKnowledgeContent(ctx, item.ID, auditVariant)
+	if err != nil {
+		return nil, err
+	}
+	return content, nil
+}
+
+func (s *Service) GetKnowledgeOriginalByMessage(ctx context.Context, userID, messageID string) (*domain.KnowledgeContent, error) {
+	item, err := s.Repo.GetKnowledgeItemByMessage(ctx, strings.TrimSpace(messageID))
+	if err != nil {
+		return nil, err
+	}
+	return s.GetKnowledgeOriginal(ctx, userID, item.ID)
+}
+
+func (s *Service) CanReviewAccessRequest(ctx context.Context, userID, resourceType, resourceID string) (bool, error) {
+	return s.Repo.CanUserReviewAccess(ctx, strings.TrimSpace(userID), strings.TrimSpace(resourceType), strings.TrimSpace(resourceID))
+}
+
+func (s *Service) ListAccessRequestContexts(ctx context.Context, resources []repository.AccessRequestResource) ([]domain.AccessRequestContext, error) {
+	if len(resources) == 0 {
+		return []domain.AccessRequestContext{}, nil
+	}
+	if len(resources) > 100 {
+		resources = resources[:100]
+	}
+	clean := make([]repository.AccessRequestResource, 0, len(resources))
+	for _, resource := range resources {
+		resource.ResourceType = strings.TrimSpace(resource.ResourceType)
+		resource.ResourceID = strings.TrimSpace(resource.ResourceID)
+		if resource.ResourceID == "" {
+			continue
+		}
+		if resource.ResourceType != "knowledge_original" && resource.ResourceType != "attachment_content" {
+			continue
+		}
+		clean = append(clean, resource)
+	}
+	return s.Repo.ListAccessRequestContexts(ctx, clean)
 }
 
 // ApplyRAGResult is an additive callback contract for service three. Version

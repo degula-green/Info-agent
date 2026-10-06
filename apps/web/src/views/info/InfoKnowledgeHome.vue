@@ -105,17 +105,24 @@
       </section>
     </template>
 
-    <InfoResultDrawer v-model:visible="drawerVisible" :result="drawerResult" @toast="toast" />
+    <InfoSearchPreviewDialog
+      v-model:visible="previewVisible"
+      :result="previewResult"
+      :file="previewFile"
+      :downloading="previewDownloading"
+      @open-source="openPreviewSource"
+      @download="downloadPreviewFile"
+    />
   </section>
 </template>
 
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { MessagePlugin } from 'tdesign-vue-next'
 import { useRouter } from 'vue-router'
 import type { KnowledgeLibraryDTO } from '@/api/info-knowledge'
 import { searchGlobal } from '@/api/rag'
-import InfoResultDrawer from '@/components/InfoResultDrawer.vue'
+import InfoSearchPreviewDialog from '@/components/InfoSearchPreviewDialog.vue'
+import { useSearchResultNavigation } from '@/composables/useSearchResultNavigation'
 import type { SearchResult } from '@/mock'
 import { useInfoKnowledgeStore } from '@/stores/infoKnowledge'
 import { resolveGlobalSearchScope, searchEmptyHint } from '@/utils/info-search-scope'
@@ -123,13 +130,12 @@ import { isAbortError, mapRagSearchItems } from '@/utils/info-search-result'
 
 const router = useRouter()
 const store = useInfoKnowledgeStore()
+const { previewVisible, previewResult, previewFile, previewDownloading, openSearchResult, openPreviewSource, downloadPreviewFile } = useSearchResultNavigation()
 const query = ref('')
 const searchResults = ref<SearchResult[]>([])
 const searchLoading = ref(false)
 const searchError = ref('')
 const searchEmptyText = ref('没有匹配的消息或附件，可尝试更短的关键词。')
-const drawerVisible = ref(false)
-const drawerResult = ref<SearchResult | null>(null)
 let searchTimer: ReturnType<typeof setTimeout> | undefined
 let searchAbort: AbortController | null = null
 let searchSeq = 0
@@ -235,16 +241,8 @@ watch(query, (value) => {
 })
 
 function selectSearchResult(result: SearchResult) {
-  if (result.kind === 'chat' && result.chatId) {
-    const platformKey = result.platform === 'all' ? 'feishu' : result.platform
-    router.push(`/knowledge/${platformKey}/conversations/${result.chatId}`)
-    return
-  }
-  drawerResult.value = result
-  drawerVisible.value = true
+  void openSearchResult(result)
 }
-
-function toast(text: string) { MessagePlugin.success(text) }
 
 async function refresh() {
   try { await store.refreshLibraries() } catch { /* error is displayed in the page */ }

@@ -282,6 +282,128 @@ func TestMediaPrivacyDoesNotPromoteProviderEnvelopeToMessageText(t *testing.T) {
 	}
 }
 
+func TestProcessPrivacyMasksOrganizationGroupSensitiveContent(t *testing.T) {
+	f := newPipelineFixture(t, domain.PlatformFeishu)
+	result, err := f.service.IngestMessage(context.Background(), pipelineInput(f, "sensitive-group", "text", "密码123456"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.service.ProcessPrivacy(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	item, err := f.repo.GetKnowledgeItemByMessage(context.Background(), result.Message.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	messages, err := f.repo.ListMessages(context.Background(), f.conversation.ID, 10, "")
+	if err != nil || len(messages) != 1 {
+		t.Fatalf("read classified message: messages=%+v err=%v", messages, err)
+	}
+	if !messages[0].Sensitive || messages[0].Content != "[密码已脱敏]" {
+		t.Fatalf("organization group content was not masked: %+v", messages[0])
+	}
+	if item.ContentVisibility != "masked" || !item.OriginalAccessRequired || item.Sensitivity != "restricted" {
+		t.Fatalf("organization group item did not enter protected mode: %+v", item)
+	}
+}
+
+func TestProcessPrivacyKeepsPrivateContentOwnerOnlyAndUnmasked(t *testing.T) {
+	ctx := context.Background()
+	repo := repository.NewMemoryStore()
+	now := time.Now().UTC()
+	account := domain.ConnectorAccount{
+		ID: "private-account", OwnerUserID: "owner", Platform: domain.PlatformWechat,
+		WorkspaceKey: "workspace", ExternalAccountID: "private-external", Status: domain.ConnectorActive,
+	}
+	if _, err := repo.SaveConnector(ctx, account); err != nil {
+		t.Fatal(err)
+	}
+	conversation, err := repo.AttachConversation(ctx, repository.AttachInput{
+		UserID: "owner", Platform: domain.PlatformWechat, WorkspaceKey: "workspace",
+		ExternalConversationID: "private-chat", ConversationType: "private",
+		RequestedStartAt: &now, PrimaryConnectorID: account.ID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := &Service{Repo: repo, Config: config.Config{}, Now: func() time.Time { return time.Now().UTC() }}
+	sum := sha256.Sum256([]byte("密码123456"))
+	input := repository.IngestMessageInput{
+		CollectorID: conversation.Collectors[0].ID, ExternalConversationID: conversation.ExternalConversationID,
+		ExternalMessageID: "private-sensitive", SenderExternalID: "sender-id", SenderDisplayName: "Sender",
+		MessageType: "text", Content: "密码123456", ContentHash: hex.EncodeToString(sum[:]),
+		SentAt: now.Add(-time.Minute),
+	}
+	input.PayloadHash, err = repository.CalculatePayloadHash(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := service.IngestMessage(ctx, input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := service.ProcessPrivacy(ctx); err != nil {
+		t.Fatal(err)
+	}
+	messages, err := repo.ListMessages(ctx, conversation.ID, 10, "")
+	if err != nil || len(messages) != 1 {
+		t.Fatalf("read private message: messages=%+v err=%v", messages, err)
+	}
+	message := messages[0]
+	item, err := repo.GetKnowledgeItemByMessage(ctx, result.Message.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if message.Sensitive || message.Content != "密码123456" {
+		t.Fatalf("private content should remain unmasked: %+v", message)
+	}
+	if item.ContentVisibility != "original" || item.OriginalAccessRequired || item.SecurityStatus != "not_required" {
+		t.Fatalf("private item should remain owner-only and unmasked: %+v", item)
+	}
+}
+
+func TestGetKnowledgeOriginalRequiresResourceGrant(t *testing.T) {
+	f := newPipelineFixture(t, domain.PlatformFeishu)
+	result, err := f.service.IngestMessage(context.Background(), pipelineInput(f, "original-access", "text", "密码123456"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.service.ProcessPrivacy(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	item, err := f.repo.GetKnowledgeItemByMessage(context.Background(), result.Message.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	core := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			SubjectID string `json:"subject_id"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"snapshot_id": "test",
+			"decisions": []map[string]any{{
+				"check_id": "c1",
+				"allowed":  body.SubjectID == "member",
+			}},
+		})
+	}))
+	defer core.Close()
+	f.service.Core = coreclient.New(core.URL, "service-token")
+
+	if _, err := f.service.GetKnowledgeOriginal(context.Background(), "outsider", item.ID); apperror.From(err).Code != "original_access_required" {
+		t.Fatalf("unprotected original was returned to outsider: %v", err)
+	}
+	content, err := f.service.GetKnowledgeOriginal(context.Background(), "member", item.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if content.ContentVariant != "original" || content.Text != "密码123456" {
+		t.Fatalf("authorized original mismatch: %+v", content)
+	}
+}
+
 func TestPrivacyPermissionAndReadyOutboxContract(t *testing.T) {
 	f := newPipelineFixture(t, domain.PlatformWechat)
 	f.service.Config.RedisOutboundStream = "test:knowledge:ready"

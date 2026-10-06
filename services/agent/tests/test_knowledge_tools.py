@@ -362,6 +362,10 @@ def test_content_question_routes_to_search_content_and_answer() -> None:
         "step": 1,
         "output": "results",
     }
+    assert "metadata_coverage_ref" not in plan.steps[1].arguments
+    assert plan.steps[1].arguments["metadata_coverage"] == (
+        f"$steps.{plan.steps[0].step_id}.output.metadata_coverage"
+    )
 
 
 def test_knowledge_router_uses_the_original_question_not_attachment_body() -> None:
@@ -413,6 +417,7 @@ def test_knowledge_content_query_is_capped_at_schema_limit() -> None:
         "青云官网部署到哪了",
         "谁部署的青云官网，在哪台服务器",
         "官网现在什么情况",
+        "我记得我的领导之前给我说过数据库的配置，但是我忘了在哪个群里，帮我找一下",
     ],
 )
 def test_internal_project_status_routes_to_knowledge_content(text: str) -> None:

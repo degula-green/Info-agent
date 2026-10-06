@@ -266,6 +266,14 @@ type publicKnowledgeLibraryItem struct {
 	Searchable             bool       `json:"searchable"`
 }
 
+type publicKnowledgeOriginal struct {
+	KnowledgeItemID string `json:"knowledge_item_id"`
+	Content         string `json:"content"`
+	ContentVariant  string `json:"content_variant"`
+	ContentVersion  int    `json:"content_version"`
+	ContentHash     string `json:"content_hash"`
+}
+
 type publicAgentAssignment struct {
 	Collector    publicCollector    `json:"collector"`
 	Conversation publicConversation `json:"conversation"`
@@ -469,6 +477,16 @@ func publicKnowledgeLibraryFromDomain(value domain.KnowledgeLibrary) publicKnowl
 
 func publicKnowledgeLibraryItemFromDomain(value domain.KnowledgeLibraryItem) publicKnowledgeLibraryItem {
 	return publicKnowledgeLibraryItem{ID: value.ID, LibraryID: value.LibraryID, Kind: value.Kind, Title: value.Title, Excerpt: value.Excerpt, Platform: value.Platform, ConversationID: value.ConversationID, ExternalConversationID: value.ExternalConversationID, ConversationType: value.ConversationType, ConversationName: value.ConversationName, CollectionStatus: value.CollectionStatus, SourceType: value.SourceType, SourceMessageID: value.SourceMessageID, SourceAttachmentID: value.SourceAttachmentID, ContentType: value.ContentType, ContentVisibility: value.ContentVisibility, AccessScope: value.AccessScope, ProcessingStatus: value.ProcessingStatus, ContentStatus: value.ContentStatus, FileName: value.FileName, MIMEType: value.MIMEType, SizeBytes: value.SizeBytes, MessageCount: value.MessageCount, AttachmentCount: value.AttachmentCount, MemberCount: value.MemberCount, CurrentCollectorID: value.CurrentCollectorID, CurrentCollectorStatus: value.CurrentCollectorStatus, PrimaryCollectorUserID: value.PrimaryCollectorUserID, PrimaryCollectorName: value.PrimaryCollectorName, PrimaryCollectorStatus: value.PrimaryCollectorStatus, SentAt: value.SentAt, CreatedAt: value.CreatedAt, UpdatedAt: value.UpdatedAt, SharedAt: value.SharedAt, ShareBatchID: value.ShareBatchID, CanView: value.CanView, CanDownload: value.CanDownload, ContentAccessRequired: value.ContentAccessRequired, RAGStatus: value.RAGStatus, RAGContentVersion: value.RAGContentVersion, RAGACLVersion: value.RAGACLVersion, RAGLastError: value.RAGLastError, Searchable: value.Searchable}
+}
+
+func publicKnowledgeOriginalFromDomain(value domain.KnowledgeContent) publicKnowledgeOriginal {
+	return publicKnowledgeOriginal{
+		KnowledgeItemID: value.KnowledgeItemID,
+		Content:         value.Text,
+		ContentVariant:  value.ContentVariant,
+		ContentVersion:  value.ContentVersion,
+		ContentHash:     value.ContentHash,
+	}
 }
 
 func publicIngestResultFromDomain(value *repository.IngestResult) publicIngestResult {
