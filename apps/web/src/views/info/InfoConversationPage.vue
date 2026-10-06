@@ -9,6 +9,7 @@
     @back="router.push(backPath)"
     @toggle="toggleChat"
     @toast="toast"
+    @error="handleError"
     @share="shareSelected"
     @load-more="loadOlder"
   />
@@ -119,6 +120,7 @@ async function confirmResume() {
   }
 }
 function toast(text: string) { MessagePlugin.success(text) }
+function handleError(text: string) { MessagePlugin.error(text) }
 async function shareSelected(payload: { conversationId: string; messageIDs: string[]; attachmentIDs: string[] }) {
   try {
     const result = await sharePrivateResources({
@@ -148,8 +150,23 @@ async function loadCurrentConversation(platform: string, id: string, force = fal
     // can replace the in-memory snapshot while a provider returns a partial
     // page, briefly turning a valid route into "conversation not found".
     await store.loadConversation(platform as 'feishu' | 'wecom' | 'wechat', id, force, { shared: sharedView.value })
-  } catch (error) {
-    loadError.value = error
+  } catch (error: any) {
+    const initialCode = String(error?.code || error?.error?.code || '')
+    if (!hadChat && initialCode === 'conversation_not_found') {
+      await new Promise((resolve) => window.setTimeout(resolve, 600))
+      try {
+        await store.loadConversation(platform as 'feishu' | 'wecom' | 'wechat', id, true, { shared: sharedView.value })
+      } catch (retryError: any) {
+        loadError.value = retryError
+      }
+    } else {
+      const code = String(error?.code || error?.error?.code || '')
+      if (code === 'forbidden' || code === 'conversation_not_found') {
+        loadError.value = error
+      } else if (!hadChat) {
+        loadError.value = error
+      }
+    }
   } finally {
     loading.value = false
   }

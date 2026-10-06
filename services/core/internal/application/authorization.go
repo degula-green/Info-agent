@@ -67,8 +67,23 @@ type RelationWriter interface {
 	WriteRelations(ctx context.Context, tuples []RelationTuple) error
 }
 
+// RoleRelationWriter synchronizes organization role grants with OpenFGA
+// relations. It is optional so services that only expose resource-relation
+// writes remain compatible.
+type RoleRelationWriter interface {
+	SyncOrganizationRole(ctx context.Context, organizationID, userID, role string, granted bool) error
+}
+
 type RelationSynchronizer interface {
 	SyncRelations(ctx context.Context, managedObjects []string, tuples []RelationTuple) error
+}
+
+// RelationSynchronizerWithPreservedRelations reconciles an object while
+// leaving selected relations under the ownership of another workflow. Access
+// grants are the important case: temporary knowledge_original.viewer tuples
+// are written by access-request review and must survive resource ACL sync.
+type RelationSynchronizerWithPreservedRelations interface {
+	SyncRelationsPreserving(ctx context.Context, managedObjects []string, tuples []RelationTuple, preserved map[string][]string) error
 }
 
 type ACLVersionRepository interface {
@@ -107,7 +122,14 @@ func (s *PermissionSyncService) Sync(ctx context.Context, input ResourcePermissi
 	}
 	managedObjects := permissionManagedObjects(input)
 	var writeErr error
-	if synchronizer, ok := s.writer.(RelationSynchronizer); ok {
+	if synchronizer, ok := s.writer.(RelationSynchronizerWithPreservedRelations); ok {
+		writeErr = synchronizer.SyncRelationsPreserving(
+			ctx,
+			managedObjects,
+			tuples,
+			map[string][]string{"knowledge_original:" + input.KnowledgeItemID: {"viewer"}},
+		)
+	} else if synchronizer, ok := s.writer.(RelationSynchronizer); ok {
 		writeErr = synchronizer.SyncRelations(ctx, managedObjects, tuples)
 	} else {
 		writeErr = s.writer.WriteRelations(ctx, tuples)
@@ -126,6 +148,37 @@ func (s *PermissionSyncService) Sync(ctx context.Context, input ResourcePermissi
 		return PermissionSyncResult{}, err
 	}
 	return PermissionSyncResult{ACLVersion: version, RelationCount: len(tuples)}, nil
+}
+
+func (s *PermissionSyncService) RevokeResourceRelations(ctx context.Context, knowledgeItemID, attachmentID string) (int, error) {
+	itemID := strings.TrimSpace(knowledgeItemID)
+	if itemID == "" {
+		return 0, errors.New("knowledge_item_id is required")
+	}
+	managed := []string{"knowledge_item:" + itemID, "knowledge_original:" + itemID}
+	if attachmentID = strings.TrimSpace(attachmentID); attachmentID != "" {
+		managed = append(managed, "attachment_meta:"+attachmentID, "attachment_content:"+attachmentID)
+	}
+	synchronizer, ok := s.writer.(RelationSynchronizer)
+	if !ok {
+		return 0, errors.New("relation synchronizer is not configured")
+	}
+	before := 0
+	if reader, ok := s.writer.(interface {
+		ReadRelations(ctx context.Context, object string) ([]RelationTuple, error)
+	}); ok {
+		for _, object := range managed {
+			rows, err := reader.ReadRelations(ctx, object)
+			if err != nil {
+				return 0, err
+			}
+			before += len(rows)
+		}
+	}
+	if err := synchronizer.SyncRelations(ctx, managed, nil); err != nil {
+		return 0, err
+	}
+	return before, nil
 }
 
 func permissionManagedObjects(input ResourcePermission) []string {

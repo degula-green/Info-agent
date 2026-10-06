@@ -133,6 +133,35 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Server, 
 		return nil, err
 	}
 	authorizationClient := openfga.NewClient(cfg)
+	if err := authorizationClient.ValidateModel(startupCtx); err != nil {
+		_ = redisClient.Close()
+		pool.Close()
+		return nil, fmt.Errorf("validate OpenFGA model: %w", err)
+	}
+	organizationService.SetRoleRelationWriter(authorizationClient)
+	// Existing organizations may have roles written before role-to-OpenFGA
+	// synchronization was wired into the organization service. Repair them
+	// during startup and retry in the background if OpenFGA is temporarily down.
+	roleSyncErr := organizationService.SyncExistingRoleRelations(startupCtx)
+	if roleSyncErr != nil {
+		logger.Warn("initial organization role synchronization failed", "error", roleSyncErr)
+	}
+	if roleSyncErr != nil {
+		go func() {
+			for attempt := 0; attempt < 3; attempt++ {
+				if err := organizationService.SyncExistingRoleRelations(ctx); err == nil {
+					return
+				} else {
+					logger.Warn("failed to synchronize existing organization roles", "attempt", attempt+1, "error", err)
+				}
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(time.Duration(attempt+1) * time.Second):
+				}
+			}
+		}()
+	}
 	permissionSync := application.NewPermissionSyncService(authorizationClient, postgres.NewAuthorizationVersionRepository(pool))
 	knowledgeClient := knowledgeclient.New(cfg.KnowledgeURL, cfg.KnowledgeAuthorizationToken)
 	organizationService.SetExitPreflightChecker(knowledgeClient)
@@ -149,7 +178,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Server, 
 	eventRelay := application.NewOrganizationEventRelay(organizationRepository, knowledgeClient, 5*time.Second, clock.Now)
 	go eventRelay.Run(relayCtx)
 	return &Server{
-		Engine: httpapi.NewRouterWithRegistration(authService, cookies, logger, registrationService, organizationService, &httpapi.AuthorizationConfig{Provider: authorizationClient, Token: cfg.RAGAuthorizationToken, KnowledgeToken: cfg.KnowledgeAuthorizationToken, PermissionSync: permissionSync}, accessRequestService),
+		Engine: httpapi.NewRouterWithRegistration(authService, cookies, logger, registrationService, organizationService, &httpapi.AuthorizationConfig{Provider: authorizationClient, Token: cfg.RAGAuthorizationToken, KnowledgeToken: cfg.KnowledgeAuthorizationToken, PermissionSync: permissionSync, UserLookup: authRepository}, accessRequestService),
 		pool:   pool,
 		redis:  redisClient,
 		cancel: relayCancel,

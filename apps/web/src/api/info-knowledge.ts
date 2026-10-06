@@ -118,6 +118,51 @@ export interface KnowledgeLibraryItemDTO {
   searchable?: boolean
 }
 
+export interface DeletionTargetDTO {
+  id: string
+  resource_type: string
+  resource_id: string
+  conversation_id?: string
+  knowledge_item_id?: string
+  content_version: number
+  acl_version: number
+  visibility_state: string
+  vector_state: string
+  object_state: string
+  auth_state: string
+  attempt_count: number
+  last_error?: string
+  created_at: string
+  updated_at: string
+}
+
+export interface DeletionRequestDTO {
+  id: string
+  organization_id?: string
+  requester_user_id: string
+  requester_display_name?: string
+  requester_email?: string
+  reviewer_user_id?: string
+  scope_type: string
+  scope_id: string
+  status: string
+  status_label?: string
+  reason: string
+  idempotency_key: string
+  requested_at: string
+  reviewed_at?: string
+  execution_started_at?: string
+  completed_at?: string
+  purge_after?: string
+  last_error?: string
+  created_at: string
+  updated_at: string
+  targets: DeletionTargetDTO[]
+  target_summary?: string
+  stage_summary?: string
+  can_review: boolean
+  can_cancel: boolean
+}
 export interface LocalUploadTaskDTO {
   request_id: string
   upload_destination: 'private_local_library' | 'organization_file_library' | string
@@ -401,6 +446,54 @@ export async function getKnowledgeLibraryItems(libraryID: string, options: { kin
   return body.items || []
 }
 
+export async function getMessageDeletionPermission(messageID: string) {
+  return knowledgeRequest<{ can_delete: boolean }>(`/knowledge/messages/${encodeURIComponent(messageID)}/deletion-permission`)
+}
+export async function createMessageDeletionRequest(messageID: string, reason: string, contentVersion?: number) {
+  return knowledgeRequest<DeletionRequestDTO>('/deletion-requests', {
+    method: 'POST',
+    body: JSON.stringify({
+      scope_type: 'message',
+      scope_id: messageID,
+      reason,
+      idempotency_key: messageDeletionIdempotencyKey(messageID, contentVersion),
+    }),
+  })
+}
+
+// One deletion intent per message revision. Re-submitting the same revision
+// must reuse the existing request rather than stacking duplicates, while a
+// re-collected revision legitimately needs a fresh request.
+export function messageDeletionIdempotencyKey(messageID: string, contentVersion?: number) {
+  const version = Number.isFinite(contentVersion) ? Number(contentVersion) : 0
+  return `message-delete:${messageID}:v${version}`
+}
+
+export async function getDeletionRequest(requestID: string) {
+  return knowledgeRequest<DeletionRequestDTO>(`/deletion-requests/${encodeURIComponent(requestID)}`)
+}
+
+export async function listDeletionRequests(scope: 'mine' | 'inbox' = 'mine', view: 'active' | 'history' | 'all' = 'active', status = '') {
+  const params = new URLSearchParams({ scope, view })
+  if (status) params.set('status', status)
+  const suffix = `?${params.toString()}`
+  const body = await knowledgeRequest<{ items: DeletionRequestDTO[] }>(`/deletion-requests${suffix}`)
+  return body.items || []
+}
+
+export async function approveDeletionRequest(requestID: string, reason = '') {
+  return knowledgeRequest<DeletionRequestDTO>(`/deletion-requests/${encodeURIComponent(requestID)}/approve`, {
+    method: 'POST',
+    body: JSON.stringify({ reason }),
+  })
+}
+
+export async function rejectDeletionRequest(requestID: string, reason = '') {
+  return knowledgeRequest<DeletionRequestDTO>(`/deletion-requests/${encodeURIComponent(requestID)}/reject`, {
+    method: 'POST',
+    body: JSON.stringify({ reason }),
+  })
+}
 export async function getMessageOriginal(messageID: string) {
   return knowledgeRequest<KnowledgeOriginalDTO>(`/knowledge/messages/${encodeURIComponent(messageID)}/original`)
 }

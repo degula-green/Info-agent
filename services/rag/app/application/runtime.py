@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from app.application.callback_service import CallbackLane
+from app.application.deletion_service import DeletionService
 from app.application.index_service import MVPIndexService
 from app.application.memory_service import MemoryCandidateService
 from app.application.parse_service import MVPParseService
@@ -36,6 +37,7 @@ class MVPWorkerRuntime:
         memory_service: MemoryCandidateService,
         callback_lane: CallbackLane,
         branch_refresh_service: Any | None = None,
+        deletion_service: DeletionService | None = None,
     ) -> None:
         self.repository = repository or (
             PostgresRagMVPRepository()
@@ -47,6 +49,7 @@ class MVPWorkerRuntime:
         self.memory_service = memory_service
         self.callback_lane = callback_lane
         self.branch_refresh_service = branch_refresh_service
+        self.deletion_service = deletion_service
         self.queues = {
             lane: queue.Queue(maxsize=max(1, settings.lane_queue_size))
             for lane in ("parse", "index", "memory")
@@ -56,6 +59,10 @@ class MVPWorkerRuntime:
 
     def handle(self, envelope: dict[str, Any]) -> None:
         validate_envelope(envelope)
+        if envelope.get("event_type") == "knowledge.deletion.requested":
+            service = self.deletion_service or DeletionService(repository=self.repository, indexer=self.index_service.indexer, callback_lane=self.callback_lane)
+            service.handle(envelope)
+            return
         job = self.repository.create_or_get_job(envelope)
         detailed = self.repository.get_job(job["id"])
         if detailed:

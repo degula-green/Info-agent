@@ -43,6 +43,21 @@ type RoleCatalogRepository interface {
 	ListRolePermissions(ctx context.Context, roleCode string) ([]domain.RolePermission, error)
 }
 
+// OrganizationRoleAssignment is the minimal snapshot needed to repair
+// authorization relations for roles that were granted before OpenFGA role
+// synchronization was enabled.
+type OrganizationRoleAssignment struct {
+	OrganizationID string
+	UserID         string
+	RoleCode       string
+}
+
+// OrganizationRoleAssignmentReader is optional so existing repository
+// implementations and tests that do not need the repair job remain valid.
+type OrganizationRoleAssignmentReader interface {
+	ListActiveRoleAssignments(ctx context.Context) ([]OrganizationRoleAssignment, error)
+}
+
 type OrganizationRepository interface {
 	CreateOrganization(ctx context.Context, userID, name, slug string) (domain.Organization, domain.OrganizationMember, error)
 	FindCurrentOrganization(ctx context.Context, userID string) (domain.Organization, domain.OrganizationMember, error)

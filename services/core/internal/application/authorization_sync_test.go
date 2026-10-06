@@ -8,6 +8,7 @@ import (
 type recordingRelationWriter struct {
 	tuples         []RelationTuple
 	managedObjects []string
+	preserved      map[string][]string
 }
 
 func (w *recordingRelationWriter) WriteRelations(_ context.Context, tuples []RelationTuple) error {
@@ -19,6 +20,11 @@ func (w *recordingRelationWriter) SyncRelations(_ context.Context, managedObject
 	w.managedObjects = append([]string(nil), managedObjects...)
 	w.tuples = append([]RelationTuple(nil), tuples...)
 	return nil
+}
+
+func (w *recordingRelationWriter) SyncRelationsPreserving(_ context.Context, managedObjects []string, tuples []RelationTuple, preserved map[string][]string) error {
+	w.preserved = preserved
+	return w.SyncRelations(context.Background(), managedObjects, tuples)
 }
 
 type memoryACLVersions struct {
@@ -60,6 +66,9 @@ func TestPermissionSyncBuildsOrganizationAttachmentRelationsAndStableVersion(t *
 	}
 	if len(writer.managedObjects) != 4 || writer.managedObjects[3] != "attachment_content:att-1" {
 		t.Fatalf("permission sync did not own the complete resource set: %+v", writer.managedObjects)
+	}
+	if len(writer.preserved["knowledge_original:ki-1"]) != 1 || writer.preserved["knowledge_original:ki-1"][0] != "viewer" {
+		t.Fatalf("temporary original viewer grants were not preserved: %+v", writer.preserved)
 	}
 	want := map[RelationTuple]bool{
 		{User: "organization:org-1", Relation: "organization", Object: "knowledge_item:ki-1"}:                        true,

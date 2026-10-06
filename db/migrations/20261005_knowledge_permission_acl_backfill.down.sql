@@ -1,0 +1,2 @@
+-- Data backfills are intentionally not reversed. Reverting the migration
+-- must not invalidate already synchronized authorization relations.

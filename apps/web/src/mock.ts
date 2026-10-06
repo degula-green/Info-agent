@@ -22,7 +22,7 @@ export interface InfoMessage {
   id: string; sender: string; content: string; time: string; timestamp: string; collectedAt?: string; collectionTimestamp?: string
   attachments?: InfoAttachment[]; vectorStatus?: string; sourceMessageId?: string; senderAvatarUrl?: string
   isDeleted?: boolean; isUpdated?: boolean; messageType?: string; sourceMessageType?: string; metadata?: Record<string, unknown>
-  sensitive?: boolean; classificationStatus?: string
+  sensitive?: boolean; classificationStatus?: string; contentVersion?: number
 }
 
 export interface InfoFile {
