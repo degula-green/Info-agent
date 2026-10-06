@@ -22,6 +22,12 @@ class UnderstandingIntent(BaseModel):
     evidence: str | None = None
 
 
+# Evidence a turn may draw on. The understanding step judges which of these the
+# user's instruction actually calls for; an empty list means "not judged" and
+# leaves the decision to the planner's own fallback.
+EvidenceSource = Literal["attachment", "knowledge"]
+
+
 class TaskUnderstanding(BaseModel):
     is_task: bool
     goal: str
@@ -29,6 +35,8 @@ class TaskUnderstanding(BaseModel):
     intent_candidates: list[UnderstandingIntent] = Field(default_factory=list)
     confidence: float | None = Field(default=None, ge=0, le=1)
     reason: str | None = None
+    evidence_sources: list[EvidenceSource] = Field(default_factory=list)
+    evidence_reason: str | None = None
 
 
 class PlanStep(BaseModel):

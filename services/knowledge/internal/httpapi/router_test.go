@@ -504,6 +504,110 @@ func TestSignedAgentRequiresSHA256PayloadHash(t *testing.T) {
 	}
 }
 
+func TestDeviceBootstrapUsesOnlyAssignedConnector(t *testing.T) {
+	app := newApp(config.Config{AllowDevAuth: true, InternalServiceToken: "service-secret"})
+	ctx := context.Background()
+	now := time.Now().UTC()
+	deviceKey := "bootstrap-secret"
+	account := domain.ConnectorAccount{
+		ID: "connector-bootstrap", OwnerUserID: "u1", Platform: domain.PlatformWechat,
+		ExternalAccountID: "wxid-bootstrap", Status: domain.ConnectorActive,
+	}
+	if _, err := app.Service.Repo.SaveConnector(ctx, account); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.Service.Repo.CreateDevice(ctx, domain.AgentDevice{
+		ID: "device-bootstrap", ConnectorID: account.ID, OwnerUserID: "u1",
+		KeyHash: sha256Hex([]byte(deviceKey)), ExpiresAt: now.Add(time.Hour),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	request := httptest.NewRequest(http.MethodGet, "/api/knowledge/v1/internal/wechat/bootstrap?device_id=device-bootstrap", nil)
+	signAgentRequest(request, deviceKey, sha256Hex(nil))
+	recorder := httptest.NewRecorder()
+	NewRouterWithApp(app).ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("assigned device bootstrap failed: status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	var response map[string]any
+	_ = json.Unmarshal(recorder.Body.Bytes(), &response)
+	connector, _ := response["connector"].(map[string]any)
+	if response["status"] != "bound" || connector["id"] != account.ID {
+		t.Fatalf("bootstrap returned the wrong connector: %s", recorder.Body.String())
+	}
+	if _, leaked := connector["database_ref"]; leaked {
+		t.Fatalf("bootstrap leaked database_ref: %s", recorder.Body.String())
+	}
+
+	mismatch := httptest.NewRequest(http.MethodGet, "/api/knowledge/v1/internal/wechat/bootstrap?device_id=other-device", nil)
+	signAgentRequest(mismatch, deviceKey, sha256Hex(nil))
+	mismatchRecorder := httptest.NewRecorder()
+	NewRouterWithApp(app).ServeHTTP(mismatchRecorder, mismatch)
+	if mismatchRecorder.Code != http.StatusForbidden {
+		t.Fatalf("mismatched device_id was accepted: status=%d body=%s", mismatchRecorder.Code, mismatchRecorder.Body.String())
+	}
+
+	serviceRequest := httptest.NewRequest(http.MethodGet, "/api/knowledge/v1/internal/wechat/bootstrap", nil)
+	serviceRequest.Header.Set("X-Service-Token", "service-secret")
+	serviceRecorder := httptest.NewRecorder()
+	NewRouterWithApp(app).ServeHTTP(serviceRecorder, serviceRequest)
+	if serviceRecorder.Code != http.StatusBadRequest {
+		t.Fatalf("global service bootstrap was not rejected: status=%d body=%s", serviceRecorder.Code, serviceRecorder.Body.String())
+	}
+}
+
+func TestCollectorSelfPauseRouteOnlyChangesCurrentUser(t *testing.T) {
+	app := newApp(config.Config{AllowDevAuth: true, DevUserID: "u1", DevOrganizationID: "org-1"})
+	ctx := context.Background()
+	now := time.Now().UTC()
+	account := domain.ConnectorAccount{
+		ID: "collector-pause-account", OwnerUserID: "u1", Platform: domain.PlatformFeishu,
+		WorkspaceKey: "tenant", ExternalAccountID: "user-1", DefaultOrganizationID: "org-1",
+		Status: domain.ConnectorActive,
+	}
+	if _, err := app.Service.Repo.SaveConnector(ctx, account); err != nil {
+		t.Fatal(err)
+	}
+	conversation, err := app.Service.Repo.AttachConversation(ctx, repository.AttachInput{
+		UserID: "u1", Platform: domain.PlatformFeishu, WorkspaceKey: "tenant",
+		ExternalConversationID: "self-pause-chat", ConversationType: "group",
+		OrganizationID: "org-1", RequestedStartAt: &now, PrimaryConnectorID: account.ID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/api/knowledge/v1/conversations/"+conversation.ID+"/collectors/me/pause", nil)
+	recorder := httptest.NewRecorder()
+	NewRouterWithApp(app).ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("self pause failed: status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	current, err := app.Service.Repo.GetConversation(ctx, conversation.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(current.Collectors) != 1 || current.Collectors[0].Status != domain.CollectorPaused {
+		t.Fatalf("self pause did not update the current collector: %+v", current.Collectors)
+	}
+	if current.Status != domain.ConversationPaused || current.PauseReason != "no_available_collector" {
+		t.Fatalf("conversation did not pause after its last collector stopped: %+v", current)
+	}
+	resume := httptest.NewRequest(http.MethodPost, "/api/knowledge/v1/conversations/"+conversation.ID+"/collectors/me/resume", nil)
+	resumeRecorder := httptest.NewRecorder()
+	NewRouterWithApp(app).ServeHTTP(resumeRecorder, resume)
+	if resumeRecorder.Code != http.StatusOK {
+		t.Fatalf("self resume failed: status=%d body=%s", resumeRecorder.Code, resumeRecorder.Body.String())
+	}
+	current, err = app.Service.Repo.GetConversation(ctx, conversation.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current.Status != domain.ConversationActive || current.Collectors[0].Status != domain.CollectorActive {
+		t.Fatalf("self resume did not restore collection: %+v", current)
+	}
+}
+
 func TestServiceTokenIsLimitedToWorkerPublish(t *testing.T) {
 	app := newApp(config.Config{AllowDevAuth: true, InternalServiceToken: "service-secret"})
 	request := httptest.NewRequest(http.MethodGet, "/api/knowledge/v1/internal/devices/device/collectors", nil)

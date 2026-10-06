@@ -3,6 +3,7 @@
     v-if="chat && !loadError"
     :chat="chat"
     :shared-view="sharedView"
+    :my-collector-status="myCollectorStatus"
     :target-message-id="targetMessageId"
     :target-attachment-id="targetAttachmentId"
     @back="router.push(backPath)"
@@ -33,16 +34,35 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { MessagePlugin } from 'tdesign-vue-next'
-import { sharePrivateResources } from '@/api/info-knowledge'
+import { addConversationCollector, setConversationCollectorPaused, sharePrivateResources } from '@/api/info-knowledge'
+import { getAuthSession } from '@/auth/session'
 import InfoConversation from '@/components/InfoConversation.vue'
 import type { InfoChat } from '@/mock'
 import { normalizeSourceKey, useInfoKnowledgeStore } from '@/stores/infoKnowledge'
 const route = useRoute(); const router = useRouter(); const store = useInfoKnowledgeStore()
 const sourceKey = computed(() => normalizeSourceKey(String(route.params.platform)) || 'wechat')
 const conversationId = computed(() => String(route.params.conversationId))
+const currentUserID = computed(() => {
+  const token = getAuthSession().accessToken
+  if (!token) return ''
+  try {
+    const payload = token.split('.')[1]
+    if (!payload) return ''
+    const normalized = payload.replace(/-/g, '+').replace(/_/g, '/')
+    const decoded = globalThis.atob(normalized.padEnd(Math.ceil(normalized.length / 4) * 4, '='))
+    return String((JSON.parse(decoded) as { sub?: string }).sub || '')
+  } catch {
+    return ''
+  }
+})
 const targetMessageId = computed(() => String(route.query.message || '').trim() || null)
 const targetAttachmentId = computed(() => String(route.query.attachment || '').trim() || null)
 const chat = computed(() => store.findConversation(sourceKey.value, conversationId.value))
+const myCollectorStatus = computed(() => {
+  const userID = currentUserID.value
+  if (!userID) return ''
+  return chat.value?.collectors?.find((collector) => collector.collectorUserId === userID)?.status || ''
+})
 const backPath = computed(() => {
   const requested = String(route.query.return || '')
   if (requested.startsWith('/') && !requested.startsWith('//')) return requested
@@ -68,9 +88,10 @@ const conversationHasActiveWork = computed(() => {
 
 async function toggleChat(current: any) {
   if (current.collectionStatus === 'detached') return
-  if (current.collectionStatus === 'collecting') {
-    await store.pauseConversation(sourceKey.value, current.externalId || current.id)
-    toast('已停止采集')
+  if (myCollectorStatus.value === 'active') {
+    await setConversationCollectorPaused(conversationId.value, true)
+    await store.loadConversation(sourceKey.value, conversationId.value, true)
+    toast('已停止我的采集')
     return
   }
   pendingResumeChat.value = current as InfoChat
@@ -82,11 +103,16 @@ async function confirmResume() {
   if (!current || current.collectionStatus === 'detached' || resumeLoading.value) return
   resumeLoading.value = true
   try {
-    await store.resumeConversation(sourceKey.value, current.id)
+    try {
+      await setConversationCollectorPaused(conversationId.value, false)
+    } catch (error: any) {
+      if (error?.code !== 'collector_not_found') throw error
+      await addConversationCollector(conversationId.value)
+    }
     await store.loadConversation(sourceKey.value, conversationId.value, true)
     resumeDialogVisible.value = false
     pendingResumeChat.value = null
-    toast('已恢复采集')
+    toast('已恢复我的采集')
   } catch (error: any) {
     MessagePlugin.error(error?.message || '无法恢复采集')
   } finally {

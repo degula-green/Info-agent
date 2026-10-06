@@ -85,6 +85,21 @@ class UnreadableResearch(RecordingResearch):
         )
 
 
+class EmptyResearch(RecordingResearch):
+    """Returns no evidence so the no-result branch is exercised."""
+
+    def execute(self, arguments):  # type: ignore[override]
+        self.requests.append(arguments.request)
+        return {
+            "request": arguments.request,
+            "urls": list(arguments.urls),
+            "queries": list(arguments.queries),
+            "include_domains": [],
+            "evidence": [],
+            "warnings": ["no_results"],
+        }
+
+
 class ScriptedWebPlanner:
     """The Planner stand-in the router sends web.research turns to."""
 
@@ -290,22 +305,41 @@ def test_an_unanswered_url_answer_is_not_marked_success() -> None:
         f"提供的 evidence 中未提及网址 {URL} 的相关内容。",
         citations=[],
     )
+    # The page could not be read at all, which is the case the quality gate
+    # exists for: there is no fetched evidence for the requested URL.
+    container, store, _research = build(
+        web_intent="web.research",
+        research=EmptyResearch(),
+        answer_provider=provider,
+    )
+    task = create_task(container, text=f"{URL} 这个网址在讲什么？")
+
+    # The page could not be read, so the honest verdict is that the requested
+    # URL was not answered; it must not be reported as a success.
+    assert container.execution_service.run_task(task.task_id) == "failed"
+    error = store.get_task(task.task_id).last_error
+    assert error["code"] == "requested_url_unanswered"
+
+
+def test_a_read_url_comparison_with_a_not_mentioned_clause_still_succeeds() -> None:
+    """A grounded comparison may say "the material does not mention X"."""
+    provider = FakeAnswerProvider(
+        f"该协议已读取。对照公司材料，部分条款未提及，但材料与协议比对结论明确。",
+        citations=[{"evidence_id": "ev-flow", "quote": "正文"}],
+    )
     container, store, _research = build(
         web_intent="web.research",
         answer_provider=provider,
     )
     task = create_task(container, text=f"{URL} 这个网址在讲什么？")
 
-    assert container.execution_service.run_task(task.task_id) == "failed"
-    error = store.get_task(task.task_id).last_error
-    assert error["code"] == "requested_url_unanswered"
-    assert URL in error["message"]
+    assert container.execution_service.run_task(task.task_id) == "succeeded"
 
-
-def test_an_uncited_web_answer_is_not_marked_success() -> None:
+def test_an_uncited_web_answer_with_no_evidence_is_not_marked_success() -> None:
     provider = FakeAnswerProvider("这是整理后的回答", citations=[])
     container, store, _research = build(
         web_intent="web.research",
+        research=EmptyResearch(),
         answer_provider=provider,
     )
     task = create_task(container, text="搜索一下公开资料并总结")
@@ -315,6 +349,24 @@ def test_an_uncited_web_answer_is_not_marked_success() -> None:
         store.get_task(task.task_id).last_error["code"]
         == "uncited_web_answer"
     )
+
+
+def test_a_no_evidence_web_search_completes_as_not_found() -> None:
+    provider = FakeAnswerProvider(
+        "未找到关于该主题的可靠公开来源。",
+        citations=[],
+    )
+    container, store, _research = build(
+        web_intent="web.research",
+        research=EmptyResearch(),
+        answer_provider=provider,
+    )
+    task = create_task(container, text="搜索一下北京市网络协议是什么")
+
+    assert container.execution_service.run_task(task.task_id) == "succeeded"
+    result = store.get_task(task.task_id).result
+    assert "未找到" in result["answer"]
+    assert result["citations"] == []
 
 
 def test_a_to_do_that_mentions_a_link_does_not_run_research() -> None:

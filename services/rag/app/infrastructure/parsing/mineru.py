@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import http.client
 import json
-import mimetypes
+import logging
+import socket
+import ssl
 import time
+import urllib.parse
 import urllib.request
 import uuid
 import zipfile
@@ -18,6 +22,8 @@ from app.infrastructure.parsing.local import markdown_blocks, normalize_newlines
 SUPPORTED_MINERU = {"pdf", "docx", "pptx", "xlsx", "png", "jpg", "jpeg"}
 DONE_STATES = {"done", "success", "succeeded", "completed", "finished"}
 FAILED_STATES = {"failed", "error", "cancelled", "canceled"}
+
+logger = logging.getLogger("rag.mineru")
 
 
 class MinerUError(RuntimeError):
@@ -95,18 +101,60 @@ class MinerUClient:
         if not url:
             raise MinerUError("MinerU task completed without a result ZIP")
         destination.parent.mkdir(parents=True, exist_ok=True)
-        request = urllib.request.Request(url, headers={"Accept": "application/zip"})
-        try:
-            with urllib.request.urlopen(request, timeout=settings.mineru_result_download_timeout_seconds) as response:
-                with destination.open("wb") as stream:
-                    while True:
-                        chunk = response.read(1024 * 1024)
-                        if not chunk:
-                            break
-                        stream.write(chunk)
-        except Exception as exc:
-            raise MinerUError("MinerU result download failed", retryable=True) from exc
-        return destination
+        attempts = max(1, int(settings.mineru_result_download_attempts))
+        failure: Exception | None = None
+        host = urllib.parse.urlsplit(url).hostname or ""
+        # A fake-IP proxy answers with an unroutable 198.18/15 address for hosts
+        # it does not carry. Detecting that up front skips a connection attempt
+        # that is guaranteed to fail and wastes part of the retry budget.
+        poisoned = _resolution_is_fake(host)
+        if poisoned:
+            logger.info(
+                "MinerU result host %s resolves into the fake-IP range; using DoH first",
+                host,
+            )
+        for attempt in range(attempts):
+            if not poisoned:
+                try:
+                    _stream_download(
+                        url,
+                        destination,
+                        timeout=settings.mineru_result_download_timeout_seconds,
+                    )
+                    return destination
+                except Exception as exc:
+                    failure = exc
+            # The host may have resolved through a fake-IP proxy that hands out
+            # an unroutable 198.18/15 address. Re-resolve it over DoH and retry
+            # the real address; the certificate is still checked against the
+            # hostname, so this cannot silently accept the wrong host.
+            addresses = _resolve_result_addresses(url)
+            if not addresses:
+                logger.warning(
+                    "MinerU result download failed and DoH returned no address: %s",
+                    failure,
+                )
+            for address in addresses:
+                try:
+                    _stream_download_via_address(
+                        url,
+                        address,
+                        destination,
+                        timeout=settings.mineru_result_download_timeout_seconds,
+                    )
+                    if attempt:
+                        logger.info(
+                            "MinerU result downloaded via DoH address %s on attempt %s",
+                            address,
+                            attempt + 1,
+                        )
+                    return destination
+                except Exception as exc:
+                    failure = exc
+            if attempt + 1 < attempts:
+                time.sleep(min(2**attempt, 5))
+        logger.warning("MinerU result download failed after %s attempts: %s", attempts, failure)
+        raise MinerUError("MinerU result download failed", retryable=True) from failure
 
     def _require_configured(self) -> None:
         if not self.base_url or not settings.mineru_api_token:
@@ -156,17 +204,166 @@ class MinerUClient:
         raise MinerUError("MinerU API request failed", retryable=True)
 
     def _upload(self, url: str, path: Path) -> None:
-        request = urllib.request.Request(
-            url,
-            data=path.read_bytes(),
-            headers={"Content-Type": mimetypes.guess_type(path.name)[0] or "application/octet-stream"},
-            method="PUT",
+        # MinerU hands out a presigned OSS URL. The signature covers the exact
+        # header set, and OSS rejects the request with 403 SignatureDoesNotMatch
+        # as soon as a Content-Type is present. urllib always injects one for a
+        # non-empty body, so the PUT is issued over http.client instead: that
+        # sends only Host/Content-Length and keeps the signature valid.
+        body = path.read_bytes()
+        parsed = urllib.parse.urlsplit(url)
+        connection_cls = (
+            http.client.HTTPSConnection
+            if parsed.scheme == "https"
+            else http.client.HTTPConnection
         )
+        connection = connection_cls(parsed.netloc, timeout=settings.mineru_http_timeout_seconds)
+        target = parsed.path + (f"?{parsed.query}" if parsed.query else "")
         try:
-            with urllib.request.urlopen(request, timeout=settings.mineru_http_timeout_seconds):
-                return
+            connection.request("PUT", target, body=body)
+            response = connection.getresponse()
+            response.read()
+            if response.status >= 300:
+                raise MinerUError(f"upload to MinerU failed ({response.status})", retryable=True)
+        except MinerUError:
+            raise
         except Exception as exc:
             raise MinerUError("upload to MinerU failed", retryable=True) from exc
+        finally:
+            connection.close()
+
+
+def _stream_download(url: str, destination: Path, *, timeout: float) -> None:
+    request = urllib.request.Request(url, headers={"Accept": "application/zip"})
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        _write_stream(response, destination)
+
+
+def _write_stream(response: Any, destination: Path) -> None:
+    with destination.open("wb") as stream:
+        while True:
+            chunk = response.read(1024 * 1024)
+            if not chunk:
+                break
+            stream.write(chunk)
+
+
+class _SniHttpsConnection(http.client.HTTPSConnection):
+    """Reach a resolved address while still presenting the real hostname.
+
+    Certificate validation runs against ``hostname``, so dodging a poisoned
+    resolver cannot quietly accept a certificate for the wrong host.
+    """
+
+    def __init__(self, address: str, hostname: str, **kwargs: Any) -> None:
+        super().__init__(address, **kwargs)
+        self._server_hostname = hostname
+
+    def connect(self) -> None:
+        self.sock = socket.create_connection((self.host, self.port), self.timeout)
+        self.sock = self._context.wrap_socket(
+            self.sock, server_hostname=self._server_hostname
+        )
+
+
+def _stream_download_via_address(
+    url: str, address: str, destination: Path, *, timeout: float
+) -> None:
+    parts = urllib.parse.urlsplit(url)
+    if parts.scheme != "https" or not parts.hostname:
+        raise MinerUError("MinerU result URL is not a usable HTTPS URL")
+    target = parts.path or "/"
+    if parts.query:
+        target = f"{target}?{parts.query}"
+    connection = _SniHttpsConnection(
+        address,
+        parts.hostname,
+        port=parts.port or 443,
+        timeout=timeout,
+        context=ssl.create_default_context(),
+    )
+    try:
+        connection.request(
+            "GET",
+            target,
+            headers={"Host": parts.hostname, "Accept": "application/zip"},
+        )
+        response = connection.getresponse()
+        if response.status != 200:
+            raise MinerUError(
+                f"MinerU result download failed ({response.status})", retryable=True
+            )
+        _write_stream(response, destination)
+    finally:
+        connection.close()
+
+
+def _resolution_is_fake(host: str) -> bool:
+    """Whether the system resolver only offers an unroutable fake-IP address."""
+
+    if not host:
+        return False
+    try:
+        infos = socket.getaddrinfo(host, None, proto=socket.IPPROTO_TCP)
+    except OSError:
+        return False
+    addresses = {info[4][0] for info in infos}
+    return bool(addresses) and all(_is_fake_address(item) for item in addresses)
+
+
+def _is_fake_address(address: str) -> bool:
+    """198.18.0.0/15 is the range a fake-IP proxy hands out for unrouted hosts."""
+
+    parts = str(address).split(".")
+    if len(parts) != 4:
+        return False
+    try:
+        numbers = [int(part) for part in parts]
+    except ValueError:
+        return False
+    return numbers[0] == 198 and numbers[1] in (18, 19)
+
+
+def _resolve_result_addresses(url: str) -> list[str]:
+    """Real IPv4 addresses for the result host, or an empty list.
+
+    A fake-IP proxy answers with an unroutable 198.18/15 address for hosts it
+    does not carry, so the system resolver is not trustworthy here. DNS over
+    HTTPS goes out over a connection that already works and returns the address
+    the direct download can actually reach.
+    """
+
+    if not settings.mineru_result_doh_enabled:
+        return []
+    host = urllib.parse.urlsplit(url).hostname
+    endpoint = (settings.mineru_result_doh_url or "").rstrip("/")
+    if not host or not endpoint:
+        return []
+    request = urllib.request.Request(
+        f"{endpoint}?name={urllib.parse.quote(host)}&type=A",
+        headers={"accept": "application/dns-json"},
+    )
+    try:
+        with urllib.request.urlopen(
+            request, timeout=settings.mineru_result_doh_timeout_seconds
+        ) as response:
+            body = json.loads(response.read().decode("utf-8", "replace"))
+    except Exception:
+        return []
+    answers = body.get("Answer") if isinstance(body, dict) else None
+    addresses: list[str] = []
+    for answer in answers or []:
+        if not isinstance(answer, dict):
+            continue
+        try:
+            record_type = int(answer.get("type") or 0)
+        except (TypeError, ValueError):
+            continue
+        if record_type != 1:
+            continue
+        value = str(answer.get("data") or "").strip()
+        if value and value not in addresses:
+            addresses.append(value)
+    return addresses
 
 
 def safe_extract_zip(archive: Path, destination: Path) -> list[Path]:
@@ -360,6 +557,13 @@ def _find_url(value: Any, keys: tuple[str, ...]) -> str | None:
             found = _find_url(nested, keys)
             if found:
                 return found
+    elif isinstance(value, list):
+        # Batch responses put the result entries in a list
+        # (data.extract_result = [...]), so lists must be walked too.
+        for item in value:
+            found = _find_url(item, keys)
+            if found:
+                return found
     return None
 
 
@@ -370,10 +574,24 @@ def _state(value: Any) -> str:
     direct = str(data.get("state") or data.get("status") or data.get("task_state") or "").lower()
     if direct:
         return direct
+    # The single-file endpoint reports one state; the batch endpoint returns a
+    # list of entries. A batch is "done" only when every entry finished, and
+    # any failed entry makes the whole batch failed.
     extract = data.get("extract_result")
-    if isinstance(extract, dict):
-        return str(extract.get("state") or extract.get("status") or "").lower()
-    return ""
+    entries = extract if isinstance(extract, list) else [extract] if isinstance(extract, dict) else []
+    states = [
+        str(entry.get("state") or entry.get("status") or "").lower()
+        for entry in entries
+        if isinstance(entry, dict)
+    ]
+    states = [state for state in states if state]
+    if not states:
+        return ""
+    if any(state in FAILED_STATES for state in states):
+        return "failed"
+    if all(state in DONE_STATES for state in states):
+        return "done"
+    return states[0]
 
 
 def _find_auxiliary_files(root: Path) -> dict[str, str]:

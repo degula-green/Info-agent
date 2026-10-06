@@ -208,7 +208,6 @@ const emit = defineEmits<{ (event: 'request-expand'): void }>()
 const todoLedger = useTodoLedgerStore()
 
 const POLL_MS = 5000
-const VISIBLE_LIMIT = 5
 
 const drafts = ref<ScheduleDraft[]>([])
 const finished = ref<ScheduleDraft[]>([])
@@ -245,10 +244,9 @@ let pollTimer: number | undefined
 const pendingCount = computed(() => drafts.value.length)
 const visibleDrafts = computed(() => {
   const live = [...drafts.value].sort((left, right) => draftSortKey(left) - draftSortKey(right))
-  const shown = live.slice(0, VISIBLE_LIMIT)
-  const shownIDs = new Set(shown.map((draft) => draft.taskId))
+  const shownIDs = new Set(live.map((draft) => draft.taskId))
   const done = finished.value.filter((draft) => !shownIDs.has(draft.taskId))
-  return [...shown, ...done]
+  return [...live, ...done]
 })
 const collapsedTitle = computed(() => (pendingCount.value ? `待办 · ${pendingCount.value} 条待确认` : '待办'))
 
@@ -538,7 +536,7 @@ onUnmounted(() => {
   max-height: 36vh;
   min-height: 0;
   overflow: hidden;
-  margin: 0 6px 6px;
+  margin: 12px 6px 6px;
   padding: 6px;
   border-radius: 10px;
   background: var(--td-bg-color-container, #fff);

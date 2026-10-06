@@ -31,6 +31,47 @@ from app.understanding.schema import (
 DEFAULT_LAYAYA_MIN_CONFIDENCE = 0.80
 DEFAULT_LAYAYA_MIN_MARGIN = 0.15
 
+EVIDENCE_PLAN_NAME = "evidence_plan"
+# Below this the source verdict is treated as "not judged" and the planner
+# applies its own default. It is deliberately looser than the intent gate: the
+# question only has three options, so a modest confidence still carries signal.
+EVIDENCE_PLAN_MIN_CONFIDENCE = 0.5
+
+# The three answers map straight onto the source lists the planner consumes.
+EVIDENCE_PLAN_SOURCES: dict[str, tuple[str, ...]] = {
+    "attachment_only": ("attachment",),
+    "knowledge_only": ("knowledge",),
+    "attachment_and_knowledge": ("attachment", "knowledge"),
+}
+
+_EVIDENCE_PLAN_INSTRUCTION = (
+    "判断回答这条消息需要哪些证据来源。"
+    "用户明确要求只用附件、或问题明确限定在附件内容范围内时，选 attachment_only。"
+    "用户只问公司内部资料、且消息没有附件时，选 knowledge_only。"
+    "只要消息带有附件，而指令没有明确排除附件，就选 attachment_and_knowledge："
+    "回答可能需要公司资料补充，指令也没有限定来源，宁可多查也不要漏查。"
+)
+
+_EVIDENCE_PLAN_CRITERIA: dict[str, str] = {
+    "attachment_only": (
+        "The user explicitly wants the answer taken from the uploaded attachment "
+        "alone, or the question is clearly scoped to the attachment's contents."
+    ),
+    "knowledge_only": (
+        "The user asks only about company or internal knowledge and the message "
+        "carries no attachment."
+    ),
+    "attachment_and_knowledge": (
+        "The message carries an attachment and the instruction does not rule it "
+        "out, so the answer may need both the attachment and company knowledge. "
+        "Prefer this whenever the instruction is ambiguous about sources."
+    ),
+}
+
+_IMAGE_SUFFIXES = frozenset(
+    {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp", ".tif", ".tiff"}
+)
+
 
 def _ordered_criteria() -> dict[str, str]:
     """Criteria in the frozen contract order; option position is the model target."""
@@ -72,14 +113,108 @@ def verify_model_contract(model_dir: str | Path) -> dict[str, Any]:
     return config
 
 
-def build_question() -> dict[str, dict[str, Any]]:
-    return {
+def build_question(
+    *, include_evidence_plan: bool = False
+) -> dict[str, dict[str, Any]]:
+    """The typed questions sent to System One.
+
+    ``include_evidence_plan`` is off by default because the fine-tuned Laya
+    checkpoint is positionally bound to the intent question; only the cloud
+    backend is asked for the extra source decision.
+    """
+
+    questions: dict[str, dict[str, Any]] = {
         "intent": {
             "type": "choice",
             "instructions": LAYAYA_INSTRUCTION,
             "criteria": _ordered_criteria(),
         }
     }
+    if include_evidence_plan:
+        questions[EVIDENCE_PLAN_NAME] = {
+            "type": "choice",
+            "instructions": _EVIDENCE_PLAN_INSTRUCTION,
+            "criteria": dict(_EVIDENCE_PLAN_CRITERIA),
+        }
+    return questions
+
+
+def build_evidence_state(task: TaskEnvelope, text: str) -> dict[str, Any]:
+    """State for the source decision: the instruction plus what attachments exist.
+
+    The attachment *bodies* stay out on purpose. The question is which sources
+    the instruction calls for, and a long document would drown the very wording
+    that carries that signal.
+    """
+
+    state: dict[str, Any] = {"text": text}
+    attachment_ids = task.input.get("attachment_ids") or []
+    if not attachment_ids:
+        return state
+    has_text = bool(str(task.input.get("_attachment_excerpt") or "").strip())
+    attachments: list[dict[str, Any]] = []
+    for name in task.input.get("_attachment_file_names") or []:
+        file_name = str(name).strip()
+        if not file_name:
+            continue
+        attachments.append(
+            {
+                "name": file_name,
+                "kind": (
+                    "image"
+                    if Path(file_name).suffix.lower() in _IMAGE_SUFFIXES
+                    else "document"
+                ),
+                "has_text": has_text,
+            }
+        )
+    if not attachments:
+        attachments = [
+            {"name": "attachment", "kind": "document", "has_text": has_text}
+        ]
+    state["attachments"] = attachments
+    return state
+
+
+def parse_evidence_plan(
+    raw: Mapping[str, Any],
+) -> tuple[list[str], float, dict[str, float]]:
+    """Read the source answer, tolerating a backend that does not return one."""
+
+    answers = raw.get("answers")
+    if not isinstance(answers, Mapping):
+        return [], 0.0, {}
+    answer = answers.get(EVIDENCE_PLAN_NAME)
+    if not isinstance(answer, Mapping):
+        return [], 0.0, {}
+    sources = EVIDENCE_PLAN_SOURCES.get(str(answer.get("choice") or "").strip())
+    if sources is None:
+        return [], 0.0, {}
+
+    raw_confidence = answer.get("confidence")
+    if raw_confidence is None:
+        raw_confidence = answer.get("answer_confidence")
+    if isinstance(raw_confidence, bool) or not isinstance(
+        raw_confidence, (int, float)
+    ):
+        confidence = 0.0
+    else:
+        confidence = float(raw_confidence)
+        if not math.isfinite(confidence) or not 0.0 <= confidence <= 1.0:
+            confidence = 0.0
+
+    probabilities: dict[str, float] = {}
+    raw_probabilities = answer.get("probabilities")
+    if isinstance(raw_probabilities, Mapping):
+        for name, value in raw_probabilities.items():
+            if (
+                isinstance(name, str)
+                and name
+                and not isinstance(value, bool)
+                and isinstance(value, (int, float))
+            ):
+                probabilities[name] = float(value)
+    return list(sources), confidence, probabilities
 
 
 def score_text(
@@ -154,6 +289,7 @@ class SystemOneUnderstandingProvider:
         min_margin: float = DEFAULT_LAYAYA_MIN_MARGIN,
         max_len: int | None = None,
         head_max_len: int | None = None,
+        request_evidence_plan: bool = False,
     ) -> None:
         self.client = client
         self.name = str(name)
@@ -162,6 +298,9 @@ class SystemOneUnderstandingProvider:
         self.min_margin = _clamp(min_margin)
         self.max_len = max_len
         self.head_max_len = head_max_len
+        # Only the cloud backend is asked to judge evidence sources. The local
+        # Laya checkpoint is fine-tuned for the intent question alone.
+        self.request_evidence_plan = bool(request_evidence_plan)
         self.last_call_count = 0
         self.last_fallback_reason: str | None = None
         self.last_answer_confidence: float | None = None
@@ -214,16 +353,24 @@ class SystemOneUnderstandingProvider:
         # planner. Laya keeps its own stricter fast-path gate.
         threshold = max(self.min_confidence, runtime_threshold)
         self.last_call_count = 1
+        # Only the cloud backend gets the source question, and with it the
+        # attachment inventory. The local checkpoint keeps the minimal state it
+        # was trained on: extra metadata moves its distribution substantially.
+        if self.request_evidence_plan:
+            state: dict[str, Any] = build_evidence_state(task, text)
+            questions = build_question(include_evidence_plan=True)
+        else:
+            state = {"text": text}
+            questions = build_question()
         raw = self.client.predict(
-            # Keep the state minimal. Adding metadata such as source_type moves
-            # the model's distribution substantially.
-            {"text": text},
-            build_question(),
+            state,
+            questions,
             max_len=self.max_len,
             head_max_len=self.head_max_len,
         )
         self.last_model = _response_model(raw)
         label, answer_confidence, probabilities = _interpret(raw, source=self.name)
+        evidence_sources, evidence_reason = self._resolve_evidence_plan(raw)
         ordered = sorted(probabilities.items(), key=lambda item: item[1], reverse=True)
         second_probability = ordered[1][1] if len(ordered) > 1 else 0.0
         margin = answer_confidence - second_probability
@@ -239,6 +386,8 @@ class SystemOneUnderstandingProvider:
                 margin,
                 probabilities,
                 "low_probability",
+                evidence_sources,
+                evidence_reason,
             )
         if margin < self.min_margin:
             return self._uncertain(
@@ -248,6 +397,8 @@ class SystemOneUnderstandingProvider:
                 margin,
                 probabilities,
                 "low_margin",
+                evidence_sources,
+                evidence_reason,
             )
         if label in INTENT_NAMES:
             competing = [
@@ -263,6 +414,8 @@ class SystemOneUnderstandingProvider:
                     margin,
                     probabilities,
                     "multiple_intents",
+                    evidence_sources,
+                    evidence_reason,
                 )
             return LayaEvaluation(
                 understanding=TaskUnderstanding(
@@ -278,6 +431,8 @@ class SystemOneUnderstandingProvider:
                     ],
                     confidence=answer_confidence,
                     reason=f"{self.name}: {label}",
+                    evidence_sources=evidence_sources,
+                    evidence_reason=evidence_reason,
                 ),
                 label=label,
                 answer_confidence=answer_confidence,
@@ -294,6 +449,8 @@ class SystemOneUnderstandingProvider:
                     intent_candidates=[],
                     confidence=answer_confidence,
                     reason=f"{self.name}: other_task",
+                    evidence_sources=evidence_sources,
+                    evidence_reason=evidence_reason,
                 ),
                 label=label,
                 answer_confidence=answer_confidence,
@@ -309,6 +466,8 @@ class SystemOneUnderstandingProvider:
                 intent_candidates=[],
                 confidence=answer_confidence,
                 reason=f"{self.name}: non_task",
+                evidence_sources=evidence_sources,
+                evidence_reason=evidence_reason,
             ),
             label=label,
             answer_confidence=answer_confidence,
@@ -316,6 +475,20 @@ class SystemOneUnderstandingProvider:
             probabilities=probabilities,
             accepted=True,
         )
+
+    def _resolve_evidence_plan(
+        self, raw: Mapping[str, Any]
+    ) -> tuple[list[str], str | None]:
+        """The judged sources, or empty when the question was not asked/answered."""
+
+        if not self.request_evidence_plan:
+            return [], None
+        sources, confidence, _ = parse_evidence_plan(raw)
+        if not sources:
+            return [], f"{self.name}: no source verdict"
+        if confidence < EVIDENCE_PLAN_MIN_CONFIDENCE:
+            return [], f"{self.name}: source verdict below threshold"
+        return sources, f"{self.name}: {'+'.join(sources)}"
 
     def _uncertain(
         self,
@@ -325,6 +498,8 @@ class SystemOneUnderstandingProvider:
         margin: float,
         probabilities: dict[str, float],
         reason: str,
+        evidence_sources: list[str] | None = None,
+        evidence_reason: str | None = None,
     ) -> LayaEvaluation:
         self.last_fallback_reason = reason
         return LayaEvaluation(
@@ -336,6 +511,8 @@ class SystemOneUnderstandingProvider:
                 intent_candidates=[],
                 confidence=answer_confidence,
                 reason=f"{self.name} uncertain: {reason}",
+                evidence_sources=list(evidence_sources or []),
+                evidence_reason=evidence_reason,
             ),
             label=label,
             answer_confidence=answer_confidence,
@@ -387,6 +564,9 @@ class JevUnderstandingProvider(SystemOneUnderstandingProvider):
             min_margin=min_margin,
             max_len=max_len,
             head_max_len=head_max_len,
+            # The cloud backend can answer the extra source question; the
+            # fine-tuned local checkpoint cannot.
+            request_evidence_plan=True,
         )
 
 

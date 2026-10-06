@@ -1,5 +1,9 @@
 <template>
   <article class="agent-user-message">
+    <span v-for="file in attachments" :key="file.id" class="agent-user-message__file">
+      <t-icon name="file" />
+      <span>{{ file.name }}</span>
+    </span>
     <div class="agent-user-message__bubble">{{ text }}</div>
     <div class="agent-user-message__actions" aria-label="问题操作">
       <button type="button" title="复制问题" aria-label="复制问题" @click="$emit('copy')">
@@ -15,6 +19,7 @@
 <script setup lang="ts">
 defineProps<{
   text: string
+  attachments?: { id: string; name: string }[]
 }>()
 
 defineEmits<{
@@ -32,6 +37,25 @@ defineEmits<{
   flex-direction: column;
   align-items: flex-end;
   gap: 6px;
+}
+
+.agent-user-message__file {
+  display: inline-flex;
+  max-width: min(320px, 100%);
+  align-items: center;
+  gap: 5px;
+  padding: 4px 9px;
+  border: 1px solid var(--td-component-stroke);
+  border-radius: 8px;
+  background: var(--td-bg-color-container);
+  color: var(--td-text-color-secondary);
+  font-size: 12px;
+}
+
+.agent-user-message__file > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .agent-user-message__bubble {

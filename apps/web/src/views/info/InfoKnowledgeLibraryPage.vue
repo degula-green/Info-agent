@@ -89,8 +89,18 @@
         <span class="conversation-card__metrics">
           <span><t-icon name="chat-bubble" />{{ item.message_count || 0 }} 条消息</span>
           <span><t-icon name="file" />{{ item.attachment_count || 0 }} 个文件</span>
+          <span v-if="isCollaborativeConversation(item)">我的采集：{{ myCollectorLabel(item) }}</span>
+          <span v-if="isCollaborativeConversation(item)">主采集者：{{ primaryCollectorLabel(item) }}</span>
         </span>
         <span class="conversation-card__status" :class="`conversation-card__status--${collectionStatus(item)}`"><i />{{ collectionStatusLabel(item.collection_status) }}</span>
+        <span
+          v-if="isCollaborativeConversation(item)"
+          class="conversation-card__status"
+          role="button"
+          tabindex="0"
+          @click.stop="toggleMyCollector(item)"
+          @keydown.enter.stop.prevent="toggleMyCollector(item)"
+        >{{ myCollectorActionLabel(item) }}</span>
       </button>
     </div>
     <div v-else-if="filteredItems.length" class="library-list">
@@ -129,10 +139,10 @@
         <div v-if="discoveryLoading" class="discovery-dialog__loading"><t-loading text="正在发现会话..." /></div>
         <div v-else-if="discoveryError" class="library-alert"><t-icon name="error-circle" /><span>{{ discoveryError }}</span></div>
         <div v-else class="discovery-list">
-          <button v-for="session in discoverySessions" :key="session.external_id" type="button" class="discovery-row" :disabled="Boolean(session.attached_conversation_id)" @click="attach(session)">
+          <button v-for="session in discoverySessions" :key="session.external_id" type="button" class="discovery-row" :disabled="discoverySessionAction(session) === 'attached'" @click="handleDiscoverySession(session)">
             <span class="discovery-row__icon"><t-icon :name="isPrivateLibrary ? 'user' : 'chat'" /></span>
             <span><strong>{{ session.name }}</strong><small>{{ session.member_count }} 位成员 · {{ session.external_id }}</small></span>
-            <span class="discovery-row__action">{{ session.attached_conversation_id ? '已接入' : '接入' }}</span>
+            <span class="discovery-row__action">{{ discoverySessionLabel(session) }}</span>
           </button>
           <p v-if="!discoverySessions.length" class="discovery-empty">没有发现可接入会话。</p>
         </div>
@@ -179,9 +189,9 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { MessagePlugin } from 'tdesign-vue-next'
 import { useRoute, useRouter } from 'vue-router'
-import { createLocalUploadTask, discoverConversationsByType, getKnowledgeLibraryItems, sharePrivateResources, uploadLocalContent, type AvailableConversationDTO, type KnowledgeLibraryDTO, type KnowledgeLibraryItemDTO } from '@/api/info-knowledge'
+import { addConversationCollector, createLocalUploadTask, discoverConversationsByType, getKnowledgeLibraryItems, setConversationCollectorPaused, sharePrivateResources, uploadLocalContent, type AvailableConversationDTO, type KnowledgeLibraryDTO, type KnowledgeLibraryItemDTO } from '@/api/info-knowledge'
 import { searchGlobal, searchKnowledge } from '@/api/rag'
-import { isHistoryStartAllowed, knowledgeDisplayLabel, mapKnowledgeDisplayStatus } from '@/knowledge-mapping'
+import { discoveryAction, isHistoryStartAllowed, knowledgeDisplayLabel, mapKnowledgeDisplayStatus } from '@/knowledge-mapping'
 import InfoAttachmentPreview from '@/components/InfoAttachmentPreview.vue'
 import InfoSearchPreviewDialog from '@/components/InfoSearchPreviewDialog.vue'
 import { useSearchResultNavigation } from '@/composables/useSearchResultNavigation'
@@ -239,6 +249,7 @@ const discoveryVisible = ref(false); const discoveryLoading = ref(false); const 
 const availableConnectors = computed(() => store.sources.filter((source) => source.bound && source.available !== false))
 const discoverySessions = computed(() => (discovery.value?.conversations || []).filter((item) => !discoveryQuery.value.trim() || `${item.name} ${item.external_id}`.toLowerCase().includes(discoveryQuery.value.trim().toLowerCase())))
 const collectDialogVisible = ref(false); const pendingGroupSession = ref<AvailableConversationDTO | null>(null); const collectStart = ref('')
+const collectorActionBusy = ref('')
 function localDateTimeInput(value: Date) {
   const year = value.getFullYear(); const month = String(value.getMonth() + 1).padStart(2, '0'); const day = String(value.getDate()).padStart(2, '0')
   const hours = String(value.getHours()).padStart(2, '0'); const minutes = String(value.getMinutes()).padStart(2, '0')
@@ -271,6 +282,56 @@ function collectionStatusLabel(value?: string) {
     case 'missing': return '已不存在'
     default: return '未开始'
   }
+}
+function shortCollectorName(value?: string) {
+  const text = String(value || '').trim()
+  return text.length > 12 ? `${text.slice(0, 8)}…` : text || '暂无'
+}
+function isCollaborativeConversation(item: KnowledgeLibraryItemDTO) {
+  return item.kind === 'conversation' && item.conversation_type === 'group' && Boolean(item.conversation_id)
+}
+function myCollectorLabel(item: KnowledgeLibraryItemDTO) {
+  if (!item.current_collector_id) return '未加入'
+  if (item.current_collector_status === 'paused') return '已停止'
+  if (item.current_collector_status === 'unavailable') return '暂不可用'
+  return '采集中'
+}
+function primaryCollectorLabel(item: KnowledgeLibraryItemDTO) {
+  return shortCollectorName(item.primary_collector_name || item.primary_collector_user_id)
+}
+function myCollectorActionLabel(item: KnowledgeLibraryItemDTO) {
+  if (!item.current_collector_id) return '加入协同采集'
+  if (item.current_collector_status === 'paused') return '恢复我的采集'
+  return '停止我的采集'
+}
+async function toggleMyCollector(item: KnowledgeLibraryItemDTO) {
+  if (!item.current_collector_id) {
+    await joinCollector(item.conversation_id || '')
+    return
+  }
+  await setMyCollectorPaused(item, item.current_collector_status !== 'paused')
+}
+function discoverySessionAction(session: AvailableConversationDTO) {
+  if (!session.attached_conversation_id) return discoveryAction({})
+  if (session.conversation_type !== 'group') return 'attached'
+  return discoveryAction({
+    attachedConversationId: session.attached_conversation_id,
+    currentUserCollector: session.current_user_collector,
+  })
+}
+function discoverySessionLabel(session: AvailableConversationDTO) {
+  const action = discoverySessionAction(session)
+  if (action === 'join') return '加入协同采集'
+  if (action === 'attached') return '已接入'
+  return '接入'
+}
+function collectorErrorMessage(error: any, fallback: string) {
+  const code = String(error?.code || '')
+  if (code === 'connector_not_found') return '请先绑定对应平台的连接器后再加入协同采集'
+  if (code === 'forbidden') return '当前账号不符合协同采集条件，请确认已加入同一组织并绑定同一工作区的连接器'
+  if (code === 'collector_not_allowed') return '只有群聊支持协同采集'
+  if (code === 'conversation_not_found') return '会话不存在或已解除接入'
+  return error?.message || fallback
 }
 function secondary(item: KnowledgeLibraryItemDTO) { if (item.kind === 'conversation') return `${item.conversation_type === 'private' ? '私聊' : '群聊'} · ${item.conversation_name || item.external_conversation_id || ''}`; return item.excerpt || `${item.conversation_name || item.external_conversation_id || ''} · ${item.sent_at ? new Date(item.sent_at).toLocaleString('zh-CN') : ''}` }
 
@@ -413,11 +474,46 @@ async function loadDiscovery() {
     discovery.value = await discoverConversationsByType(connector.key, isPrivateLibrary.value ? 'private' : 'group')
   } catch (e: any) { discoveryError.value = e?.message || '会话发现失败' } finally { discoveryLoading.value = false }
 }
+async function joinCollector(conversationID: string) {
+  if (!conversationID || collectorActionBusy.value) return
+  collectorActionBusy.value = conversationID
+  try {
+    await addConversationCollector(conversationID)
+    discoveryVisible.value = false
+    await loadItems()
+    MessagePlugin.success('已加入协同采集')
+  } catch (e: any) {
+    MessagePlugin.error(collectorErrorMessage(e, '加入协同采集失败'))
+  } finally {
+    collectorActionBusy.value = ''
+  }
+}
+async function setMyCollectorPaused(item: KnowledgeLibraryItemDTO, paused: boolean) {
+  if (!item.conversation_id || collectorActionBusy.value) return
+  collectorActionBusy.value = item.id
+  try {
+    await setConversationCollectorPaused(item.conversation_id, paused)
+    await loadItems()
+    MessagePlugin.success(paused ? '已停止我的采集' : '已恢复我的采集')
+  } catch (e: any) {
+    MessagePlugin.error(collectorErrorMessage(e, paused ? '停止采集失败' : '恢复采集失败'))
+  } finally {
+    collectorActionBusy.value = ''
+  }
+}
 async function attach(session: AvailableConversationDTO) {
   if (!discovery.value) return
+  if (discoverySessionAction(session) === 'join' && session.attached_conversation_id) {
+    await joinCollector(session.attached_conversation_id)
+    return
+  }
   pendingGroupSession.value = session
   collectStart.value = ''
   collectDialogVisible.value = true
+}
+async function handleDiscoverySession(session: AvailableConversationDTO) {
+  if (discoverySessionAction(session) === 'attached') return
+  await attach(session)
 }
 async function attachSession(session: AvailableConversationDTO, requestedStartAt: string | null = null) {
   if (!discovery.value) return

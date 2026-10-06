@@ -14,6 +14,7 @@ import {
   listPrivateAccessRequests,
   rejectPrivateAccessRequest,
   removeConversationCollector,
+  setConversationCollectorPaused,
   setConversationStatus,
   unbindConnector,
 } from '../src/api/info-knowledge.ts'
@@ -66,6 +67,8 @@ test('connector, conversation, and attachment calls use the Knowledge contract',
   await attachConversation({ platform: 'feishu', externalConversationID: 'chat', conversationType: 'group', discoveryID: 'd1', organizationID: 'org', requestedStartAt: '2026-09-01T00:00:00Z' })
   await addConversationCollector('c1')
   await removeConversationCollector('c1', 'collector id')
+  await setConversationCollectorPaused('c1', true)
+  await setConversationCollectorPaused('c1', false)
   await setConversationStatus('c1', 'pause')
   await setConversationStatus('c1', 'resume')
   await getConversationDetail('c1')
@@ -80,6 +83,8 @@ test('connector, conversation, and attachment calls use the Knowledge contract',
   assert.ok(calls.every((call) => call.headers.get('X-Trace-ID')))
   assert.equal(calls.find((call) => call.url.endsWith('/connectors/feishu/authorize'))?.body, '{"intent":"rebind"}')
   assert.ok(calls.some((call) => call.url.endsWith('/conversations/c1/collectors/collector%20id') && call.method === 'DELETE'))
+  assert.ok(calls.some((call) => call.url.endsWith('/conversations/c1/collectors/me/pause') && call.method === 'POST'))
+  assert.ok(calls.some((call) => call.url.endsWith('/conversations/c1/collectors/me/resume') && call.method === 'POST'))
   assert.equal(calls.find((call) => call.url.endsWith('/attachments/a1/content?action=download'))?.headers.get('Accept'), 'application/octet-stream')
 })
 

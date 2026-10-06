@@ -285,7 +285,7 @@ func (s *PostgresStore) ReplaceConnector(ctx context.Context, previousConnectorI
 	if _, err = tx.Exec(ctx, `UPDATE knowledge.wechat_collector_runtime SET status='stopped',stopped_at=now(),updated_at=now() WHERE connector_account_id=$1`, previousConnectorID); err != nil {
 		return nil, dbError(err)
 	}
-	if _, err = tx.Exec(ctx, `UPDATE knowledge.conversation_collectors SET status='unavailable',last_error='connector_replaced',updated_at=now() WHERE connector_account_id=$1 AND status<>'removed'`, previousConnectorID); err != nil {
+	if _, err = tx.Exec(ctx, `UPDATE knowledge.conversation_collectors SET status='unavailable',last_error='connector_replaced',updated_at=now() WHERE connector_account_id=$1 AND status='active'`, previousConnectorID); err != nil {
 		return nil, dbError(err)
 	}
 	row := tx.QueryRow(ctx, `INSERT INTO knowledge.connector_accounts (id,owner_user_id,platform,platform_workspace_key,external_account_id,display_name,credential_ref,database_ref,token_expires_at,default_organization_id,status,last_error)
@@ -335,7 +335,7 @@ func (s *PostgresStore) BindConnector(ctx context.Context, previousConnectorID s
 		if _, err = tx.Exec(ctx, `UPDATE knowledge.wechat_collector_runtime SET status='stopped',stopped_at=$2,updated_at=$2 WHERE connector_account_id=$1`, previousConnectorID, now); err != nil {
 			return nil, dbError(err)
 		}
-		if _, err = tx.Exec(ctx, `UPDATE knowledge.conversation_collectors SET status='unavailable',last_error='connector_replaced',updated_at=$2 WHERE connector_account_id=$1 AND status<>'removed'`, previousConnectorID, now); err != nil {
+		if _, err = tx.Exec(ctx, `UPDATE knowledge.conversation_collectors SET status='unavailable',last_error='connector_replaced',updated_at=$2 WHERE connector_account_id=$1 AND status='active'`, previousConnectorID, now); err != nil {
 			return nil, dbError(err)
 		}
 	}
@@ -425,7 +425,7 @@ func (s *PostgresStore) RevokeConnector(ctx context.Context, userID, platformNam
 		_, err = tx.Exec(ctx, `UPDATE knowledge.external_identities AS identity SET mapped_user_id=NULL,mapping_status='unmapped',mapped_at=NULL,updated_at=now() WHERE identity.platform=$2 AND identity.mapped_user_id=$1::uuid AND EXISTS (SELECT 1 FROM knowledge.connector_accounts AS connector WHERE connector.id=$3::uuid AND connector.external_account_id=identity.external_user_id)`, userID, platformName, id)
 	}
 	if err == nil {
-		_, err = tx.Exec(ctx, `UPDATE knowledge.conversation_collectors SET status='unavailable',last_error='connector_revoked',updated_at=now() WHERE connector_account_id=$1 AND status<>'removed'`, id)
+		_, err = tx.Exec(ctx, `UPDATE knowledge.conversation_collectors SET status='unavailable',last_error='connector_revoked',updated_at=now() WHERE connector_account_id=$1 AND status='active'`, id)
 	}
 	if err != nil {
 		return dbError(err)
@@ -553,7 +553,7 @@ func (s *PostgresStore) CompleteAgentPairing(ctx context.Context, input AgentPai
 		if _, err = tx.Exec(ctx, `UPDATE knowledge.agent_device_assignments SET status='revoked',revoked_by_user_id=$2::uuid,revoked_at=$3 WHERE connector_id=$1::uuid AND status='active' AND revoked_at IS NULL`, connector.ID, nilString(pairing.OwnerUserID), now); err != nil {
 			return nil, dbError(err)
 		}
-		if _, err = tx.Exec(ctx, `UPDATE knowledge.conversation_collectors SET status='unavailable',last_error='connector_revoked',updated_at=$2 WHERE connector_account_id=$1 AND status<>'removed'`, connector.ID, now); err != nil {
+		if _, err = tx.Exec(ctx, `UPDATE knowledge.conversation_collectors SET status='unavailable',last_error='connector_revoked',updated_at=$2 WHERE connector_account_id=$1 AND status='active'`, connector.ID, now); err != nil {
 			return nil, dbError(err)
 		}
 	}
@@ -1211,12 +1211,58 @@ func scanCollector(row rowScanner) (*domain.Collector, error) {
 	return &c, err
 }
 func (s *PostgresStore) AddCollector(ctx context.Context, input CollectorInput) (*domain.Collector, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, dbError(err)
+	}
+	defer tx.Rollback(ctx)
+
+	var existingID, existingUserID, existingStatus string
+	err = tx.QueryRow(ctx, `SELECT id::text,collector_user_id::text,status
+		FROM knowledge.conversation_collectors
+		WHERE conversation_ingestion_id=$1 AND connector_account_id=$2 AND status<>'removed'
+		FOR UPDATE`, input.ConversationID, input.ConnectorAccountID).Scan(&existingID, &existingUserID, &existingStatus)
+	if err == nil {
+		if existingUserID != input.CollectorUserID {
+			return nil, apperror.New("collector_already_exists", "collector already exists", 409, false)
+		}
+		if existingStatus != domain.CollectorActive {
+			if _, err = tx.Exec(ctx, `UPDATE knowledge.conversation_collectors
+				SET status='active',next_poll_at=NULL,last_error=NULL,updated_at=now()
+				WHERE id=$1`, existingID); err != nil {
+				return nil, dbError(err)
+			}
+			if _, err = tx.Exec(ctx, `UPDATE knowledge.conversation_ingestions
+				SET status='active',pause_reason=NULL,updated_at=now()
+				WHERE id=$1 AND status='paused' AND pause_reason='no_available_collector'`, input.ConversationID); err != nil {
+				return nil, dbError(err)
+			}
+		}
+		c, scanErr := scanCollector(tx.QueryRow(ctx, `SELECT `+collectorColumns+` FROM knowledge.conversation_collectors WHERE id=$1`, existingID))
+		if scanErr != nil {
+			return nil, dbError(scanErr)
+		}
+		if err = tx.Commit(ctx); err != nil {
+			return nil, dbError(err)
+		}
+		return c, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return nil, dbError(err)
+	}
+
 	id := uuid.NewString()
-	c, err := scanCollector(s.pool.QueryRow(ctx, `INSERT INTO knowledge.conversation_collectors (id,conversation_ingestion_id,connector_account_id,collector_user_id,collector_role,status) VALUES ($1,$2,$3,$4,$5,'active') RETURNING `+collectorColumns, id, input.ConversationID, input.ConnectorAccountID, input.CollectorUserID, input.Role))
+	c, err := scanCollector(tx.QueryRow(ctx, `INSERT INTO knowledge.conversation_collectors (id,conversation_ingestion_id,connector_account_id,collector_user_id,collector_role,status) VALUES ($1,$2,$3,$4,$5,'active') RETURNING `+collectorColumns, id, input.ConversationID, input.ConnectorAccountID, input.CollectorUserID, input.Role))
 	if isUnique(err) {
 		return nil, apperror.New("collector_already_exists", "collector already exists or primary collector is occupied", 409, false)
 	}
-	return c, dbError(err)
+	if err != nil {
+		return nil, dbError(err)
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return nil, dbError(err)
+	}
+	return c, nil
 }
 func (s *PostgresStore) GetCollector(ctx context.Context, id string) (*domain.Collector, error) {
 	c, err := scanCollector(s.pool.QueryRow(ctx, `SELECT `+collectorColumns+` FROM knowledge.conversation_collectors WHERE id=$1`, id))
@@ -1275,6 +1321,49 @@ func (s *PostgresStore) RemoveCollector(ctx context.Context, conversationID, col
 		return dbError(err)
 	}
 	return dbError(tx.Commit(ctx))
+}
+func (s *PostgresStore) SetCollectorStatus(ctx context.Context, conversationID, collectorID, status string, now time.Time) (*domain.Collector, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, dbError(err)
+	}
+	defer tx.Rollback(ctx)
+	tag, err := tx.Exec(ctx, `UPDATE knowledge.conversation_collectors
+		SET status=$3::varchar,next_poll_at=NULL,
+		    last_error=CASE WHEN $3::varchar='active' THEN NULL ELSE last_error END,
+		    updated_at=$4
+		WHERE id=$1 AND conversation_ingestion_id=$2 AND status<>'removed'`,
+		collectorID, conversationID, status, now)
+	if err != nil {
+		return nil, dbError(err)
+	}
+	if tag.RowsAffected() == 0 {
+		return nil, apperror.New("collector_not_found", "collector not found", 404, false)
+	}
+	if status == domain.CollectorPaused {
+		if _, err = tx.Exec(ctx, `UPDATE knowledge.conversation_ingestions
+			SET status='paused',pause_reason='no_available_collector',updated_at=$2
+			WHERE id=$1 AND NOT EXISTS (
+				SELECT 1 FROM knowledge.conversation_collectors
+				WHERE conversation_ingestion_id=$1 AND status='active'
+			)`, conversationID, now); err != nil {
+			return nil, dbError(err)
+		}
+	} else if status == domain.CollectorActive {
+		if _, err = tx.Exec(ctx, `UPDATE knowledge.conversation_ingestions
+			SET status='active',pause_reason=NULL,updated_at=$2
+			WHERE id=$1 AND status='paused' AND pause_reason='no_available_collector'`, conversationID, now); err != nil {
+			return nil, dbError(err)
+		}
+	}
+	c, err := scanCollector(tx.QueryRow(ctx, `SELECT `+collectorColumns+` FROM knowledge.conversation_collectors WHERE id=$1`, collectorID))
+	if err != nil {
+		return nil, dbError(err)
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return nil, dbError(err)
+	}
+	return c, nil
 }
 func (s *PostgresStore) SetConversationStatus(ctx context.Context, id, status, reason string) error {
 	// Cast the status parameter explicitly because PostgreSQL otherwise sees it
@@ -1861,7 +1950,7 @@ func (s *PostgresStore) Heartbeat(ctx context.Context, collectorID string, _ tim
 }
 
 func (s *PostgresStore) RecordCollectorFailure(ctx context.Context, collectorID, lastError string, nextPollAt, now time.Time) error {
-	tag, err := s.pool.Exec(ctx, `UPDATE knowledge.conversation_collectors SET last_attempt_at=$2,next_poll_at=$3,consecutive_failures=consecutive_failures+1,last_error=$4 WHERE id=$1 AND status<>'removed'`, collectorID, now, nilTime(nextPollAt), nilString(lastError))
+	tag, err := s.pool.Exec(ctx, `UPDATE knowledge.conversation_collectors SET last_attempt_at=$2,next_poll_at=$3,consecutive_failures=consecutive_failures+1,last_error=$4 WHERE id=$1 AND status='active'`, collectorID, now, nilTime(nextPollAt), nilString(lastError))
 	if err != nil {
 		return dbError(err)
 	}
@@ -4129,26 +4218,21 @@ func (s *PostgresStore) ListKnowledgeLibraries(ctx context.Context, userID, orga
 	// conversation total when they are projected into the same directory.
 	for _, definition := range definitions {
 		var conversationCount int
-		query := `SELECT COUNT(*) FROM knowledge.conversation_ingestions WHERE status IN ('active','paused','detached','error') AND `
-		args := []any{}
-		if definition.scope == "private" {
-			query += `owner_user_id=$1 AND conversation_type='private'`
-			args = append(args, userID)
-		} else {
-			query += `organization_id=$1 AND conversation_type='group'`
-			args = append(args, organizationID)
-		}
-		if definition.baseType == "private_conversation" {
-			// The private directory mirrors the private conversation list. Do not
-			// require a particular physical knowledge_base type here: historical
-			// Feishu/WeChat private chats may point at a legacy base row.
-		} else if definition.baseType == "organization_conversation" {
-			query += ` AND knowledge_base_id IN (SELECT id FROM knowledge.knowledge_bases WHERE base_type='organization_conversation' AND organization_id=$2)`
-			args = append(args, organizationID)
-		}
-		if definition.baseType == "organization_private_shared" {
+		var query string
+		var args []any
+		switch definition.baseType {
+		case "private_conversation":
+			query = `SELECT COUNT(*) FROM knowledge.conversation_ingestions WHERE status IN ('active','paused','detached','error') AND owner_user_id=$1 AND conversation_type='private' AND knowledge_base_id IN (SELECT id FROM knowledge.knowledge_bases WHERE base_type='private_conversation' AND owner_user_id=$2)`
+			args = []any{userID, userID}
+		case "organization_conversation":
+			query = `SELECT COUNT(*) FROM knowledge.conversation_ingestions WHERE status IN ('active','paused','detached','error') AND organization_id=$1 AND conversation_type='group' AND knowledge_base_id IN (SELECT id FROM knowledge.knowledge_bases WHERE base_type='organization_conversation' AND organization_id=$2)`
+			args = []any{organizationID, organizationID}
+		case "organization_private_shared":
 			query = `SELECT COUNT(DISTINCT ki.conversation_ingestion_id) FROM knowledge.knowledge_items ki WHERE ki.source_type='shared_private_item' AND ki.organization_id=$1 AND ki.lifecycle_status='active' AND ki.conversation_ingestion_id IS NOT NULL`
 			args = []any{organizationID}
+		default:
+			aggregates[definition.id].conversationCount = 0
+			continue
 		}
 		if err := s.pool.QueryRow(ctx, query, args...).Scan(&conversationCount); err != nil {
 			return nil, dbError(err)
@@ -4250,7 +4334,13 @@ func (s *PostgresStore) ListKnowledgeLibraryItems(ctx context.Context, libraryID
 			messageCountExpr = `(SELECT COUNT(DISTINCT shared.source_message_id) FROM knowledge.knowledge_items shared JOIN knowledge.messages cm ON cm.id=shared.source_message_id WHERE shared.conversation_ingestion_id=ci.id AND shared.source_type='shared_private_item' AND shared.organization_id=` + sharedOrgArg + ` AND shared.lifecycle_status='active' AND cm.message_type<>'system' AND btrim(COALESCE(cm.normalized_content,'')) <> '')`
 			attachmentCountExpr = `(SELECT COUNT(DISTINCT shared.source_attachment_id) FROM knowledge.knowledge_items shared WHERE shared.conversation_ingestion_id=ci.id AND shared.source_type='shared_private_item' AND shared.organization_id=` + sharedOrgArg + ` AND shared.lifecycle_status='active' AND shared.source_attachment_id IS NOT NULL)`
 		}
-		conversationSQL := `SELECT ci.id::text,COALESCE(ci.platform,''),COALESCE(ci.external_conversation_id,''),COALESCE(ci.conversation_type,''),COALESCE(ci.name,''),CASE WHEN ci.status='active' AND EXISTS (SELECT 1 FROM knowledge.conversation_collectors cc_error WHERE cc_error.conversation_ingestion_id=ci.id AND cc_error.status='unavailable') AND NOT EXISTS (SELECT 1 FROM knowledge.conversation_collectors cc_active WHERE cc_active.conversation_ingestion_id=ci.id AND cc_active.status='active') THEN 'error' WHEN ci.status IN ('active','paused','detached','error') THEN ci.status ELSE 'not_started' END,ci.created_at,GREATEST(COALESCE(ci.updated_at,ci.created_at),COALESCE(MAX(ki.updated_at),ci.created_at)),` + messageCountExpr + `,` + attachmentCountExpr + `,(SELECT COUNT(*) FROM knowledge.conversation_memberships cmem WHERE cmem.conversation_ingestion_id=ci.id AND cmem.status='active') FROM knowledge.conversation_ingestions ci LEFT JOIN knowledge.knowledge_items ki ON ki.conversation_ingestion_id=ci.id AND ` + itemJoinFilter + ` LEFT JOIN knowledge.messages m ON m.id=ki.source_message_id LEFT JOIN knowledge.attachments a ON a.id=ki.source_attachment_id WHERE ` + strings.Join(conversationConditions, " AND ") + ` GROUP BY ci.id,ci.platform,ci.external_conversation_id,ci.conversation_type,ci.name,ci.status,ci.created_at,ci.updated_at ORDER BY GREATEST(COALESCE(ci.updated_at,ci.created_at),COALESCE(MAX(ki.updated_at),ci.created_at)) DESC LIMIT ` + strconv.Itoa(limit)
+		currentUserArg := conversationAdd(userID)
+		currentCollectorIDExpr := `COALESCE((SELECT cc.id::text FROM knowledge.conversation_collectors cc WHERE cc.conversation_ingestion_id=ci.id AND cc.collector_user_id=` + currentUserArg + ` AND cc.status<>'removed' ORDER BY CASE WHEN cc.status='active' THEN 0 ELSE 1 END,cc.joined_at LIMIT 1),'')`
+		currentCollectorStatusExpr := `COALESCE((SELECT cc.status FROM knowledge.conversation_collectors cc WHERE cc.conversation_ingestion_id=ci.id AND cc.collector_user_id=` + currentUserArg + ` AND cc.status<>'removed' ORDER BY CASE WHEN cc.status='active' THEN 0 ELSE 1 END,cc.joined_at LIMIT 1),'')`
+		primaryCollectorUserExpr := `COALESCE((SELECT cc.collector_user_id::text FROM knowledge.conversation_collectors cc WHERE cc.conversation_ingestion_id=ci.id AND cc.collector_role='primary' AND cc.status<>'removed' ORDER BY CASE WHEN cc.status='active' THEN 0 ELSE 1 END,cc.joined_at LIMIT 1),'')`
+		primaryCollectorNameExpr := `COALESCE((SELECT COALESCE(NULLIF(ca.display_name,''),ca.external_account_id) FROM knowledge.conversation_collectors cc JOIN knowledge.connector_accounts ca ON ca.id=cc.connector_account_id WHERE cc.conversation_ingestion_id=ci.id AND cc.collector_role='primary' AND cc.status<>'removed' ORDER BY CASE WHEN cc.status='active' THEN 0 ELSE 1 END,cc.joined_at LIMIT 1),'')`
+		primaryCollectorStatusExpr := `COALESCE((SELECT cc.status FROM knowledge.conversation_collectors cc WHERE cc.conversation_ingestion_id=ci.id AND cc.collector_role='primary' AND cc.status<>'removed' ORDER BY CASE WHEN cc.status='active' THEN 0 ELSE 1 END,cc.joined_at LIMIT 1),'')`
+		conversationSQL := `SELECT ci.id::text,COALESCE(ci.platform,''),COALESCE(ci.external_conversation_id,''),COALESCE(ci.conversation_type,''),COALESCE(ci.name,''),CASE WHEN ci.status='active' AND EXISTS (SELECT 1 FROM knowledge.conversation_collectors cc_error WHERE cc_error.conversation_ingestion_id=ci.id AND cc_error.status='unavailable') AND NOT EXISTS (SELECT 1 FROM knowledge.conversation_collectors cc_active WHERE cc_active.conversation_ingestion_id=ci.id AND cc_active.status='active') THEN 'error' WHEN ci.status IN ('active','paused','detached','error') THEN ci.status ELSE 'not_started' END,ci.created_at,GREATEST(COALESCE(ci.updated_at,ci.created_at),COALESCE(MAX(ki.updated_at),ci.created_at)),` + messageCountExpr + `,` + attachmentCountExpr + `,(SELECT COUNT(*) FROM knowledge.conversation_memberships cmem WHERE cmem.conversation_ingestion_id=ci.id AND cmem.status='active'),` + currentCollectorIDExpr + `,` + currentCollectorStatusExpr + `,` + primaryCollectorUserExpr + `,` + primaryCollectorNameExpr + `,` + primaryCollectorStatusExpr + ` FROM knowledge.conversation_ingestions ci LEFT JOIN knowledge.knowledge_items ki ON ki.conversation_ingestion_id=ci.id AND ` + itemJoinFilter + ` LEFT JOIN knowledge.messages m ON m.id=ki.source_message_id LEFT JOIN knowledge.attachments a ON a.id=ki.source_attachment_id WHERE ` + strings.Join(conversationConditions, " AND ") + ` GROUP BY ci.id,ci.platform,ci.external_conversation_id,ci.conversation_type,ci.name,ci.status,ci.created_at,ci.updated_at ORDER BY GREATEST(COALESCE(ci.updated_at,ci.created_at),COALESCE(MAX(ki.updated_at),ci.created_at)) DESC LIMIT ` + strconv.Itoa(limit)
 		rows, err := s.pool.Query(ctx, conversationSQL, conversationArgs...)
 		if err != nil {
 			return nil, dbError(err)
@@ -4260,7 +4350,7 @@ func (s *PostgresStore) ListKnowledgeLibraryItems(ctx context.Context, libraryID
 		for rows.Next() {
 			var item domain.KnowledgeLibraryItem
 			var platformValue, externalConversationID, conversationType, conversationName string
-			if err := rows.Scan(&item.ID, &platformValue, &externalConversationID, &conversationType, &conversationName, &item.CollectionStatus, &item.CreatedAt, &item.UpdatedAt, &item.MessageCount, &item.AttachmentCount, &item.MemberCount); err != nil {
+			if err := rows.Scan(&item.ID, &platformValue, &externalConversationID, &conversationType, &conversationName, &item.CollectionStatus, &item.CreatedAt, &item.UpdatedAt, &item.MessageCount, &item.AttachmentCount, &item.MemberCount, &item.CurrentCollectorID, &item.CurrentCollectorStatus, &item.PrimaryCollectorUserID, &item.PrimaryCollectorName, &item.PrimaryCollectorStatus); err != nil {
 				return nil, dbError(err)
 			}
 			item.LibraryID = libraryID

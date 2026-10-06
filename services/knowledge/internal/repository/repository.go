@@ -753,6 +753,7 @@ type Repository interface {
 	ListCollectors(ctx context.Context, conversationID string) ([]domain.Collector, error)
 	ListCollectorsByConnector(ctx context.Context, connectorID string) ([]domain.Collector, error)
 	RemoveCollector(ctx context.Context, conversationID, collectorID string) error
+	SetCollectorStatus(ctx context.Context, conversationID, collectorID, status string, now time.Time) (*domain.Collector, error)
 	SetConversationStatus(ctx context.Context, conversationID, status, reason string) error
 
 	IngestMessage(ctx context.Context, input IngestMessageInput) (*IngestResult, error)

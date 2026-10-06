@@ -40,6 +40,65 @@ DEFAULT_LANGUAGE = "zh-CN"
 DEFAULT_MAX_EVIDENCE_CHARS = 60_000
 _QUERY_SPLIT = re.compile(r"[\s,，。、;；:：!！?？/|]+")
 
+# Conversational wrappers around what is really a search term. Engines handle
+# "北京市网络协议" far better than "帮我搜索一下北京市网络协议是什么，并给出原文链接".
+_QUERY_PREFIXES = ("请帮我", "麻烦帮我", "帮我", "请你", "请", "麻烦")
+_SEARCH_PREFIXES = (
+    "搜索一下",
+    "搜一下",
+    "搜索",
+    "查找一下",
+    "查一下",
+    "找一下",
+    "检索一下",
+    "检索",
+    "搜",
+    "查",
+    "找",
+)
+_QUERY_SUFFIXES = (
+    "并给出原文链接",
+    "给出原文链接",
+    "并给出链接",
+    "给出链接",
+    "并附上链接",
+    "附上链接",
+    "并总结一下",
+    "总结一下",
+    "并总结",
+    "总结",
+    "并概括一下",
+    "概括一下",
+    "并说明一下",
+    "说明一下",
+    "并回答一下",
+    "回答一下",
+    "是什么意思",
+    "什么意思",
+    "是什么东西",
+    "是什么",
+)
+_QUERY_TRIM = " \t\r\n，,。.:：;；!！?？\"'“”‘’()（）[]【】<>《》"
+
+
+def clean_search_query(value: str) -> str:
+    """Strips the conversational shell from a user sentence used as a query."""
+
+    text = " ".join(str(value or "").split()).strip()
+    original = text
+    changed = True
+    while changed:
+        changed = False
+        for prefix in _QUERY_PREFIXES + _SEARCH_PREFIXES:
+            if text.startswith(prefix) and len(text) > len(prefix):
+                text = text[len(prefix) :].strip(_QUERY_TRIM)
+                changed = True
+        for suffix in _QUERY_SUFFIXES:
+            if text.endswith(suffix) and len(text) > len(suffix):
+                text = text[: -len(suffix)].strip(_QUERY_TRIM)
+                changed = True
+    return text or original
+
 
 def _relevance_keys(query: str) -> set[str]:
     """Keys that make a search hit plausibly about the query.
@@ -207,14 +266,17 @@ class WebResearchCapability:
             warnings.append(
                 "include_domains 中部分名称不在别名表内、也不是用户写明的域名，已忽略"
             )
-        queries = normalize_queries(arguments.queries, limit=self.max_queries)
+        queries = normalize_queries(
+            (clean_search_query(item) for item in arguments.queries),
+            limit=self.max_queries,
+        )
         if not queries and not urls:
             # The Planner sometimes writes the search terms into `request` (the
             # argument it does not control) and leaves `queries` empty. Asking to
             # search without naming terms still means "search this", and the
             # user's own words are the only safe query, so it is used instead of
             # failing the whole task.
-            queries = normalize_queries([request], limit=1)
+            queries = normalize_queries([clean_search_query(request)], limit=1)
 
         candidate_results = []
         search_unavailable = False

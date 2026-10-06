@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
@@ -100,7 +101,9 @@ class SessionManager:
             "viewport": {"width": 1440, "height": 900},
             "user_agent": self.settings.default_user_agent,
         }
-        if self.settings.storage_state_path:
+        if self.settings.storage_state_path and Path(
+            self.settings.storage_state_path
+        ).exists():
             options["storage_state"] = self.settings.storage_state_path
         context = await self._browser.new_context(**options)
         # The grid driver reads selected cells back through the clipboard.
@@ -133,9 +136,24 @@ class SessionManager:
         if session is None:
             return
         try:
+            if not session.login_required:
+                await self.persist_state(session)
             await session.context.close()
         except Exception:  # noqa: BLE001 - closing is best effort
             pass
+
+    async def persist_state(self, session: Session) -> None:
+        """Save the live login cookies/local storage for later sessions."""
+
+        path = str(self.settings.storage_state_path or "").strip()
+        if not path:
+            return
+        try:
+            target = Path(path).expanduser()
+            target.parent.mkdir(parents=True, exist_ok=True)
+            await session.context.storage_state(path=str(target))
+        except Exception:  # noqa: BLE001 - persistence must not break the action
+            return
 
     def count(self) -> int:
         return len(self._sessions)

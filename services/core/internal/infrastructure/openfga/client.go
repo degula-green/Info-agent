@@ -111,8 +111,18 @@ func (c *Client) ListObjectsWithMetadata(ctx context.Context, subjectID, organiz
 		return application.ListObjectsResult{}, err
 	}
 	result := make([]string, 0, len(response.Objects))
+	prefix := objectType + ":"
 	for _, id := range response.Objects {
 		id = strings.TrimSpace(id)
+		if id == "" || id == "*" {
+			continue
+		}
+		// OpenFGA returns fully qualified objects ("conversation_group:<id>").
+		// Strip the requested type's prefix before repacking; anything else
+		// still carrying a colon is a different type and is not ours to use.
+		if strings.HasPrefix(id, prefix) {
+			id = strings.TrimPrefix(id, prefix)
+		}
 		if id == "" || id == "*" || strings.Contains(id, ":") {
 			continue
 		}

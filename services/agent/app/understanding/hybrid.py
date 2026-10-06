@@ -57,6 +57,11 @@ class HybridUnderstandingProvider:
         self.last_primary_margin: float | None = None
         self.intents = getattr(resolved, "intents", None)
         self.available_intents = self.intents
+        # Whether the primary judges evidence sources itself. Only the cloud
+        # backend does; the fine-tuned local checkpoint does not.
+        self._primary_judges_evidence = bool(
+            getattr(resolved, "request_evidence_plan", False)
+        )
 
     @property
     def primary_name(self) -> str:
@@ -81,8 +86,16 @@ class HybridUnderstandingProvider:
         # attachment-driven ones ("根据这个附件创建日程" reads like a form
         # request to it). When the user explicitly points at an attachment,
         # let the LLM understanding follow the intent catalog instead.
+        #
+        # A primary that can judge evidence sources is exempt: it reads the
+        # attachment inventory itself and returning early would throw that
+        # verdict away.
         text = str(task.input.get("text") or "")
-        if task.input.get("attachment_ids") and references_attachment(text):
+        if (
+            not self._primary_judges_evidence
+            and task.input.get("attachment_ids")
+            and references_attachment(text)
+        ):
             result = _call_provider(
                 self.fallback.understand,
                 task,
@@ -137,6 +150,17 @@ class HybridUnderstandingProvider:
             int(getattr(self.fallback, "last_call_count", 0)), 0
         )
         self.last_decision_source = "llm"
+        # The primary is the only stage that judges evidence sources, so an
+        # intent fallback must not throw that verdict away.
+        if evaluation is not None and not result.evidence_sources:
+            judged = list(evaluation.understanding.evidence_sources or [])
+            if judged:
+                result = result.model_copy(
+                    update={
+                        "evidence_sources": judged,
+                        "evidence_reason": evaluation.understanding.evidence_reason,
+                    }
+                )
         return result
 
     def _record_confidence(self, confidence: float, margin: float) -> None:

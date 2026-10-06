@@ -54,8 +54,8 @@ TIME_PHRASE_PATTERN = re.compile(
 # attachment. Matching this against the parsed body would let a document that
 # merely mentions "附件" trigger itself, so callers pass the user's own text.
 ATTACHMENT_REFERENCE_PATTERN = re.compile(
-    r"(?:附件|文档|文件|资料|材料)"
-    r"|(?:根据|按照|参考|基于|依据|结合)(?:上述|以上|下面|以下|其中|这个|该|这份)"
+    r"(?:附件|文档|文件|资料|材料|图片|照片|截图|图像)"
+    r"|(?:根据|按照|参考|基于|依据|结合)(?:上述|以上|下面|以下|其中|这个|该|这份|这张|那张)"
 )
 
 

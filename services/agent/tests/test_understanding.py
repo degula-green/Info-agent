@@ -55,6 +55,26 @@ class CountingUnderstandingProvider:
         return self.result
 
 
+class RetryableProviderError(RuntimeError):
+    classification = "retryable_error"
+
+
+class FlakyUnderstandingProvider:
+    name = "flaky"
+    model = "flaky"
+    last_call_count = 1
+
+    def __init__(self, fail_times: int = 1) -> None:
+        self.fail_times = fail_times
+        self.calls = 0
+
+    def understand(self, task):
+        self.calls += 1
+        if self.calls <= self.fail_times:
+            raise RetryableProviderError("transient provider failure")
+        return understanding()
+
+
 def understanding(
     *,
     is_task: bool = True,
@@ -223,6 +243,21 @@ def test_enforce_provider_failure_fails_the_task() -> None:
 
     assert container.execution_service.run_task(task.task_id) == "failed"
     assert store.get_task(task.task_id).last_error["message"] == "provider unavailable"
+
+
+def test_enforce_retries_a_transient_understanding_failure() -> None:
+    provider = FlakyUnderstandingProvider()
+    container, store, _publisher, _knowledge = build_step2_container(
+        understanding_provider=provider,
+        understanding_mode="enforce",
+    )
+    task = container.task_service.create_task(
+        owner_user_id="user-1",
+        payload={"text": "明天晚上八点开评审会"},
+    )
+
+    assert container.execution_service.run_task(task.task_id) == "waiting_approval"
+    assert provider.calls == 2
 
 
 def test_enforce_mode_uses_understanding_to_produce_a_zero_step_plan() -> None:

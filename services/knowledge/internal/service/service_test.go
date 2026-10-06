@@ -961,6 +961,37 @@ func TestPairAgentCreatesMappedWechatIdentity(t *testing.T) {
 	}
 }
 
+func TestWechatBootstrapRequiresDeviceAndUsesAssignment(t *testing.T) {
+	service, repo, _ := newServiceForTest(nil)
+	ctx := context.Background()
+	pairing, err := service.CreatePairingForWXID(ctx, "u1", "wxid-a", "org-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	exchange, err := service.PairAgent(ctx, pairing.PairingID, pairing.PairingCode, "wxid-a", "", "agent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.WechatBootstrap(ctx, ""); apperror.From(err).Code != "device_id_required" {
+		t.Fatalf("global bootstrap was not rejected: %v", err)
+	}
+	device, err := repo.GetDeviceByHash(ctx, hashForTest(exchange.DeviceKey))
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := service.WechatBootstrapForDevice(ctx, device)
+	if err != nil {
+		t.Fatal(err)
+	}
+	connector, _ := out["connector"].(map[string]any)
+	if out["status"] != "bound" || connector["id"] != exchange.ConnectorID {
+		t.Fatalf("bootstrap did not return the assigned connector: %+v", out)
+	}
+	if _, leaked := connector["database_ref"]; leaked {
+		t.Fatalf("bootstrap leaked the server-side database_ref: %+v", connector)
+	}
+}
+
 func TestListConversationsRejectsUnsupportedPlatform(t *testing.T) {
 	service, _, _ := newServiceForTest(nil)
 	if _, err := service.ListConversations(context.Background(), "u1", domain.PlatformWecom); apperror.From(err).Code != "unsupported_platform" {
@@ -995,8 +1026,12 @@ func TestDiscoverExposesExistingGroupForSupplementalJoin(t *testing.T) {
 	if len(discovery.Conversations) != 1 || discovery.Conversations[0].AttachedConversationID != conversation.ID || discovery.Conversations[0].CurrentUserCollector {
 		t.Fatalf("existing group was not exposed as joinable: %+v", discovery.Conversations)
 	}
-	if _, err := service.AddCollector(ctx, "u2", conversation.ID); apperror.From(err).Code != "forbidden" {
-		t.Fatalf("expected organization member without collector to be unable to manage collection, got %v", err)
+	collector, err := service.AddCollector(ctx, "u2", conversation.ID)
+	if err != nil {
+		t.Fatalf("expected organization member to join supplemental collection, got %v", err)
+	}
+	if collector.CollectorRole != domain.CollectorSupplemental || collector.Status != domain.CollectorActive {
+		t.Fatalf("unexpected supplemental collector: %+v", collector)
 	}
 }
 
@@ -1143,6 +1178,55 @@ func TestAddCollectorRejectsDifferentWorkspace(t *testing.T) {
 	}
 	if _, err = service.AddCollector(ctx, "u2", conversation.ID); apperror.From(err).Code != "forbidden" {
 		t.Fatalf("cross-workspace supplemental join was not rejected: %v", err)
+	}
+}
+
+func TestSetCollectorPausedOnlyAffectsCurrentUser(t *testing.T) {
+	service, repo, _ := newServiceForTest(nil)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	for _, account := range []domain.ConnectorAccount{
+		{ID: "pause-a1", OwnerUserID: "u1", Platform: domain.PlatformFeishu, WorkspaceKey: "tenant", ExternalAccountID: "user-1", DefaultOrganizationID: "org-1", Status: domain.ConnectorActive},
+		{ID: "pause-a2", OwnerUserID: "u2", Platform: domain.PlatformFeishu, WorkspaceKey: "tenant", ExternalAccountID: "user-2", DefaultOrganizationID: "org-1", Status: domain.ConnectorActive},
+	} {
+		if _, err := repo.SaveConnector(ctx, account); err != nil {
+			t.Fatal(err)
+		}
+	}
+	conversation, err := repo.AttachConversation(ctx, repository.AttachInput{
+		UserID: "u1", Platform: domain.PlatformFeishu, WorkspaceKey: "tenant", ExternalConversationID: "pause-chat",
+		ConversationType: "group", OrganizationID: "org-1", RequestedStartAt: &now, PrimaryConnectorID: "pause-a1",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = service.AddCollector(ctx, "u2", conversation.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = service.SetCollectorPaused(ctx, "u1", conversation.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	primary, _ := repo.GetCollector(ctx, conversation.Collectors[0].ID)
+	supplemental, _ := repo.ListCollectors(ctx, conversation.ID)
+	if primary.Status != domain.CollectorPaused {
+		t.Fatalf("primary collector was not paused: %+v", primary)
+	}
+	if len(supplemental) != 2 || supplemental[1].Status != domain.CollectorActive {
+		t.Fatalf("pausing one user changed another collector: %+v", supplemental)
+	}
+	if _, err = service.SetCollectorPaused(ctx, "u2", conversation.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	pausedConversation, _ := repo.GetConversation(ctx, conversation.ID)
+	if pausedConversation.Status != domain.ConversationPaused || pausedConversation.PauseReason != "no_available_collector" {
+		t.Fatalf("conversation was not paused after all collectors stopped: %+v", pausedConversation)
+	}
+	if _, err = service.SetCollectorPaused(ctx, "u2", conversation.ID, false); err != nil {
+		t.Fatal(err)
+	}
+	resumedConversation, _ := repo.GetConversation(ctx, conversation.ID)
+	if resumedConversation.Status != domain.ConversationActive {
+		t.Fatalf("conversation was not resumed by its collector: %+v", resumedConversation)
 	}
 }
 

@@ -16,6 +16,7 @@
           <AgentUserMessage
             v-if="message.role === 'user'"
             :text="message.text || ''"
+            :attachments="message.attachments || []"
             @copy="copyText(message.text || '', '问题已复制')"
             @edit="editQuestion(message.text || '')"
           />
@@ -76,7 +77,11 @@
               >撤销</button>
             </div>
 
-            <div v-if="message.approval" class="agent-approval">
+            <div
+              v-if="message.approval"
+              class="agent-approval"
+              :class="{ 'agent-approval--form': message.approval.capability === 'form.apply' }"
+            >
               <div class="agent-approval__header">
                 <span><t-icon name="lock-on" />需要确认</span>
                 <small>{{ message.approval.capability }}</small>
@@ -93,28 +98,43 @@
               </template>
               <template v-else-if="message.approval.capability === 'form.apply'">
                 <div class="agent-form">
-                  <p class="agent-form__title">
-                    {{ formDraft(message).title || '链接表单' }}
-                  </p>
-                  <p class="agent-form__summary">
-                    {{ formSummary(message).total }} 字段 ·
-                    {{ formSummary(message).filled }} 已填
-                    <span v-if="formSummary(message).empty"> · {{ formSummary(message).empty }} 待补</span>
-                    <span v-if="formDraft(message).target_cell"> · 写入 {{ formDraft(message).target_cell }}</span>
-                  </p>
+                  <div class="agent-form__head">
+                    <div class="agent-form__heading">
+                      <p class="agent-form__title">
+                        {{ formDraft(message).title || '链接表单' }}
+                      </p>
+                      <p class="agent-form__summary">
+                        {{ formSummary(message).total }} 字段 ·
+                        {{ formSummary(message).filled }} 已填
+                        <span v-if="formSummary(message).empty"> · {{ formSummary(message).empty }} 待补</span>
+                        <span v-if="formDraft(message).target_cell"> · 写入 {{ formDraft(message).target_cell }}</span>
+                      </p>
+                    </div>
+                    <span class="agent-form__percent">{{ formCompletion(message) }}%</span>
+                  </div>
+                  <div class="agent-form__progress" role="presentation">
+                    <span :style="{ width: `${formCompletion(message)}%` }"></span>
+                  </div>
                   <p v-if="formDraft(message).missing?.length" class="agent-form__warning">
                     缺少：{{ formDraft(message).missing.join('、') }}
                   </p>
-                  <p v-if="formHasRetrieved(message)" class="agent-form__hint">
-                    部分字段来自知识库语义检索，可能取错上下文，请核对后再确认
+                  <p v-if="formHasReview(message)" class="agent-form__hint">
+                    带「请核对」的字段取自共享来源，可能不是该主体的信息，请核对后再确认
+                  </p>
+                  <p v-else-if="formHasRetrieved(message)" class="agent-form__hint">
+                    部分字段来自知识库检索，请核对后再确认
                   </p>
                   <div class="agent-form__fields">
                     <label v-for="(field, index) in formEditor(message)" :key="`${field.name}-${index}`">
-                      <span>
-                        {{ field.name }}
-                        <small class="agent-form__source">{{ formSourceLabel(field.source) }}</small>
-                      </span>
+                      <span class="agent-form__label">{{ field.name }}</span>
                       <input v-model="field.value" :disabled="message.submitting" />
+                      <span class="agent-form__meta">
+                        <small
+                          class="agent-form__source"
+                          :class="`agent-form__source--${formSourceKind(field)}`"
+                        >{{ formSourceLabel(field) }}</small>
+                        <em v-if="field.evidence" class="agent-form__evidence">{{ field.evidence }}</em>
+                      </span>
                     </label>
                   </div>
                 </div>
@@ -423,6 +443,8 @@ type AgentMessage = {
   id: string
   role: 'user' | 'agent'
   text?: string
+  /** Files attached to a user turn, kept locally so the sent bubble can show them. */
+  attachments?: { id: string; name: string }[]
   taskId?: string
   status?: ChatStatus
   statusText?: string
@@ -459,7 +481,16 @@ const approvalEditors = reactive<Record<string, { title: string; dueDate: string
  * owner's edits are what the confirm call sends back, so the values written
  * are the ones on screen, not the ones the Agent proposed.
  */
-const formEditors = reactive<Record<string, Array<{ name: string; value: string; source: string }>>>({})
+/** One editable cell of a form draft, plus where a retrieved value came from. */
+type FormEditorField = {
+  name: string
+  value: string
+  source: string
+  subject: string
+  tier: string
+  evidence: string
+}
+const formEditors = reactive<Record<string, FormEditorField[]>>({})
 const inputValues = reactive<Record<string, string>>({})
 const expandedTraces = reactive<Record<string, boolean>>({})
 const expandedSources = reactive<Record<string, boolean>>({})
@@ -1376,11 +1407,13 @@ async function sendMessage(): Promise<void> {
   if (!text || activeTaskID.value || uploading.value) return
   const file = selectedFile.value
   let attachmentIds: string[] = []
+  let attachments: { id: string; name: string }[] = []
   if (file) {
     uploading.value = true
     try {
       const uploaded = await uploadAgentAttachment(file)
       attachmentIds = [uploaded.attachment_id]
+      attachments = [{ id: String(uploaded.attachment_id), name: file.name }]
     } catch (error) {
       uploading.value = false
       MessagePlugin.error(error instanceof Error ? error.message : '附件上传失败')
@@ -1390,7 +1423,7 @@ async function sendMessage(): Promise<void> {
     selectedFile.value = null
     if (fileInputRef.value) fileInputRef.value.value = ''
   }
-  const userMessage: AgentMessage = { id: newMessageID(), role: 'user', text, steps: [], blocks: [], citations: [], lastEventId: 0 }
+  const userMessage: AgentMessage = { id: newMessageID(), role: 'user', text, attachments, steps: [], blocks: [], citations: [], lastEventId: 0 }
   const agentMessage = reactive<AgentMessage>({
     id: newMessageID(),
     role: 'agent',
@@ -1481,7 +1514,7 @@ function approvalEditor(message: AgentMessage) {
   return approvalEditors[message.id] || { title: '', dueDate: '' }
 }
 
-function formFieldsFrom(draft: unknown): Array<{ name: string; value: string; source: string }> {
+function formFieldsFrom(draft: unknown): FormEditorField[] {
   const raw =
     draft && typeof draft === 'object' && Array.isArray((draft as Record<string, unknown>).fields)
       ? ((draft as Record<string, unknown>).fields as unknown[])
@@ -1492,21 +1525,40 @@ function formFieldsFrom(draft: unknown): Array<{ name: string; value: string; so
       name: String(field.name ?? ''),
       value: String(field.value ?? ''),
       source: String(field.source ?? 'empty'),
+      // Which subject the value was scoped to, how strong that attribution is
+      // ("b" = shared source, needs a human look) and where it came from.
+      subject: String(field.subject ?? ''),
+      tier: String(field.tier ?? 'none'),
+      evidence: String(field.evidence ?? ''),
     }
   })
 }
 
 /** Where a draft value came from, in the owner's words. */
-function formSourceLabel(source: string): string {
-  return (
-    {
-      instruction: '来自指令',
-      knowledge: '来自知识库',
-      user: '你填写的',
-      page: '页面已有',
-      empty: '待补充',
-    } as Record<string, string>
-  )[source] || '待补充'
+function formSourceLabel(field: { source: string; subject?: string; tier?: string }): string {
+  const base =
+    (
+      {
+        instruction: '来自指令',
+        knowledge: '来自知识库',
+        user: '你填写的',
+        page: '页面已有',
+        empty: '待补充',
+      } as Record<string, string>
+    )[field.source] || '待补充'
+  if (field.source !== 'knowledge') return base
+  const subject = String(field.subject || '').trim()
+  const label = subject ? `来自「${subject}」` : base
+  return field.tier === 'b' ? `${label} · 请核对` : label
+}
+
+/** Chip tint: "请核对" outranks the plain retrieval tint. */
+function formSourceKind(field: { source: string; tier?: string }): string {
+  if (field.tier === 'b') return 'review'
+  if (field.source === 'knowledge') return 'knowledge'
+  if (field.source === 'user') return 'user'
+  if (field.source === 'empty') return 'empty'
+  return 'instruction'
 }
 
 function formEditor(message: AgentMessage) {
@@ -1524,6 +1576,13 @@ function formSummary(message: AgentMessage) {
   return { total: fields.length, filled, empty: fields.length - filled }
 }
 
+/** Share of fields that already hold a value, for the meter and its label. */
+function formCompletion(message: AgentMessage): number {
+  const summary = formSummary(message)
+  if (!summary.total) return 0
+  return Math.round((summary.filled / summary.total) * 100)
+}
+
 /**
  * Whether any value came from retrieval.
  *
@@ -1533,6 +1592,11 @@ function formSummary(message: AgentMessage) {
  */
 function formHasRetrieved(message: AgentMessage): boolean {
   return formEditor(message).some((field) => field.source === 'knowledge')
+}
+
+/** Values taken from a shared carrier, which the owner has to check by eye. */
+function formHasReview(message: AgentMessage): boolean {
+  return formEditor(message).some((field) => field.tier === 'b')
 }
 
 /** The sidecar captures at this viewport, so clicks map back through it. */
@@ -1650,8 +1714,23 @@ async function takeoverPressEnter(message: AgentMessage): Promise<void> {
 
 async function continueAfterTakeover(message: AgentMessage): Promise<void> {
   stopTakeover(message)
-  inputValues[message.id] = '已完成登录，请继续'
-  await submitInput(message)
+  if (!message.taskId || message.submitting) return
+  message.submitting = true
+  try {
+    await submitAgentTaskInput(message.taskId, {
+      text: '已完成登录，请继续',
+      resume: true,
+    })
+    message.inputRequest = undefined
+    message.status = 'executing'
+    message.statusText = '登录已完成，正在继续原任务'
+    await watchTask(message, message.lastEventId)
+  } catch (error) {
+    message.error = error instanceof Error ? error.message : '继续任务失败'
+    MessagePlugin.error(message.error)
+  } finally {
+    message.submitting = false
+  }
 }
 
 async function confirmApproval(message: AgentMessage): Promise<void> {
@@ -1881,15 +1960,32 @@ onBeforeUnmount(() => {
 .agent-approval label, .agent-input-request label { display: grid; gap: 5px; color: var(--td-text-color-secondary); font-size: 12px; }
 .agent-approval input, .agent-input-request input { width: 100%; min-height: 34px; padding: 6px 9px; border: 1px solid var(--td-component-stroke); border-radius: 6px; color: var(--td-text-color-primary); background: var(--td-bg-color-container); }
 .agent-approval__arguments { max-height: 220px; overflow: auto; margin: 0; padding: 10px; border-radius: 6px; color: var(--td-text-color-secondary); background: var(--td-bg-color-container); font-size: 12px; }
-.agent-form { display: grid; gap: 8px; }
-.agent-form__title { margin: 0; font-weight: 600; }
+/* Form prefill is a light glass panel instead of a warning-coloured slab: the
+   "needs confirmation" signal survives as a hairline rail on the left, and the
+   panel stays translucent so it reads as part of the page. */
+.agent-approval.agent-approval--form { border-color: var(--td-component-border); background: color-mix(in srgb, var(--td-bg-color-container) 88%, transparent); backdrop-filter: blur(14px) saturate(140%); box-shadow: 0 1px 2px rgba(0, 0, 0, .04), 0 10px 24px -16px rgba(0, 0, 0, .18); }
+.agent-form { position: relative; display: grid; gap: 12px; padding-left: 14px; }
+.agent-form::before { content: ''; position: absolute; top: 3px; bottom: 3px; left: 0; width: 3px; border-radius: 2px; background: color-mix(in srgb, var(--td-warning-color) 45%, transparent); }
+.agent-form__head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.agent-form__heading { display: grid; gap: 2px; min-width: 0; }
+.agent-form__title { margin: 0; color: var(--td-text-color-primary); font-size: 15px; font-weight: 600; }
 .agent-form__summary { margin: 0; color: var(--td-text-color-secondary); font-size: 12px; }
+.agent-form__percent { color: var(--td-text-color-secondary); font-size: 12px; font-variant-numeric: tabular-nums; }
+.agent-form__progress { height: 2px; overflow: hidden; border-radius: 999px; background: color-mix(in srgb, var(--td-component-stroke) 60%, transparent); }
+.agent-form__progress > span { display: block; height: 100%; border-radius: inherit; background: var(--td-brand-color); transition: width 200ms ease; }
 .agent-form__warning { margin: 0; color: var(--td-warning-color-6, #e37318); font-size: 12px; }
 .agent-form__hint { margin: 0; color: var(--td-text-color-secondary); font-size: 12px; }
-.agent-form__fields { display: grid; gap: 8px; max-height: 260px; overflow: auto; }
-.agent-form__fields label { display: grid; gap: 4px; color: var(--td-text-color-secondary); font-size: 12px; }
-.agent-form__source { margin-left: 6px; padding: 0 6px; border-radius: 8px; color: var(--td-text-color-placeholder); background: var(--td-bg-color-component); font-size: 11px; }
-.agent-form__fields input { width: 100%; min-height: 32px; padding: 6px 9px; border: 1px solid var(--td-component-stroke); border-radius: 6px; color: var(--td-text-color-primary); background: var(--td-bg-color-container); }
+.agent-form__fields { display: grid; gap: 10px; }
+.agent-form__fields label { display: grid; grid-template-columns: minmax(88px, 120px) minmax(0, 1fr); align-items: start; gap: 6px 12px; color: var(--td-text-color-secondary); font-size: 13px; }
+.agent-form__label { display: flex; align-items: center; min-height: 36px; color: var(--td-text-color-primary); }
+.agent-form__meta { grid-column: 2; display: flex; align-items: center; flex-wrap: wrap; gap: 4px 8px; min-width: 0; }
+.agent-form__source { padding: 1px 7px; border-radius: 999px; color: var(--td-text-color-placeholder); background: var(--td-bg-color-component); font-size: 11px; white-space: nowrap; }
+.agent-form__source--knowledge { color: var(--td-brand-color-8); background: var(--td-brand-color-1); }
+.agent-form__source--review { color: var(--td-warning-color-8); background: var(--td-warning-color-1); }
+.agent-form__evidence { color: var(--td-text-color-placeholder); font-size: 11px; font-style: normal; overflow-wrap: anywhere; }
+.agent-form__fields input { width: 100%; min-height: 36px; padding: 7px 10px; border: 1px solid color-mix(in srgb, var(--td-component-stroke) 75%, transparent); border-radius: var(--td-radius-large); color: var(--td-text-color-primary); background: color-mix(in srgb, var(--td-bg-color-container) 55%, transparent); transition: border-color 150ms ease, box-shadow 150ms ease; }
+.agent-form__fields input:focus { outline: none; border-color: var(--td-brand-color); box-shadow: 0 0 0 3px var(--td-brand-color-focus); }
+@media (max-width: 760px) { .agent-form__fields label { grid-template-columns: 1fr; } .agent-form__label { min-height: 0; } .agent-form__meta { grid-column: 1; } }
 .agent-takeover { display: grid; gap: 10px; margin-top: 2px; padding: 16px; border: 1px solid var(--td-warning-color-3); border-radius: 12px; background: var(--td-warning-color-1); }
 .agent-takeover__hint { margin: 0; color: var(--td-text-color-secondary); font-size: 12px; line-height: 1.6; }
 .agent-takeover__screen { width: 100%; max-height: 420px; object-fit: contain; border: 1px solid var(--td-component-stroke); border-radius: 6px; background: #fff; cursor: crosshair; }
