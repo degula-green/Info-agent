@@ -39,8 +39,17 @@ class AnswerComposeInput(BaseModel):
     knowledge_evidence: list[dict[str, Any]] = Field(
         default_factory=list, max_length=MAX_EVIDENCE_ITEMS
     )
+    # Evidence the planner already holds, such as a parsed attachment body, is
+    # passed inline. It gets its own slot because knowledge_evidence is filled
+    # by the knowledge_evidence_refs binding, and a step may not supply both a
+    # binding and an inline value for one runtime argument.
+    attachment_evidence: list[dict[str, Any]] = Field(
+        default_factory=list, max_length=MAX_EVIDENCE_ITEMS
+    )
 
-    @field_validator("evidence", "knowledge_evidence", mode="before")
+    @field_validator(
+        "evidence", "knowledge_evidence", "attachment_evidence", mode="before"
+    )
     @classmethod
     def _flatten_evidence(cls, value: Any) -> Any:
         """Accept one list of evidence per referenced source.
@@ -212,7 +221,11 @@ class AnswerComposeCapability:
         return AnswerComposeInput.model_validate(arguments)
 
     def execute(self, arguments: AnswerComposeInput) -> dict[str, Any]:
-        evidence = _merge_evidence(arguments.knowledge_evidence, arguments.evidence)
+        evidence = _merge_evidence(
+            arguments.attachment_evidence,
+            arguments.knowledge_evidence,
+            arguments.evidence,
+        )
         draft = _compose_with_context(
             self.provider,
             arguments.question,
@@ -228,24 +241,24 @@ class AnswerComposeCapability:
 
 
 def _merge_evidence(
-    knowledge_evidence: list[dict[str, Any]],
-    web_evidence: list[dict[str, Any]],
+    *groups: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     merged: list[dict[str, Any]] = []
     seen: set[str] = set()
-    for item in [*knowledge_evidence, *web_evidence]:
-        if not isinstance(item, dict):
-            continue
-        identity = str(
-            item.get("evidence_id")
-            or item.get("content_hash")
-            or item.get("url")
-            or len(merged)
-        )
-        if identity in seen:
-            continue
-        seen.add(identity)
-        merged.append(item)
-        if len(merged) >= MAX_EVIDENCE_ITEMS:
-            break
+    for group in groups:
+        for item in group or []:
+            if not isinstance(item, dict):
+                continue
+            identity = str(
+                item.get("evidence_id")
+                or item.get("content_hash")
+                or item.get("url")
+                or len(merged)
+            )
+            if identity in seen:
+                continue
+            seen.add(identity)
+            merged.append(item)
+            if len(merged) >= MAX_EVIDENCE_ITEMS:
+                return merged
     return merged

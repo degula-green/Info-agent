@@ -286,8 +286,13 @@ class KnowledgeSearchContentCapability:
         timeout_seconds=30,
     )
 
-    def __init__(self, client: RAGClient) -> None:
+    def __init__(self, client: RAGClient, *, min_answer_score: float = 0.0) -> None:
         self.client = client
+        # Retrieval scores are RRF values, which have no absolute meaning across
+        # deployments. The default keeps every hit; a deployment that sees
+        # unrelated chunks survive retrieval raises this after sampling its own
+        # score distribution.
+        self.min_answer_score = max(float(min_answer_score), 0.0)
 
     def validate(self, arguments: dict[str, Any]) -> SearchContentInput:
         return SearchContentInput.model_validate(arguments)
@@ -326,7 +331,11 @@ class KnowledgeSearchContentCapability:
                 trace_id=context.trace_id,
             ),
         )
-        merged = _merge_content(responses, limit=arguments.top_k)
+        merged = _merge_content(
+            responses,
+            limit=arguments.top_k,
+            min_score=self.min_answer_score,
+        )
         output = SearchContentOutput(
             results=merged,
             evidence=_answer_evidence(merged),
@@ -482,6 +491,7 @@ def _merge_content(
     responses: list[dict[str, Any]],
     *,
     limit: int,
+    min_score: float = 0.0,
 ) -> list[ContentResult]:
     grouped: dict[str, dict[str, Any]] = {}
     for response in responses:
@@ -527,6 +537,10 @@ def _merge_content(
                 chunk_id = str(chunk.get("chunk_id") or "")
                 if not chunk_id:
                     continue
+                # A chunk below the relevance floor never reaches the answer
+                # layer, so an unrelated retrieval cannot be quoted at all.
+                if float(chunk.get("score") or 0) < min_score:
+                    continue
                 item["chunks"][chunk_id] = {
                     "chunk_id": chunk_id,
                     "text": str(chunk.get("text") or ""),
@@ -541,6 +555,9 @@ def _merge_content(
             key=lambda chunk: chunk["score"],
             reverse=True,
         )[:3]
+        if not chunks:
+            # Every chunk of this resource was filtered out by the floor.
+            continue
         results.append(
             ContentResult(
                 **item,
@@ -602,6 +619,10 @@ def _answer_evidence(
             evidence.append(
                 {
                     "evidence_id": chunk.chunk_id,
+                    # Tells answer.compose which source this came from, so the
+                    # answer can attribute a fact to the knowledge base rather
+                    # than to an uploaded attachment.
+                    "fetch_method": "knowledge",
                     "resource_id": result.resource_id,
                     "resource_type": result.resource_type,
                     "title": result.title,

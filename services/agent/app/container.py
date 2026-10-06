@@ -47,6 +47,7 @@ from app.infrastructure.knowledge.client import HttpKnowledgeClient, KnowledgeCl
 from app.infrastructure.llm.client import OpenAIChatClient
 from app.providers.answer import LlmAnswerProvider
 from app.providers.chat import LlmChatReplyProvider
+from app.providers.form_values import LlmFormValueExtractor
 from app.providers.page_fetcher import HttpPageFetcher
 from app.ingress.knowledge_events import KnowledgeEventIngress
 from app.kernel.models import OutboxEvent
@@ -287,7 +288,10 @@ def build_registry(
         capabilities.extend(
             [
                 KnowledgeSearchSourcesCapability(rag_client),
-                KnowledgeSearchContentCapability(rag_client),
+                KnowledgeSearchContentCapability(
+                    rag_client,
+                    min_answer_score=settings.knowledge_min_answer_score,
+                ),
                 KnowledgeAnswerCapability(
                     answer_provider,
                     timeout_seconds=_timeout_seconds(settings.answer_timeout_seconds),
@@ -307,13 +311,41 @@ def build_registry(
             ),
             None,
         )
+        knowledge_sources = next(
+            (
+                item
+                for item in capabilities
+                if item.descriptor.name == "knowledge.search_sources"
+            ),
+            None,
+        )
         retriever = (
-            KnowledgeFormRetriever(knowledge_content) if knowledge_content else None
+            KnowledgeFormRetriever(knowledge_content, knowledge_sources)
+            if knowledge_content
+            else None
+        )
+        # Which subject a value belongs to is decided by scoping the search; the
+        # model reader below only rescues values written as prose instead of
+        # "字段: 值", and its answer passes the same checks as a rule match.
+        value_extractor = (
+            LlmFormValueExtractor(
+                OpenAIChatClient(
+                    base_url=settings.llm_base_url,
+                    api_key=settings.llm_api_key,
+                    model=settings.llm_model,
+                    timeout_seconds=settings.llm_timeout_seconds,
+                    max_output_tokens=settings.llm_max_output_tokens,
+                    response_format=settings.llm_response_format,
+                )
+            )
+            if settings.llm_api_key
+            else None
         )
         capabilities.append(
             FormPreviewCapability(
                 form_client,
                 retriever=retriever,
+                value_extractor=value_extractor,
                 timeout_seconds=_timeout_seconds(settings.form_preview_timeout_seconds),
             )
         )

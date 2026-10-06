@@ -5,8 +5,13 @@ from dataclasses import dataclass
 
 from app.application.processing.preflight import validate_attachment, PreflightError
 from app.application.processing.parser_router import ParserRouter
+from app.application.processing.image_enrichment import (
+    ImageDescriptionEnricher,
+    ImageTooLargeError,
+)
 from app.infrastructure.parsing.mineru import MinerUClient, MinerUResultNormalizer
 from app.infrastructure.parsing.local import LocalDocumentParser
+from app.infrastructure.vision.client import VisionClient
 from app.config import settings
 from app.infrastructure.http import HttpClient
 from minio import Minio
@@ -29,6 +34,35 @@ def _verify_internal_token(x_rag_internal_token: str | None = Header(default=Non
         raise HTTPException(500, "RAG_INTERNAL_TOKEN未配置")
     if x_rag_internal_token != expected_token:
         raise HTTPException(403, "内部API鉴权失败")
+
+
+def _vision_cache():
+    """Redis cache for picture descriptions; an outage must not break parsing."""
+
+    if not settings.redis_url:
+        return None
+    try:
+        import redis
+
+        return redis.Redis.from_url(settings.redis_url)
+    except Exception:  # noqa: BLE001 - the enricher already degrades on errors
+        return None
+
+
+def _vision_enricher() -> ImageDescriptionEnricher:
+    return ImageDescriptionEnricher(
+        VisionClient(
+            base_url=settings.vision_base_url,
+            api_key=settings.vision_api_key,
+            model=settings.vision_model,
+            http=HttpClient(),
+            timeout_seconds=settings.vision_timeout_seconds,
+        ),
+        cache=_vision_cache(),
+        max_images=settings.vision_max_images,
+        max_image_bytes=settings.vision_max_image_bytes,
+        cache_ttl_seconds=settings.vision_cache_ttl_seconds,
+    )
 
 
 @router.post("/parse-attachment")
@@ -103,6 +137,19 @@ def parse_attachment_internal(
         except PreflightError as e:
             raise HTTPException(400, f"文件校验失败: {e.code} - {str(e)}")
 
+        # An oversized picture is refused before MinerU runs: there is no point
+        # paying for a parse whose only content we are unable to interpret.
+        if (
+            settings.vision_enabled
+            and str(mime_type or "").lower().startswith("image/")
+            and tmp_path.stat().st_size > settings.vision_max_image_bytes
+        ):
+            raise HTTPException(
+                413,
+                "图片过大，暂不支持识别（上限 "
+                f"{settings.vision_max_image_bytes // (1024 * 1024)}MB）",
+            )
+
         # 解析
         parser_router = ParserRouter(
             local=LocalDocumentParser(),
@@ -141,6 +188,20 @@ def parse_attachment_internal(
                     raise HTTPException(500, f"解析失败: {str(e)}")
             else:
                 raise HTTPException(500, f"解析失败: {str(e)}")
+
+        # Pictures MinerU could not read get a vision description so the
+        # attachment still carries something searchable. A failure here leaves
+        # the parse intact; only an oversized uploaded picture is refused.
+        if settings.vision_enabled and settings.vision_base_url:
+            try:
+                parsed_doc = _vision_enricher().enrich(
+                    parsed_doc,
+                    root=parse_root / "result",
+                    source_path=tmp_path,
+                    source_mime_type=mime_type or "",
+                )
+            except ImageTooLargeError as e:
+                raise HTTPException(413, str(e)) from e
 
         # 转换为返回格式
         result = {

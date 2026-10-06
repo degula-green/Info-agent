@@ -145,6 +145,42 @@ class Settings:
         "MINERU_TASK_MAX_WAIT_SECONDS", 1800.0
     )
     mineru_max_retries: int = _int("MINERU_MAX_RETRIES", 3)
+    # A fake-IP proxy answers with an unroutable 198.18/15 address for hosts it
+    # does not carry, which strands the MinerU result CDN while the MinerU API
+    # itself keeps working. When the direct download fails, resolve the result
+    # host over DNS-over-HTTPS and retry the real address with the original SNI.
+    mineru_result_doh_enabled: bool = _bool("MINERU_RESULT_DOH_ENABLED", True)
+    mineru_result_doh_url: str = _text(
+        "MINERU_RESULT_DOH_URL", "https://223.5.5.5/resolve"
+    )
+    mineru_result_doh_timeout_seconds: float = _float(
+        "MINERU_RESULT_DOH_TIMEOUT_SECONDS", 15.0
+    )
+    # The CDN can drop a connection mid-handshake; the download is idempotent,
+    # so retrying the whole resolution-and-fetch sequence is safe.
+    mineru_result_download_attempts: int = _int(
+        "MINERU_RESULT_DOWNLOAD_ATTEMPTS", 3
+    )
+
+    # Vision descriptions for pictures MinerU cannot read (a photo, a scene, a
+    # chart with no written meaning). Only the chat-attachment parse route asks
+    # for these; the document ingestion pipeline is untouched.
+    vision_enabled: bool = _bool("RAG_VISION_ENABLED", True)
+    vision_base_url: str = _text("RAG_VISION_BASE_URL")
+    vision_api_key: str = _text("RAG_VISION_API_KEY")
+    vision_model: str = _text("RAG_VISION_MODEL", "qwen-vl-max")
+    vision_timeout_seconds: float = _float("RAG_VISION_TIMEOUT_SECONDS", 60.0)
+    # A wide document can carry many pictures; describing all of them would
+    # turn one upload into a burst of model calls.
+    vision_max_images: int = _int("RAG_VISION_MAX_IMAGES", 5)
+    # An uploaded picture over this size is reported as unsupported instead of
+    # being sent to the model.
+    vision_max_image_bytes: int = _int(
+        "RAG_VISION_MAX_IMAGE_BYTES", 10 * 1024 * 1024
+    )
+    vision_cache_ttl_seconds: int = _int(
+        "RAG_VISION_CACHE_TTL_SECONDS", 7 * 24 * 3600
+    )
 
     # MinIO source and derived artifacts.
     minio_endpoint: str = _text("RAG_MINIO_ENDPOINT")

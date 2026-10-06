@@ -196,6 +196,55 @@ def test_an_explicit_url_question_uses_the_fixed_web_pipeline() -> None:
     assert (deterministic.plans, llm.plans) == (0, 0)
 
 
+def test_a_url_followed_by_a_question_still_composes_an_answer() -> None:
+    """A question mark after a link asks for an answer, not just for a fetch."""
+
+    planner, deterministic, llm = router()
+
+    plan = planner.create_plan(
+        envelope(
+            text=(
+                "https://baike.baidu.com/item/%E7%8B%AC%E8%A7%92%E5%85%BD%E4%BC%81"
+                "%E4%B8%9A/22449491，我的公司是否是独角兽企业呢？"
+            )
+        ),
+        [
+            WebResearchCapability.descriptor,
+            AnswerComposeCapability.descriptor,
+        ],
+        [],
+        PlanningConstraints(),
+        understanding("web.research"),
+    )
+
+    # A retrieval-only plan leaves nothing to answer with, and the replan that
+    # follows is where this used to fail with an unresolvable reference.
+    assert plan.objective == "检索公开网页并回答"
+    assert [step.capability for step in plan.steps] == [
+        "web.research",
+        "answer.compose",
+    ]
+    assert (deterministic.plans, llm.plans) == (0, 0)
+
+
+def test_a_bare_link_without_a_question_stays_a_single_fetch() -> None:
+    planner, deterministic, llm = router()
+
+    plan = planner.create_plan(
+        envelope(text="https://example.com/standup"),
+        [
+            WebResearchCapability.descriptor,
+            AnswerComposeCapability.descriptor,
+        ],
+        [],
+        PlanningConstraints(),
+        understanding("web.research"),
+    )
+
+    assert [step.capability for step in plan.steps] == ["web.research"]
+    assert (deterministic.plans, llm.plans) == (0, 0)
+
+
 def test_a_chat_to_do_stays_on_the_deterministic_planner() -> None:
     planner, deterministic, llm = router()
 

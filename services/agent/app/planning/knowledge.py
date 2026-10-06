@@ -39,6 +39,7 @@ from app.planning.conversation_memory import (
     build_conversation_memory_plan,
     decide_conversation_memory_plan,
 )
+from app.planning.routing import resolve_evidence_sources
 
 KnowledgeMode = Literal["sources", "content", "content_with_sources"]
 
@@ -572,16 +573,31 @@ class KnowledgeRoutingPlanner:
                 task,
                 capabilities,
             )
+        sources = resolve_evidence_sources(task, understanding)
         if _requests_compliance_assessment(understanding) or _requests_document_comparison(
             task
         ):
             compliance_plan = build_compliance_plan(
                 task,
                 capabilities,
+                sources=sources,
             )
             if compliance_plan is not None:
                 self._last_call_count = 0
                 return compliance_plan
+        if "attachment" in sources:
+            # The instruction judged the attachment to be evidence, so the
+            # knowledge classifier must not turn wording like "图片里是什么"
+            # into a company-document search. Retrieval still joins when the
+            # turn also judged the knowledge source to be needed.
+            attachment_plan = build_attachment_answer_plan(
+                task,
+                capabilities,
+                sources,
+            )
+            if attachment_plan is not None:
+                self._last_call_count = 0
+                return attachment_plan
         if _explicit_action_task(task, understanding):
             built = _call_plan(
                 self.base.create_plan,
@@ -848,6 +864,8 @@ def _is_knowledge_plan(plan: Plan) -> bool:
 def build_compliance_plan(
     task: TaskEnvelope,
     capabilities: list[CapabilityDescriptor],
+    *,
+    sources: tuple[str, ...] | None = None,
 ) -> Plan | None:
     """Compose the comparison the compliance intent actually asks for.
 
@@ -862,8 +880,15 @@ def build_compliance_plan(
         return None
     text = _task_instruction_text(task)
     attachment_excerpt = str(task.input.get("_attachment_excerpt") or "").strip()
-    has_attachment = bool(attachment_excerpt)
-    has_knowledge = SEARCH_CONTENT_NAME in registered and not has_attachment
+    judged = set(sources or ())
+    if judged:
+        has_attachment = bool(attachment_excerpt) and "attachment" in judged
+        has_knowledge = SEARCH_CONTENT_NAME in registered and "knowledge" in judged
+    else:
+        # No source verdict: keep the historical behaviour, which assumed the
+        # attachment replaced retrieval instead of joining it.
+        has_attachment = bool(attachment_excerpt)
+        has_knowledge = SEARCH_CONTENT_NAME in registered and not has_attachment
     urls = extract_http_urls(text)
     has_web = WEB_RESEARCH_NAME in registered and (
         bool(urls) or _contains_any(text.lower(), _COMPLIANCE_WEB_MARKERS)
@@ -903,7 +928,9 @@ def build_compliance_plan(
 
     answer_arguments: dict[str, Any] = {"question": text[:2000]}
     if has_attachment:
-        answer_arguments["knowledge_evidence"] = [
+        # Inline evidence needs its own slot: knowledge_evidence is claimed by
+        # the knowledge_evidence_refs binding when retrieval also runs.
+        answer_arguments["attachment_evidence"] = [
             _attachment_evidence(task, attachment_excerpt)
         ]
     if web_step is not None:
@@ -927,6 +954,70 @@ def build_compliance_plan(
         plan_id=plan_id,
         task_id=task.task_id,
         objective=COMPLIANCE_OBJECTIVE,
+        steps=steps,
+    )
+
+
+def build_attachment_answer_plan(
+    task: TaskEnvelope,
+    capabilities: list[CapabilityDescriptor],
+    sources: tuple[str, ...],
+) -> Plan | None:
+    """Answer from the parsed attachment, adding retrieval when it was judged.
+
+    The attachment body is already in the task input, so it needs no step of
+    its own: it is handed straight to ``answer.compose``. Retrieval, when the
+    turn judged the knowledge source necessary, runs as its own step and is
+    merged in by reference.
+    """
+
+    registered = {descriptor.name for descriptor in capabilities}
+    if ANSWER_COMPOSE_NAME not in registered:
+        return None
+    excerpt = str(task.input.get("_attachment_excerpt") or "").strip()
+    if not excerpt:
+        return None
+
+    text = _task_instruction_text(task)
+    wants_knowledge = (
+        "knowledge" in sources and SEARCH_CONTENT_NAME in registered
+    )
+    plan_id = str(uuid4())
+    steps: list[PlanStep] = []
+    knowledge_step: PlanStep | None = None
+    if wants_knowledge:
+        knowledge_step = PlanStep(
+            step_id=f"{plan_id}-step-1",
+            plan_id=plan_id,
+            order=1,
+            capability=SEARCH_CONTENT_NAME,
+            arguments={"query": text[:500]},
+        )
+        steps.append(knowledge_step)
+
+    answer_arguments: dict[str, Any] = {
+        "question": text[:2000],
+        "attachment_evidence": [_attachment_evidence(task, excerpt)],
+    }
+    if knowledge_step is not None:
+        answer_arguments["knowledge_evidence_refs"] = [
+            {"step": knowledge_step.order, "output": "evidence"}
+        ]
+    steps.append(
+        PlanStep(
+            step_id=f"{plan_id}-step-{len(steps) + 1}",
+            plan_id=plan_id,
+            order=len(steps) + 1,
+            capability=ANSWER_COMPOSE_NAME,
+            arguments=answer_arguments,
+        )
+    )
+    return Plan(
+        plan_id=plan_id,
+        task_id=task.task_id,
+        objective=(
+            "根据附件和知识库回答" if knowledge_step is not None else "根据附件回答"
+        ),
         steps=steps,
     )
 

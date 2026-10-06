@@ -1042,7 +1042,7 @@ def test_compliance_plan_uses_uploaded_attachment_as_company_evidence() -> None:
         "answer.compose",
     ]
     answer = plan.steps[-1]
-    evidence = answer.arguments["knowledge_evidence"]
+    evidence = answer.arguments["attachment_evidence"]
     assert evidence[0]["fetch_method"] == "attachment"
     assert evidence[0]["title"] == "公司制度.txt"
     assert "张三" in evidence[0]["text"]
@@ -1126,7 +1126,7 @@ def test_attachment_plus_url_comparison_uses_both_sources() -> None:
         "answer.compose",
     ]
     answer = plan.steps[-1]
-    assert answer.arguments["knowledge_evidence"][0]["fetch_method"] == "attachment"
+    assert answer.arguments["attachment_evidence"][0]["fetch_method"] == "attachment"
     assert answer.arguments["evidence_refs"] == [
         {"step": 1, "output": "evidence"}
     ]
