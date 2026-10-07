@@ -14,7 +14,11 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 SERVICE_ROOT = Path(__file__).resolve().parents[3]
-REPO_ROOT = SERVICE_ROOT.parents[1]
+REPO_ROOT = (
+    SERVICE_ROOT.parents[1]
+    if len(SERVICE_ROOT.parents) > 1
+    else SERVICE_ROOT
+)
 MIGRATIONS_DIR = Path(
     os.getenv(
         "AGENT_MIGRATIONS_DIR",

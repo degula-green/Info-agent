@@ -34,23 +34,6 @@ services:
       - -ec
       - |
         for migration in \
-          20260905_knowledge_connectors.sql \
-          20260910_private_chat_pipeline.sql \
-          20260911_knowledge_runtime_compatibility.sql \
-          20260912_attachment_content_access.sql \
-          20260913_contacts.sql \
-          20260916_knowledge_ready_pipeline.sql \
-          20260916_rag_memory_tree.sql \
-          20260918_knowledge_rag_status.sql \
-          20260926_rag_mvp_schema.sql \
-          20260927_rag_mvp_entity_review_requests.sql \
-          20260927_rag_mvp_phase1_hardening.up.sql \
-          20260927_rag_mvp_phase3_fencing.up.sql \
-          20260927_knowledge_rag_source_audit.sql \
-          20260927_knowledge_private_classification.up.sql \
-          20260927_knowledge_rag_mvp_status.sql \
-          20260925_contact_profiles.sql \
-          20261004_wechat_device_assignments.up.sql \
           20261007_wechat_control_flow.up.sql; do
           psql "$${KNOWLEDGE_DATABASE_URL}" --set=ON_ERROR_STOP=1 --file="/migrations/$${migration}";
         done
@@ -104,7 +87,7 @@ services:
 
   agent-migrate:
     build: ../services/agent
-    command: ["python", "-m", "app.infrastructure.postgres.migrate", "--bootstrap"]
+    command: ["python", "-m", "app.infrastructure.postgres.migrate"]
     env_file: .env.server
     environment:
       <<: *agent-environment
