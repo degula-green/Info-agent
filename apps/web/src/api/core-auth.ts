@@ -1,4 +1,5 @@
 import { emitAuthSessionExpired } from '../auth/events.ts'
+import { desktopApiBase } from './runtime-config.ts'
 
 export interface CoreUser { id: string; email: string; nickname: string; status: string; avatar_url?: string }
 export interface CoreTokenResponse { access_token: string; token_type: string; expires_at: string }
@@ -15,7 +16,7 @@ export class CoreAuthError extends Error {
   }
 }
 const env = ((import.meta as ImportMeta & { env?: Record<string, string> }).env || {})
-const baseURL = String(env.VITE_CORE_BASE_URL || '/api/core').replace(/\/$/, '')
+const baseURL = String(desktopApiBase('/api/core') || env.VITE_CORE_BASE_URL || '/api/core').replace(/\/$/, '')
 let refreshPromise: Promise<CoreTokenResponse> | null = null
 
 // Refresh tokens are rotated on every successful refresh. A process-local

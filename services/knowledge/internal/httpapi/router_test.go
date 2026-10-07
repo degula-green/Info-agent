@@ -324,6 +324,19 @@ func TestOAuthCallbackRedirectsWithSafeErrorCode(t *testing.T) {
 	}
 }
 
+func TestDesktopOAuthRedirectUsesDeepLink(t *testing.T) {
+	target := oauthRedirectURL(
+		"infoagent://oauth/callback",
+		"state-1",
+		"active",
+		"",
+		true,
+	)
+	if target != "infoagent://oauth/callback?provider=feishu&state=state-1&status=active" {
+		t.Fatalf("unexpected desktop oauth redirect: %s", target)
+	}
+}
+
 func TestDevAuthFallsBackWhenBearerTokenIsInvalid(t *testing.T) {
 	app := newApp(config.Config{AllowDevAuth: true, DevUserID: "u1", DevOrganizationID: "org-1"})
 	if _, err := app.Service.Repo.SaveConnector(context.Background(), domain.ConnectorAccount{

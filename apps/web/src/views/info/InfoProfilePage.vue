@@ -203,6 +203,7 @@ import { acceptOrganizationInvitation, approveAccessRequest, createOrganization,
 import { CoreAuthError } from '@/api/core-auth'
 import { approveDeletionRequest, approvePrivateAccessRequest, createWechatPairing, getWechatPairingStatus, listDeletionRequests, listPrivateAccessRequests, rejectDeletionRequest, rejectPrivateAccessRequest, type DeletionRequestDTO, type PrivateAccessRequestDTO } from '@/api/info-knowledge'
 import { listLocalWechatAccounts, pairLocalWechatAccount, type LocalWechatAccount } from '@/api/wechat-local-agent'
+import { desktopRuntimeActive, openExternalUrl } from '@/api/runtime-config'
 
 const store = useInfoMockStore()
 const authStore = useAuthStore()
@@ -589,8 +590,8 @@ async function confirmFeishuBind() {
   feishuBinding.value = true
   try {
 	const current = connectors.value.find((item) => item.platform === 'feishu')
-	const url = await getFeishuAuthorizeURL(current?.bound ? 'rebind' : 'bind')
-    window.location.assign(url)
+	const url = await getFeishuAuthorizeURL(current?.bound ? 'rebind' : 'bind', desktopRuntimeActive() ? 'desktop' : 'web')
+    if (!(await openExternalUrl(url))) window.location.assign(url)
   } catch (cause) { MessagePlugin.error(errorMessage(cause, '飞书授权暂不可用')) }
   finally { feishuBinding.value = false }
 }
@@ -728,6 +729,7 @@ async function beginWechatPairing() {
 async function handleOAuthCallback() {
   const notice = oauthCallbackNotice(route.query)
   if (!notice) return
+  if (notice.kind === 'success') await refreshConnectors().catch(() => undefined)
   if (notice.kind === 'success') MessagePlugin.success(notice.message)
   else MessagePlugin.error(notice.message)
   const query = { ...route.query }

@@ -58,6 +58,8 @@ type WechatCollectionConfig struct {
 	HistoryStartAt        *time.Time `json:"history_start_at,omitempty"`
 	Enabled               bool       `json:"enabled"`
 	ListenMode            string     `json:"listen_mode"`
+	DesiredStatus         string     `json:"desired_status"`
+	ConfigVersion         int64      `json:"config_version"`
 	UpdatedAt             time.Time  `json:"updated_at"`
 }
 
@@ -69,6 +71,38 @@ type WechatCollectorRuntime struct {
 	LastError       string     `json:"last_error,omitempty"`
 	StoppedAt       *time.Time `json:"stopped_at,omitempty"`
 	UpdatedAt       time.Time  `json:"updated_at"`
+}
+
+type WechatCommand struct {
+	CommandID      string         `json:"command_id"`
+	ConnectorID    string         `json:"connector_id"`
+	DeviceID       string         `json:"device_id,omitempty"`
+	CommandType    string         `json:"command_type"`
+	Payload        map[string]any `json:"payload"`
+	Result         map[string]any `json:"result,omitempty"`
+	IdempotencyKey string         `json:"idempotency_key"`
+	Status         string         `json:"status"`
+	Attempt        int            `json:"attempt"`
+	Deadline       time.Time      `json:"deadline"`
+	DeliveredAt    *time.Time     `json:"delivered_at,omitempty"`
+	StartedAt      *time.Time     `json:"started_at,omitempty"`
+	CompletedAt    *time.Time     `json:"completed_at,omitempty"`
+	ErrorCode      string         `json:"error_code,omitempty"`
+	ErrorMessage   string         `json:"error_message,omitempty"`
+	CreatedAt      time.Time      `json:"created_at"`
+	UpdatedAt      time.Time      `json:"updated_at"`
+}
+
+type WechatSnapshot struct {
+	ConnectorID  string           `json:"connector_id"`
+	SnapshotType string           `json:"snapshot_type"`
+	DeviceID     string           `json:"device_id,omitempty"`
+	Version      int64            `json:"version"`
+	Items        []map[string]any `json:"items"`
+	CapturedAt   time.Time        `json:"captured_at"`
+	ExpiresAt    time.Time        `json:"expires_at"`
+	CreatedAt    time.Time        `json:"created_at,omitempty"`
+	UpdatedAt    time.Time        `json:"updated_at,omitempty"`
 }
 
 type ConnectorView struct {

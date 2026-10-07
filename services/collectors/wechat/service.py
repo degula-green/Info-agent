@@ -236,7 +236,32 @@ class BrowserPairRequest(BaseModel):
 def auth(token: str | None) -> None:
     if token != os.getenv("COLLECTOR_INTERNAL_TOKEN", "local-development-only"): raise HTTPException(401, "invalid collector credential")
 
-def state_path() -> Path: return Path(os.getenv("WECHAT_COLLECTOR_STATE_FILE", "./data/wechat-collector.json")).expanduser()
+_PROJECT_ROOT = Path(__file__).resolve().parents[3]
+_DEFAULT_STATE_PATH = _PROJECT_ROOT / "data" / "wechat-collector.json"
+
+def state_path() -> Path:
+    configured = os.getenv("WECHAT_COLLECTOR_STATE_FILE", "").strip()
+    if not configured:
+        return _DEFAULT_STATE_PATH
+    path = Path(configured).expanduser()
+    return path if path.is_absolute() else (_PROJECT_ROOT / path)
+
+def http_error_code(exc: urllib.error.HTTPError) -> str:
+    try:
+        raw = exc.read()
+    except Exception:
+        return ""
+    if isinstance(raw, bytes):
+        raw = raw.decode("utf-8", errors="replace")
+    try:
+        payload = json.loads(raw or "{}")
+    except (TypeError, ValueError):
+        return ""
+    return str(payload.get("code") or "").strip()
+
+def should_clear_device_credentials(exc: urllib.error.HTTPError) -> bool:
+    return exc.code == 401 and http_error_code(exc) == "agent_device_expired"
+
 def load_state() -> None:
     global checkpoints, replayed_media
     try:
@@ -296,11 +321,20 @@ def bootstrap_from_knowledge() -> None:
         config["connector_id"] = connector.get("id")
         save_state()
     except urllib.error.HTTPError as exc:
-        if exc.code == 401:
+        code = http_error_code(exc)
+        if exc.code == 401 and code == "agent_device_expired":
             device_identity.clear()
             binding.clear()
             save_state()
             bootstrap_error = "agent device is expired or revoked; pair it again"
+            return
+        if exc.code == 401:
+            save_state()
+            bootstrap_error = (
+                "Knowledge rejected agent credentials ("
+                + (code or "unauthorized")
+                + "); keeping local pairing for retry"
+            )
             return
         bootstrap_error = f"Knowledge bootstrap failed: {exc}"[:500]
     except Exception as exc:
@@ -309,7 +343,7 @@ def bootstrap_from_knowledge() -> None:
 def ensure_bootstrap() -> bool:
     """Retry Knowledge bootstrap after startup ordering or transient outages."""
     global db, media, last_bootstrap_at, bootstrap_error
-    if binding.get("status") == "running" and db is not None and config.get("connector_id"):
+    if binding.get("status") == "running" and bool(db) and config.get("connector_id"):
         return True
     now = time.time()
     retry_interval = max(1.0, float(os.getenv("WECHAT_BOOTSTRAP_RETRY_INTERVAL", "5")))
@@ -332,33 +366,140 @@ def ensure_bootstrap() -> bool:
         bootstrap_error = f"WeChat database bootstrap failed: {exc}"[:500]
         return False
 
-def send_device_heartbeat(*, force: bool = False) -> bool:
-    global last_device_heartbeat_at
+def apply_wechat_desired_state(value: dict[str, Any]) -> None:
+    desired_status = str(value.get("desired_status") or "").strip().lower()
+    if desired_status in {"stopped", "running", "paused"}:
+        binding["status"] = desired_status
+    if "enabled" in value:
+        config["enabled"] = bool(value.get("enabled"))
+    if "selected_conversations" in value:
+        config["selected_conversations"] = list(value.get("selected_conversations") or [])
+    if "listen_mode" in value:
+        config["listen_mode"] = str(value.get("listen_mode") or "whitelist")
+    if "history_start_at" in value:
+        config["history_start_at"] = value.get("history_start_at")
+    if value.get("config_version") is not None:
+        config["config_version"] = int(value.get("config_version") or 0)
+    connector_id = str(binding.get("connector_id") or config.get("connector_id") or "").strip()
+    if connector_id:
+        config["connector_id"] = connector_id
+    save_state()
+
+def ack_wechat_command(
+    command_id: str,
+    status: str,
+    *,
+    result: dict[str, Any] | None = None,
+    error_code: str = "",
+    error_message: str = "",
+) -> bool:
     device_id = str(device_identity.get("device_id") or "").strip()
-    if not device_id or not device_identity.get("device_key"):
+    if not device_id or not command_id:
         return False
-    now = time.time()
-    interval = max(5.0, float(os.getenv("WECHAT_HEARTBEAT_INTERVAL", "30")))
-    if not force and now - last_device_heartbeat_at < interval:
-        return True
-    path = f"/api/knowledge/v1/internal/devices/{urllib.parse.quote(device_id)}/heartbeat"
+    path = (
+        f"/api/knowledge/v1/internal/devices/{urllib.parse.quote(device_id)}"
+        f"/commands/{urllib.parse.quote(command_id)}/ack"
+    )
     try:
         knowledge(
             path,
             "POST",
-            {"agent_version": str(device_identity.get("agent_version") or "local-wechat-agent")},
+            {
+                "status": status,
+                "result": result or {},
+                "error_code": error_code,
+                "error_message": error_message,
+            },
+        )
+        return True
+    except Exception as exc:
+        binding["last_error"] = f"command acknowledgement failed: {exc}"[:500]
+        save_state()
+        return False
+
+def apply_heartbeat_response(payload: dict[str, Any]) -> None:
+    desired_state = payload.get("desired_state") or {}
+    if isinstance(desired_state, dict) and desired_state:
+        apply_wechat_desired_state(desired_state)
+    commands = payload.get("commands") or []
+    if not isinstance(commands, list):
+        return
+    for command in commands:
+        if not isinstance(command, dict):
+            continue
+        command_id = str(command.get("command_id") or "").strip()
+        command_type = str(command.get("command_type") or "").strip()
+        command_payload = command.get("payload") or {}
+        if not command_id or not command_type:
+            continue
+        ack_wechat_command(command_id, "running")
+        try:
+            if isinstance(command_payload, dict) and command_payload:
+                apply_wechat_desired_state(command_payload)
+            if command_type == "wechat.collector.stop":
+                binding["status"] = "stopped"
+                save_state()
+            elif command_type in {"wechat.collector.start", "wechat.collector.apply_config"}:
+                desired_status = str(command_payload.get("desired_status") or "running")
+                binding["status"] = desired_status
+                config["enabled"] = bool(command_payload.get("enabled", True))
+                save_state()
+            ack_wechat_command(command_id, "acknowledged", result={"applied": True})
+        except Exception as exc:
+            ack_wechat_command(
+                command_id,
+                "failed",
+                error_code="collector_command_failed",
+                error_message=str(exc)[:500],
+            )
+
+def send_device_heartbeat(*, force: bool = False) -> dict[str, Any] | None:
+    global last_device_heartbeat_at
+    device_id = str(device_identity.get("device_id") or "").strip()
+    if not device_id or not device_identity.get("device_key"):
+        return None
+    now = time.time()
+    interval = max(5.0, float(os.getenv("WECHAT_HEARTBEAT_INTERVAL", "30")))
+    if not force and now - last_device_heartbeat_at < interval:
+        return None
+    path = f"/api/knowledge/v1/internal/devices/{urllib.parse.quote(device_id)}/heartbeat"
+    try:
+        payload = knowledge(
+            path,
+            "POST",
+            {
+                "agent_version": str(device_identity.get("agent_version") or "local-wechat-agent"),
+                "collector_status": str(binding.get("status") or "stopped"),
+            },
         )
         last_device_heartbeat_at = now
-        return True
+        return payload if isinstance(payload, dict) else {}
     except urllib.error.HTTPError as exc:
-        if exc.code == 401:
+        code = http_error_code(exc)
+        if exc.code == 401 and code == "agent_device_expired":
             device_identity.clear()
             binding.clear()
             save_state()
-        return False
+        elif exc.code == 401:
+            binding["last_error"] = (
+                "heartbeat rejected ("
+                + (code or "unauthorized")
+                + "); local pairing retained"
+            )
+            save_state()
+        return None
 
 def save_state() -> None:
-    path = state_path(); path.parent.mkdir(parents=True, exist_ok=True); temp = path.with_suffix(path.suffix + ".tmp")
+    path = state_path(); path.parent.mkdir(parents=True, exist_ok=True)
+    backup = path.with_suffix(path.suffix + ".bak")
+    try:
+        raw = path.read_text(encoding="utf-8")
+        previous = json.loads(raw)
+        if previous.get("device") or previous.get("binding"):
+            backup.write_text(raw, encoding="utf-8")
+    except (FileNotFoundError, OSError, TypeError, ValueError):
+        pass
+    temp = path.with_suffix(path.suffix + ".tmp")
     temp.write_text(json.dumps({"device": dict(device_identity), "binding": dict(binding), "checkpoints": checkpoints, "replayed_media": {key: sorted(values) for key, values in replayed_media.items()}}, ensure_ascii=False), encoding="utf-8"); temp.replace(path)
 
 def auth_headers_for(path: str, method: str, body: bytes | None) -> dict[str, str]:
@@ -539,7 +680,7 @@ def message_external_id(
 
 def nickname_index() -> dict[str, str]:
     """Return the local WeChat contact display-name index when available."""
-    if db is None:
+    if not db:
         return {}
     try:
         # The library's helper prefers ``remark``.  A remark is an internal
@@ -725,7 +866,7 @@ def local_file_fallback(raw: dict[str, Any], root: Path) -> str | None:
     return str(fallback)
 
 def download_attachment(chat_id: str, raw: dict[str, Any]) -> tuple[Path, Path] | None:
-    if media is None: return None
+    if not media: return None
     try: local_id = int(raw.get("local_id"))
     except (TypeError, ValueError): return None
     root = Path(tempfile.mkdtemp(prefix="wechat-attachment-"))
@@ -846,7 +987,7 @@ def media_replay_candidates(
 
 
 def collect_once() -> None:
-    if binding.get("status") == "running" and config.get("enabled") and config.get("connector_id") and db is not None:
+    if binding.get("status") == "running" and config.get("enabled") and config.get("connector_id") and bool(db):
         device_id = urllib.parse.quote(str(device_identity.get("device_id") or ""))
         if not device_id:
             return
@@ -994,10 +1135,29 @@ def collect_once() -> None:
         # stale failure after the collector has recovered.
         binding.pop("last_error", None)
 
+def upload_wechat_snapshot(snapshot_type: str, items: list[dict[str, Any]]) -> dict[str, Any]:
+    device_id = str(device_identity.get("device_id") or "").strip()
+    if not device_id:
+        return {"status": "unpaired"}
+    path = (
+        f"/api/knowledge/v1/internal/devices/{urllib.parse.quote(device_id)}"
+        "/wechat/snapshot"
+    )
+    return knowledge(
+        path,
+        "POST",
+        {
+            "snapshot_type": snapshot_type,
+            "version": int(time.time() * 1000),
+            "items": items,
+            "captured_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        },
+    )
+
 def discover_conversations() -> dict[str, Any]:
     connector_id = str(binding.get("connector_id") or config.get("connector_id") or "").strip()
-    if db is None or not connector_id:
-        return {"items": []}
+    if not db or not connector_id:
+        return {"status": "empty", "items": []}
     items = []; names = nickname_index()
     include_members = os.getenv("WECHAT_DISCOVERY_INCLUDE_MEMBERS", "1").strip().lower() in {"1", "true", "yes", "on"}
     for row in db.get_sessions(limit=1000):
@@ -1018,7 +1178,48 @@ def discover_conversations() -> dict[str, Any]:
             "members": members,
             "metadata": {"source": "wechat_collector"},
         })
-    return knowledge("/api/knowledge/v1/internal/wechat/discovery", "POST", {"connector_id": connector_id, "items": items})
+    return upload_wechat_snapshot("conversations", items)
+
+def local_contact_items(keyword: str = "") -> list[dict[str, str]]:
+    if not db:
+        return []
+    needle = keyword.strip()
+    rows: list[dict[str, Any]] = []
+    for rel, path, _ in db._db_files:
+        if Path(path).name != "contact.db":
+            continue
+        conn = db._open(rel)
+        try:
+            pattern = f"%{needle}%"
+            records = conn.execute(
+                "SELECT username,nick_name,remark FROM contact "
+                "WHERE nick_name LIKE ? OR remark LIKE ? OR username LIKE ? OR alias LIKE ? "
+                "ORDER BY id ASC",
+                (pattern, pattern, pattern, pattern),
+            ).fetchall()
+            rows = [dict(record) for record in records]
+        finally:
+            conn.close()
+        break
+    return [
+        {
+            "external_user_id": str(row.get("username") or ""),
+            "username": str(row.get("username") or ""),
+            "nick_name": str(row.get("nick_name") or ""),
+            "remark": str(row.get("remark") or ""),
+            "display_name": str(row.get("remark") or row.get("nick_name") or row.get("username") or ""),
+        }
+        for row in rows
+        if str(row.get("username") or "").strip()
+    ]
+
+def refresh_contacts() -> None:
+    if not db:
+        return
+    try:
+        upload_wechat_snapshot("contacts", local_contact_items())
+    except Exception as exc:
+        binding["last_error"] = f"contacts snapshot failed: {exc}"[:500]
 
 def refresh_discovery() -> None:
     """Refresh discovery without blocking message collection or UI requests."""
@@ -1030,6 +1231,7 @@ def refresh_discovery() -> None:
             global discovery_thread
             try:
                 discover_conversations()
+                refresh_contacts()
             except Exception as exc:
                 binding["last_error"] = f"discovery failed: {exc}"[:500]
             finally:
@@ -1040,7 +1242,7 @@ def refresh_discovery() -> None:
 
 def group_members(chat_id: str) -> list[dict[str, str]]:
     """Read the contact.db chatroom membership relation for an exact count."""
-    if db is None or not chat_id.endswith("@chatroom"):
+    if not db or not chat_id.endswith("@chatroom"):
         return []
     try:
         for rel, path, _ in db._db_files:
@@ -1066,7 +1268,9 @@ def collector_worker() -> None:
             if not ensure_bootstrap():
                 time.sleep(float(os.getenv("WECHAT_COLLECTOR_POLL_INTERVAL", "5")))
                 continue
-            send_device_heartbeat()
+            heartbeat = send_device_heartbeat()
+            if heartbeat is not None:
+                apply_heartbeat_response(heartbeat)
             if time.time() - last_discovery_at >= float(os.getenv("WECHAT_DISCOVERY_INTERVAL", "60")):
                 refresh_discovery(); last_discovery_at = time.time()
             collect_once()
@@ -1339,7 +1543,7 @@ def stop(x_collector_token: str | None = Header(default=None)) -> dict[str, str]
 @app.get("/conversations")
 def conversations(x_collector_token: str | None = Header(default=None)) -> dict[str, Any]:
     auth(x_collector_token)
-    if db is None: return {"conversations": [], "total": 0}
+    if not db: return {"conversations": [], "total": 0}
     selected = set(config.get("selected_conversations") or []); items = []; names = nickname_index()
     for row in db.get_sessions(limit=1000):
         cid = str(row.get("username") or row.get("chat_id") or "")
@@ -1349,34 +1553,8 @@ def conversations(x_collector_token: str | None = Header(default=None)) -> dict[
 @app.get("/contacts")
 def contacts(keyword: str = "", x_collector_token: str | None = Header(default=None)) -> dict[str, Any]:
     auth(x_collector_token)
-    if db is None: return {"contacts": [], "total": 0}
-    # wechatauto-replica.search_contact currently applies a hard LIMIT 50.
-    # Read the same local contact table here so discovery is complete; filtering
-    # remains parameterized and happens in SQLite rather than in application code.
-    needle = keyword.strip()
-    rows: list[dict[str, Any]] = []
-    for rel, path, _ in db._db_files:
-        if Path(path).name != "contact.db":
-            continue
-        conn = db._open(rel)
-        try:
-            pattern = f"%{needle}%"
-            records = conn.execute(
-                "SELECT username,nick_name,remark FROM contact "
-                "WHERE nick_name LIKE ? OR remark LIKE ? OR username LIKE ? OR alias LIKE ? "
-                # Keep the same order as WeChat's contact table. The previous
-                # LIMIT 50 helper returned rows in this order; sorting by
-                # nickname/remark made the first page look like unrelated
-                # contacts (many users legitimately use punctuation-only
-                # nicknames) even though the records were correct.
-                "ORDER BY id ASC",
-                (pattern, pattern, pattern, pattern),
-            ).fetchall()
-            rows = [dict(record) for record in records]
-        finally:
-            conn.close()
-        break
-    items = [{"username": str(row.get("username") or ""), "nick_name": str(row.get("nick_name") or ""), "remark": str(row.get("remark") or "")} for row in rows if str(row.get("username") or "").strip()]
+    if not db: return {"contacts": [], "total": 0}
+    items = local_contact_items(keyword)
     return {"contacts": items, "total": len(items)}
 @app.get("/config")
 def get_config(x_collector_token: str | None = Header(default=None)) -> dict[str, Any]:

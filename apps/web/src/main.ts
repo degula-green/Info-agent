@@ -9,11 +9,13 @@ import './assets/theme/theme.css'
 import './style.css'
 import { installAuthExpiryHandler } from './auth/expiry'
 import { initializeAuthSession } from './auth/session'
+import { installDesktopDeepLinkHandler } from './desktop-deep-links'
 
 const app = createApp(App)
 app.use(TDesign)
 app.use(createPinia())
 initializeAuthSession()
 installAuthExpiryHandler(router)
+installDesktopDeepLinkHandler(router)
 app.use(router)
 router.isReady().then(() => app.mount('#app'))

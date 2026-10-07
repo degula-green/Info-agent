@@ -1,5 +1,6 @@
 import { authenticatedFetch } from '../auth/request.ts'
 import { resolveOrganizationId } from '@/utils/info-search-scope'
+import { desktopApiBase } from './runtime-config.ts'
 
 export class ApiError extends Error {
   code: string
@@ -18,7 +19,7 @@ export class ApiError extends Error {
 }
 
 const appEnv = ((import.meta as ImportMeta & { env?: Record<string, string> }).env || {})
-const baseURL = String(appEnv.VITE_KNOWLEDGE_BASE_URL || '/api/knowledge/v1').replace(/\/$/, '')
+const baseURL = String(desktopApiBase('/api/knowledge/v1') || appEnv.VITE_KNOWLEDGE_BASE_URL || '/api/knowledge/v1').replace(/\/$/, '')
 
 // Keep browser traffic bounded while the collectors are catching up. The
 // Knowledge service is intentionally polled conservatively so a slow detail

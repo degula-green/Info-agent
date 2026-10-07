@@ -9,6 +9,9 @@ import (
 
 func main() {
 	cfg := config.Load()
+	if err := cfg.Validate(); err != nil {
+		log.Fatal(err)
+	}
 	app := server.New(cfg)
 	log.Printf("knowledge service listening on :%s", cfg.HTTPPort)
 	if err := app.Run(":" + cfg.HTTPPort); err != nil {

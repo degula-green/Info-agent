@@ -20,6 +20,10 @@ from app.application.task_service import (
 from app.auth import AuthenticatedUser, current_user, current_user_id
 from app.container import AgentContainer
 from app.infrastructure.attachment_store import RedisAttachmentStore
+from app.infrastructure.web.desktop_form_browser_client import (
+    DesktopFormBrowserClient,
+    bind_desktop_form_owner,
+)
 from app.kernel.approval import ApprovalError
 from app.kernel.errors import AgentContractError
 from app.kernel.states import TERMINAL_TASK_STATUSES, WAITING_TASK_STATUSES
@@ -429,6 +433,11 @@ def takeover_screenshot(
     container = get_container()
     container.task_service.get_task(task_id, owner_user_id=owner_user_id)
     takeover = _require_takeover(container, task_id)
+    if isinstance(container.form_browser, DesktopFormBrowserClient):
+        raise HTTPException(
+            status_code=409,
+            detail="complete the sign-in in the desktop app and resume the task",
+        )
     try:
         image = container.form_browser.screenshot(str(takeover["session_id"]))
     except AgentContractError as exc:
@@ -445,6 +454,11 @@ def takeover_input(
     container = get_container()
     container.task_service.get_task(task_id, owner_user_id=owner_user_id)
     takeover = _require_takeover(container, task_id)
+    if isinstance(container.form_browser, DesktopFormBrowserClient):
+        raise HTTPException(
+            status_code=409,
+            detail="enter the sign-in details in the desktop app",
+        )
     try:
         return container.form_browser.send_input(
             str(takeover["session_id"]),
@@ -522,21 +536,22 @@ def form_undo(
     if not url:
         raise HTTPException(status_code=409, detail="the write did not record its page")
 
-    session_id = container.form_browser.create_session()
-    try:
-        container.form_browser.open(session_id, url)
-        blank = not any(str(cell).strip() for row in previous for cell in row)
-        if blank:
-            # Nothing was there before, so undoing means clearing the block.
-            container.form_browser.clear_range(session_id, written_range)
-            return {"reverted": True, "target": target, "observed": [], "verified": True}
-        width = max((len(row) for row in previous), default=1) or 1
-        rows = [list(row) + [""] * (width - len(row)) for row in previous]
-        written = container.form_browser.write_grid(session_id, target, rows)
-    except AgentContractError as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
-    finally:
-        container.form_browser.close_session(session_id)
+    with bind_desktop_form_owner(owner_user_id):
+        session_id = container.form_browser.create_session()
+        try:
+            container.form_browser.open(session_id, url)
+            blank = not any(str(cell).strip() for row in previous for cell in row)
+            if blank:
+                # Nothing was there before, so undoing means clearing the block.
+                container.form_browser.clear_range(session_id, written_range)
+                return {"reverted": True, "target": target, "observed": [], "verified": True}
+            width = max((len(row) for row in previous), default=1) or 1
+            rows = [list(row) + [""] * (width - len(row)) for row in previous]
+            written = container.form_browser.write_grid(session_id, target, rows)
+        except AgentContractError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        finally:
+            container.form_browser.close_session(session_id)
     return {
         "reverted": True,
         "target": target,

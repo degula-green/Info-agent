@@ -1,8 +1,9 @@
 import { authenticatedFetch } from '../auth/request.ts'
 import { getCurrentUser } from './core-auth.ts'
+import { desktopApiBase } from './runtime-config.ts'
 
 const env = ((import.meta as ImportMeta & { env?: Record<string, string> }).env || {})
-const baseURL = String(env.VITE_RAG_BASE_URL || '/api/rag/api/v1').replace(/\/$/, '')
+const baseURL = String(desktopApiBase('/api/rag/api/v1') || env.VITE_RAG_BASE_URL || '/api/rag/api/v1').replace(/\/$/, '')
 let userIDPromise: Promise<string> | null = null
 
 function isUserID(value: unknown): value is string {

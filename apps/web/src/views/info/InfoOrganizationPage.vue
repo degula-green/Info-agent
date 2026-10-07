@@ -198,6 +198,7 @@ import { MessagePlugin } from 'tdesign-vue-next'
 import { useRouter } from 'vue-router'
 import { CoreAuthError, getCurrentUser } from '@/api/core-auth'
 import { createOrganizationInvitation, getCurrentOrganization, getOrganizationCapabilities, getOrganizationExitPreflight, grantOrganizationRole, leaveOrganization, listAccessRequests, listOrganizationMembers, reactivateOrganizationMember, removeOrganizationMember, revokeOrganizationInvitation, revokeOrganizationRole, suspendOrganizationMember, transferOrganizationOwner, type CoreAccessRequest, type CoreOrganizationCapabilities, type CoreOrganizationExitPreflight, type CoreOrganizationMember, type CoreOrganizationResponse } from '@/api/core-organization'
+import { desktopInvitationBaseUrl } from '@/api/runtime-config'
 
 type ManagementRole = 'owner' | 'information_admin' | 'membership_approver'
 type DisplayRole = ManagementRole | 'member'
@@ -356,7 +357,11 @@ async function generateInvitation() {
   invitationSubmitting.value = true
   try {
     const result = await createOrganizationInvitation(organization.value.organization.id)
-    const generated = { id: result.invitation_id, url: `${window.location.origin}/organization-invitations/${result.token}`, expiresAt: new Date(result.expires_at), status: 'pending' as const }
+    const invitationBaseURL = desktopInvitationBaseUrl()
+    const inviteURL = invitationBaseURL
+      ? `${invitationBaseURL}#token=${encodeURIComponent(result.token)}`
+      : `${window.location.origin}/organization-invitations/${result.token}`
+    const generated = { id: result.invitation_id, url: inviteURL, expiresAt: new Date(result.expires_at), status: 'pending' as const }
     invitationDraft.value = generated; invitation.value = generated
   } catch (cause) { MessagePlugin.error(errorMessage(cause, '邀请链接生成失败')) }
   finally { invitationSubmitting.value = false }

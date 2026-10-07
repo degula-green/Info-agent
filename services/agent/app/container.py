@@ -43,11 +43,23 @@ from app.infrastructure.search.searxng import SearxngSearchProvider
 from app.infrastructure.search.tavily import TavilySearchProvider
 from app.infrastructure.web.content_reader import ContentReader
 from app.infrastructure.web.crawl4ai_client import Crawl4AIClient
+from app.infrastructure.web.desktop_form_browser_client import (
+    DesktopFormBrowserClient,
+)
 from app.infrastructure.web.evidence import EvidenceBuilder
 from app.infrastructure.web.form_browser_client import FormBrowserClient
 from app.infrastructure.web.tavily_extractor import TavilyRenderer
 from app.infrastructure.web.url_tools import load_aliases
 from app.infrastructure.knowledge.client import HttpKnowledgeClient, KnowledgeClient
+from app.infrastructure.knowledge.device_auth import (
+    DeviceAuthClient,
+    HttpDeviceAuthClient,
+)
+from app.infrastructure.postgres.desktop_tasks import (
+    DesktopTaskStore,
+    InMemoryDesktopTaskStore,
+    PostgresDesktopTaskStore,
+)
 from app.infrastructure.llm.client import OpenAIChatClient
 from app.providers.answer import LlmAnswerProvider
 from app.providers.chat import LlmChatReplyProvider
@@ -90,7 +102,9 @@ class AgentContainer:
     core_client: CoreClient
     # Present only when the form-browser sidecar is configured; the takeover
     # endpoints proxy to it so the browser stays off the public surface.
-    form_browser: FormBrowserClient | None = None
+    form_browser: FormBrowserClient | DesktopFormBrowserClient | None = None
+    desktop_tasks: DesktopTaskStore | None = None
+    device_auth: DeviceAuthClient | None = None
 
     def close(self) -> None:
         # The two stores normally share one pool; closing it twice is a no-op
@@ -206,7 +220,7 @@ def build_registry(
     settings: Settings,
     todo_store: TodoStore,
     rag_client: RAGClient | None = None,
-    form_client: FormBrowserClient | None = None,
+    form_client: FormBrowserClient | DesktopFormBrowserClient | None = None,
 ) -> CapabilityRegistry:
     """Every capability the Agent can actually execute.
 
@@ -578,10 +592,13 @@ def build_container(
     knowledge: KnowledgeClient | None = None,
     core: CoreClient | None = None,
     rag_client: RAGClient | None = None,
+    desktop_tasks: DesktopTaskStore | None = None,
+    device_auth: DeviceAuthClient | None = None,
     ingress: KnowledgeEventIngress | None = None,
     understanding_provider=None,
 ) -> AgentContainer:
     resolved = settings or default_settings
+    shared_pool = None
     if store is None and todo_store is None and resolved.database_url:
         # One worker process should own one database pool, not one per store.
         # The stores have separate lifetimes, but they share the same process
@@ -599,17 +616,41 @@ def build_container(
         resolved_todo_store = PostgresTodoStore(
             shared_pool, schema=resolved.database_schema
         )
+        if desktop_tasks is None:
+            desktop_tasks = PostgresDesktopTaskStore(
+                shared_pool, schema=resolved.database_schema
+            )
     else:
         resolved_store = store or build_store(resolved)
         resolved_todo_store = todo_store or build_todo_store(resolved)
+    if desktop_tasks is None:
+        desktop_tasks = InMemoryDesktopTaskStore()
     resolved_knowledge = knowledge or build_knowledge_client(resolved)
     resolved_rag_client = rag_client or build_rag_client(resolved)
-    resolved_form_client: FormBrowserClient | None = None
-    if resolved.form_browser_url.strip():
+    resolved_device_auth = device_auth or HttpDeviceAuthClient(
+        resolved.knowledge_base_url,
+        service_token=resolved.knowledge_service_token,
+        timeout_seconds=resolved.knowledge_timeout_seconds,
+    )
+    resolved_form_client: FormBrowserClient | DesktopFormBrowserClient | None = None
+    form_mode = (resolved.form_browser_mode or "server").strip().lower()
+    if form_mode == "desktop":
+        resolved_form_client = DesktopFormBrowserClient(
+            desktop_tasks,
+            resolved_device_auth,
+            task_ttl_seconds=resolved.desktop_task_ttl_seconds,
+            poll_seconds=resolved.desktop_task_poll_seconds,
+            timeout_seconds=resolved.form_browser_timeout_seconds,
+        )
+    elif form_mode == "server" and resolved.form_browser_url.strip():
         resolved_form_client = FormBrowserClient(
             resolved.form_browser_url,
             api_token=resolved.form_browser_token,
             timeout_seconds=resolved.form_browser_timeout_seconds,
+        )
+    elif form_mode not in {"server", "desktop"}:
+        raise RuntimeError(
+            f"unsupported AGENT_FORM_BROWSER_MODE: {resolved.form_browser_mode}"
         )
     registry = registry or build_registry(
         resolved,
@@ -724,4 +765,6 @@ def build_container(
         ),
         core_client=core or build_core_client(resolved),
         form_browser=resolved_form_client,
+        desktop_tasks=desktop_tasks,
+        device_auth=resolved_device_auth,
     )
