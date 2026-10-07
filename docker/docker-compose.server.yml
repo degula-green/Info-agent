@@ -13,6 +13,9 @@ services:
     env_file: .env.server
     environment:
       CORE_KNOWLEDGE_URL: http://knowledge-service:8090
+    volumes:
+      - ../services/core/.runtime/jwt-private.pem:/run/secrets/jwt-private.pem:ro
+      - ../services/core/.runtime/jwt-public.pem:/run/secrets/jwt-public.pem:ro
     expose:
       - "8080"
     restart: unless-stopped
