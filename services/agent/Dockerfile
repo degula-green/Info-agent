@@ -1,13 +1,21 @@
-FROM ghcr.io/astral-sh/uv:python3.11-bookworm-slim
+FROM python:3.12-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
 
 WORKDIR /app
 
-ENV UV_COMPILE_BYTECODE=1 \
-    UV_LINK_MODE=copy \
-    PATH="/app/.venv/bin:$PATH"
-
-COPY pyproject.toml uv.lock ./
-RUN uv sync --frozen --no-dev
+RUN pip install --no-cache-dir \
+    "fastapi==0.115.6" \
+    "PyJWT[crypto]>=2.10,<3" \
+    "pydantic>=2.7,<3" \
+    "psycopg[binary,pool]>=3.2,<4" \
+    "python-dotenv>=1,<2" \
+    "redis>=5,<6" \
+    "uvicorn[standard]==0.34.0" \
+    "minio>=7.2.0,<8" \
+    "httpx>=0.27,<1" \
+    "python-multipart>=0.0.20,<1"
 
 COPY app ./app
 COPY worker.py knowledge_worker.py worker_supervisor.py ./
