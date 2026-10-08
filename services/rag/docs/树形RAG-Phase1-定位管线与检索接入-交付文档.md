@@ -3,7 +3,7 @@
 - **阶段**: Phase 1 / 定位管线与检索接入
 - **分支**: `codex/tree-rag-v2`
 - **完成日期**: 2026-10-09
-- **状态**: 后端完成；前端审核界面待建（见第 4 节）
+- **状态**: 完成（前端审核界面已建）
 - **关联文档**: 树形RAG实施计划.md (v2.4)、实体定位五层管线接口草案.md、树形RAG-Phase0-地基改造-交付文档.md
 
 ## 1. 阶段目标
@@ -115,13 +115,46 @@ pytest: 98 passed, 4 skipped
    -> 置信度不足时继续执行 L3 并合并候选
 ```
 
+### 3.4 审核闭环端到端验证（真实数据）
+
+在真实组织 scope 造一条候选，走 HTTP 审核接口通过，再查树：
+
+```text
+1) 列表   total=1  candidate=青云飞鹏官网项目
+2) 详情   status=new mentions=1 score=0.82
+3) promote -> status=promoted entity=7dee93a1-... registry_version=1
+              branch_refresh_job=ed6237a0-...
+4) 树     nodes=2
+            domain | project | statistics={"entity_count":1}
+            entity | project | 青云飞鹏官网项目 | statistics={"chunk_count":0}
+```
+
+验证后已清理测试数据（实体、候选、挂载、刷新任务全部归零）。
+
+### 3.5 前端验收
+
+```text
+vue-tsc --noEmit    通过
+npm test            72 passed, 0 failed
+npm run build       构建成功（45.5s）
+GET  /admin/entities?scope_type=organization           -> OK
+GET  /admin/entity-candidates/{id}                     -> 200
+POST /admin/entity-candidates/{id}/review (promote)    -> promoted
+```
+
+### 2.6 前端审核界面
+
+| 文件 | 内容 |
+|---|---|
+| `apps/web/src/api/rag.ts` | 新增候选列表/详情/审核/实体列表四个接口，管理员请求同时带 `X-User-ID` 与 `X-Organization-Id`，403 文案明确为"没有实体审核权限" |
+| `apps/web/src/views/info/InfoEntityReviewPage.vue` | 最小审核页：筛选（类型/状态/名称）、候选表格与多选、批量通过/忽略、详情抽屉（置信度/提及/来源 chunk/证据上下文）、规范名称与类型编辑、合并目标选择、备注、四个动作 |
+| `apps/web/src/router.ts`、`InfoOrganizationPage.vue`、`InfoShell.vue` | 路由 `/organization/entity-review`、组织页入口、导航分组与标题 |
+
+页面刻意保持最小：不做树可视化、不做图谱式合并选择器、不引入"试用节点"
+（接口 07 无此状态）。旧 mock `InfoKnowledgeStructurePage.vue` 保留为设计参考，
+已加"设计稿演示"提示条并从组织页摘掉入口，只保留 URL 直达。
+
 ## 4. 未完成项
-
-### 4.1 前端审核界面（Phase 1 后期，未开始）
-
-按实施计划 1.5 与 3.2.4，Phase 1 还需要新建最小审核页并把旧 mock 摘出导航。
-当前旧 mock 仍在 `apps/web/src/views/info/InfoKnowledgeStructurePage.vue`，
-已加"设计稿演示"提示条、并从组织页移除了入口按钮，但新页面尚未创建。
 
 ### 4.2 挂载置信度阈值尚未接入检索
 

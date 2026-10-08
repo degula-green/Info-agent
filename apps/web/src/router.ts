@@ -22,6 +22,7 @@ const router = createRouter({
       { path: 'knowledge/:platform/conversations/:conversationId', name: 'conversation', component: () => import('./views/info/InfoConversationPage.vue') },
       { path: 'organization', name: 'organization', component: () => import('./views/info/InfoOrganizationPage.vue') },
       { path: 'organization/knowledge', name: 'organizationKnowledge', component: () => import('./views/info/InfoKnowledgeStructurePage.vue') },
+      { path: 'organization/entity-review', name: 'organizationEntityReview', component: () => import('./views/info/InfoEntityReviewPage.vue') },
       { path: 'contacts', name: 'contacts', component: () => import('./views/info/InfoContactsPage.vue') },
       { path: 'chat', name: 'chat', component: () => import('./views/info/InfoAgentChatPage.vue') },
       { path: 'rag-chat', name: 'ragChat', component: () => import('./views/info/InfoQuickQAPage.vue') },
