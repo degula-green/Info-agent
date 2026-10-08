@@ -17,7 +17,12 @@ MAX_UNEMBEDDED_RATIO = 0.2
 # Above this share of queries failing to resolve any entity, the tree is mostly
 # adding a round trip without narrowing anything.
 MAX_NO_ENTITY_MATCH_RATE = 0.5
+# Above this share of windows coming back empty, the extraction model is costing
+# calls without producing mounts. Measured baseline after the prompt fix was
+# 18.75%, so 50% means something regressed.
+MAX_EMPTY_WINDOW_RATIO = 0.5
 SEARCH_WINDOW_HOURS = 24
+SCAN_RUN_WINDOW = 50
 
 
 class TreeMetricsService:
@@ -31,8 +36,45 @@ class TreeMetricsService:
             window_hours=SEARCH_WINDOW_HOURS, limit=2000,
         )
         metrics["search"] = summarize_search(rows, window_hours=SEARCH_WINDOW_HOURS)
+        metrics["scan"] = summarize_scan_runs(
+            self.repository.list_scan_runs(
+                scope_type=scope_type, scope_id=scope_id, limit=SCAN_RUN_WINDOW
+            )
+        )
         metrics["alerts"] = evaluate_alerts(metrics)
         return metrics
+
+
+def summarize_scan_runs(runs: list[dict[str, Any]]) -> dict[str, Any]:
+    """Aggregate recent window-scan sweeps.
+
+    The empty-window ratio is the number worth watching: it separates "this
+    conversation had nothing to extract" from "the model skipped the window",
+    and only the ratio over many sweeps can tell the two apart.
+    """
+    if not runs:
+        return {
+            "run_count": 0, "conversations": 0, "windows": 0,
+            "empty_windows": 0, "empty_window_ratio": 0.0,
+            "mounts": 0, "candidates": 0, "relations": 0,
+            "failed_conversations": 0, "last_run_at": None,
+        }
+    windows = sum(int(run.get("windows") or 0) for run in runs)
+    empty = sum(int(run.get("empty_windows") or 0) for run in runs)
+    return {
+        "run_count": len(runs),
+        "conversations": sum(int(run.get("conversations") or 0) for run in runs),
+        "windows": windows,
+        "empty_windows": empty,
+        "empty_window_ratio": round(empty / windows, 4) if windows else 0.0,
+        "mounts": sum(int(run.get("mounts") or 0) for run in runs),
+        "candidates": sum(int(run.get("candidates") or 0) for run in runs),
+        "relations": sum(int(run.get("relations") or 0) for run in runs),
+        "failed_conversations": sum(
+            int(run.get("failed_conversations") or 0) for run in runs
+        ),
+        "last_run_at": runs[0].get("created_at"),
+    }
 
 
 def summarize_search(
@@ -117,4 +159,11 @@ def evaluate_alerts(metrics: dict[str, Any]) -> list[str]:
         # Most queries cannot resolve an entity, so the tree is mostly adding a
         # round trip without narrowing anything.
         alerts.append("high_no_entity_match")
+    scan = metrics.get("scan") or {}
+    if int(scan.get("windows") or 0) and (
+        float(scan.get("empty_window_ratio") or 0) > MAX_EMPTY_WINDOW_RATIO
+    ):
+        # The extraction model is burning calls on windows it returns nothing
+        # for; mount coverage will lag behind the scan frequency.
+        alerts.append("high_empty_window_rate")
     return alerts

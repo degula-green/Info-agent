@@ -863,6 +863,59 @@ class PostgresRagMVPRepository:
                     ),
                 )
 
+    def record_scan_run(
+        self,
+        *,
+        scope_type: str,
+        scope_id: str,
+        conversations: int = 0,
+        windows: int = 0,
+        empty_windows: int = 0,
+        mounts: int = 0,
+        candidates: int = 0,
+        relations: int = 0,
+        failed_conversations: int = 0,
+    ) -> str:
+        with self._connection() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    f"""INSERT INTO {self.schema}.entity_scan_runs
+                        (scope_type,scope_id,conversations,windows,empty_windows,
+                         mounts,candidates,relations,failed_conversations)
+                        VALUES (%s,%s::uuid,%s,%s,%s,%s,%s,%s,%s)
+                        RETURNING id::text""",
+                    (
+                        scope_type, scope_id, int(conversations), int(windows),
+                        min(int(empty_windows), int(windows)), int(mounts),
+                        int(candidates), int(relations), int(failed_conversations),
+                    ),
+                )
+                return str(cursor.fetchone()[0])
+
+    def list_scan_runs(
+        self, *, scope_type: str, scope_id: str, limit: int = 50
+    ) -> list[dict[str, Any]]:
+        with self._connection() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    f"""SELECT conversations,windows,empty_windows,mounts,candidates,
+                               relations,failed_conversations,created_at
+                        FROM {self.schema}.entity_scan_runs
+                        WHERE scope_type=%s AND scope_id=%s::uuid
+                        ORDER BY created_at DESC LIMIT %s""",
+                    (scope_type, scope_id, max(1, int(limit))),
+                )
+                return [
+                    {
+                        "conversations": int(row[0]), "windows": int(row[1]),
+                        "empty_windows": int(row[2]), "mounts": int(row[3]),
+                        "candidates": int(row[4]), "relations": int(row[5]),
+                        "failed_conversations": int(row[6]),
+                        "created_at": row[7].isoformat() if row[7] else None,
+                    }
+                    for row in cursor.fetchall()
+                ]
+
     def find_entities_by_normalized(
         self, *, scope_type: str, scope_id: str, normalized_keys: list[str]
     ) -> dict[str, dict[str, Any]]:
@@ -2599,6 +2652,7 @@ class InMemoryRagMVPRepository:
         self.aliases: list[dict[str, Any]] = []
         self.branches: dict[tuple[str, str], dict[str, Any]] = {}
         self.scan_watermarks: dict[tuple[str, str, str], dict[str, Any]] = {}
+        self.scan_runs: list[dict[str, Any]] = []
         self.relations: dict[tuple[str, str, str, str, str], dict[str, Any]] = {}
         self.eval_cases: dict[tuple[str, str, str, int, str], dict[str, Any]] = {}
         self.eval_runs: list[dict[str, Any]] = []
@@ -2989,6 +3043,40 @@ class InMemoryRagMVPRepository:
             "last_chunk_id": last_chunk_id,
             "window_count": (current["window_count"] if current else 0) + int(window_count),
         }
+
+    def record_scan_run(
+        self,
+        *,
+        scope_type: str,
+        scope_id: str,
+        conversations: int = 0,
+        windows: int = 0,
+        empty_windows: int = 0,
+        mounts: int = 0,
+        candidates: int = 0,
+        relations: int = 0,
+        failed_conversations: int = 0,
+    ) -> str:
+        run_id = new_uuid()
+        self.scan_runs.append({
+            "run_id": run_id, "scope_type": scope_type, "scope_id": scope_id,
+            "conversations": int(conversations), "windows": int(windows),
+            "empty_windows": min(int(empty_windows), int(windows)),
+            "mounts": int(mounts), "candidates": int(candidates),
+            "relations": int(relations), "failed_conversations": int(failed_conversations),
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        })
+        return run_id
+
+    def list_scan_runs(
+        self, *, scope_type: str, scope_id: str, limit: int = 50
+    ) -> list[dict[str, Any]]:
+        values = [
+            dict(item) for item in self.scan_runs
+            if item["scope_type"] == scope_type and item["scope_id"] == scope_id
+        ]
+        values.sort(key=lambda item: item["created_at"], reverse=True)
+        return values[: max(1, int(limit))]
 
     def find_entities_by_normalized(
         self, *, scope_type: str, scope_id: str, normalized_keys: list[str]

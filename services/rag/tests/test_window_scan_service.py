@@ -239,6 +239,25 @@ def test_explicit_mentions_are_written_even_when_the_model_returns_nothing():
     assert all(value["confidence"] >= 0.95 for value in explicit)
 
 
+def test_empty_windows_are_counted_and_the_sweep_is_recorded():
+    # The model returning nothing is the signal the metrics watch: it can mean
+    # "nothing here" or "the model skipped it", and only the rate tells them
+    # apart. It has to be counted, not just silently produce no mounts.
+    repo = _repository_with_messages(6)
+    worker = EntityWindowScanWorker(repository=repo, extractor=FakeExtractor())
+
+    outcome = worker.run_once()
+
+    assert outcome.windows == 1
+    assert outcome.empty_windows == 1
+    assert outcome.mounts == 0
+    assert len(repo.scan_runs) == 1
+    recorded = repo.scan_runs[0]
+    assert recorded["windows"] == 1
+    assert recorded["empty_windows"] == 1
+    assert recorded["conversations"] == 1
+
+
 def test_prompt_carries_no_known_entity_list():
     # Measured on real windows: a known-entity list of >=10 entries made the
     # model return nothing at all (4 runs: 3,0,0,0 entities); even after

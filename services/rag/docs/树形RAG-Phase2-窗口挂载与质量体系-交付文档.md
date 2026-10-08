@@ -107,6 +107,17 @@ l4_invocation_rate       L4 被触发的查询占比
 latency_ms               p50 / p95 / max
 ```
 
+同一接口还有 `scan` 段，来自新增的 `entity_scan_runs` 表（每轮扫描按 scope 记一行）：
+
+```text
+run_count / conversations / windows / empty_windows / empty_window_ratio
+mounts / candidates / relations / failed_conversations / last_run_at
+```
+
+**空转率是这一段的重点**：模型对某个窗口返回空，可能是"这个窗口确实没有实体"，
+也可能是"模型这次跳过了它"，只有跨多轮的比例能区分。实测两轮 38 个窗口的空转率
+为 7.9%。告警阈值设为 50%，超过即说明提取质量回归。
+
 配套改动：检索诊断新增顶层 `locate_llm_invoked`，让 L4 调用率变成可查询的单个
 标志，而不必解析嵌套的逐 mention 轨迹。
 

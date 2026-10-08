@@ -157,6 +157,34 @@ first_attempt_empty_rate: 0.1875（原 0.4375）
 6.5~6.8s）。说明延迟由与 prompt 长度无关的固定开销主导，不要指望靠缩小 prompt
 来降延迟。TPM 相应从 17 万降到 9.4 万（同样并发下更少的 token），仍远高于需求。
 
+## 4.2 生产环境的真实空转率（已接入监控）
+
+新增 `entity_scan_runs` 表与 `tree-metrics` 的 `scan` 段，让空转率在线上可见。
+定时 worker 自行跑了两轮之后的实测：
+
+```text
+GET /api/v1/admin/tree-metrics?scope_type=user
+scan:
+  run_count            2
+  conversations        2
+  windows              38
+  empty_windows        3
+  empty_window_ratio   0.0789        ← 7.9%
+  candidates           132
+  failed_conversations 0
+  last_run_at          2026-10-09T03:53:26+08:00
+tree:
+  message_count        1071
+  mounted_chunk_count  0（注册表为空，冷启动全部落候选）
+  pending_candidate    88
+```
+
+**7.9% 比探针测出的 18.75% 更低**，说明移除已知实体列表后的真实表现好于受控实验。
+`scan` 段同时给出 `mounts` 与 `candidates`，因此"扫描在跑但树不增长"这种状态
+可以直接从数字上看出来。
+
+新增告警 `high_empty_window_rate`（空转率 > 50%），用于在提取质量回归时报警。
+
 ## 5. 结论
 
 ```text

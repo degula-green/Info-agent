@@ -85,12 +85,17 @@ class WindowResult:
     mounts: int = 0
     candidates: int = 0
     relations: int = 0
+    # How many entities the model returned for this window, before resolution.
+    # Zero is the signal that matters: it can mean "nothing here" or "the model
+    # skipped it", and only the rate over time tells the two apart.
+    entities: int = 0
 
 
 @dataclass
 class WindowScanOutcome:
     conversations: int = 0
     windows: int = 0
+    empty_windows: int = 0
     mounts: int = 0
     candidates: int = 0
     relations: int = 0
@@ -101,6 +106,7 @@ class WindowScanOutcome:
         return {
             "conversations": self.conversations,
             "windows": self.windows,
+            "empty_windows": self.empty_windows,
             "mounts": self.mounts,
             "candidates": self.candidates,
             "relations": self.relations,
@@ -133,17 +139,49 @@ class EntityWindowScanWorker:
 
     def run_once(self, *, conversation_limit: int = 5) -> WindowScanOutcome:
         outcome = WindowScanOutcome()
+        per_scope: dict[tuple[str, str], WindowScanOutcome] = {}
         for conversation in self.repository.list_scan_conversations(limit=conversation_limit):
+            key = (conversation["scope_type"], conversation["scope_id"])
+            scoped = per_scope.setdefault(key, WindowScanOutcome())
             try:
-                self._scan_conversation(conversation, outcome)
-                outcome.conversations += 1
+                self._scan_conversation(conversation, scoped)
+                scoped.conversations += 1
             except Exception as exc:
                 # The watermark stays put, so the next sweep picks this
                 # conversation up again instead of losing the messages.
-                outcome.failed_conversations += 1
-                outcome.errors.append(f"{conversation.get('conversation_id')}: {type(exc).__name__}")
+                scoped.failed_conversations += 1
+                scoped.errors.append(f"{conversation.get('conversation_id')}: {type(exc).__name__}")
                 logger.exception("window scan failed for %s", conversation.get("conversation_id"))
+        for (scope_type, scope_id), scoped in per_scope.items():
+            merge_outcome(outcome, scoped)
+            self._record_scan_run(scope_type, scope_id, scoped)
         return outcome
+
+    def _record_scan_run(
+        self, scope_type: str, scope_id: str, scoped: WindowScanOutcome
+    ) -> None:
+        """Persist the sweep so the empty-window rate is visible in production.
+
+        Observability must never break the scan itself, so a failure here is
+        logged and dropped.
+        """
+        recorder = getattr(self.repository, "record_scan_run", None)
+        if not callable(recorder):
+            return
+        try:
+            recorder(
+                scope_type=scope_type,
+                scope_id=scope_id,
+                conversations=scoped.conversations,
+                windows=scoped.windows,
+                empty_windows=scoped.empty_windows,
+                mounts=scoped.mounts,
+                candidates=scoped.candidates,
+                relations=scoped.relations,
+                failed_conversations=scoped.failed_conversations,
+            )
+        except Exception:
+            logger.warning("scan run was not recorded", exc_info=True)
 
     def _scan_conversation(self, conversation: dict[str, Any], outcome: WindowScanOutcome) -> None:
         scope_type = conversation["scope_type"]
@@ -177,6 +215,8 @@ class EntityWindowScanWorker:
         )
         for result in results:
             outcome.windows += 1
+            if not result.entities:
+                outcome.empty_windows += 1
             outcome.mounts += result.mounts
             outcome.candidates += result.candidates
             outcome.relations += result.relations
@@ -232,6 +272,7 @@ class EntityWindowScanWorker:
         prompt = build_extraction_prompt(window)
         payload = self.extractor.extract(prompt)
         extracted = clean_entities(payload.get("entities"))
+        result.entities = len(extracted)
         relations = clean_relations(payload.get("relations"))
 
         # Resolve the model's names against the registry once per window. The
@@ -320,6 +361,18 @@ class EntityWindowScanWorker:
             method="llm",
         )
         result.candidates += 1
+
+
+def merge_outcome(target: WindowScanOutcome, source: WindowScanOutcome) -> None:
+    """Add one scope's counters into the sweep total."""
+    target.conversations += source.conversations
+    target.windows += source.windows
+    target.empty_windows += source.empty_windows
+    target.mounts += source.mounts
+    target.candidates += source.candidates
+    target.relations += source.relations
+    target.failed_conversations += source.failed_conversations
+    target.errors.extend(source.errors)
 
 
 def build_windows(chunks: Sequence[Chunk], size: int, step: int) -> list[list[Chunk]]:

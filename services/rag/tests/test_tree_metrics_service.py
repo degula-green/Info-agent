@@ -3,6 +3,7 @@
 from app.application.tree_metrics_service import (
     TreeMetricsService,
     evaluate_alerts,
+    summarize_scan_runs,
     summarize_search,
 )
 from app.domain.rag import Chunk, EntityMount, normalized_text
@@ -170,3 +171,54 @@ class TestSearchMetrics:
         assert snapshot["search"]["query_count"] == 1
         assert snapshot["search"]["l4_invocation_rate"] == 1.0
         assert snapshot["search"]["resolved_entity_rate"] == 1.0
+
+
+class TestScanMetrics:
+    def test_empty_history_reports_zeros(self):
+        summary = summarize_scan_runs([])
+
+        assert summary["run_count"] == 0
+        assert summary["empty_window_ratio"] == 0.0
+        assert summary["last_run_at"] is None
+
+    def test_aggregates_sweeps_and_computes_the_empty_ratio(self):
+        summary = summarize_scan_runs([
+            {"conversations": 2, "windows": 6, "empty_windows": 3, "mounts": 4,
+             "candidates": 2, "relations": 1, "failed_conversations": 0,
+             "created_at": "2026-10-12T10:00:00Z"},
+            {"conversations": 1, "windows": 4, "empty_windows": 1, "mounts": 2,
+             "candidates": 1, "relations": 0, "failed_conversations": 1,
+             "created_at": "2026-10-12T09:00:00Z"},
+        ])
+
+        assert summary["run_count"] == 2
+        assert summary["windows"] == 10
+        assert summary["empty_windows"] == 4
+        assert summary["empty_window_ratio"] == 0.4
+        assert summary["mounts"] == 6
+        assert summary["failed_conversations"] == 1
+        assert summary["last_run_at"] == "2026-10-12T10:00:00Z"
+
+    def test_high_empty_window_rate_is_flagged(self):
+        alerts = evaluate_alerts({
+            "scan": {"windows": 10, "empty_window_ratio": 0.8},
+        })
+
+        assert "high_empty_window_rate" in alerts
+
+    def test_scan_alert_needs_windows(self):
+        # An empty ratio without any windows is not a signal.
+        assert evaluate_alerts({"scan": {"windows": 0, "empty_window_ratio": 1.0}}) == []
+
+    def test_snapshot_includes_the_scan_section(self):
+        repo = InMemoryRagMVPRepository()
+        repo.record_scan_run(
+            scope_type=SCOPE["scope_type"], scope_id=SCOPE["scope_id"],
+            conversations=1, windows=5, empty_windows=1, mounts=7,
+        )
+
+        snapshot = TreeMetricsService(repository=repo).snapshot(**SCOPE)
+
+        assert snapshot["scan"]["run_count"] == 1
+        assert snapshot["scan"]["empty_window_ratio"] == 0.2
+        assert snapshot["scan"]["mounts"] == 7

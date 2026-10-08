@@ -154,6 +154,22 @@ class EntityRegistryRepository(Protocol):
         last_chunk_id: str | None = None,
         window_count: int = 0,
     ) -> None: ...
+    def record_scan_run(
+        self,
+        *,
+        scope_type: str,
+        scope_id: str,
+        conversations: int = 0,
+        windows: int = 0,
+        empty_windows: int = 0,
+        mounts: int = 0,
+        candidates: int = 0,
+        relations: int = 0,
+        failed_conversations: int = 0,
+    ) -> str: ...
+    def list_scan_runs(
+        self, *, scope_type: str, scope_id: str, limit: int = 50
+    ) -> list[dict[str, Any]]: ...
     def find_entities_by_normalized(
         self, *, scope_type: str, scope_id: str, normalized_keys: list[str]
     ) -> dict[str, dict[str, Any]]: ...
