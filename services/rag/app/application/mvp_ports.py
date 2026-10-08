@@ -178,6 +178,47 @@ class EntityRegistryRepository(Protocol):
         min_confidence: float = 0.7,
         limit: int = 3,
     ) -> list[dict[str, Any]]: ...
+    def upsert_eval_case(
+        self,
+        *,
+        scope_type: str,
+        scope_id: str,
+        suite: str,
+        dataset_version: int,
+        query: str,
+        labels: dict[str, Any],
+        notes: str | None = None,
+        created_by: str | None = None,
+    ) -> str: ...
+    def list_eval_cases(
+        self,
+        *,
+        scope_type: str,
+        scope_id: str,
+        suite: str,
+        dataset_version: int | None = None,
+        status: str | None = "active",
+    ) -> list[dict[str, Any]]: ...
+    def record_eval_run(
+        self,
+        *,
+        scope_type: str,
+        scope_id: str,
+        suite: str,
+        dataset_version: int,
+        case_count: int,
+        passed_count: int,
+        metrics: dict[str, Any],
+        label: str | None = None,
+    ) -> str: ...
+    def list_eval_runs(
+        self,
+        *,
+        scope_type: str,
+        scope_id: str,
+        suite: str | None = None,
+        limit: int = 20,
+    ) -> list[dict[str, Any]]: ...
     def update_entity_embedding(
         self,
         *,

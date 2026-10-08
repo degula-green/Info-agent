@@ -1059,6 +1059,134 @@ class PostgresRagMVPRepository:
                     for row in cursor.fetchall()
                 ]
 
+    # --------------------------------------------------------------- eval sets
+
+    def upsert_eval_case(
+        self,
+        *,
+        scope_type: str,
+        scope_id: str,
+        suite: str,
+        dataset_version: int,
+        query: str,
+        labels: dict[str, Any],
+        notes: str | None = None,
+        created_by: str | None = None,
+    ) -> str:
+        with self._connection() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    f"""INSERT INTO {self.schema}.eval_cases
+                        (scope_type,scope_id,suite,dataset_version,query,labels,notes,created_by)
+                        VALUES (%s,%s::uuid,%s,%s,%s,%s::jsonb,%s,%s::uuid)
+                        ON CONFLICT (scope_type,scope_id,suite,dataset_version,query)
+                        DO UPDATE SET
+                          labels=EXCLUDED.labels,notes=EXCLUDED.notes,status='active',
+                          updated_at=CURRENT_TIMESTAMP
+                        RETURNING id::text""",
+                    (
+                        scope_type, scope_id, suite, max(1, int(dataset_version)),
+                        query, _as_json(labels), notes, created_by,
+                    ),
+                )
+                return str(cursor.fetchone()[0])
+
+    def list_eval_cases(
+        self,
+        *,
+        scope_type: str,
+        scope_id: str,
+        suite: str,
+        dataset_version: int | None = None,
+        status: str | None = "active",
+    ) -> list[dict[str, Any]]:
+        conditions = ["scope_type=%s", "scope_id=%s::uuid", "suite=%s"]
+        params: list[Any] = [scope_type, scope_id, suite]
+        if dataset_version is not None:
+            conditions.append("dataset_version=%s")
+            params.append(int(dataset_version))
+        if status:
+            conditions.append("status=%s")
+            params.append(status)
+        with self._connection() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    f"""SELECT id::text,suite,dataset_version,query,labels,notes,status
+                        FROM {self.schema}.eval_cases
+                        WHERE {' AND '.join(conditions)}
+                        ORDER BY created_at,query""",
+                    tuple(params),
+                )
+                return [
+                    {
+                        "case_id": row[0], "suite": row[1], "dataset_version": int(row[2]),
+                        "query": row[3], "labels": row[4] or {}, "notes": row[5],
+                        "status": row[6],
+                    }
+                    for row in cursor.fetchall()
+                ]
+
+    def record_eval_run(
+        self,
+        *,
+        scope_type: str,
+        scope_id: str,
+        suite: str,
+        dataset_version: int,
+        case_count: int,
+        passed_count: int,
+        metrics: dict[str, Any],
+        label: str | None = None,
+    ) -> str:
+        with self._connection() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    f"""INSERT INTO {self.schema}.eval_runs
+                        (scope_type,scope_id,suite,dataset_version,case_count,
+                         passed_count,metrics,label)
+                        VALUES (%s,%s::uuid,%s,%s,%s,%s,%s::jsonb,%s)
+                        RETURNING id::text""",
+                    (
+                        scope_type, scope_id, suite, max(1, int(dataset_version)),
+                        int(case_count), int(passed_count), _as_json(metrics), label,
+                    ),
+                )
+                return str(cursor.fetchone()[0])
+
+    def list_eval_runs(
+        self,
+        *,
+        scope_type: str,
+        scope_id: str,
+        suite: str | None = None,
+        limit: int = 20,
+    ) -> list[dict[str, Any]]:
+        conditions = ["scope_type=%s", "scope_id=%s::uuid"]
+        params: list[Any] = [scope_type, scope_id]
+        if suite:
+            conditions.append("suite=%s")
+            params.append(suite)
+        params.append(max(1, int(limit)))
+        with self._connection() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    f"""SELECT id::text,suite,dataset_version,case_count,passed_count,
+                               metrics,label,created_at
+                        FROM {self.schema}.eval_runs
+                        WHERE {' AND '.join(conditions)}
+                        ORDER BY created_at DESC LIMIT %s""",
+                    tuple(params),
+                )
+                return [
+                    {
+                        "run_id": row[0], "suite": row[1], "dataset_version": int(row[2]),
+                        "case_count": int(row[3]), "passed_count": int(row[4]),
+                        "metrics": row[5] or {}, "label": row[6],
+                        "created_at": row[7].isoformat() if row[7] else None,
+                    }
+                    for row in cursor.fetchall()
+                ]
+
     def list_pending_branch_refresh_jobs(self, *, limit: int = 10) -> list[dict[str, Any]]:
         with self._connection() as connection:
             with connection.cursor() as cursor:
@@ -2398,6 +2526,8 @@ class InMemoryRagMVPRepository:
         self.branches: dict[tuple[str, str], dict[str, Any]] = {}
         self.scan_watermarks: dict[tuple[str, str, str], dict[str, Any]] = {}
         self.relations: dict[tuple[str, str, str, str, str], dict[str, Any]] = {}
+        self.eval_cases: dict[tuple[str, str, str, int, str], dict[str, Any]] = {}
+        self.eval_runs: list[dict[str, Any]] = []
         self.candidates: dict[str, dict[str, Any]] = {}
         self.candidate_mentions: list[dict[str, Any]] = []
         self.reviews: list[dict[str, Any]] = []
@@ -2872,6 +3002,87 @@ class InMemoryRagMVPRepository:
             })
         output.sort(key=lambda item: (-item["confidence"], item["canonical_name"]))
         return output[: max(1, int(limit))]
+
+    def upsert_eval_case(
+        self,
+        *,
+        scope_type: str,
+        scope_id: str,
+        suite: str,
+        dataset_version: int,
+        query: str,
+        labels: dict[str, Any],
+        notes: str | None = None,
+        created_by: str | None = None,
+    ) -> str:
+        key = (scope_type, scope_id, suite, int(dataset_version), query)
+        current = self.eval_cases.get(key)
+        case_id = current["case_id"] if current else new_uuid()
+        self.eval_cases[key] = {
+            "case_id": case_id, "suite": suite, "dataset_version": int(dataset_version),
+            "query": query, "labels": dict(labels), "notes": notes,
+            "status": "active", "created_by": created_by,
+        }
+        return case_id
+
+    def list_eval_cases(
+        self,
+        *,
+        scope_type: str,
+        scope_id: str,
+        suite: str,
+        dataset_version: int | None = None,
+        status: str | None = "active",
+    ) -> list[dict[str, Any]]:
+        output: list[dict[str, Any]] = []
+        for (case_scope_type, case_scope_id, case_suite, version, _), value in self.eval_cases.items():
+            if (case_scope_type, case_scope_id, case_suite) != (scope_type, scope_id, suite):
+                continue
+            if dataset_version is not None and version != int(dataset_version):
+                continue
+            if status and value["status"] != status:
+                continue
+            output.append(dict(value))
+        output.sort(key=lambda item: item["query"])
+        return output
+
+    def record_eval_run(
+        self,
+        *,
+        scope_type: str,
+        scope_id: str,
+        suite: str,
+        dataset_version: int,
+        case_count: int,
+        passed_count: int,
+        metrics: dict[str, Any],
+        label: str | None = None,
+    ) -> str:
+        run_id = new_uuid()
+        self.eval_runs.append({
+            "run_id": run_id, "scope_type": scope_type, "scope_id": scope_id,
+            "suite": suite, "dataset_version": int(dataset_version),
+            "case_count": int(case_count), "passed_count": int(passed_count),
+            "metrics": dict(metrics), "label": label,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        })
+        return run_id
+
+    def list_eval_runs(
+        self,
+        *,
+        scope_type: str,
+        scope_id: str,
+        suite: str | None = None,
+        limit: int = 20,
+    ) -> list[dict[str, Any]]:
+        values = [
+            dict(item) for item in self.eval_runs
+            if item["scope_type"] == scope_type and item["scope_id"] == scope_id
+            and (suite is None or item["suite"] == suite)
+        ]
+        values.sort(key=lambda item: item["created_at"], reverse=True)
+        return values[: max(1, int(limit))]
 
     def list_pending_branch_refresh_jobs(self, *, limit: int = 10) -> list[dict[str, Any]]:
         return [
