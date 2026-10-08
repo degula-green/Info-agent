@@ -366,6 +366,13 @@ class Settings:
     worker_prefetch: int = _int("RAG_WORKER_PREFETCH", 10)
     lane_queue_size: int = _int("RAG_LANE_QUEUE_SIZE", 256)
     lane_poll_interval_seconds: float = _float("RAG_LANE_POLL_INTERVAL_SECONDS", 0.5)
+
+    # Window-scan pacing. The scan runs behind ingestion: a slow sweep only
+    # delays how fresh the tree is, and the traditional retrieval path keeps
+    # answering meanwhile, so this must never share the ingestion lanes.
+    window_scan_enabled: bool = _bool("RAG_WINDOW_SCAN_ENABLED", True)
+    window_scan_interval_seconds: int = _int("RAG_WINDOW_SCAN_INTERVAL_SECONDS", 300)
+    window_scan_conversation_limit: int = _int("RAG_WINDOW_SCAN_CONVERSATION_LIMIT", 5)
     task_lease_seconds: int = _int("RAG_TASK_LEASE_SECONDS", 300)
     task_heartbeat_seconds: int = _int("RAG_TASK_HEARTBEAT_SECONDS", 60)
     task_max_retries: int = _int("RAG_TASK_MAX_RETRIES", 3)

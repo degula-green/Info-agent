@@ -1,5 +1,8 @@
 """Window scan: windowing, entity/relation validation and watermark advance."""
 
+import threading
+import time
+
 from app.application.window_scan_service import (
     EntityWindowScanWorker,
     build_extraction_prompt,
@@ -50,6 +53,27 @@ class FakeExtractor:
         if self.fail:
             raise ExtractionError("boom", retryable=True)
         return self.payload
+
+
+class SlowExtractor:
+    """Records how many windows were in flight at once."""
+
+    def __init__(self, delay: float = 0.05):
+        self.delay = delay
+        self.active = 0
+        self.max_active = 0
+        self.prompts: list[str] = []
+        self.lock = threading.Lock()
+
+    def extract(self, prompt):
+        with self.lock:
+            self.active += 1
+            self.max_active = max(self.max_active, self.active)
+            self.prompts.append(prompt)
+        time.sleep(self.delay)
+        with self.lock:
+            self.active -= 1
+        return {"entities": [], "relations": []}
 
 
 def _repository_with_messages(count: int, mention: str = "") -> InMemoryRagMVPRepository:
@@ -230,3 +254,22 @@ def test_prompt_lists_known_entities_so_the_model_can_reuse_their_ids():
     assert entity_id in prompt
     assert "A项目" in prompt
     assert "works_for" in prompt and "participates_in" in prompt
+
+
+def test_windows_run_concurrently_and_totals_still_add_up():
+    # 45 messages at size 20 / step 10 gives 4 overlapping windows.
+    repo = _repository_with_messages(45)
+    extractor = SlowExtractor()
+    worker = EntityWindowScanWorker(repository=repo, extractor=extractor, concurrency=4)
+
+    outcome = worker.run_once(conversation_limit=1)
+
+    assert outcome.windows == 4
+    assert outcome.failed_conversations == 0
+    # Serial execution would never exceed 1 window in flight.
+    assert extractor.max_active > 1
+    # Every window still produced its prompt, and the watermark advanced once.
+    assert len(extractor.prompts) == 4
+    assert repo.get_scan_watermark(
+        scope_type=SCOPE["scope_type"], scope_id=SCOPE["scope_id"], conversation_id=CONVERSATION
+    ) == "2026-10-01T00:45:00Z"

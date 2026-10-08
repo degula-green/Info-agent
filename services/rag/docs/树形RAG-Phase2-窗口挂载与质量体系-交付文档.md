@@ -92,6 +92,26 @@ alerts                        使其它指标失去解释力的状态
 
 新增接口：`GET /api/v1/admin/tree-metrics`（与其它管理接口同一套 Core 能力校验）。
 
+### 2.7 并发与调度
+
+**并发**：同一个会话的多个窗口彼此独立，用 `ThreadPoolExecutor` 并发执行，
+上限取 `RAG_EXTRACT_CONCURRENCY`（默认 8）。计数不再写共享对象，改为每个窗口
+返回 `WindowResult` 由调用方汇总，因此不需要锁。任一窗口失败即中止该会话批次，
+水位线不推进——部分成功不能算成功。
+
+**调度**：`MVPWorkerRuntime` 的 callback 循环按 `RAG_WINDOW_SCAN_INTERVAL_SECONDS`
+（默认 300s）触发扫描，并且：
+
+```text
+- 放在后台线程执行：一次扫描要处理多个会话、可能持续数分钟，同步执行会把
+  callback 通道堵住，延迟 knowledge 回写
+- 同一时刻只允许一个扫描在飞行，跨过间隔也不会叠加第二个会话批次
+- RAG_WINDOW_SCAN_ENABLED=false 可整体关闭
+```
+
+配置项：`RAG_WINDOW_SCAN_ENABLED` / `RAG_WINDOW_SCAN_INTERVAL_SECONDS` /
+`RAG_WINDOW_SCAN_CONVERSATION_LIMIT`（默认 5）。
+
 ## 3. 验收证据
 
 ### 3.1 单元测试
@@ -134,7 +154,19 @@ outcome = conversations=1 windows=3 mounts=60 candidates=5 relations=0
 
 两次验证后测试数据均已清理，`tree-metrics` 回到全零且不误报告警。
 
-### 3.3 开发过程中发现并修正的三个问题
+### 3.3 定时扫描在真实环境中的运行证据
+
+重启 rag-worker 后（首次 tick 立即触发），无需人工调用即产生数据：
+
+```text
+entity_scan_watermarks     = 3 个会话
+entity_candidates          = 48 条（去重后）
+entity_candidate_mentions  = 141 条
+chunk_branches             = 0（注册表为空，冷启动全部落候选，符合预期）
+tree-metrics(org scope)    = 2 个会话已扫、5 条待审候选、覆盖率为 0 且无误报告警
+```
+
+### 3.4 开发过程中发现并修正的四个问题
 
 ```text
 1. 候选评分恒为 0.5
@@ -146,6 +178,9 @@ outcome = conversations=1 windows=3 mounts=60 candidates=5 relations=0
 3. 窗口挂载与显式挂载互相覆盖
    窗口扫描最初复用 replace 语义，会让后一个窗口抹掉前一个窗口的挂载。
    拆出 merge_chunk_mounts（只增不删）后修复。
+4. 扫描阻塞回调通道
+   扫描最初同步跑在 callback 循环里，一次批次持续数分钟，期间 knowledge 回写
+   无法 flush。改为后台线程 + 单批次互斥后修复。
 ```
 
 ## 4. 未完成项
@@ -165,15 +200,16 @@ outcome = conversations=1 windows=3 mounts=60 candidates=5 relations=0
 - 用真实 20 条消息窗口复测延迟与提取质量（当前为 3 窗口 / 23.5s 的单点数据）
 - TPM 上限（代理不返回 x-ratelimit-* 头，只能实测推断）
 - 关闭推理对多实体、复杂关系窗口的召回影响
+- 建议并发下"一小时内处理完当日窗口量"的实测（当前只有并发正确性测试）
 ```
 
 ### 4.4 已知限制
 
 ```text
-- 未做并发：worker 目前串行处理窗口，配置项 extract_concurrency 尚未接线
-- 未接调度：run_once 需手动或由 runtime 调用，尚未挂到定时任务
 - 单会话扫描上限 500 条消息，超出部分留待下一轮
 - 窗口内所有消息都会挂到窗口主题实体（这是设计取舍），噪音由置信度分级控制
+- 扫描线程不随 stop_event 中断：进程退出时正在进行的批次会被直接终止（水位线
+  未推进，下次重扫，无数据损失）
 ```
 
 ## 5. 变更记录

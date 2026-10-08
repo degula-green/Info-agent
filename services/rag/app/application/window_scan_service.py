@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 import re
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Sequence
 
@@ -78,6 +79,19 @@ _WINDOW_PROMPT = """## 任务
 
 
 @dataclass
+class WindowResult:
+    """Per-window counters.
+
+    Returned rather than accumulated into a shared object so windows can run
+    concurrently without a lock around the totals.
+    """
+
+    mounts: int = 0
+    candidates: int = 0
+    relations: int = 0
+
+
+@dataclass
 class WindowScanOutcome:
     conversations: int = 0
     windows: int = 0
@@ -111,6 +125,7 @@ class EntityWindowScanWorker:
         window_step: int | None = None,
         max_chunks_per_conversation: int = 500,
         known_entity_limit: int = 40,
+        concurrency: int | None = None,
     ) -> None:
         self.repository = repository
         self.extractor = extractor
@@ -118,6 +133,9 @@ class EntityWindowScanWorker:
         self.window_step = max(1, int(window_step or settings.extract_window_step))
         self.max_chunks_per_conversation = max(1, int(max_chunks_per_conversation))
         self.known_entity_limit = max(1, int(known_entity_limit))
+        # Only one conversation at a time, but its windows are independent IO
+        # waits, so they overlap up to this bound.
+        self.concurrency = max(1, int(concurrency or settings.extract_concurrency))
 
     def run_once(self, *, conversation_limit: int = 5) -> WindowScanOutcome:
         outcome = WindowScanOutcome()
@@ -156,18 +174,20 @@ class EntityWindowScanWorker:
         if not chunks:
             return
         windows = build_windows(chunks, self.window_size, self.window_step)
-        for window in windows:
-            self._apply_window(
-                scope_type=scope_type,
-                scope_id=scope_id,
-                window=window,
-                matcher=matcher,
-                registry_version=max((e.registry_version for e in entities), default=1),
-                entities=entities,
-                aliases=aliases,
-                outcome=outcome,
-            )
+        results = self._run_windows(
+            scope_type=scope_type,
+            scope_id=scope_id,
+            windows=windows,
+            matcher=matcher,
+            registry_version=max((e.registry_version for e in entities), default=1),
+            entities=entities,
+            aliases=aliases,
+        )
+        for result in results:
             outcome.windows += 1
+            outcome.mounts += result.mounts
+            outcome.candidates += result.candidates
+            outcome.relations += result.relations
         last = chunks[-1]
         self.repository.set_scan_watermark(
             scope_type=scope_type,
@@ -177,6 +197,39 @@ class EntityWindowScanWorker:
             last_chunk_id=last.chunk_id,
             window_count=len(windows),
         )
+
+    def _run_windows(
+        self,
+        *,
+        scope_type: str,
+        scope_id: str,
+        windows: Sequence[Sequence[Chunk]],
+        matcher: EntityMatcher,
+        registry_version: int,
+        entities: Sequence[Entity],
+        aliases: Sequence[EntityAlias],
+    ) -> list[WindowResult]:
+        """Apply every window, or raise before the watermark moves.
+
+        A partial conversation must not advance the watermark, so the first
+        failed window aborts the batch even when others succeeded.
+        """
+        def apply(window: Sequence[Chunk]) -> WindowResult:
+            return self._apply_window(
+                scope_type=scope_type,
+                scope_id=scope_id,
+                window=window,
+                matcher=matcher,
+                registry_version=registry_version,
+                entities=entities,
+                aliases=aliases,
+            )
+
+        if self.concurrency > 1 and len(windows) > 1:
+            with ThreadPoolExecutor(max_workers=min(self.concurrency, len(windows))) as pool:
+                futures = [pool.submit(apply, window) for window in windows]
+                return [future.result() for future in futures]
+        return [apply(window) for window in windows]
 
     def _apply_window(
         self,
@@ -188,8 +241,8 @@ class EntityWindowScanWorker:
         registry_version: int,
         entities: Sequence[Entity],
         aliases: Sequence[EntityAlias],
-        outcome: WindowScanOutcome,
-    ) -> None:
+    ) -> WindowResult:
+        result = WindowResult()
         prompt = build_extraction_prompt(window, entities, aliases, limit=self.known_entity_limit)
         payload = self.extractor.extract(prompt)
         extracted = clean_entities(payload.get("entities"))
@@ -209,13 +262,11 @@ class EntityWindowScanWorker:
 
         # 1) Explicit mounts come from the chunk's own text and are the most
         #    trustworthy signal, so they are written even with no model output.
-        window_entity_ids: list[str] = []
         for chunk in window:
             mounts = match_chunk_mounts(chunk, matcher)
             if mounts:
                 self.repository.merge_chunk_mounts(chunk, mounts)
-                outcome.mounts += len(mounts)
-            window_entity_ids.extend(mount.entity_id for mount in mounts)
+                result.mounts += len(mounts)
 
         # 2) Window-level mounts: the window is about this entity, so every
         #    message in it becomes reachable from that entity node.
@@ -223,7 +274,7 @@ class EntityWindowScanWorker:
             resolved = lookup.get(normalized_text(item["name"]))
             if resolved is None:
                 self._create_candidate(
-                    scope_type=scope_type, scope_id=scope_id, item=item, window=window, outcome=outcome
+                    scope_type=scope_type, scope_id=scope_id, item=item, window=window, result=result
                 )
                 continue
             tier = "window_strong" if item["confidence"] >= 0.8 else "window_weak"
@@ -238,8 +289,7 @@ class EntityWindowScanWorker:
             ]
             for chunk in window:
                 self.repository.merge_chunk_mounts(chunk, mounts)
-            outcome.mounts += len(mounts) * len(window)
-            window_entity_ids.append(resolved["entity_id"])
+            result.mounts += len(mounts) * len(window)
 
         # 3) Relations need both endpoints to be real entities; a name the
         #    registry does not know cannot anchor an edge.
@@ -258,7 +308,8 @@ class EntityWindowScanWorker:
                 confidence=relation["confidence"],
                 evidence_chunk_ids=evidence,
             )
-            outcome.relations += 1
+            result.relations += 1
+        return result
 
     def _create_candidate(
         self,
@@ -267,7 +318,7 @@ class EntityWindowScanWorker:
         scope_id: str,
         item: dict[str, Any],
         window: Sequence[Chunk],
-        outcome: WindowScanOutcome,
+        result: WindowResult,
     ) -> None:
         anchor = next((chunk for chunk in window if item["name"] in (chunk.content or "")), window[0])
         excerpt = _excerpt(anchor.content, item["name"])
@@ -282,7 +333,7 @@ class EntityWindowScanWorker:
             confidence=item["confidence"],
             method="llm",
         )
-        outcome.candidates += 1
+        result.candidates += 1
 
 
 def build_windows(chunks: Sequence[Chunk], size: int, step: int) -> list[list[Chunk]]:

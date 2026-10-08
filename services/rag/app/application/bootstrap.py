@@ -13,6 +13,8 @@ from app.application.qa_service import QAService
 from app.application.runtime import MVPWorkerRuntime
 from app.application.rag_service import RAGRetrievalService
 from app.application.tree_metrics_service import TreeMetricsService
+from app.application.window_scan_service import EntityWindowScanWorker
+from app.infrastructure.extraction.client import EntityExtractionClient
 from app.config import settings
 from app.infrastructure.embedding.client import EmbeddingClient
 from app.infrastructure.module2.knowledge_client import Module2KnowledgeClient
@@ -116,6 +118,10 @@ def build_runtime() -> MVPWorkerRuntime:
         branch_refresh_service=BranchRefreshService(
             repository=container.repository,
             indexer=container.indexer,
+        ),
+        window_scan_service=EntityWindowScanWorker(
+            repository=container.repository,
+            extractor=EntityExtractionClient(),
         ),
     )
     runtime.container = container
