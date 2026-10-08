@@ -51,31 +51,25 @@ _LONG_DIGITS = re.compile(r"\d{8,}")
 _WINDOW_PROMPT = """## 任务
 从对话中提取实体（公司、人名、项目、政策、合同），以及实体之间的关系。
 
-## 参考用的已知实体（只用于填写 existing_entity_id，不要因为不在下表就跳过任何实体）
-{known}
-
 ## 对话内容
 {window}
 
 ## 提取规则
-1. 提取所有被实际讨论的具体实体（不要泛指）。**下表只是参考：不在表里的实体
-   同样必须提取，并给出你认为的规范名称。**
+1. 提取所有被实际讨论的具体实体（不要泛指）
 2. 包括简称、昵称（如"aims"、"小张"）
-3. 只有当下表里确实有对应实体（含其简称）时，才填写 existing_entity_id；
-   否则填 null
-4. 如果是新实体，给出你认为的规范名称
-5. 类型必须从 organization|person|project|policy|contract 中选一个；无法判断时丢弃
-6. 设备、服务器、数据库实例、云服务产品、账号、金额、时间、地址不作为实体提取
-7. 凭据类信息（账号、密码、token、密钥、验证码、身份证号、银行卡号）一律不要提取，
+3. 给出你认为的规范名称
+4. 类型必须从 organization|person|project|policy|contract 中选一个；无法判断时丢弃
+5. 设备、服务器、数据库实例、云服务产品、账号、金额、时间、地址不作为实体提取
+6. 凭据类信息（账号、密码、token、密钥、验证码、身份证号、银行卡号）一律不要提取，
    也不要写进 evidence
-8. 关系类型必须从以下枚举选一个，不要自创：
+7. 关系类型必须从以下枚举选一个，不要自创：
    works_for | participates_in | belongs_to | governed_by |
    signed_by | related_to | applies_to | contacts
-9. 只在关系稳定明确时输出，不要把"同一次对话里提到"当成关系
+8. 只在关系稳定明确时输出，不要把"同一次对话里提到"当成关系
 
 ## 输出格式
 只返回 JSON 对象：
-{{"entities":[{{"existing_entity_id":null,"name":"","type":"","confidence":0.0,"mentions":[],"evidence":""}}],
+{{"entities":[{{"name":"","type":"","confidence":0.0,"mentions":[],"evidence":""}}],
   "relations":[{{"source":"","target":"","type":"","confidence":0.0}}]}}
 """
 
@@ -126,7 +120,6 @@ class EntityWindowScanWorker:
         window_size: int | None = None,
         window_step: int | None = None,
         max_chunks_per_conversation: int = 500,
-        known_entity_limit: int = 40,
         concurrency: int | None = None,
     ) -> None:
         self.repository = repository
@@ -134,7 +127,6 @@ class EntityWindowScanWorker:
         self.window_size = max(2, int(window_size or settings.extract_window_size))
         self.window_step = max(1, int(window_step or settings.extract_window_step))
         self.max_chunks_per_conversation = max(1, int(max_chunks_per_conversation))
-        self.known_entity_limit = max(1, int(known_entity_limit))
         # Only one conversation at a time, but its windows are independent IO
         # waits, so they overlap up to this bound.
         self.concurrency = max(1, int(concurrency or settings.extract_concurrency))
@@ -182,8 +174,6 @@ class EntityWindowScanWorker:
             windows=windows,
             matcher=matcher,
             registry_version=max((e.registry_version for e in entities), default=1),
-            entities=entities,
-            aliases=aliases,
         )
         for result in results:
             outcome.windows += 1
@@ -208,8 +198,6 @@ class EntityWindowScanWorker:
         windows: Sequence[Sequence[Chunk]],
         matcher: EntityMatcher,
         registry_version: int,
-        entities: Sequence[Entity],
-        aliases: Sequence[EntityAlias],
     ) -> list[WindowResult]:
         """Apply every window, or raise before the watermark moves.
 
@@ -223,8 +211,6 @@ class EntityWindowScanWorker:
                 window=window,
                 matcher=matcher,
                 registry_version=registry_version,
-                entities=entities,
-                aliases=aliases,
             )
 
         if self.concurrency > 1 and len(windows) > 1:
@@ -241,11 +227,9 @@ class EntityWindowScanWorker:
         window: Sequence[Chunk],
         matcher: EntityMatcher,
         registry_version: int,
-        entities: Sequence[Entity],
-        aliases: Sequence[EntityAlias],
     ) -> WindowResult:
         result = WindowResult()
-        prompt = build_extraction_prompt(window, entities, aliases, limit=self.known_entity_limit)
+        prompt = build_extraction_prompt(window)
         payload = self.extractor.extract(prompt)
         extracted = clean_entities(payload.get("entities"))
         relations = clean_relations(payload.get("relations"))
@@ -361,26 +345,23 @@ def build_windows(chunks: Sequence[Chunk], size: int, step: int) -> list[list[Ch
 
 def build_extraction_prompt(
     window: Sequence[Chunk],
-    entities: Sequence[Entity],
-    aliases: Sequence[EntityAlias],
-    *,
-    limit: int = 40,
 ) -> str:
-    """Render the window and the registry摘要 the model may match against."""
-    aliases_by_entity: dict[str, list[str]] = {}
-    for alias in aliases:
-        aliases_by_entity.setdefault(alias.entity_id, []).append(alias.display_alias)
-    known_lines: list[str] = []
-    for entity in entities[:limit]:
-        names = [entity.canonical_name, *aliases_by_entity.get(entity.id, [])[:3]]
-        known_lines.append(f"- {entity.id} | {entity.domain} | {' / '.join(names)}")
-    known = "\n".join(known_lines) if known_lines else "（无）"
+    """Render one window for the extraction model.
+
+    The scope's known entities are deliberately absent. Measured on real
+    windows: a list of ~10+ entries made the model return nothing at all
+    (4 runs: 3,0,0,0 entities), and even after rewording it left 43.75% of
+    windows empty with a third of them unstable between runs. Without the list
+    the same windows returned entities 24/24 times. Nothing downstream used the
+    ids the model would have echoed anyway - entity resolution happens in code
+    via name lookup - so the list was pure cost.
+    """
     lines: list[str] = []
     for chunk in window:
         sender = str(chunk.context_header.get("sender_display_name") or "未知")
         content = " ".join((chunk.content or "").split())
         lines.append(f"[{sender}] {content[:300]}")
-    return _WINDOW_PROMPT.format(known=known, window="\n".join(lines))
+    return _WINDOW_PROMPT.format(window="\n".join(lines))
 
 
 def clean_entities(raw: Any) -> list[dict[str, Any]]:

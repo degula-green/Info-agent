@@ -20,13 +20,11 @@ import argparse
 import json
 import sys
 import time
-import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from app.application.entity_locator import EntityLocator  # noqa: E402
 from app.application.window_scan_service import (  # noqa: E402
     build_extraction_prompt,
     build_windows,
@@ -34,7 +32,6 @@ from app.application.window_scan_service import (  # noqa: E402
     clean_relations,
 )
 from app.config import settings  # noqa: E402
-from app.domain.rag import Entity, EntityAlias, normalized_text  # noqa: E402
 from app.infrastructure.extraction.client import (  # noqa: E402
     EntityExtractionClient,
     ExtractionError,
@@ -73,32 +70,6 @@ class _RecordingClient:
         return payload
 
 
-def _known_entities(count: int, *, scope_type: str, scope_id: str) -> tuple[list[Entity], list[EntityAlias]]:
-    """A synthetic warm registry.
-
-    Real workers pass the scope's active entities in the prompt; an empty registry
-    would understate the prompt size, so the measurement fabricates a plausible
-    set instead of writing test rows into the database.
-    """
-    entities: list[Entity] = []
-    aliases: list[EntityAlias] = []
-    domains = ("project", "person", "organization", "policy", "contract")
-    for index in range(count):
-        name = f"示例实体{index}"
-        entity_id = str(uuid.uuid4())
-        domain = domains[index % len(domains)]
-        entities.append(Entity(
-            id=entity_id, scope_type=scope_type, scope_id=scope_id, domain=domain,
-            canonical_name=name, normalized_key=normalized_text(name),
-        ))
-        aliases.append(EntityAlias(
-            id=str(uuid.uuid4()), entity_id=entity_id, scope_type=scope_type,
-            scope_id=scope_id, domain=domain, display_alias=f"示例{index}",
-            normalized_alias=normalized_text(f"示例{index}"),
-        ))
-    return entities, aliases
-
-
 def _collect_windows(repository, *, conversation_limit: int, per_conversation: int, size: int, step: int):
     windows = []
     for conversation in repository.list_active_conversations(limit=conversation_limit):
@@ -124,7 +95,6 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--conversation-limit", type=int, default=3)
     parser.add_argument("--windows-per-conversation", type=int, default=2)
-    parser.add_argument("--known-entities", type=int, default=20)
     parser.add_argument("--concurrency", default="1,4,8")
     parser.add_argument("--repeat", type=int, default=1,
                         help="repeat the window list to reach a larger sample")
@@ -142,13 +112,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.repeat > 1:
         windows = windows * args.repeat
 
-    first_conversation = windows[0][0]
-    entities, aliases = _known_entities(
-        args.known_entities,
-        scope_type=first_conversation["scope_type"], scope_id=first_conversation["scope_id"],
-    )
     prompts = [
-        build_extraction_prompt(window, entities, aliases)
+        build_extraction_prompt(window)
         for _, window in windows
     ]
     message_counts = [len(window) for _, window in windows]
@@ -159,7 +124,6 @@ def main(argv: list[str] | None = None) -> int:
         "max_tokens": settings.extract_max_tokens,
         "window_size": settings.extract_window_size,
         "window_step": settings.extract_window_step,
-        "known_entities": len(entities),
         "window_count": len(prompts),
         "messages_per_window": {
             "min": min(message_counts), "max": max(message_counts),

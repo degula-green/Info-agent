@@ -239,42 +239,29 @@ def test_explicit_mentions_are_written_even_when_the_model_returns_nothing():
     assert all(value["confidence"] >= 0.95 for value in explicit)
 
 
-def test_prompt_lists_known_entities_so_the_model_can_reuse_their_ids():
+def test_prompt_carries_no_known_entity_list():
+    # Measured on real windows: a known-entity list of >=10 entries made the
+    # model return nothing at all (4 runs: 3,0,0,0 entities); even after
+    # rewording it left 43.75% of windows empty and a third of those unstable.
+    # Without the list the same windows returned entities 24/24 times, and
+    # nothing downstream read the ids the model would have echoed - resolution
+    # happens in code by name lookup.
     repo = _repository_with_messages(2)
     entity_id = repo.upsert_entity(
         domain="project", canonical_name="A项目", normalized_key=normalized_text("A项目"), **SCOPE
     )["id"]
-    entities, aliases, _ = repo.load_entity_registry(**SCOPE)
     chunks = repo.list_conversation_chunks(
         scope_type=SCOPE["scope_type"], scope_id=SCOPE["scope_id"], conversation_id=CONVERSATION
     )
 
-    prompt = build_extraction_prompt(chunks, entities, aliases)
+    prompt = build_extraction_prompt(chunks)
 
-    assert entity_id in prompt
-    assert "A项目" in prompt
+    assert "第1条消息" in prompt
     assert "works_for" in prompt and "participates_in" in prompt
-
-
-def test_prompt_states_the_known_list_is_reference_only():
-    # Measured: with the original wording, a known-entity list of >=10 entries
-    # made the model return nothing at all (4 runs: 3,0,0,0 entities). The list
-    # framed the task as matching, so an unmatched window produced an empty
-    # result. Restating it as reference-only restored 12/12 runs, including at
-    # the production limit of 40 entries.
-    repo = _repository_with_messages(2)
-    repo.upsert_entity(
-        domain="project", canonical_name="A项目", normalized_key=normalized_text("A项目"), **SCOPE
-    )
-    entities, aliases, _ = repo.load_entity_registry(**SCOPE)
-    chunks = repo.list_conversation_chunks(
-        scope_type=SCOPE["scope_type"], scope_id=SCOPE["scope_id"], conversation_id=CONVERSATION
-    )
-
-    prompt = build_extraction_prompt(chunks, entities, aliases)
-
-    assert "只用于填写 existing_entity_id" in prompt
-    assert "不在表里的实体" in prompt
+    assert "已知实体" not in prompt
+    assert "existing_entity_id" not in prompt
+    # The registry id must not leak into the prompt either.
+    assert entity_id not in prompt
 
 
 def test_windows_run_concurrently_and_totals_still_add_up():
