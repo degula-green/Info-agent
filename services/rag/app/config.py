@@ -410,8 +410,8 @@ class Settings:
         ):
             if not name.startswith("rag_chunks_"):
                 raise RuntimeError(f"Elasticsearch alias must use rag_chunks_*: {name}")
-        if self.tree_mode not in {"off", "shadow", "boost"}:
-            raise RuntimeError("RAG_TREE_MODE must be off, shadow, or boost")
+        if self.tree_mode not in {"off", "shadow", "tree"}:
+            raise RuntimeError("RAG_TREE_MODE must be off, shadow, or tree")
         if not self.development_like:
             if not self.authz_base_url:
                 raise RuntimeError(

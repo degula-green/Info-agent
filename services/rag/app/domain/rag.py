@@ -473,6 +473,11 @@ class SearchRequest:
     message_types: tuple[str, ...] = ()
     group_by_source: bool = False
     entity_ids: tuple[str, ...] = ()
+    # Pre-resolved scope handed down by the Agent's plan, plus the knobs for the
+    # location pipeline. See 实体定位五层管线接口草案 §9.2.
+    entity_composition: str = "and"
+    min_mount_confidence: float | None = None
+    locate_allow_llm: bool = True
 
     @property
     def scope_key(self) -> str:

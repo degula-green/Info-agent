@@ -99,7 +99,60 @@ class _RecordingElasticsearch:
 
 
 class RetrievalTests(unittest.TestCase):
-    def test_boost_keeps_global_and_branch_channels(self) -> None:
+    def test_tree_mode_selects_channels_and_reports_fallbacks(self) -> None:
+        from app.application.rag_service import select_tree_channels
+
+        global_branches = {"bm25": ["g"]}
+        scoped = {"branch_bm25": ["s"]}
+
+        effective, path, reason = select_tree_channels(
+            tree_mode="off", global_branches=global_branches,
+            scoped_branches=scoped, resolved_entity_count=1, degraded=[],
+        )
+        self.assertEqual(path, "traditional")
+        self.assertIsNone(reason)
+        self.assertEqual(effective, global_branches)
+
+        # shadow does the location work but returns the traditional result.
+        effective, path, reason = select_tree_channels(
+            tree_mode="shadow", global_branches=global_branches,
+            scoped_branches=scoped, resolved_entity_count=1, degraded=[],
+        )
+        self.assertEqual(path, "tree_shadow")
+        self.assertIsNone(reason)
+        self.assertEqual(effective, global_branches)
+
+        # tree leads with the scoped channels and keeps global as a backstop.
+        effective, path, reason = select_tree_channels(
+            tree_mode="tree", global_branches=global_branches,
+            scoped_branches=scoped, resolved_entity_count=1, degraded=[],
+        )
+        self.assertEqual(path, "tree")
+        self.assertIsNone(reason)
+        self.assertEqual(set(effective), {"branch_bm25", "bm25"})
+
+        for tree_mode, entities, scoped_branches, expected in (
+            ("tree", 0, scoped, "no_entity_match"),
+            ("tree", 1, {}, "empty_scope"),
+            ("shadow", 0, {}, "no_entity_match"),
+        ):
+            _, path, reason = select_tree_channels(
+                tree_mode=tree_mode, global_branches=global_branches,
+                scoped_branches=scoped_branches, resolved_entity_count=entities,
+                degraded=[],
+            )
+            self.assertEqual(reason, expected)
+            self.assertEqual(path, "tree_shadow" if tree_mode == "shadow" else "traditional")
+
+        # A failed scoped query must not hide the global result.
+        _, path, reason = select_tree_channels(
+            tree_mode="tree", global_branches=global_branches,
+            scoped_branches=scoped, resolved_entity_count=1,
+            degraded=["branch_failed"],
+        )
+        self.assertEqual((path, reason), ("traditional", "branch_failed"))
+
+    def test_tree_mode_keeps_global_and_scoped_channels(self) -> None:
         repository = InMemoryRagMVPRepository()
         repository.upsert_entity(
             entity_id="entity-1",
@@ -112,7 +165,7 @@ class RetrievalTests(unittest.TestCase):
         )
         indexer = _Indexer()
         original = settings.tree_mode
-        object.__setattr__(settings, "tree_mode", "boost")
+        object.__setattr__(settings, "tree_mode", "tree")
         try:
             service = RAGRetrievalService(
                 repository=repository,
@@ -132,7 +185,7 @@ class RetrievalTests(unittest.TestCase):
         self.assertEqual(len(response.results), 1)
         self.assertTrue(any(call[1].get("entity_ids") for call in indexer.calls))
         self.assertTrue(any(not call[1].get("entity_ids") for call in indexer.calls))
-        self.assertEqual(response.diagnostics["effective_execution_path"], "tree_boost")
+        self.assertEqual(response.diagnostics["effective_execution_path"], "tree")
         self.assertEqual(response.diagnostics["authorization_candidate_count"], 1)
         self.assertEqual(service.authorization.batch_sizes, [1])
 

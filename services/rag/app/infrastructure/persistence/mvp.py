@@ -1585,6 +1585,14 @@ class PostgresRagMVPRepository:
                             candidate_normalized_key,
                         ),
                     )
+                    # A new alias changes the text the entity should be embedded
+                    # from, so the vector is refreshed instead of going stale.
+                    cursor.execute(
+                        f"""UPDATE {self.schema}.entity_registry
+                            SET embedding_status='pending',updated_at=CURRENT_TIMESTAMP
+                            WHERE id=%s::uuid""",
+                        (resolved_entity_id,),
+                    )
                 result_status = {"promote": "promoted", "merge": "merged", "ignore": "ignored", "defer": "deferred"}[action]
                 cursor.execute(
                     f"""UPDATE {self.schema}.entity_candidates
