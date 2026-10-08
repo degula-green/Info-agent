@@ -350,6 +350,13 @@ class Settings:
     tree_mount_weight: float = _float("RAG_TREE_MOUNT_WEIGHT", 0.5)
     tree_max_entities: int = _int("RAG_TREE_MAX_ENTITIES", 8)
     tree_max_mounts_per_chunk: int = _int("RAG_TREE_MAX_MOUNTS_PER_CHUNK", 8)
+    # Relation expansion: when the located entity's own node is thin, widen to
+    # one hop of neighbours instead of falling straight back to full-corpus
+    # search. Depth stays at one hop and the fan-out is bounded.
+    tree_relation_expansion_enabled: bool = _bool("RAG_TREE_RELATION_EXPANSION_ENABLED", True)
+    tree_relation_min_confidence: float = _float("RAG_TREE_RELATION_MIN_CONFIDENCE", 0.7)
+    tree_relation_max_entities: int = _int("RAG_TREE_RELATION_MAX_ENTITIES", 3)
+    tree_relation_weight: float = _float("RAG_TREE_RELATION_WEIGHT", 0.3)
     query_rewrite_enabled: bool = _bool("RAG_QUERY_REWRITE_ENABLED", False)
     query_rewrite_max: int = _int("RAG_QUERY_REWRITE_MAX", 1)
     highlight_final_only: bool = _bool("RAG_HIGHLIGHT_FINAL_ONLY", True)

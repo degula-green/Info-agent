@@ -167,6 +167,17 @@ class EntityRegistryRepository(Protocol):
         confidence: float,
         evidence_chunk_ids: list[str] | None = None,
     ) -> None: ...
+    def find_related_entities(
+        self,
+        *,
+        scope_type: str,
+        scope_id: str,
+        entity_ids: list[str],
+        relation_types: list[str] | None = None,
+        direction: str = "both",
+        min_confidence: float = 0.7,
+        limit: int = 3,
+    ) -> list[dict[str, Any]]: ...
     def update_entity_embedding(
         self,
         *,

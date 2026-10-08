@@ -987,6 +987,78 @@ class PostgresRagMVPRepository:
                 }
                 return metrics
 
+    def find_related_entities(
+        self,
+        *,
+        scope_type: str,
+        scope_id: str,
+        entity_ids: list[str],
+        relation_types: list[str] | None = None,
+        direction: str = "both",
+        min_confidence: float = 0.7,
+        limit: int = 3,
+    ) -> list[dict[str, Any]]:
+        """One-hop neighbours of the given entities.
+
+        Depth is fixed at one: the design's relation depth is 1-2 hops and every
+        extra hop multiplies the candidate set, so traversal stays bounded here
+        and the caller decides whether to widen.
+        """
+        seeds = [value for value in dict.fromkeys(entity_ids) if value]
+        if not seeds:
+            return []
+        # Parameter order follows the SQL text, and the ON clause is rendered
+        # before the WHERE clause, so the neighbour placeholder comes first.
+        params: list[Any] = []
+        if direction == "outbound":
+            neighbor_clause = "r.target_entity_id"
+            match = "r.source_entity_id=ANY(%s::uuid[])"
+            params.append(seeds)
+        elif direction == "inbound":
+            neighbor_clause = "r.source_entity_id"
+            match = "r.target_entity_id=ANY(%s::uuid[])"
+            params.append(seeds)
+        else:
+            neighbor_clause = (
+                "CASE WHEN r.source_entity_id=ANY(%s::uuid[]) "
+                "THEN r.target_entity_id ELSE r.source_entity_id END"
+            )
+            match = ("(r.source_entity_id=ANY(%s::uuid[]) "
+                     "OR r.target_entity_id=ANY(%s::uuid[]))")
+            params.extend([seeds, seeds, seeds])
+        params.extend([scope_type, scope_id, float(min_confidence)])
+        type_clause = ""
+        if relation_types:
+            type_clause = " AND r.relation_type=ANY(%s::text[])"
+            params.append(list(relation_types))
+        params.append(max(1, int(limit)))
+        with self._connection() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    f"""SELECT e.id::text,e.domain,e.canonical_name,
+                               r.relation_type,r.confidence,
+                               r.source_entity_id::text,r.target_entity_id::text
+                        FROM {self.schema}.entity_relations r
+                        JOIN {self.schema}.entity_registry e
+                          ON e.id={neighbor_clause}
+                        WHERE {match}
+                          AND r.scope_type=%s AND r.scope_id=%s::uuid
+                          AND r.confidence>=%s
+                          AND e.status='active'
+                          {type_clause}
+                        ORDER BY r.confidence DESC, e.canonical_name
+                        LIMIT %s""",
+                    tuple(params),
+                )
+                return [
+                    {
+                        "entity_id": row[0], "domain": row[1], "canonical_name": row[2],
+                        "relation_type": row[3], "confidence": float(row[4] or 0),
+                        "source_entity_id": row[5], "target_entity_id": row[6],
+                    }
+                    for row in cursor.fetchall()
+                ]
+
     def list_pending_branch_refresh_jobs(self, *, limit: int = 10) -> list[dict[str, Any]]:
         with self._connection() as connection:
             with connection.cursor() as cursor:
@@ -2753,6 +2825,53 @@ class InMemoryRagMVPRepository:
             "confidence": max(float(confidence), float(current["confidence"])) if current else float(confidence),
             "evidence_chunk_ids": list(dict.fromkeys((current["evidence_chunk_ids"] if current else []) + evidence)),
         }
+
+    def find_related_entities(
+        self,
+        *,
+        scope_type: str,
+        scope_id: str,
+        entity_ids: list[str],
+        relation_types: list[str] | None = None,
+        direction: str = "both",
+        min_confidence: float = 0.7,
+        limit: int = 3,
+    ) -> list[dict[str, Any]]:
+        seeds = {value for value in entity_ids if value}
+        if not seeds:
+            return []
+        wanted = set(relation_types) if relation_types else None
+        output: list[dict[str, Any]] = []
+        for key, value in self.relations.items():
+            if key[0] != scope_type or key[1] != scope_id:
+                continue
+            if float(value["confidence"]) < float(min_confidence):
+                continue
+            if wanted and value["relation_type"] not in wanted:
+                continue
+            source = value["source_entity_id"]
+            target = value["target_entity_id"]
+            if direction == "outbound" and source not in seeds:
+                continue
+            if direction == "inbound" and target not in seeds:
+                continue
+            if direction == "both" and not ({source, target} & seeds):
+                continue
+            neighbor_id = target if direction != "inbound" else source
+            if direction == "both":
+                neighbor_id = target if source in seeds else source
+            neighbor = next((e for e in self.entities if e["id"] == neighbor_id), None)
+            if neighbor is None or neighbor.get("status") != "active":
+                continue
+            output.append({
+                "entity_id": neighbor_id, "domain": neighbor["domain"],
+                "canonical_name": neighbor["canonical_name"],
+                "relation_type": value["relation_type"],
+                "confidence": float(value["confidence"]),
+                "source_entity_id": source, "target_entity_id": target,
+            })
+        output.sort(key=lambda item: (-item["confidence"], item["canonical_name"]))
+        return output[: max(1, int(limit))]
 
     def list_pending_branch_refresh_jobs(self, *, limit: int = 10) -> list[dict[str, Any]]:
         return [

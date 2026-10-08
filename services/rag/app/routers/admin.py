@@ -296,6 +296,42 @@ def get_entity(
     return value
 
 
+@router.get("/entities/{entity_id}/relations")
+def list_entity_relations(
+    entity_id: str,
+    relation_type: str | None = None,
+    direction: str = Query(default="both", pattern="^(outbound|inbound|both)$"),
+    min_confidence: float = Query(default=0.0, ge=0, le=1),
+    limit: int = Query(default=20, ge=1, le=100),
+    scope_type: str = Query(default="organization", pattern="^(organization|user)$"),
+    x_user_id: str | None = Header(default=None),
+    x_organization_id: str | None = Header(default=None),
+    container: ApplicationContainer = Depends(get_container),
+) -> dict[str, Any]:
+    """One-hop neighbours of an entity, the same traversal the search path uses."""
+    _, scope_type, scope_id = _admin_scope(
+        x_user_id=x_user_id,
+        x_organization_id=x_organization_id,
+        scope_type=scope_type,
+        service=container.retrieval_service,
+    )
+    items = container.repository.find_related_entities(
+        scope_type=scope_type,
+        scope_id=scope_id,
+        entity_ids=[entity_id],
+        relation_types=[relation_type] if relation_type else None,
+        direction=direction,
+        min_confidence=min_confidence,
+        limit=limit,
+    )
+    return {
+        "entity_id": entity_id,
+        "direction": direction,
+        "count": len(items),
+        "items": items,
+    }
+
+
 @router.post("/entities")
 def create_entity(
     body: EntityBody,

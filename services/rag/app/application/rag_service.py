@@ -145,8 +145,20 @@ class RAGRetrievalService:
             resolved_entity_count=len(entity_ids),
             degraded=degraded,
         )
+        related_branches, related_entities = self._expand_relations(
+            request=request,
+            retrieval_request=retrieval_request,
+            entity_ids=entity_ids,
+            scoped_branches=scoped_branches,
+            query_vector=query_vector,
+            protected_keys=protected_keys,
+            degraded=degraded,
+        )
+        if related_branches:
+            effective.update(related_branches)
         raw_global_candidate_count = sum(len(value) for value in global_branches.values())
         raw_branch_candidate_count = sum(len(value) for value in scoped_branches.values())
+        raw_related_candidate_count = sum(len(value) for value in related_branches.values())
         gate_dropped = 0
         if request.entry == "ai":
             effective, gate_dropped = filter_qa_anchor_candidates(
@@ -162,6 +174,8 @@ class RAGRetrievalService:
                 "knn": settings.rrf_vector_weight,
                 "branch_bm25": settings.tree_mount_weight,
                 "branch_knn": settings.tree_mount_weight,
+                "related_bm25": settings.tree_relation_weight,
+                "related_knn": settings.tree_relation_weight,
             },
         )
         fused = dedupe_logical_positions(fused)
@@ -219,6 +233,16 @@ class RAGRetrievalService:
             },
             "locate": locate.diagnostics if locate else None,
             "branch_candidate_count": raw_branch_candidate_count,
+            "related_entity_count": len(related_entities),
+            "related_candidate_count": raw_related_candidate_count,
+            "related_entities": [
+                {
+                    "entity_id": item["entity_id"],
+                    "relation_type": item["relation_type"],
+                    "confidence": item["confidence"],
+                }
+                for item in related_entities
+            ],
             "global_candidate_count": raw_global_candidate_count,
             "score_gate_dropped_count": gate_dropped,
             "anchor_candidate_count": len(anchor_candidates),
@@ -281,6 +305,73 @@ class RAGRetrievalService:
             "retrieval_mode": request.qa_mode,
             "execution_path": response.diagnostics["effective_execution_path"],
         }
+
+    def _expand_relations(
+        self,
+        *,
+        request: SearchRequest,
+        retrieval_request: SearchRequest,
+        entity_ids: tuple[str, ...],
+        scoped_branches: dict[str, list[SearchResult]],
+        query_vector: list[float] | None,
+        protected_keys: tuple[str, ...],
+        degraded: list[str],
+    ) -> tuple[dict[str, list[SearchResult]], list[dict[str, Any]]]:
+        """Widen to one hop of neighbours when the entity's own node is thin.
+
+        Falling straight back to full-corpus search throws away the fact that we
+        know which entity the user meant; one hop keeps that context while still
+        reaching "张三参与的项目" style questions.
+        """
+        if not settings.tree_relation_expansion_enabled or settings.tree_mode != "tree":
+            return {}, []
+        if not entity_ids or not scoped_branches:
+            return {}, []
+        scoped_count = sum(len(values) for values in scoped_branches.values())
+        if scoped_count >= max(1, int(request.top_k * 0.5)):
+            return {}, []
+        try:
+            related = self.repository.find_related_entities(
+                scope_type=request.scope_type,
+                scope_id=request.scope_id,
+                entity_ids=list(entity_ids),
+                direction="both",
+                min_confidence=settings.tree_relation_min_confidence,
+                limit=settings.tree_relation_max_entities,
+            )
+        except Exception:
+            degraded.append("relation_lookup_failed")
+            return {}, []
+        related_ids = tuple(dict.fromkeys(item["entity_id"] for item in related))
+        if not related_ids:
+            return {}, []
+        branches: dict[str, list[SearchResult]] = {}
+        try:
+            branches["related_bm25"] = _annotate_branch(
+                "bm25",
+                self.indexer.search_bm25(
+                    retrieval_request,
+                    entity_ids=related_ids,
+                    protected_object_keys=protected_keys,
+                ),
+            )
+            if query_vector is not None:
+                branches["related_knn"] = _annotate_branch(
+                    "knn",
+                    self.indexer.search_knn(
+                        retrieval_request,
+                        query_vector,
+                        entity_ids=related_ids,
+                        protected_object_keys=protected_keys,
+                    ),
+                )
+        except Exception:
+            degraded.append("relation_search_failed")
+            return {}, []
+        for values in branches.values():
+            for result in values:
+                result.source["retrieval_origin"] = "related"
+        return branches, related
 
     def _locate(self, request: SearchRequest) -> LocateResult | None:
         """Resolve the request's entities, or None when the tree does not apply.
