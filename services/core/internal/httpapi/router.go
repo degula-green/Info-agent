@@ -62,7 +62,7 @@ func newRouter(authentication Authentication, cookies RefreshCookieConfig, logge
 		inv := router.Group("/organization-invitations", RequireAuthentication(authentication, logger))
 		inv.POST("/:token/accept", orgHandler.AcceptInvitation)
 		if authorization != nil {
-			internalOrganizationHandler := NewInternalOrganizationHandler(organization, authorization.KnowledgeToken)
+			internalOrganizationHandler := NewInternalOrganizationHandler(organization, authorization.Token, authorization.KnowledgeToken)
 			router.GET("/internal/organizations/:organization_id/members/:user_id/check", internalOrganizationHandler.CheckMember)
 		}
 	}

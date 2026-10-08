@@ -160,6 +160,22 @@ func TestCompleteFeishuOAuthDuplicateIsIdempotent(t *testing.T) {
 	}
 }
 
+func TestFeishuOAuthStatePreservesDesktopClientMode(t *testing.T) {
+	provider := &fakeOAuthProvider{profile: platform.Profile{ExternalAccountID: "feishu-user", ExternalUserID: "feishu-user", WorkspaceKey: "tenant", DisplayName: "Alice"}}
+	service, _, _ := newServiceForTest(provider)
+	start, err := service.StartFeishuOAuthForClient(context.Background(), "u1", "bind", "desktop", "org-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, err := service.PeekOAuthState(context.Background(), start.StateID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.ClientMode != "desktop" {
+		t.Fatalf("desktop oauth client mode was not preserved: %+v", state)
+	}
+}
+
 func TestFeishuOpenIDMappingAllowsInitialGroupAttach(t *testing.T) {
 	provider := &fakeOAuthProvider{
 		profile: platform.Profile{ExternalAccountID: "user-id", ExternalUserID: "open-id", WorkspaceKey: "tenant", DisplayName: "Alice"},
@@ -989,6 +1005,61 @@ func TestWechatBootstrapRequiresDeviceAndUsesAssignment(t *testing.T) {
 	}
 	if _, leaked := connector["database_ref"]; leaked {
 		t.Fatalf("bootstrap leaked the server-side database_ref: %+v", connector)
+	}
+}
+
+func TestDesktopWechatHeartbeatReturnsStateCommandsAndSnapshot(t *testing.T) {
+	service, repo, _ := newServiceForTest(nil)
+	service.Config.CollectorMode = "desktop"
+	ctx := context.Background()
+	pairing, err := service.CreatePairingForWXID(ctx, "u1", "wxid-desktop", "org-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	exchange, err := service.PairAgent(ctx, pairing.PairingID, pairing.PairingCode, "wxid-desktop", "", "desktop")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.SaveWechatConfig(ctx, "u1", map[string]any{
+		"selected_conversations": []any{"chat-a"},
+		"enabled":                true,
+		"listen_mode":            "whitelist",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	device, err := repo.GetDeviceByHash(ctx, hashForTest(exchange.DeviceKey))
+	if err != nil {
+		t.Fatal(err)
+	}
+	heartbeat, err := service.HeartbeatDevice(ctx, device, "desktop-test", "running")
+	if err != nil {
+		t.Fatal(err)
+	}
+	desired, ok := heartbeat["desired_state"].(map[string]any)
+	if !ok || desired["desired_status"] != "running" {
+		t.Fatalf("heartbeat did not return the desired state: %+v", heartbeat)
+	}
+	commands, ok := heartbeat["commands"].([]domain.WechatCommand)
+	if !ok || len(commands) != 1 || commands[0].CommandType != "wechat.collector.apply_config" {
+		t.Fatalf("heartbeat did not claim the pending command: %+v", heartbeat)
+	}
+	if err := service.AckWechatCommand(ctx, device, commands[0].CommandID, "acknowledged", "", "", map[string]any{"applied": true}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.ReportWechatSnapshot(ctx, device, "conversations", 7, []map[string]any{{
+		"external_id":       "chat-a",
+		"name":              "测试群",
+		"conversation_type": "group",
+	}}, time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	out, err := service.WechatConversations(ctx, "u1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	items, ok := out["conversations"].([]domain.AvailableConversation)
+	if !ok || len(items) != 1 || items[0].ExternalID != "chat-a" {
+		t.Fatalf("desktop conversations did not come from the snapshot: %+v", out)
 	}
 }
 

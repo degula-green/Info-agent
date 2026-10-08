@@ -190,7 +190,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { MessagePlugin } from 'tdesign-vue-next'
 import { sourceColor } from '@/mock'
@@ -203,6 +203,7 @@ import { acceptOrganizationInvitation, approveAccessRequest, createOrganization,
 import { CoreAuthError } from '@/api/core-auth'
 import { approveDeletionRequest, approvePrivateAccessRequest, createWechatPairing, getWechatPairingStatus, listDeletionRequests, listPrivateAccessRequests, rejectDeletionRequest, rejectPrivateAccessRequest, type DeletionRequestDTO, type PrivateAccessRequestDTO } from '@/api/info-knowledge'
 import { listLocalWechatAccounts, pairLocalWechatAccount, type LocalWechatAccount } from '@/api/wechat-local-agent'
+import { desktopRuntimeActive, openExternalUrl } from '@/api/runtime-config'
 
 const store = useInfoMockStore()
 const authStore = useAuthStore()
@@ -252,6 +253,7 @@ const wechatPathForm = reactive({ wxid: '', db_dir: '' })
 const wechatAgentError = ref('')
 const connectorPending = reactive<Record<ConnectorPlatform, boolean>>({ feishu: false, wecom: false, wechat: false })
 const feishuBinding = ref(false)
+const feishuAuthorizationPending = ref(false)
 const wechatBinding = ref(false)
 const avatarLabel = computed(() => (form.nickname.trim().slice(0, 1) || '我'))
 const selectedWechatAccount = computed(() => (
@@ -560,7 +562,27 @@ function heartbeatAge(value?: string | null) {
   if (seconds < 86400) return `${Math.floor(seconds / 3600)} 小时前`
   return date.toLocaleDateString('zh-CN')
 }
-async function refreshConnectors() { connectors.value = await getConnectors() }
+async function refreshConnectors() {
+  const next = await getConnectors()
+  connectors.value = next
+  if (!feishuAuthorizationPending.value) return
+  const feishu = next.find((item) => item.platform === 'feishu')
+  if (feishu?.bound && !needsFeishuAuthorization(feishu)) {
+    feishuAuthorizationPending.value = false
+    feishuDialogVisible.value = false
+  }
+}
+let connectorRefreshTimer: number | null = null
+function refreshConnectorsWhenVisible() {
+  if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return
+  void refreshConnectors().catch(() => undefined)
+}
+function handleWindowFocus() {
+  refreshConnectorsWhenVisible()
+}
+function handleVisibilityChange() {
+  refreshConnectorsWhenVisible()
+}
 function openFeishuReauthorization() { feishuDialogVisible.value = true }
 async function handleConnector(connector: Connector) {
 	if (connectorPending[connector.platform]) return
@@ -589,9 +611,13 @@ async function confirmFeishuBind() {
   feishuBinding.value = true
   try {
 	const current = connectors.value.find((item) => item.platform === 'feishu')
-	const url = await getFeishuAuthorizeURL(current?.bound ? 'rebind' : 'bind')
-    window.location.assign(url)
-  } catch (cause) { MessagePlugin.error(errorMessage(cause, '飞书授权暂不可用')) }
+	const url = await getFeishuAuthorizeURL(current?.bound ? 'rebind' : 'bind', desktopRuntimeActive() ? 'desktop' : 'web')
+    feishuAuthorizationPending.value = true
+    if (!(await openExternalUrl(url))) window.location.assign(url)
+  } catch (cause) {
+    feishuAuthorizationPending.value = false
+    MessagePlugin.error(errorMessage(cause, '飞书授权暂不可用'))
+  }
   finally { feishuBinding.value = false }
 }
 async function confirmWechatBind() {
@@ -728,6 +754,11 @@ async function beginWechatPairing() {
 async function handleOAuthCallback() {
   const notice = oauthCallbackNotice(route.query)
   if (!notice) return
+  if (notice.kind === 'success') {
+    feishuAuthorizationPending.value = false
+    feishuDialogVisible.value = false
+    await refreshConnectors().catch(() => undefined)
+  }
   if (notice.kind === 'success') MessagePlugin.success(notice.message)
   else MessagePlugin.error(notice.message)
   const query = { ...route.query }
@@ -745,11 +776,20 @@ async function restoreDemo() {
 onMounted(async () => {
   await loadPage()
   await handleOAuthCallback()
+  window.addEventListener('focus', handleWindowFocus)
+  document.addEventListener('visibilitychange', handleVisibilityChange)
+  connectorRefreshTimer = window.setInterval(refreshConnectorsWhenVisible, 8_000)
   const token = String(route.params.token || '').trim()
   if (token && !organization.value) {
     invitationToken.value = token
     await submitJoinOrganization()
   }
+})
+onBeforeUnmount(() => {
+  window.removeEventListener('focus', handleWindowFocus)
+  document.removeEventListener('visibilitychange', handleVisibilityChange)
+  if (connectorRefreshTimer !== null) window.clearInterval(connectorRefreshTimer)
+  connectorRefreshTimer = null
 })
 </script>
 

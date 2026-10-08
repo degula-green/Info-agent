@@ -182,6 +182,29 @@ class Settings:
         "RAG_VISION_CACHE_TTL_SECONDS", 7 * 24 * 3600
     )
 
+    # Entity extraction for the window scan, and the L4 disambiguation call in
+    # the entity locator. Both talk to a reasoning-capable chat model. This is
+    # deliberately a separate endpoint from QA so the two can move
+    # independently; measured 2026-10-09 against deepseek-flash, disabling
+    # thinking cut latency ~8x and tokens ~10x with equal or better extraction
+    # quality, so reasoning is off by default.
+    extract_base_url: str = _text("RAG_EXTRACT_BASE_URL")
+    extract_api_key: str = _text("RAG_EXTRACT_API_KEY")
+    extract_model: str = _text("RAG_EXTRACT_MODEL", "deepseek-flash")
+    extract_disable_thinking: bool = _bool("RAG_EXTRACT_DISABLE_THINKING", True)
+    # Only consulted when thinking is enabled: the fallback when disabling it
+    # turns out to hurt extraction quality. "minimal" is intentionally not the
+    # default - measured on real 20-message windows it spent the whole
+    # max_tokens budget on reasoning and truncated the JSON.
+    extract_reasoning_effort: str = _text("RAG_EXTRACT_REASONING_EFFORT", "low")
+    extract_timeout_seconds: float = _float("RAG_EXTRACT_TIMEOUT_SECONDS", 120.0)
+    # A reasoning model that runs out of budget returns an empty body instead of
+    # an error, so this must stay generous.
+    extract_max_tokens: int = _int("RAG_EXTRACT_MAX_TOKENS", 4000)
+    extract_max_retries: int = _int("RAG_EXTRACT_MAX_RETRIES", 2)
+    # Concurrency is for the window scan worker, not for a single request.
+    extract_concurrency: int = _int("RAG_EXTRACT_CONCURRENCY", 8)
+
     # MinIO source and derived artifacts.
     minio_endpoint: str = _text("RAG_MINIO_ENDPOINT")
     minio_access_key: str = _text("RAG_MINIO_ACCESS_KEY")

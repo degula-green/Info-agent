@@ -318,8 +318,8 @@ export async function getConnectors() {
   return body.items || []
 }
 
-export async function getFeishuAuthorizeURL(intent: 'bind' | 'rebind' = 'bind') {
-  const body = await knowledgeRequest<{ authorize_url: string }>('/connectors/feishu/authorize', { method: 'POST', body: JSON.stringify({ intent }) })
+export async function getFeishuAuthorizeURL(intent: 'bind' | 'rebind' = 'bind', client: 'web' | 'desktop' = 'web') {
+  const body = await knowledgeRequest<{ authorize_url: string }>('/connectors/feishu/authorize', { method: 'POST', body: JSON.stringify({ intent, client }) })
   return body.authorize_url
 }
 

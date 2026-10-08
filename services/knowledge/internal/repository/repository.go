@@ -705,6 +705,11 @@ type Repository interface {
 	GetWechatRuntime(ctx context.Context, connectorID string) (*domain.WechatCollectorRuntime, error)
 	UpsertWechatRuntime(ctx context.Context, runtime domain.WechatCollectorRuntime) (*domain.WechatCollectorRuntime, error)
 	UpdateWechatRuntime(ctx context.Context, connectorID, status, lastError string, heartbeat, collectedAt *time.Time) error
+	CreateWechatCommand(ctx context.Context, command domain.WechatCommand) (*domain.WechatCommand, error)
+	ClaimWechatCommands(ctx context.Context, connectorID, deviceID string, now time.Time, limit int) ([]domain.WechatCommand, error)
+	AcknowledgeWechatCommand(ctx context.Context, commandID, deviceID, status, errorCode, errorMessage string, result map[string]any, now time.Time) error
+	UpsertWechatSnapshot(ctx context.Context, snapshot domain.WechatSnapshot) (*domain.WechatSnapshot, error)
+	GetWechatSnapshot(ctx context.Context, connectorID, snapshotType string) (*domain.WechatSnapshot, error)
 	ReplaceConnector(ctx context.Context, previousConnectorID string, account domain.ConnectorAccount) (*domain.ConnectorAccount, error)
 	BindConnector(ctx context.Context, previousConnectorID string, account domain.ConnectorAccount, identity ExternalIdentityInput, now time.Time) (*domain.ConnectorAccount, error)
 	SetConnectorDefaultOrganization(ctx context.Context, connectorID, ownerUserID, organizationID string) (*domain.ConnectorAccount, error)
@@ -721,6 +726,7 @@ type Repository interface {
 	CreateDevice(ctx context.Context, device domain.AgentDevice) error
 	CompletePairing(ctx context.Context, pairingID, deviceID, connectorID string) error
 	GetDeviceByHash(ctx context.Context, keyHash string) (*domain.AgentDevice, error)
+	GetActiveDeviceByOwner(ctx context.Context, ownerUserID string) (*domain.AgentDevice, error)
 	CreateDeviceAssignment(ctx context.Context, assignment domain.AgentDeviceAssignment) error
 	GetActiveDeviceAssignment(ctx context.Context, deviceID string) (*domain.AgentDeviceAssignment, error)
 	RevokeDeviceAssignments(ctx context.Context, connectorID, actorUserID string, now time.Time) error

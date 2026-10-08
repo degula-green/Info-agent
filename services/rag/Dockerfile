@@ -1,12 +1,12 @@
 FROM python:3.12-slim
+ENV PIP_INDEX_URL=https://mirrors.cloud.tencent.com/pypi/simple/ \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
 WORKDIR /app
-RUN pip install --no-cache-dir uv
-COPY pyproject.toml uv.lock ./
-RUN uv sync --frozen --no-dev
+COPY requirements.txt ./
+RUN pip install --no-cache-dir -r requirements.txt
 COPY app ./app
 COPY worker.py ./worker.py
 # The Elasticsearch mappings are loaded from `config/` at runtime.
 COPY config ./config
-ENV PATH="/app/.venv/bin:$PATH"
 EXPOSE 8000
-CMD ["uv", "run", "--frozen", "--no-dev", "python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

@@ -1,8 +1,9 @@
 import { authenticatedFetch } from '../auth/request.ts'
 import { listConversations, type ConnectorPlatform } from './info-knowledge.ts'
+import { desktopApiBase } from './runtime-config.ts'
 
 const env = ((import.meta as ImportMeta & { env?: Record<string, string> }).env || {})
-const baseURL = String(env.VITE_AGENT_BASE_URL || '/api/agent/v1').replace(/\/$/, '')
+const baseURL = String(desktopApiBase('/api/agent/v1') || env.VITE_AGENT_BASE_URL || '/api/agent/v1').replace(/\/$/, '')
 
 export class AgentApiError extends Error {
   code: string

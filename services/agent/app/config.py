@@ -400,6 +400,9 @@ class Settings:
     # Form filling drives a real browser, so the browser lives in its own
     # service. An empty base URL means the capability is not registered and
     # the form intent reports as unsupported instead of failing at runtime.
+    form_browser_mode: str = _text(
+        "server", "AGENT_FORM_BROWSER_MODE", "agent_FORM_BROWSER_MODE"
+    )
     form_browser_url: str = _text(
         "", "AGENT_FORM_BROWSER_URL", "agent_FORM_BROWSER_URL"
     )
@@ -418,6 +421,21 @@ class Settings:
     # How many data rows a preview reads back before it stops.
     form_max_rows: int = _int(
         50, "AGENT_FORM_MAX_ROWS", "agent_FORM_MAX_ROWS"
+    )
+    desktop_task_ttl_seconds: float = _float(
+        300.0,
+        "AGENT_DESKTOP_TASK_TTL_SECONDS",
+        "agent_DESKTOP_TASK_TTL_SECONDS",
+    )
+    desktop_task_lease_seconds: float = _float(
+        60.0,
+        "AGENT_DESKTOP_TASK_LEASE_SECONDS",
+        "agent_DESKTOP_TASK_LEASE_SECONDS",
+    )
+    desktop_task_poll_seconds: float = _float(
+        1.0,
+        "AGENT_DESKTOP_TASK_POLL_SECONDS",
+        "agent_DESKTOP_TASK_POLL_SECONDS",
     )
     answer_timeout_seconds: float = _float(
         60.0, "AGENT_ANSWER_TIMEOUT_SECONDS", "agent_ANSWER_TIMEOUT_SECONDS"

@@ -72,24 +72,41 @@ func TestInternalOrganizationMemberCheckRestrictsCaller(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	stub := &organizationCheckStub{allowed: true}
 	router := gin.New()
-	router.GET("/internal/organizations/:organization_id/members/:user_id/check", NewInternalOrganizationHandler(stub, "knowledge-token").CheckMember)
+	router.GET("/internal/organizations/:organization_id/members/:user_id/check", NewInternalOrganizationHandler(stub, "rag-token", "knowledge-token").CheckMember)
 
-	forbidden := httptest.NewRequest(http.MethodGet, "/internal/organizations/org-1/members/user-1/check", nil)
-	forbidden.Header.Set("Authorization", "Bearer knowledge-token")
-	forbidden.Header.Set("X-Caller-Service", "worker")
-	forbiddenResult := httptest.NewRecorder()
-	router.ServeHTTP(forbiddenResult, forbidden)
-	if forbiddenResult.Code != http.StatusForbidden {
-		t.Fatalf("unexpected forbidden status: %d", forbiddenResult.Code)
+	cases := []struct {
+		name     string
+		caller   string
+		token    string
+		wantCode int
+	}{
+		{"unknown caller is rejected", "worker", "knowledge-token", http.StatusForbidden},
+		{"knowledge authenticates with its own token", "knowledge", "knowledge-token", http.StatusOK},
+		// RAG resolves organization capability through this endpoint as well, so it
+		// must be able to authenticate with the RAG token.
+		{"rag authenticates with its own token", "rag", "rag-token", http.StatusOK},
+		{"rag cannot reuse the knowledge token", "rag", "knowledge-token", http.StatusForbidden},
+		{"knowledge cannot reuse the rag token", "knowledge", "rag-token", http.StatusForbidden},
+		{"missing authorization is rejected", "rag", "", http.StatusForbidden},
 	}
-
-	request := httptest.NewRequest(http.MethodGet, "/internal/organizations/org-1/members/user-1/check", nil)
-	request.Header.Set("Authorization", "Bearer knowledge-token")
-	request.Header.Set("X-Caller-Service", "knowledge")
-	result := httptest.NewRecorder()
-	router.ServeHTTP(result, request)
-	if result.Code != http.StatusOK || !strings.Contains(result.Body.String(), `"allowed":true`) || !strings.Contains(result.Body.String(), `"is_member":true`) {
-		t.Fatalf("unexpected member check response: status=%d body=%s", result.Code, result.Body.String())
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodGet, "/internal/organizations/org-1/members/user-1/check", nil)
+			if testCase.token != "" {
+				request.Header.Set("Authorization", "Bearer "+testCase.token)
+			}
+			request.Header.Set("X-Caller-Service", testCase.caller)
+			result := httptest.NewRecorder()
+			router.ServeHTTP(result, request)
+			if result.Code != testCase.wantCode {
+				t.Fatalf("status=%d body=%s", result.Code, result.Body.String())
+			}
+			if testCase.wantCode == http.StatusOK &&
+				(!strings.Contains(result.Body.String(), `"allowed":true`) ||
+					!strings.Contains(result.Body.String(), `"is_member":true`)) {
+				t.Fatalf("unexpected member check response: body=%s", result.Body.String())
+			}
+		})
 	}
 }
 

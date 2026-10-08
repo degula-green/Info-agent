@@ -1,5 +1,12 @@
 <template>
   <section class="knowledge-structure-page">
+    <t-alert
+      class="structure-mock-banner"
+      theme="warning"
+      title="设计稿演示"
+      message="本页数据均为本地假数据，尚未接入 RAG 接口，不代表已实现功能，请勿据此验收。"
+      :close="false"
+    />
     <header class="structure-heading">
       <button class="structure-heading__back" type="button" aria-label="返回我的组织" @click="router.push('/organization')">
         <t-icon name="chevron-left" />
@@ -546,6 +553,7 @@ async function runTreeTest() {
 
 <style scoped lang="less">
 .knowledge-structure-page { box-sizing: border-box; width: min(1180px, 100%); margin: 0 auto; padding: 30px 34px 58px; color: var(--td-text-color-primary); }
+.structure-mock-banner { margin-bottom: 16px; }
 .structure-heading { display: flex; align-items: flex-start; gap: 13px; margin-bottom: 20px; }
 .structure-heading__back { display: grid; place-items: center; flex: 0 0 34px; width: 34px; height: 34px; margin-top: 2px; padding: 0; border: 1px solid var(--td-component-stroke); border-radius: 7px; color: var(--td-text-color-secondary); background: var(--td-bg-color-container); cursor: pointer; }
 .structure-heading__back:hover { color: var(--td-brand-color); border-color: var(--td-brand-color-4); }

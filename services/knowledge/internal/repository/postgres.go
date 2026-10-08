@@ -95,9 +95,16 @@ func scanConnector(row rowScanner) (*domain.ConnectorAccount, error) {
 func (s *PostgresStore) GetWechatConfig(ctx context.Context, connectorID string) (*domain.WechatCollectionConfig, error) {
 	var c domain.WechatCollectionConfig
 	var raw []byte
-	err := s.pool.QueryRow(ctx, `SELECT connector_account_id::text,COALESCE(selected_conversations,'[]'::jsonb),history_start_at,enabled,listen_mode,updated_at FROM knowledge.wechat_collection_configs WHERE connector_account_id=$1`, connectorID).Scan(&c.ConnectorID, &raw, &c.HistoryStartAt, &c.Enabled, &c.ListenMode, &c.UpdatedAt)
+	err := s.pool.QueryRow(ctx, `SELECT connector_account_id::text,COALESCE(selected_conversations,'[]'::jsonb),history_start_at,enabled,listen_mode,desired_status,config_version,updated_at FROM knowledge.wechat_collection_configs WHERE connector_account_id=$1`, connectorID).Scan(&c.ConnectorID, &raw, &c.HistoryStartAt, &c.Enabled, &c.ListenMode, &c.DesiredStatus, &c.ConfigVersion, &c.UpdatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
-		c = domain.WechatCollectionConfig{ConnectorID: connectorID, SelectedConversations: []string{}, Enabled: true, ListenMode: "whitelist"}
+		c = domain.WechatCollectionConfig{
+			ConnectorID:           connectorID,
+			SelectedConversations: []string{},
+			Enabled:               true,
+			ListenMode:            "whitelist",
+			DesiredStatus:         "running",
+			ConfigVersion:         1,
+		}
 		return &c, nil
 	}
 	if err != nil {
@@ -112,11 +119,18 @@ func (s *PostgresStore) SaveWechatConfig(ctx context.Context, c domain.WechatCol
 	if c.ListenMode == "" {
 		c.ListenMode = "whitelist"
 	}
+	if c.DesiredStatus == "" {
+		if c.Enabled {
+			c.DesiredStatus = "running"
+		} else {
+			c.DesiredStatus = "stopped"
+		}
+	}
 	raw, err := json.Marshal(c.SelectedConversations)
 	if err != nil {
 		return nil, err
 	}
-	err = s.pool.QueryRow(ctx, `INSERT INTO knowledge.wechat_collection_configs (connector_account_id,selected_conversations,history_start_at,enabled,listen_mode) VALUES ($1,$2::jsonb,$3,$4,$5) ON CONFLICT (connector_account_id) DO UPDATE SET selected_conversations=EXCLUDED.selected_conversations,history_start_at=EXCLUDED.history_start_at,enabled=EXCLUDED.enabled,listen_mode=EXCLUDED.listen_mode,updated_at=now() RETURNING connector_account_id::text,selected_conversations,history_start_at,enabled,listen_mode,updated_at`, c.ConnectorID, raw, c.HistoryStartAt, c.Enabled, c.ListenMode).Scan(&c.ConnectorID, &raw, &c.HistoryStartAt, &c.Enabled, &c.ListenMode, &c.UpdatedAt)
+	err = s.pool.QueryRow(ctx, `INSERT INTO knowledge.wechat_collection_configs (connector_account_id,selected_conversations,history_start_at,enabled,listen_mode,desired_status,config_version) VALUES ($1,$2::jsonb,$3,$4,$5,$6,1) ON CONFLICT (connector_account_id) DO UPDATE SET selected_conversations=EXCLUDED.selected_conversations,history_start_at=EXCLUDED.history_start_at,enabled=EXCLUDED.enabled,listen_mode=EXCLUDED.listen_mode,desired_status=EXCLUDED.desired_status,config_version=knowledge.wechat_collection_configs.config_version+1,updated_at=now() RETURNING connector_account_id::text,selected_conversations,history_start_at,enabled,listen_mode,desired_status,config_version,updated_at`, c.ConnectorID, raw, c.HistoryStartAt, c.Enabled, c.ListenMode, c.DesiredStatus).Scan(&c.ConnectorID, &raw, &c.HistoryStartAt, &c.Enabled, &c.ListenMode, &c.DesiredStatus, &c.ConfigVersion, &c.UpdatedAt)
 	if err != nil {
 		return nil, dbError(err)
 	}
@@ -141,6 +155,238 @@ func (s *PostgresStore) UpsertWechatRuntime(ctx context.Context, r domain.Wechat
 func (s *PostgresStore) UpdateWechatRuntime(ctx context.Context, id, status, lastError string, heartbeat, collectedAt *time.Time) error {
 	_, err := s.pool.Exec(ctx, `UPDATE knowledge.wechat_collector_runtime SET status=COALESCE(NULLIF($2,''),status),last_error=$3,last_heartbeat_at=COALESCE($4,last_heartbeat_at),last_collected_at=COALESCE($5,last_collected_at),updated_at=now() WHERE connector_account_id=$1`, id, status, nilString(lastError), heartbeat, collectedAt)
 	return dbError(err)
+}
+
+func scanWechatCommand(row pgx.Row) (*domain.WechatCommand, error) {
+	var command domain.WechatCommand
+	var raw []byte
+	var resultRaw []byte
+	err := row.Scan(
+		&command.CommandID,
+		&command.ConnectorID,
+		&command.DeviceID,
+		&command.CommandType,
+		&raw,
+		&resultRaw,
+		&command.IdempotencyKey,
+		&command.Status,
+		&command.Attempt,
+		&command.Deadline,
+		&command.DeliveredAt,
+		&command.StartedAt,
+		&command.CompletedAt,
+		&command.ErrorCode,
+		&command.ErrorMessage,
+		&command.CreatedAt,
+		&command.UpdatedAt,
+	)
+	if err != nil {
+		return nil, err
+	}
+	command.Payload = map[string]any{}
+	if len(raw) > 0 {
+		if err := json.Unmarshal(raw, &command.Payload); err != nil {
+			return nil, dbError(err)
+		}
+	}
+	if len(resultRaw) > 0 {
+		if err := json.Unmarshal(resultRaw, &command.Result); err != nil {
+			return nil, dbError(err)
+		}
+	}
+	return &command, nil
+}
+
+func (s *PostgresStore) CreateWechatCommand(ctx context.Context, command domain.WechatCommand) (*domain.WechatCommand, error) {
+	if strings.TrimSpace(command.CommandID) == "" {
+		command.CommandID = uuid.NewString()
+	}
+	if strings.TrimSpace(command.Status) == "" {
+		command.Status = "pending"
+	}
+	if command.Payload == nil {
+		command.Payload = map[string]any{}
+	}
+	raw, err := json.Marshal(command.Payload)
+	if err != nil {
+		return nil, err
+	}
+	row := s.pool.QueryRow(ctx, `
+		INSERT INTO knowledge.wechat_commands (
+			command_id, connector_id, device_id, command_type, payload,
+			result, idempotency_key, status, attempt, deadline, created_at, updated_at
+		) VALUES ($1,$2,NULLIF($3,'')::uuid,$4,$5::jsonb,$6,$7,$8,$9,$10,COALESCE($11,CURRENT_TIMESTAMP),COALESCE($11,CURRENT_TIMESTAMP))
+		ON CONFLICT (idempotency_key) DO UPDATE SET updated_at=knowledge.wechat_commands.updated_at
+		RETURNING command_id::text,connector_id::text,COALESCE(device_id::text,''),command_type,payload,result,idempotency_key,status,attempt,deadline,delivered_at,started_at,completed_at,COALESCE(error_code,''),COALESCE(error_message,''),created_at,updated_at`,
+		command.CommandID,
+		command.ConnectorID,
+		command.DeviceID,
+		command.CommandType,
+		raw,
+		nil,
+		command.IdempotencyKey,
+		command.Status,
+		command.Attempt,
+		command.Deadline,
+		nilTime(command.CreatedAt),
+	)
+	out, err := scanWechatCommand(row)
+	if err != nil {
+		return nil, dbError(err)
+	}
+	return out, nil
+}
+
+func (s *PostgresStore) ClaimWechatCommands(ctx context.Context, connectorID, deviceID string, now time.Time, limit int) ([]domain.WechatCommand, error) {
+	if limit <= 0 {
+		limit = 20
+	}
+	if _, err := s.pool.Exec(ctx, `
+		UPDATE knowledge.wechat_commands
+		SET status='expired', updated_at=$2
+		WHERE connector_id=$1 AND status IN ('pending','delivered','running') AND deadline <= $2
+	`, connectorID, now); err != nil {
+		return nil, dbError(err)
+	}
+	rows, err := s.pool.Query(ctx, `
+		WITH claimed AS (
+			SELECT command_id
+			FROM knowledge.wechat_commands
+			WHERE connector_id=$1
+			  AND status='pending'
+			  AND deadline > $2
+			  AND (device_id IS NULL OR device_id=$3)
+			ORDER BY created_at
+			FOR UPDATE SKIP LOCKED
+			LIMIT $4
+		)
+		UPDATE knowledge.wechat_commands AS command
+		SET status='delivered',
+		    device_id=$3,
+		    delivered_at=$2,
+		    attempt=command.attempt+1,
+		    updated_at=$2
+		FROM claimed
+		WHERE command.command_id=claimed.command_id
+		RETURNING command.command_id::text,command.connector_id::text,COALESCE(command.device_id::text,''),command.command_type,command.payload,command.result,command.idempotency_key,command.status,command.attempt,command.deadline,command.delivered_at,command.started_at,command.completed_at,COALESCE(command.error_code,''),COALESCE(command.error_message,''),command.created_at,command.updated_at
+	`, connectorID, now, deviceID, limit)
+	if err != nil {
+		return nil, dbError(err)
+	}
+	defer rows.Close()
+	out := make([]domain.WechatCommand, 0, limit)
+	for rows.Next() {
+		command, scanErr := scanWechatCommand(rows)
+		if scanErr != nil {
+			return nil, dbError(scanErr)
+		}
+		out = append(out, *command)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, dbError(err)
+	}
+	return out, nil
+}
+
+func (s *PostgresStore) AcknowledgeWechatCommand(ctx context.Context, commandID, deviceID, status, errorCode, errorMessage string, result map[string]any, now time.Time) error {
+	if status == "" {
+		status = "acknowledged"
+	}
+	if result == nil {
+		result = map[string]any{}
+	}
+	raw, err := json.Marshal(result)
+	if err != nil {
+		return err
+	}
+	tag, err := s.pool.Exec(ctx, `
+		UPDATE knowledge.wechat_commands
+		SET status=$3::varchar,
+		    started_at=CASE WHEN $3::varchar IN ('running','acknowledged','failed') THEN COALESCE(started_at,$5) ELSE started_at END,
+		    completed_at=CASE WHEN $3::varchar IN ('acknowledged','failed','expired') THEN $5 ELSE completed_at END,
+		    error_code=NULLIF($4,''),
+		    error_message=NULLIF($6,''),
+		    result=$7::jsonb,
+		    updated_at=$5
+		WHERE command_id=$1
+		  AND (device_id IS NULL OR device_id=$2)
+		  AND status NOT IN ('acknowledged','failed','expired')
+	`, commandID, deviceID, status, errorCode, now, errorMessage, raw)
+	if err != nil {
+		return dbError(err)
+	}
+	if tag.RowsAffected() == 0 {
+		return apperror.New("wechat_command_not_found", "wechat command was not found", 404, false)
+	}
+	return nil
+}
+
+func (s *PostgresStore) UpsertWechatSnapshot(ctx context.Context, snapshot domain.WechatSnapshot) (*domain.WechatSnapshot, error) {
+	if snapshot.Items == nil {
+		snapshot.Items = []map[string]any{}
+	}
+	raw, err := json.Marshal(snapshot.Items)
+	if err != nil {
+		return nil, err
+	}
+	row := s.pool.QueryRow(ctx, `
+		INSERT INTO knowledge.wechat_snapshots (
+			connector_id, snapshot_type, device_id, version, items,
+			captured_at, expires_at, created_at, updated_at
+		) VALUES ($1,$2,NULLIF($3,'')::uuid,$4,$5::jsonb,$6,$7,CURRENT_TIMESTAMP,$6)
+		ON CONFLICT (connector_id, snapshot_type) DO UPDATE SET
+			device_id=EXCLUDED.device_id,
+			version=EXCLUDED.version,
+			items=EXCLUDED.items,
+			captured_at=EXCLUDED.captured_at,
+			expires_at=EXCLUDED.expires_at,
+			updated_at=EXCLUDED.updated_at
+		WHERE EXCLUDED.version >= knowledge.wechat_snapshots.version
+		RETURNING connector_id::text,snapshot_type,COALESCE(device_id::text,''),version,items,captured_at,expires_at,created_at,updated_at
+	`, snapshot.ConnectorID, snapshot.SnapshotType, snapshot.DeviceID, snapshot.Version, raw, snapshot.CapturedAt, snapshot.ExpiresAt)
+	var out domain.WechatSnapshot
+	var itemsRaw []byte
+	err = row.Scan(&out.ConnectorID, &out.SnapshotType, &out.DeviceID, &out.Version, &itemsRaw, &out.CapturedAt, &out.ExpiresAt, &out.CreatedAt, &out.UpdatedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return s.GetWechatSnapshot(ctx, snapshot.ConnectorID, snapshot.SnapshotType)
+	}
+	if err != nil {
+		return nil, dbError(err)
+	}
+	if err := json.Unmarshal(itemsRaw, &out.Items); err != nil {
+		return nil, dbError(err)
+	}
+	return &out, nil
+}
+
+func (s *PostgresStore) GetWechatSnapshot(ctx context.Context, connectorID, snapshotType string) (*domain.WechatSnapshot, error) {
+	var snapshot domain.WechatSnapshot
+	var raw []byte
+	err := s.pool.QueryRow(ctx, `
+		SELECT connector_id::text,snapshot_type,COALESCE(device_id::text,''),version,items,captured_at,expires_at,created_at,updated_at
+		FROM knowledge.wechat_snapshots
+		WHERE connector_id=$1 AND snapshot_type=$2
+	`, connectorID, snapshotType).Scan(
+		&snapshot.ConnectorID,
+		&snapshot.SnapshotType,
+		&snapshot.DeviceID,
+		&snapshot.Version,
+		&raw,
+		&snapshot.CapturedAt,
+		&snapshot.ExpiresAt,
+		&snapshot.CreatedAt,
+		&snapshot.UpdatedAt,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, apperror.New("wechat_snapshot_not_found", "wechat snapshot was not found", 404, false)
+	}
+	if err != nil {
+		return nil, dbError(err)
+	}
+	if err := json.Unmarshal(raw, &snapshot.Items); err != nil {
+		return nil, dbError(err)
+	}
+	return &snapshot, nil
 }
 
 func (s *PostgresStore) ListConnectorViews(ctx context.Context, userID string) ([]domain.ConnectorView, error) {
@@ -613,6 +859,40 @@ func (s *PostgresStore) GetDeviceByHash(ctx context.Context, keyHash string) (*d
 		return nil, apperror.New("agent_device_invalid", "agent device is invalid", 401, false)
 	}
 	return &d, dbError(err)
+}
+
+func (s *PostgresStore) GetActiveDeviceByOwner(ctx context.Context, ownerUserID string) (*domain.AgentDevice, error) {
+	var device domain.AgentDevice
+	err := s.pool.QueryRow(ctx, `
+		SELECT device.id::text,device.connector_id::text,device.owner_user_id::text,device.key_hash,device.expires_at,device.revoked_at,device.last_seen_at,COALESCE(device.agent_version,''),device.created_at
+		FROM knowledge.agent_devices AS device
+		JOIN knowledge.agent_device_assignments AS assignment
+		  ON assignment.device_id=device.id
+		 AND assignment.status='active'
+		 AND assignment.revoked_at IS NULL
+		WHERE device.owner_user_id=$1
+		  AND device.revoked_at IS NULL
+		  AND device.expires_at > now()
+		ORDER BY device.last_seen_at DESC NULLS LAST,device.created_at DESC
+		LIMIT 1
+	`, ownerUserID).Scan(
+		&device.ID,
+		&device.ConnectorID,
+		&device.OwnerUserID,
+		&device.KeyHash,
+		&device.ExpiresAt,
+		&device.RevokedAt,
+		&device.LastSeenAt,
+		&device.AgentVersion,
+		&device.CreatedAt,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, apperror.New("device_not_found", "agent device not found", 404, false)
+	}
+	if err != nil {
+		return nil, dbError(err)
+	}
+	return &device, nil
 }
 func (s *PostgresStore) RevokeDevices(ctx context.Context, connectorID string) error {
 	tx, err := s.pool.Begin(ctx)

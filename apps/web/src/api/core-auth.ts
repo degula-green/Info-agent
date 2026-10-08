@@ -1,4 +1,5 @@
 import { emitAuthSessionExpired } from '../auth/events.ts'
+import { desktopApiBase } from './runtime-config.ts'
 
 export interface CoreUser { id: string; email: string; nickname: string; status: string; avatar_url?: string }
 export interface CoreTokenResponse { access_token: string; token_type: string; expires_at: string }
@@ -15,7 +16,7 @@ export class CoreAuthError extends Error {
   }
 }
 const env = ((import.meta as ImportMeta & { env?: Record<string, string> }).env || {})
-const baseURL = String(env.VITE_CORE_BASE_URL || '/api/core').replace(/\/$/, '')
+const baseURL = String(desktopApiBase('/api/core') || env.VITE_CORE_BASE_URL || '/api/core').replace(/\/$/, '')
 let refreshPromise: Promise<CoreTokenResponse> | null = null
 
 // Refresh tokens are rotated on every successful refresh. A process-local
@@ -173,6 +174,30 @@ async function performOwnedRefresh(owner: string): Promise<CoreTokenResponse> {
 }
 
 async function refreshWithCrossTabCoordination(): Promise<CoreTokenResponse> {
+  const desktopRefresh =
+    typeof window === 'undefined'
+      ? undefined
+      : window.infoAgentDesktop?.refreshCoreSession
+  if (desktopRefresh) {
+    const response = await desktopRefresh()
+    const body = response?.body
+    if (response?.status === 401) {
+      throw refreshError(
+        body?.message || 'authentication required',
+        'AUTH_UNAUTHENTICATED',
+        401,
+      )
+    }
+    if (response?.status < 200 || response.status >= 300 || !body?.access_token) {
+      throw refreshError(
+        body?.message || 'authentication required',
+        body?.code,
+        response?.status || 401,
+      )
+    }
+    saveAccessToken(body.access_token, body.expires_at)
+    return body as CoreTokenResponse
+  }
   // SSR, tests, and embedded non-browser consumers have no shared storage;
   // the process-local promise still protects those callers.
   if (typeof window === 'undefined' || typeof localStorage === 'undefined' || typeof navigator === 'undefined') {

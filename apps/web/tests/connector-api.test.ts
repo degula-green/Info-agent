@@ -81,7 +81,7 @@ test('connector, conversation, and attachment calls use the Knowledge contract',
   assert.ok(calls.every((call) => call.headers.get('Authorization') === 'Bearer jwt-token'))
   assert.ok(calls.every((call) => call.headers.get('X-Request-ID')))
   assert.ok(calls.every((call) => call.headers.get('X-Trace-ID')))
-  assert.equal(calls.find((call) => call.url.endsWith('/connectors/feishu/authorize'))?.body, '{"intent":"rebind"}')
+  assert.equal(calls.find((call) => call.url.endsWith('/connectors/feishu/authorize'))?.body, '{"intent":"rebind","client":"web"}')
   assert.ok(calls.some((call) => call.url.endsWith('/conversations/c1/collectors/collector%20id') && call.method === 'DELETE'))
   assert.ok(calls.some((call) => call.url.endsWith('/conversations/c1/collectors/me/pause') && call.method === 'POST'))
   assert.ok(calls.some((call) => call.url.endsWith('/conversations/c1/collectors/me/resume') && call.method === 'POST'))

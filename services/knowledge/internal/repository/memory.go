@@ -46,6 +46,8 @@ type MemoryStore struct {
 	accessRequests     map[string]domain.PrivateAccessRequest
 	wechatConfigs      map[string]domain.WechatCollectionConfig
 	wechatRuntime      map[string]domain.WechatCollectorRuntime
+	wechatCommands     map[string]domain.WechatCommand
+	wechatSnapshots    map[string]domain.WechatSnapshot
 	ragSourceAudits    []RAGSourceAuditInput
 	deletionRequests   map[string]deletionRequestRecord
 	deletionAudit      []DeletionAuditInput
@@ -75,6 +77,7 @@ func NewMemoryStore() *MemoryStore {
 		outbox:        map[string]domain.OutboxEvent{},
 		shareRequests: map[string]domain.PrivateShareRequest{}, shareRefs: map[string]domain.PrivateShareReference{}, accessRequests: map[string]domain.PrivateAccessRequest{},
 		wechatConfigs: map[string]domain.WechatCollectionConfig{}, wechatRuntime: map[string]domain.WechatCollectorRuntime{},
+		wechatCommands: map[string]domain.WechatCommand{}, wechatSnapshots: map[string]domain.WechatSnapshot{},
 		ragSourceAudits:  []RAGSourceAuditInput{},
 		deletionRequests: map[string]deletionRequestRecord{}, deletionAudit: []DeletionAuditInput{},
 	}
@@ -85,7 +88,14 @@ func (s *MemoryStore) GetWechatConfig(_ context.Context, connectorID string) (*d
 	defer s.mu.RUnlock()
 	v, ok := s.wechatConfigs[connectorID]
 	if !ok {
-		return &domain.WechatCollectionConfig{ConnectorID: connectorID, SelectedConversations: []string{}, Enabled: true, ListenMode: "whitelist"}, nil
+		return &domain.WechatCollectionConfig{
+			ConnectorID:           connectorID,
+			SelectedConversations: []string{},
+			Enabled:               true,
+			ListenMode:            "whitelist",
+			DesiredStatus:         "running",
+			ConfigVersion:         1,
+		}, nil
 	}
 	c := v
 	c.SelectedConversations = append([]string(nil), v.SelectedConversations...)
@@ -96,6 +106,18 @@ func (s *MemoryStore) SaveWechatConfig(_ context.Context, c domain.WechatCollect
 	defer s.mu.Unlock()
 	if c.ListenMode == "" {
 		c.ListenMode = "whitelist"
+	}
+	if c.DesiredStatus == "" {
+		if c.Enabled {
+			c.DesiredStatus = "running"
+		} else {
+			c.DesiredStatus = "stopped"
+		}
+	}
+	if existing, exists := s.wechatConfigs[c.ConnectorID]; exists {
+		c.ConfigVersion = existing.ConfigVersion + 1
+	} else if c.ConfigVersion <= 0 {
+		c.ConfigVersion = 1
 	}
 	c.SelectedConversations = append([]string(nil), c.SelectedConversations...)
 	c.UpdatedAt = time.Now().UTC()
@@ -135,6 +157,163 @@ func (s *MemoryStore) UpdateWechatRuntime(_ context.Context, id, status, lastErr
 	v.UpdatedAt = time.Now().UTC()
 	s.wechatRuntime[id] = v
 	return nil
+}
+
+func cloneWechatPayload(value map[string]any) map[string]any {
+	if value == nil {
+		return map[string]any{}
+	}
+	out := make(map[string]any, len(value))
+	for key, item := range value {
+		out[key] = item
+	}
+	return out
+}
+
+func (s *MemoryStore) CreateWechatCommand(_ context.Context, command domain.WechatCommand) (*domain.WechatCommand, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, existing := range s.wechatCommands {
+		if existing.IdempotencyKey == command.IdempotencyKey {
+			out := existing
+			out.Payload = cloneWechatPayload(existing.Payload)
+			out.Result = cloneWechatPayload(existing.Result)
+			return &out, nil
+		}
+	}
+	if command.CommandID == "" {
+		command.CommandID = uuid.NewString()
+	}
+	if command.Status == "" {
+		command.Status = "pending"
+	}
+	now := time.Now().UTC()
+	if command.CreatedAt.IsZero() {
+		command.CreatedAt = now
+	}
+	command.UpdatedAt = now
+	command.Payload = cloneWechatPayload(command.Payload)
+	command.Result = cloneWechatPayload(command.Result)
+	s.wechatCommands[command.CommandID] = command
+	out := command
+	out.Payload = cloneWechatPayload(command.Payload)
+	out.Result = cloneWechatPayload(command.Result)
+	return &out, nil
+}
+
+func (s *MemoryStore) ClaimWechatCommands(_ context.Context, connectorID, deviceID string, now time.Time, limit int) ([]domain.WechatCommand, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if limit <= 0 {
+		limit = 20
+	}
+	candidates := make([]domain.WechatCommand, 0)
+	for id, command := range s.wechatCommands {
+		if command.ConnectorID != connectorID {
+			continue
+		}
+		if command.Status == "pending" || command.Status == "delivered" || command.Status == "running" {
+			if !command.Deadline.After(now) {
+				command.Status = "expired"
+				command.UpdatedAt = now
+				s.wechatCommands[id] = command
+				continue
+			}
+		}
+		if command.Status != "pending" {
+			continue
+		}
+		if command.DeviceID != "" && command.DeviceID != deviceID {
+			continue
+		}
+		candidates = append(candidates, command)
+	}
+	sort.Slice(candidates, func(i, j int) bool {
+		return candidates[i].CreatedAt.Before(candidates[j].CreatedAt)
+	})
+	if len(candidates) > limit {
+		candidates = candidates[:limit]
+	}
+	out := make([]domain.WechatCommand, 0, len(candidates))
+	for _, command := range candidates {
+		command.DeviceID = deviceID
+		command.Status = "delivered"
+		command.Attempt++
+		command.DeliveredAt = &now
+		command.UpdatedAt = now
+		s.wechatCommands[command.CommandID] = command
+		copyCommand := command
+		copyCommand.Payload = cloneWechatPayload(command.Payload)
+		copyCommand.Result = cloneWechatPayload(command.Result)
+		out = append(out, copyCommand)
+	}
+	return out, nil
+}
+
+func (s *MemoryStore) AcknowledgeWechatCommand(_ context.Context, commandID, deviceID, status, errorCode, errorMessage string, result map[string]any, now time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	command, ok := s.wechatCommands[commandID]
+	if !ok || (command.DeviceID != "" && command.DeviceID != deviceID) {
+		return apperror.New("wechat_command_not_found", "wechat command was not found", 404, false)
+	}
+	if command.Status == "acknowledged" || command.Status == "failed" || command.Status == "expired" {
+		return nil
+	}
+	if status == "" {
+		status = "acknowledged"
+	}
+	command.Status = status
+	command.ErrorCode = errorCode
+	command.ErrorMessage = errorMessage
+	command.Result = cloneWechatPayload(result)
+	command.UpdatedAt = now
+	if status == "running" && command.StartedAt == nil {
+		command.StartedAt = &now
+	}
+	if status == "acknowledged" || status == "failed" || status == "expired" {
+		command.CompletedAt = &now
+		if command.StartedAt == nil {
+			command.StartedAt = &now
+		}
+	}
+	s.wechatCommands[commandID] = command
+	return nil
+}
+
+func wechatSnapshotKey(connectorID, snapshotType string) string {
+	return connectorID + ":" + snapshotType
+}
+
+func (s *MemoryStore) UpsertWechatSnapshot(_ context.Context, snapshot domain.WechatSnapshot) (*domain.WechatSnapshot, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	key := wechatSnapshotKey(snapshot.ConnectorID, snapshot.SnapshotType)
+	if existing, ok := s.wechatSnapshots[key]; ok && snapshot.Version < existing.Version {
+		out := existing
+		out.Items = append([]map[string]any(nil), existing.Items...)
+		return &out, nil
+	}
+	now := time.Now().UTC()
+	snapshot.CreatedAt = now
+	snapshot.UpdatedAt = now
+	snapshot.Items = append([]map[string]any(nil), snapshot.Items...)
+	s.wechatSnapshots[key] = snapshot
+	out := snapshot
+	out.Items = append([]map[string]any(nil), snapshot.Items...)
+	return &out, nil
+}
+
+func (s *MemoryStore) GetWechatSnapshot(_ context.Context, connectorID, snapshotType string) (*domain.WechatSnapshot, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	snapshot, ok := s.wechatSnapshots[wechatSnapshotKey(connectorID, snapshotType)]
+	if !ok {
+		return nil, apperror.New("wechat_snapshot_not_found", "wechat snapshot was not found", 404, false)
+	}
+	out := snapshot
+	out.Items = append([]map[string]any(nil), snapshot.Items...)
+	return &out, nil
 }
 
 func (s *MemoryStore) Close() error { return nil }
@@ -791,6 +970,29 @@ func (s *MemoryStore) GetDeviceByHash(_ context.Context, keyHash string) (*domai
 		}
 	}
 	return nil, apperror.New("agent_device_invalid", "agent device is invalid", 401, false)
+}
+
+func (s *MemoryStore) GetActiveDeviceByOwner(_ context.Context, ownerUserID string) (*domain.AgentDevice, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var selected *domain.AgentDevice
+	for _, device := range s.devices {
+		if device.OwnerUserID != ownerUserID || device.RevokedAt != nil || device.ExpiresAt.Before(time.Now().UTC()) {
+			continue
+		}
+		assignment, ok := s.assignments[device.ID]
+		if !ok || assignment.Status != "active" || assignment.RevokedAt != nil {
+			continue
+		}
+		copyDevice := cloneDevice(device)
+		if selected == nil || device.CreatedAt.After(selected.CreatedAt) {
+			selected = &copyDevice
+		}
+	}
+	if selected == nil {
+		return nil, apperror.New("device_not_found", "agent device not found", 404, false)
+	}
+	return selected, nil
 }
 
 func (s *MemoryStore) RevokeDevices(_ context.Context, connectorID string) error {

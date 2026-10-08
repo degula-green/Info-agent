@@ -286,6 +286,7 @@ if (-not $env:AGENT_LAYAYA_BASE_URL) {
 }
 if (-not $env:KNOWLEDGE_INTERNAL_SERVICE_TOKEN) { $env:KNOWLEDGE_INTERNAL_SERVICE_TOKEN = 'local-development-only' }
 if (-not $env:COLLECTOR_INTERNAL_TOKEN) { $env:COLLECTOR_INTERNAL_TOKEN = 'local-development-only' }
+$env:WECHAT_COLLECTOR_STATE_FILE = Join-Path $projectRoot 'data\wechat-collector.json'
 if ([string]::IsNullOrWhiteSpace($env:KNOWLEDGE_CORE_SERVICE_TOKEN) -or $env:KNOWLEDGE_CORE_SERVICE_TOKEN -eq 'local-development-only') {
     # Core's authorization endpoint uses the same shared token as RAG in local dev.
     # Prefer the already loaded CORE_KNOWLEDGE_AUTHZ_TOKEN/CORE_RAG_AUTHZ_TOKEN

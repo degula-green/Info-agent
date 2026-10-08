@@ -1,5 +1,6 @@
 import { CoreAuthError } from './core-auth.ts'
 import { authenticatedFetch } from '../auth/request.ts'
+import { desktopApiBase } from './runtime-config.ts'
 
 export interface CoreOrganization { id: string; name: string; slug: string; status: string; created_at: string }
 export interface CoreMembership { id: string; user_id: string; status: string; joined_via: string; roles: Array<{ role_code?: string; RoleCode?: string; granted_at?: string; GrantedAt?: string }> }
@@ -71,7 +72,7 @@ export interface CoreAccessRequest {
 }
 
 const env = ((import.meta as ImportMeta & { env?: Record<string, string> }).env || {})
-const baseURL = String(env.VITE_CORE_BASE_URL || '/api/core').replace(/\/$/, '')
+const baseURL = String(desktopApiBase('/api/core') || env.VITE_CORE_BASE_URL || '/api/core').replace(/\/$/, '')
 function requestID() { return globalThis.crypto?.randomUUID?.() || `web-${Date.now()}-${Math.random().toString(16).slice(2)}` }
 
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
