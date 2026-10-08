@@ -690,36 +690,302 @@ class PostgresRagMVPRepository:
         with self._connection() as connection:
             with connection.cursor() as cursor:
                 cursor.execute(
-                    f"""SELECT chunk_id,resource_snapshot_id::text,knowledge_item_id::text,resource_type,
-                               resource_id::text,knowledge_base_id::text,scope_type,scope_id::text,
-                               content_version,processing_version,chunking_version,content_variant,
-                               chunk_index,chunk_count,title,file_name,heading_path,context_header,content,
-                               content_hash,source_locator,source_conversation_id::text,conversation_type,
-                               document_id::text,message_id::text,sent_at,auth_partition_key,auth_object_key,
-                               acl_version,sensitivity,embedding_model,embedding_dimensions,
-                               embedding_status,rag_eligible,lifecycle_status,
-                               COALESCE((SELECT array_agg(b.entity_id::text ORDER BY b.entity_id::text)
-                                         FROM {self.schema}.chunk_branches b
-                                         WHERE b.chunk_id={self.schema}.chunks.chunk_id
-                                           AND b.status='active'),ARRAY[]::text[]),
-                               COALESCE((SELECT jsonb_agg(jsonb_build_object(
-                                                   'entity_id', b.entity_id::text,
-                                                   'domain', e.domain,
-                                                   'confidence', b.confidence,
-                                                   'method', b.mount_method)
-                                               ORDER BY b.entity_id::text)
-                                         FROM {self.schema}.chunk_branches b
-                                         JOIN {self.schema}.entity_registry e ON e.id=b.entity_id
-                                         WHERE b.chunk_id={self.schema}.chunks.chunk_id
-                                           AND b.status='active'),'[]'::jsonb),
-                               COALESCE((SELECT MAX(registry_version)
-                                         FROM {self.schema}.chunk_branches b
-                                         WHERE b.chunk_id={self.schema}.chunks.chunk_id
-                                           AND b.status='active'),0)
+                    f"""SELECT {self._chunk_select()}
                         FROM {self.schema}.chunks WHERE {where} ORDER BY chunk_index""",
                     tuple(params),
                 )
                 return [self._chunk_row(row) for row in cursor.fetchall()]
+
+    def _chunk_select(self) -> str:
+        """Column list shared by chunk queries, including the entity mounts."""
+        return f"""chunk_id,resource_snapshot_id::text,knowledge_item_id::text,resource_type,
+                   resource_id::text,knowledge_base_id::text,scope_type,scope_id::text,
+                   content_version,processing_version,chunking_version,content_variant,
+                   chunk_index,chunk_count,title,file_name,heading_path,context_header,content,
+                   content_hash,source_locator,source_conversation_id::text,conversation_type,
+                   document_id::text,message_id::text,sent_at,auth_partition_key,auth_object_key,
+                   acl_version,sensitivity,embedding_model,embedding_dimensions,
+                   embedding_status,rag_eligible,lifecycle_status,
+                   COALESCE((SELECT array_agg(b.entity_id::text ORDER BY b.entity_id::text)
+                             FROM {self.schema}.chunk_branches b
+                             WHERE b.chunk_id={self.schema}.chunks.chunk_id
+                               AND b.status='active'),ARRAY[]::text[]),
+                   COALESCE((SELECT jsonb_agg(jsonb_build_object(
+                                       'entity_id', b.entity_id::text,
+                                       'domain', e.domain,
+                                       'confidence', b.confidence,
+                                       'method', b.mount_method)
+                                   ORDER BY b.entity_id::text)
+                             FROM {self.schema}.chunk_branches b
+                             JOIN {self.schema}.entity_registry e ON e.id=b.entity_id
+                             WHERE b.chunk_id={self.schema}.chunks.chunk_id
+                               AND b.status='active'),'[]'::jsonb),
+                   COALESCE((SELECT MAX(registry_version)
+                             FROM {self.schema}.chunk_branches b
+                             WHERE b.chunk_id={self.schema}.chunks.chunk_id
+                               AND b.status='active'),0)"""
+
+    # ---------------------------------------------------------- window scan
+
+    def list_scan_conversations(self, *, limit: int = 20) -> list[dict[str, Any]]:
+        """Conversations holding messages newer than their scan watermark."""
+        with self._connection() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    f"""SELECT c.scope_type,c.scope_id::text,c.source_conversation_id::text,
+                               COUNT(*) AS pending,MIN(c.sent_at) AS oldest
+                        FROM {self.schema}.chunks c
+                        LEFT JOIN {self.schema}.entity_scan_watermarks w
+                          ON w.scope_type=c.scope_type AND w.scope_id=c.scope_id
+                         AND w.conversation_id=c.source_conversation_id
+                        WHERE c.resource_type='message'
+                          AND c.source_conversation_id IS NOT NULL
+                          AND c.lifecycle_status='active'
+                          AND c.sent_at IS NOT NULL
+                          AND (w.last_sent_at IS NULL OR c.sent_at > w.last_sent_at)
+                        GROUP BY 1,2,3
+                        ORDER BY MIN(c.sent_at)
+                        LIMIT %s""",
+                    (max(1, int(limit)),),
+                )
+                return [
+                    {
+                        "scope_type": row[0], "scope_id": row[1],
+                        "conversation_id": row[2], "pending": int(row[3]),
+                        "last_sent_at": row[4].isoformat() if row[4] else None,
+                    }
+                    for row in cursor.fetchall()
+                ]
+
+    def get_scan_watermark(
+        self, *, scope_type: str, scope_id: str, conversation_id: str
+    ) -> str | None:
+        with self._connection() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    f"""SELECT last_sent_at FROM {self.schema}.entity_scan_watermarks
+                        WHERE scope_type=%s AND scope_id=%s::uuid AND conversation_id=%s::uuid""",
+                    (scope_type, scope_id, conversation_id),
+                )
+                row = cursor.fetchone()
+                return row[0].isoformat() if row and row[0] else None
+
+    def list_conversation_chunks(
+        self,
+        *,
+        scope_type: str,
+        scope_id: str,
+        conversation_id: str,
+        after_sent_at: str | None = None,
+        limit: int = 500,
+    ) -> list[Chunk]:
+        """Messages of one conversation, oldest first, after the watermark."""
+        with self._connection() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    f"""SELECT {self._chunk_select()}
+                        FROM {self.schema}.chunks
+                        WHERE scope_type=%s AND scope_id=%s::uuid
+                          AND source_conversation_id=%s::uuid
+                          AND resource_type='message'
+                          AND lifecycle_status='active'
+                          AND sent_at IS NOT NULL
+                          AND (%s::timestamptz IS NULL OR sent_at > %s::timestamptz)
+                        ORDER BY sent_at, chunk_id
+                        LIMIT %s""",
+                    (
+                        scope_type, scope_id, conversation_id,
+                        after_sent_at, after_sent_at, max(1, int(limit)),
+                    ),
+                )
+                return [self._chunk_row(row) for row in cursor.fetchall()]
+
+    def set_scan_watermark(
+        self,
+        *,
+        scope_type: str,
+        scope_id: str,
+        conversation_id: str,
+        last_sent_at: str,
+        last_chunk_id: str | None = None,
+        window_count: int = 0,
+    ) -> None:
+        """Advance the watermark. GREATEST keeps it from ever moving backwards,
+        so a stale batch cannot cause the same messages to be rescanned."""
+        with self._connection() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    f"""INSERT INTO {self.schema}.entity_scan_watermarks
+                        (scope_type,scope_id,conversation_id,last_sent_at,last_chunk_id,window_count)
+                        VALUES (%s,%s::uuid,%s::uuid,%s::timestamptz,%s,%s)
+                        ON CONFLICT (scope_type,scope_id,conversation_id) DO UPDATE SET
+                          last_sent_at=GREATEST(
+                              {self.schema}.entity_scan_watermarks.last_sent_at,
+                              EXCLUDED.last_sent_at),
+                          last_chunk_id=EXCLUDED.last_chunk_id,
+                          window_count={self.schema}.entity_scan_watermarks.window_count
+                                       + EXCLUDED.window_count,
+                          updated_at=CURRENT_TIMESTAMP""",
+                    (
+                        scope_type, scope_id, conversation_id, last_sent_at,
+                        last_chunk_id, max(0, int(window_count)),
+                    ),
+                )
+
+    def find_entities_by_normalized(
+        self, *, scope_type: str, scope_id: str, normalized_keys: list[str]
+    ) -> dict[str, dict[str, Any]]:
+        """Map normalized name -> active entity, for turning LLM output into mounts."""
+        keys = [key for key in dict.fromkeys(normalized_keys) if key]
+        if not keys:
+            return {}
+        found: dict[str, dict[str, Any]] = {}
+        with self._connection() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    f"""SELECT e.normalized_key,e.id::text,e.domain,e.canonical_name,e.registry_version
+                        FROM {self.schema}.entity_registry e
+                        WHERE e.scope_type=%s AND e.scope_id=%s::uuid AND e.status='active'
+                          AND e.normalized_key=ANY(%s)""",
+                    (scope_type, scope_id, keys),
+                )
+                for row in cursor.fetchall():
+                    found[str(row[0])] = {
+                        "entity_id": row[1], "domain": row[2], "canonical_name": row[3],
+                        "registry_version": int(row[4]),
+                    }
+                cursor.execute(
+                    f"""SELECT a.normalized_alias,e.id::text,e.domain,e.canonical_name,e.registry_version
+                        FROM {self.schema}.entity_aliases a
+                        JOIN {self.schema}.entity_registry e ON e.id=a.entity_id
+                        WHERE a.scope_type=%s AND a.scope_id=%s::uuid AND a.status='active'
+                          AND a.normalized_alias=ANY(%s)""",
+                    (scope_type, scope_id, keys),
+                )
+                for row in cursor.fetchall():
+                    found.setdefault(str(row[0]), {
+                        "entity_id": row[1], "domain": row[2], "canonical_name": row[3],
+                        "registry_version": int(row[4]),
+                    })
+        return found
+
+    def upsert_entity_relation(
+        self,
+        *,
+        scope_type: str,
+        scope_id: str,
+        source_entity_id: str,
+        target_entity_id: str,
+        relation_type: str,
+        confidence: float,
+        evidence_chunk_ids: list[str] | None = None,
+    ) -> None:
+        """Write a relation, keeping the strongest confidence and all evidence.
+
+        The same relation is re-observed across overlapping windows, so a plain
+        upsert would let a later low-confidence sighting overwrite a high one and
+        would drop the earlier supporting chunks.
+        """
+        evidence = [value for value in dict.fromkeys(evidence_chunk_ids or []) if value]
+        with self._connection() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    f"""INSERT INTO {self.schema}.entity_relations
+                        (scope_type,scope_id,source_entity_id,target_entity_id,
+                         relation_type,confidence,evidence_chunk_ids)
+                        VALUES (%s,%s::uuid,%s::uuid,%s::uuid,%s,%s,%s::char(64)[])
+                        ON CONFLICT (scope_type,scope_id,source_entity_id,target_entity_id,relation_type)
+                        DO UPDATE SET
+                          confidence=GREATEST(
+                              {self.schema}.entity_relations.confidence, EXCLUDED.confidence),
+                          evidence_chunk_ids=ARRAY(
+                              SELECT DISTINCT value
+                              FROM unnest({self.schema}.entity_relations.evidence_chunk_ids
+                                          || EXCLUDED.evidence_chunk_ids) AS value),
+                          updated_at=CURRENT_TIMESTAMP""",
+                    (
+                        scope_type, scope_id, source_entity_id, target_entity_id,
+                        relation_type, float(confidence), evidence,
+                    ),
+                )
+
+    def tree_metrics(self, *, scope_type: str, scope_id: str) -> dict[str, Any]:
+        """Counts that need no labelled data, so they can be watched from day one."""
+        scope_params = (scope_type, scope_id)
+        with self._connection() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    f"""SELECT
+                          (SELECT COUNT(*) FROM {self.schema}.chunks
+                            WHERE scope_type=%s AND scope_id=%s::uuid
+                              AND resource_type='message' AND lifecycle_status='active'),
+                          (SELECT COUNT(DISTINCT chunk_id) FROM {self.schema}.chunk_branches
+                            WHERE scope_type=%s AND scope_id=%s::uuid AND status='active'),
+                          (SELECT COUNT(*) FROM {self.schema}.chunk_branches
+                            WHERE scope_type=%s AND scope_id=%s::uuid AND status='active'),
+                          (SELECT COUNT(*) FROM {self.schema}.entity_registry
+                            WHERE scope_type=%s AND scope_id=%s::uuid AND status='active'),
+                          (SELECT COUNT(*) FROM {self.schema}.entity_registry
+                            WHERE scope_type=%s AND scope_id=%s::uuid AND status='active'
+                              AND embedding_status<>'ready'),
+                          (SELECT COUNT(*) FROM {self.schema}.entity_candidates
+                            WHERE scope_type=%s AND scope_id=%s::uuid AND status IN ('new','review_ready')),
+                          (SELECT COUNT(*) FROM {self.schema}.entity_relations
+                            WHERE scope_type=%s AND scope_id=%s::uuid),
+                          (SELECT COUNT(*) FROM {self.schema}.entity_scan_watermarks
+                            WHERE scope_type=%s AND scope_id=%s::uuid)""",
+                    scope_params * 8,
+                )
+                row = cursor.fetchone()
+                message_count = int(row[0] or 0)
+                mounted_chunks = int(row[1] or 0)
+                metrics: dict[str, Any] = {
+                    "message_count": message_count,
+                    "mounted_chunk_count": mounted_chunks,
+                    "mount_count": int(row[2] or 0),
+                    "entity_count": int(row[3] or 0),
+                    "entities_missing_embedding": int(row[4] or 0),
+                    "pending_candidate_count": int(row[5] or 0),
+                    "relation_count": int(row[6] or 0),
+                    "scanned_conversation_count": int(row[7] or 0),
+                    # Coverage is the cold-start signal: an empty tree scores 0
+                    # and every downstream quality number is meaningless.
+                    "mount_coverage": round(mounted_chunks / message_count, 4) if message_count else 0.0,
+                }
+                cursor.execute(
+                    f"""SELECT mount_method,COUNT(*),MIN(confidence),AVG(confidence)
+                        FROM {self.schema}.chunk_branches
+                        WHERE scope_type=%s AND scope_id=%s::uuid AND status='active'
+                        GROUP BY mount_method ORDER BY mount_method""",
+                    scope_params,
+                )
+                metrics["mount_methods"] = {
+                    str(item[0]): {
+                        "count": int(item[1]),
+                        "min_confidence": float(item[2] or 0),
+                        "avg_confidence": round(float(item[3] or 0), 4),
+                    }
+                    for item in cursor.fetchall()
+                }
+                cursor.execute(
+                    f"""SELECT domain,COUNT(*) FROM {self.schema}.entity_registry
+                        WHERE scope_type=%s AND scope_id=%s::uuid AND status='active'
+                        GROUP BY domain ORDER BY domain""",
+                    scope_params,
+                )
+                metrics["entities_by_domain"] = {
+                    str(item[0]): int(item[1]) for item in cursor.fetchall()
+                }
+                cursor.execute(
+                    f"""SELECT relation_type,COUNT(*) FROM {self.schema}.entity_relations
+                        WHERE scope_type=%s AND scope_id=%s::uuid
+                        GROUP BY relation_type ORDER BY relation_type""",
+                    scope_params,
+                )
+                metrics["relations_by_type"] = {
+                    str(item[0]): int(item[1]) for item in cursor.fetchall()
+                }
+                return metrics
 
     def list_pending_branch_refresh_jobs(self, *, limit: int = 10) -> list[dict[str, Any]]:
         with self._connection() as connection:
@@ -1322,10 +1588,9 @@ class PostgresRagMVPRepository:
     def replace_chunk_mounts(self, chunk: Chunk, mounts: list[EntityMount]) -> None:
         """Make the chunk's active mounts match ``mounts`` exactly.
 
-        Re-running a window scan must not duplicate or downgrade a mount, so
-        rows are upserted on (chunk_id, entity_id): confidence only moves up and
-        a stronger channel is never replaced by a weaker one. That is what makes
-        the 50%-overlap window scan idempotent.
+        Used by the explicit index path, where a chunk's own text decides its
+        entity set. The window scan uses :meth:`merge_chunk_mounts` instead:
+        overlapping windows must add to each other rather than overwrite.
         """
         entity_ids = [mount.entity_id for mount in mounts]
         with self._connection() as connection:
@@ -1345,32 +1610,54 @@ class PostgresRagMVPRepository:
                             WHERE chunk_id=%s AND status='active'""",
                         (chunk.chunk_id,),
                     )
-                for mount in mounts:
-                    cursor.execute(
-                        f"""INSERT INTO {self.schema}.chunk_branches
-                        (chunk_id,entity_id,scope_type,scope_id,registry_version,
-                         confidence,mount_method,status)
-                        VALUES (%s,%s::uuid,%s,%s::uuid,%s,%s,%s,'active')
-                        ON CONFLICT (chunk_id,entity_id) DO UPDATE SET
-                          registry_version=EXCLUDED.registry_version,
-                          confidence=GREATEST({self.schema}.chunk_branches.confidence,
-                                              EXCLUDED.confidence),
-                          mount_method=CASE
-                            WHEN EXCLUDED.mount_method='explicit'
-                              OR {self.schema}.chunk_branches.mount_method='explicit'
-                              THEN 'explicit'
-                            WHEN EXCLUDED.mount_method='window_batch'
-                              OR {self.schema}.chunk_branches.mount_method='window_batch'
-                              THEN 'window_batch'
-                            ELSE 'llm_infer'
-                          END,
-                          status='active',updated_at=CURRENT_TIMESTAMP""",
-                        (
-                            chunk.chunk_id, mount.entity_id, chunk.scope_type,
-                            chunk.scope_id, mount.registry_version, mount.confidence,
-                            mount.mount_method,
-                        ),
-                    )
+                self._upsert_mount_rows(cursor, chunk, mounts)
+
+    def merge_chunk_mounts(self, chunk: Chunk, mounts: list[EntityMount]) -> None:
+        """Add mounts without removing any.
+
+        A window only sees part of a conversation, so replacing here would let a
+        later window erase what an earlier one contributed.
+        """
+        if not mounts:
+            return
+        with self._connection() as connection:
+            with connection.cursor() as cursor:
+                self._upsert_mount_rows(cursor, chunk, mounts)
+
+    def _upsert_mount_rows(
+        self, cursor: Any, chunk: Chunk, mounts: list[EntityMount]
+    ) -> None:
+        """Upsert on (chunk_id, entity_id) keeping the stronger evidence.
+
+        Confidence only moves up and a stronger channel never gives way to a
+        weaker one, which is what makes the 50%-overlap window scan idempotent.
+        """
+        for mount in mounts:
+            cursor.execute(
+                f"""INSERT INTO {self.schema}.chunk_branches
+                (chunk_id,entity_id,scope_type,scope_id,registry_version,
+                 confidence,mount_method,status)
+                VALUES (%s,%s::uuid,%s,%s::uuid,%s,%s,%s,'active')
+                ON CONFLICT (chunk_id,entity_id) DO UPDATE SET
+                  registry_version=EXCLUDED.registry_version,
+                  confidence=GREATEST({self.schema}.chunk_branches.confidence,
+                                      EXCLUDED.confidence),
+                  mount_method=CASE
+                    WHEN EXCLUDED.mount_method='explicit'
+                      OR {self.schema}.chunk_branches.mount_method='explicit'
+                      THEN 'explicit'
+                    WHEN EXCLUDED.mount_method='window_batch'
+                      OR {self.schema}.chunk_branches.mount_method='window_batch'
+                      THEN 'window_batch'
+                    ELSE 'llm_infer'
+                  END,
+                  status='active',updated_at=CURRENT_TIMESTAMP""",
+                (
+                    chunk.chunk_id, mount.entity_id, chunk.scope_type,
+                    chunk.scope_id, mount.registry_version, mount.confidence,
+                    mount.mount_method,
+                ),
+            )
 
     def upsert_candidate_mention(
         self,
@@ -1392,15 +1679,16 @@ class PostgresRagMVPRepository:
                     (scope_type,scope_id,candidate_name,normalized_key,candidate_domain,mention_count,
                      distinct_chunk_count,distinct_source_count,distinct_conversation_count,
                      sample_context,score,status)
-                    VALUES (%s,%s::uuid,%s,%s,%s,1,1,1,CASE WHEN %s::text='' THEN 0 ELSE 1 END,%s,0.5,'new')
+                    VALUES (%s,%s::uuid,%s,%s,%s,1,1,1,CASE WHEN %s::text='' THEN 0 ELSE 1 END,%s,%s,'new')
                     ON CONFLICT (scope_type,scope_id,candidate_domain,normalized_key) DO UPDATE SET
                       candidate_name=EXCLUDED.candidate_name,mention_count=entity_candidates.mention_count+1,
                       sample_context=COALESCE(entity_candidates.sample_context,EXCLUDED.sample_context),
+                      score=GREATEST(entity_candidates.score,EXCLUDED.score),
                       last_seen_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP
                     RETURNING id::text""",
                     (
                         scope_type, scope_id, candidate_name, normalized_key, domain,
-                        chunk.source_conversation_id or "", context_excerpt[:500],
+                        chunk.source_conversation_id or "", context_excerpt[:500], confidence,
                     ),
                 )
                 candidate_id = str(cursor.fetchone()[0])
@@ -2036,6 +2324,8 @@ class InMemoryRagMVPRepository:
         self.entities: list[dict[str, Any]] = []
         self.aliases: list[dict[str, Any]] = []
         self.branches: dict[tuple[str, str], dict[str, Any]] = {}
+        self.scan_watermarks: dict[tuple[str, str, str], dict[str, Any]] = {}
+        self.relations: dict[tuple[str, str, str, str, str], dict[str, Any]] = {}
         self.candidates: dict[str, dict[str, Any]] = {}
         self.candidate_mentions: list[dict[str, Any]] = []
         self.reviews: list[dict[str, Any]] = []
@@ -2332,6 +2622,137 @@ class InMemoryRagMVPRepository:
                 default=0,
             )
         return output
+
+    def list_scan_conversations(self, *, limit: int = 20) -> list[dict[str, Any]]:
+        groups: dict[tuple[str, str, str], list[Chunk]] = defaultdict(list)
+        for chunk in self.chunks.values():
+            if chunk.resource_type != "message" or not chunk.source_conversation_id:
+                continue
+            if chunk.lifecycle_status != "active" or not chunk.sent_at:
+                continue
+            groups[(chunk.scope_type, chunk.scope_id, chunk.source_conversation_id)].append(chunk)
+        output: list[dict[str, Any]] = []
+        for (scope_type, scope_id, conversation_id), chunks in groups.items():
+            watermark = self.scan_watermarks.get((scope_type, scope_id, conversation_id))
+            after = watermark["last_sent_at"] if watermark else None
+            pending = [c for c in chunks if not after or (c.sent_at or "") > after]
+            if not pending:
+                continue
+            output.append({
+                "scope_type": scope_type, "scope_id": scope_id,
+                "conversation_id": conversation_id, "pending": len(pending),
+                "last_sent_at": min(c.sent_at for c in pending if c.sent_at),
+            })
+        output.sort(key=lambda item: item["last_sent_at"] or "")
+        return output[: max(1, int(limit))]
+
+    def get_scan_watermark(
+        self, *, scope_type: str, scope_id: str, conversation_id: str
+    ) -> str | None:
+        value = self.scan_watermarks.get((scope_type, scope_id, conversation_id))
+        return value["last_sent_at"] if value else None
+
+    def list_conversation_chunks(
+        self,
+        *,
+        scope_type: str,
+        scope_id: str,
+        conversation_id: str,
+        after_sent_at: str | None = None,
+        limit: int = 500,
+    ) -> list[Chunk]:
+        values = [
+            chunk for chunk in self.chunks.values()
+            if chunk.scope_type == scope_type
+            and chunk.scope_id == scope_id
+            and chunk.source_conversation_id == conversation_id
+            and chunk.resource_type == "message"
+            and chunk.lifecycle_status == "active"
+            and chunk.sent_at
+            and (after_sent_at is None or chunk.sent_at > after_sent_at)
+        ]
+        values.sort(key=lambda item: (item.sent_at or "", item.chunk_id))
+        return values[: max(1, int(limit))]
+
+    def set_scan_watermark(
+        self,
+        *,
+        scope_type: str,
+        scope_id: str,
+        conversation_id: str,
+        last_sent_at: str,
+        last_chunk_id: str | None = None,
+        window_count: int = 0,
+    ) -> None:
+        key = (scope_type, scope_id, conversation_id)
+        current = self.scan_watermarks.get(key)
+        if current and str(current["last_sent_at"]) >= str(last_sent_at):
+            return
+        self.scan_watermarks[key] = {
+            "last_sent_at": last_sent_at,
+            "last_chunk_id": last_chunk_id,
+            "window_count": (current["window_count"] if current else 0) + int(window_count),
+        }
+
+    def find_entities_by_normalized(
+        self, *, scope_type: str, scope_id: str, normalized_keys: list[str]
+    ) -> dict[str, dict[str, Any]]:
+        keys = {key for key in normalized_keys if key}
+        if not keys:
+            return {}
+        found: dict[str, dict[str, Any]] = {}
+        for item in self.entities:
+            if item["scope_type"] != scope_type or item["scope_id"] != scope_id:
+                continue
+            if item.get("status") != "active" or item["normalized_key"] not in keys:
+                continue
+            found[item["normalized_key"]] = {
+                "entity_id": item["id"], "domain": item["domain"],
+                "canonical_name": item["canonical_name"],
+                "registry_version": int(item.get("registry_version") or 1),
+            }
+        for alias in self.aliases:
+            if alias.get("scope_type") != scope_type or alias.get("scope_id") != scope_id:
+                continue
+            if alias.get("status", "active") != "active":
+                continue
+            key = alias.get("normalized_alias")
+            if key not in keys or key in found:
+                continue
+            entity = next((e for e in self.entities if e["id"] == alias["entity_id"]), None)
+            if entity is None or entity.get("status") != "active":
+                continue
+            found[key] = {
+                "entity_id": entity["id"], "domain": entity["domain"],
+                "canonical_name": entity["canonical_name"],
+                "registry_version": int(entity.get("registry_version") or 1),
+            }
+        return found
+
+    def upsert_entity_relation(
+        self,
+        *,
+        scope_type: str,
+        scope_id: str,
+        source_entity_id: str,
+        target_entity_id: str,
+        relation_type: str,
+        confidence: float,
+        evidence_chunk_ids: list[str] | None = None,
+    ) -> None:
+        # Self-loops carry no information and would pollute graph expansion.
+        if source_entity_id == target_entity_id:
+            return
+        key = (scope_type, scope_id, source_entity_id, target_entity_id, relation_type)
+        current = self.relations.get(key)
+        evidence = list(dict.fromkeys(evidence_chunk_ids or []))
+        self.relations[key] = {
+            "source_entity_id": source_entity_id,
+            "target_entity_id": target_entity_id,
+            "relation_type": relation_type,
+            "confidence": max(float(confidence), float(current["confidence"])) if current else float(confidence),
+            "evidence_chunk_ids": list(dict.fromkeys((current["evidence_chunk_ids"] if current else []) + evidence)),
+        }
 
     def list_pending_branch_refresh_jobs(self, *, limit: int = 10) -> list[dict[str, Any]]:
         return [
@@ -2705,15 +3126,35 @@ class InMemoryRagMVPRepository:
         for key in list(self.branches):
             if key[0] == chunk.chunk_id:
                 self.branches.pop(key)
+        self._upsert_mount_rows(chunk, mounts)
+
+    def merge_chunk_mounts(self, chunk: Chunk, mounts: list[EntityMount]) -> None:
+        self._upsert_mount_rows(chunk, mounts)
+
+    def _upsert_mount_rows(self, chunk: Chunk, mounts: list[EntityMount]) -> None:
+        rank = {"llm_infer": 0, "window_batch": 1, "explicit": 2}
         for mount in mounts:
-            self.branches[(chunk.chunk_id, mount.entity_id)] = {
-                "entity_id": mount.entity_id,
-                "domain": mount.domain,
-                "registry_version": mount.registry_version,
-                "mount_method": mount.mount_method,
-                "confidence": mount.confidence,
-                "status": "active",
-            }
+            key = (chunk.chunk_id, mount.entity_id)
+            current = self.branches.get(key)
+            if current is None:
+                self.branches[key] = {
+                    "entity_id": mount.entity_id,
+                    "domain": mount.domain,
+                    "registry_version": mount.registry_version,
+                    "mount_method": mount.mount_method,
+                    "confidence": mount.confidence,
+                    "status": "active",
+                }
+                continue
+            # Same rules as Postgres: confidence only moves up, and the stronger
+            # channel wins regardless of arrival order.
+            current["confidence"] = max(
+                float(current.get("confidence", 0)), float(mount.confidence)
+            )
+            if rank.get(mount.mount_method, 0) > rank.get(current.get("mount_method"), 0):
+                current["mount_method"] = mount.mount_method
+            current["registry_version"] = mount.registry_version
+            current["status"] = "active"
 
     def upsert_candidate_mention(
         self,
@@ -2741,10 +3182,13 @@ class InMemoryRagMVPRepository:
                 "candidate_name": candidate_name, "normalized_key": normalized_key,
                 "candidate_domain": domain, "mention_count": 0, "distinct_chunk_count": 0,
                 "distinct_source_count": 0, "distinct_conversation_count": 0,
-                "sample_context": context_excerpt, "score": 0.5, "status": "new",
+                "sample_context": context_excerpt, "score": float(confidence), "status": "new",
                 "suggested_entity_id": None, "resolved_entity_id": None,
             }
         value = self.candidates[candidate_id]
+        # Score tracks the best evidence seen, so the review page can rank by it
+        # instead of showing the same number for every candidate.
+        value["score"] = max(float(value.get("score") or 0), float(confidence))
         value["mention_count"] += 1
         value["distinct_chunk_count"] = len({item["chunk_id"] for item in self.candidate_mentions if item["candidate_id"] == candidate_id} | {chunk.chunk_id})
         value["distinct_source_count"] = len({self.chunks[item["chunk_id"]].resource_id for item in self.candidate_mentions if item["candidate_id"] == candidate_id} | {chunk.resource_id})
@@ -2904,6 +3348,73 @@ class InMemoryRagMVPRepository:
                 "statistics": {"chunk_count": mount_count},
             })
         return {"scope_key": prefix, "registry_version": version, "nodes": nodes}
+
+    def tree_metrics(self, *, scope_type: str, scope_id: str) -> dict[str, Any]:
+        messages = [
+            chunk for chunk in self.chunks.values()
+            if chunk.scope_type == scope_type and chunk.scope_id == scope_id
+            and chunk.resource_type == "message" and chunk.lifecycle_status == "active"
+        ]
+        message_ids = {chunk.chunk_id for chunk in messages}
+        active = [
+            (chunk_id, value) for (chunk_id, _), value in self.branches.items()
+            if value.get("status") == "active" and chunk_id in message_ids
+        ]
+        entities = [
+            item for item in self.entities
+            if item["scope_type"] == scope_type and item["scope_id"] == scope_id
+            and item.get("status") == "active"
+        ]
+        methods: dict[str, dict[str, Any]] = {}
+        for _, value in active:
+            method = str(value.get("mount_method") or "explicit")
+            entry = methods.setdefault(method, {"count": 0, "total": 0.0, "min": 1.0})
+            confidence = float(value.get("confidence") or 0)
+            entry["count"] += 1
+            entry["total"] += confidence
+            entry["min"] = min(entry["min"], confidence)
+        mounted = len({chunk_id for chunk_id, _ in active})
+        pending = [
+            item for item in self.candidates.values()
+            if item["scope_type"] == scope_type and item["scope_id"] == scope_id
+            and item.get("status") in {"new", "review_ready"}
+        ]
+        domains: dict[str, int] = {}
+        for item in entities:
+            domains[item["domain"]] = domains.get(item["domain"], 0) + 1
+        relations = {
+            key: value for key, value in self.relations.items()
+            if key[0] == scope_type and key[1] == scope_id
+        }
+        relation_types: dict[str, int] = {}
+        for value in relations.values():
+            key = str(value["relation_type"])
+            relation_types[key] = relation_types.get(key, 0) + 1
+        return {
+            "message_count": len(messages),
+            "mounted_chunk_count": mounted,
+            "mount_count": len(active),
+            "entity_count": len(entities),
+            "entities_missing_embedding": sum(
+                1 for item in entities if item.get("embedding_status", "pending") != "ready"
+            ),
+            "pending_candidate_count": len(pending),
+            "relation_count": len(relations),
+            "scanned_conversation_count": sum(
+                1 for key in self.scan_watermarks if key[0] == scope_type and key[1] == scope_id
+            ),
+            "mount_coverage": round(mounted / len(messages), 4) if messages else 0.0,
+            "mount_methods": {
+                name: {
+                    "count": entry["count"],
+                    "min_confidence": round(entry["min"], 4),
+                    "avg_confidence": round(entry["total"] / entry["count"], 4),
+                }
+                for name, entry in methods.items()
+            },
+            "entities_by_domain": domains,
+            "relations_by_type": relation_types,
+        }
 
     def add_outbox_event(self, event: dict[str, Any]) -> str:
         event_id = str(event.get("event_id") or new_uuid())

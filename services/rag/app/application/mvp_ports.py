@@ -130,6 +130,43 @@ class EntityRegistryRepository(Protocol):
         self, *, scope_type: str, scope_id: str, embedding: list[float], limit: int = 10
     ) -> list[dict[str, Any]]: ...
     def list_entities_pending_embedding(self, *, limit: int = 50) -> list[dict[str, Any]]: ...
+    def list_scan_conversations(self, *, limit: int = 20) -> list[dict[str, Any]]: ...
+    def get_scan_watermark(
+        self, *, scope_type: str, scope_id: str, conversation_id: str
+    ) -> str | None: ...
+    def list_conversation_chunks(
+        self,
+        *,
+        scope_type: str,
+        scope_id: str,
+        conversation_id: str,
+        after_sent_at: str | None = None,
+        limit: int = 500,
+    ) -> list[Chunk]: ...
+    def set_scan_watermark(
+        self,
+        *,
+        scope_type: str,
+        scope_id: str,
+        conversation_id: str,
+        last_sent_at: str,
+        last_chunk_id: str | None = None,
+        window_count: int = 0,
+    ) -> None: ...
+    def find_entities_by_normalized(
+        self, *, scope_type: str, scope_id: str, normalized_keys: list[str]
+    ) -> dict[str, dict[str, Any]]: ...
+    def upsert_entity_relation(
+        self,
+        *,
+        scope_type: str,
+        scope_id: str,
+        source_entity_id: str,
+        target_entity_id: str,
+        relation_type: str,
+        confidence: float,
+        evidence_chunk_ids: list[str] | None = None,
+    ) -> None: ...
     def update_entity_embedding(
         self,
         *,
@@ -147,7 +184,9 @@ class EntityRegistryRepository(Protocol):
 
 class BranchRepository(Protocol):
     def replace_chunk_mounts(self, chunk: Chunk, mounts: list[EntityMount]) -> None: ...
+    def merge_chunk_mounts(self, chunk: Chunk, mounts: list[EntityMount]) -> None: ...
     def get_tree(self, *, scope_type: str, scope_id: str) -> dict[str, Any]: ...
+    def tree_metrics(self, *, scope_type: str, scope_id: str) -> dict[str, Any]: ...
 
 
 class SearchHistoryRepository(Protocol):

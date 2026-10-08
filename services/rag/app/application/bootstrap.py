@@ -12,6 +12,7 @@ from app.application.parse_service import MVPParseService
 from app.application.qa_service import QAService
 from app.application.runtime import MVPWorkerRuntime
 from app.application.rag_service import RAGRetrievalService
+from app.application.tree_metrics_service import TreeMetricsService
 from app.config import settings
 from app.infrastructure.embedding.client import EmbeddingClient
 from app.infrastructure.module2.knowledge_client import Module2KnowledgeClient
@@ -38,6 +39,7 @@ class ApplicationContainer:
     retrieval_service: RAGRetrievalService
     qa_service: QAService
     entity_review_service: EntityReviewService
+    tree_metrics_service: TreeMetricsService
 
     def close(self) -> None:
         close = getattr(self.repository, "close", None)
@@ -79,6 +81,7 @@ def build_container() -> ApplicationContainer:
         answer_provider=OpenAICompatibleAnswerProvider(),
     )
     entity_review_service = EntityReviewService(repository=repository)
+    tree_metrics_service = TreeMetricsService(repository=repository)
     return ApplicationContainer(
         repository=repository,
         indexer=indexer,
@@ -87,6 +90,7 @@ def build_container() -> ApplicationContainer:
         retrieval_service=retrieval,
         qa_service=qa_service,
         entity_review_service=entity_review_service,
+        tree_metrics_service=tree_metrics_service,
     )
 
 

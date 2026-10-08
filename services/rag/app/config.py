@@ -204,6 +204,11 @@ class Settings:
     extract_max_retries: int = _int("RAG_EXTRACT_MAX_RETRIES", 2)
     # Concurrency is for the window scan worker, not for a single request.
     extract_concurrency: int = _int("RAG_EXTRACT_CONCURRENCY", 8)
+    # Sliding window over a conversation. 20 messages keeps a topic in view;
+    # step 10 gives 50% overlap so a boundary message is never the only
+    # mention of its subject.
+    extract_window_size: int = _int("RAG_EXTRACT_WINDOW_SIZE", 20)
+    extract_window_step: int = _int("RAG_EXTRACT_WINDOW_STEP", 10)
 
     # MinIO source and derived artifacts.
     minio_endpoint: str = _text("RAG_MINIO_ENDPOINT")

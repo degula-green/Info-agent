@@ -115,6 +115,27 @@ def get_entity_tree_node(
     return node
 
 
+@router.get("/tree-metrics")
+def get_tree_metrics(
+    scope_type: str = Query(default="organization", pattern="^(organization|user)$"),
+    x_user_id: str | None = Header(default=None),
+    x_organization_id: str | None = Header(default=None),
+    container: ApplicationContainer = Depends(get_container),
+) -> dict[str, Any]:
+    """Counts the tree's health without needing labelled data.
+
+    `alerts` marks the states that make the other numbers uninterpretable, so a
+    dashboard can show a reason instead of an unexplained zero.
+    """
+    _, scope_type, scope_id = _admin_scope(
+        x_user_id=x_user_id,
+        x_organization_id=x_organization_id,
+        scope_type=scope_type,
+        service=container.retrieval_service,
+    )
+    return container.tree_metrics_service.snapshot(scope_type=scope_type, scope_id=scope_id)
+
+
 @router.get("/entity-candidates")
 def list_candidates(
     status: str | None = None,

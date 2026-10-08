@@ -294,7 +294,8 @@ services:
         psql --dbname="$${KNOWLEDGE_DATABASE_URL}" --set=ON_ERROR_STOP=1 --file=/migrations/20260925_contact_profiles.sql &&
         psql --dbname="$${KNOWLEDGE_DATABASE_URL}" --set=ON_ERROR_STOP=1 --file=/migrations/20261004_wechat_device_assignments.up.sql &&
         psql --dbname="$${KNOWLEDGE_DATABASE_URL}" --set=ON_ERROR_STOP=1 --file=/migrations/20261007_wechat_control_flow.up.sql &&
-        psql --dbname="$${KNOWLEDGE_DATABASE_URL}" --set=ON_ERROR_STOP=1 --file=/migrations/20261009_tree_rag_v2_schema.up.sql
+        psql --dbname="$${KNOWLEDGE_DATABASE_URL}" --set=ON_ERROR_STOP=1 --file=/migrations/20261009_tree_rag_v2_schema.up.sql &&
+        psql --dbname="$${KNOWLEDGE_DATABASE_URL}" --set=ON_ERROR_STOP=1 --file=/migrations/20261010_tree_rag_scan_watermarks.up.sql
     depends_on:
       postgres:
         condition: service_healthy
@@ -325,6 +326,8 @@ services:
       - ../db/migrations/20261007_wechat_control_flow.down.sql:/migrations/20261007_wechat_control_flow.down.sql:ro
       - ../db/migrations/20261009_tree_rag_v2_schema.up.sql:/migrations/20261009_tree_rag_v2_schema.up.sql:ro
       - ../db/migrations/20261009_tree_rag_v2_schema.down.sql:/migrations/20261009_tree_rag_v2_schema.down.sql:ro
+      - ../db/migrations/20261010_tree_rag_scan_watermarks.up.sql:/migrations/20261010_tree_rag_scan_watermarks.up.sql:ro
+      - ../db/migrations/20261010_tree_rag_scan_watermarks.down.sql:/migrations/20261010_tree_rag_scan_watermarks.down.sql:ro
     restart: "no"
 
   redis:
