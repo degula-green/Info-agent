@@ -757,6 +757,37 @@ class PostgresRagMVPRepository:
                     for row in cursor.fetchall()
                 ]
 
+    def list_active_conversations(self, *, limit: int = 20) -> list[dict[str, Any]]:
+        """Busiest conversations, ignoring the scan watermark.
+
+        The scan worker wants whatever is new; measurement wants typical traffic,
+        so it needs a watermark-independent view.
+        """
+        with self._connection() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    f"""SELECT scope_type,scope_id::text,source_conversation_id::text,
+                               COUNT(*) AS messages, MIN(sent_at), MAX(sent_at)
+                        FROM {self.schema}.chunks
+                        WHERE resource_type='message'
+                          AND source_conversation_id IS NOT NULL
+                          AND lifecycle_status='active'
+                          AND sent_at IS NOT NULL
+                        GROUP BY 1,2,3
+                        ORDER BY COUNT(*) DESC
+                        LIMIT %s""",
+                    (max(1, int(limit)),),
+                )
+                return [
+                    {
+                        "scope_type": row[0], "scope_id": row[1],
+                        "conversation_id": row[2], "messages": int(row[3]),
+                        "first_sent_at": row[4].isoformat() if row[4] else None,
+                        "last_sent_at": row[5].isoformat() if row[5] else None,
+                    }
+                    for row in cursor.fetchall()
+                ]
+
     def get_scan_watermark(
         self, *, scope_type: str, scope_id: str, conversation_id: str
     ) -> str | None:
@@ -2890,6 +2921,26 @@ class InMemoryRagMVPRepository:
             })
         output.sort(key=lambda item: item["last_sent_at"] or "")
         return output[: max(1, int(limit))]
+
+    def list_active_conversations(self, *, limit: int = 20) -> list[dict[str, Any]]:
+        groups: dict[tuple[str, str, str], list[Chunk]] = defaultdict(list)
+        for chunk in self.chunks.values():
+            if chunk.resource_type != "message" or not chunk.source_conversation_id:
+                continue
+            if chunk.lifecycle_status != "active" or not chunk.sent_at:
+                continue
+            groups[(chunk.scope_type, chunk.scope_id, chunk.source_conversation_id)].append(chunk)
+        rows = [
+            {
+                "scope_type": key[0], "scope_id": key[1], "conversation_id": key[2],
+                "messages": len(chunks),
+                "first_sent_at": min(c.sent_at for c in chunks if c.sent_at),
+                "last_sent_at": max(c.sent_at for c in chunks if c.sent_at),
+            }
+            for key, chunks in groups.items()
+        ]
+        rows.sort(key=lambda item: (-item["messages"], item["conversation_id"]))
+        return rows[: max(1, int(limit))]
 
     def get_scan_watermark(
         self, *, scope_type: str, scope_id: str, conversation_id: str

@@ -256,6 +256,27 @@ def test_prompt_lists_known_entities_so_the_model_can_reuse_their_ids():
     assert "works_for" in prompt and "participates_in" in prompt
 
 
+def test_prompt_states_the_known_list_is_reference_only():
+    # Measured: with the original wording, a known-entity list of >=10 entries
+    # made the model return nothing at all (4 runs: 3,0,0,0 entities). The list
+    # framed the task as matching, so an unmatched window produced an empty
+    # result. Restating it as reference-only restored 12/12 runs, including at
+    # the production limit of 40 entries.
+    repo = _repository_with_messages(2)
+    repo.upsert_entity(
+        domain="project", canonical_name="A项目", normalized_key=normalized_text("A项目"), **SCOPE
+    )
+    entities, aliases, _ = repo.load_entity_registry(**SCOPE)
+    chunks = repo.list_conversation_chunks(
+        scope_type=SCOPE["scope_type"], scope_id=SCOPE["scope_id"], conversation_id=CONVERSATION
+    )
+
+    prompt = build_extraction_prompt(chunks, entities, aliases)
+
+    assert "只用于填写 existing_entity_id" in prompt
+    assert "不在表里的实体" in prompt
+
+
 def test_windows_run_concurrently_and_totals_still_add_up():
     # 45 messages at size 20 / step 10 gives 4 overlapping windows.
     repo = _repository_with_messages(45)

@@ -77,6 +77,16 @@ class EntityExtractionClient:
         return bool(self.base_url)
 
     def extract(self, prompt: str) -> dict[str, Any]:
+        parsed, _ = self.extract_with_usage(prompt)
+        return parsed
+
+    def extract_with_usage(self, prompt: str) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Same as :meth:`extract` but also returns the provider's usage block.
+
+        Kept separate so the hot path stays unchanged; the measurement script
+        needs the token counts, and re-deriving them from the response elsewhere
+        would duplicate this parsing.
+        """
         if not self.base_url:
             raise ExtractionError("extraction base URL is not configured")
         try:
@@ -110,7 +120,8 @@ class EntityExtractionClient:
             ) from exc
         if not isinstance(parsed, dict):
             raise ExtractionError("extraction completion is not a JSON object")
-        return parsed
+        usage = body.get("usage") if isinstance(body, dict) else None
+        return parsed, usage if isinstance(usage, dict) else {}
 
     def _payload(self, prompt: str) -> dict[str, Any]:
         payload: dict[str, Any] = {
