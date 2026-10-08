@@ -126,6 +126,10 @@ export interface AgentTaskEvent {
 
 export interface AgentTaskEventHandlers {
   onEvent: (event: AgentTaskEvent) => boolean | void
+  // The backend deliberately closes one SSE segment every timeout_seconds.
+  // This is a normal hand-off to the next segment, not a broken connection.
+  onWaiting?: (segment: number) => void
+  // Reserved for transport errors that must be retried.
   onReconnect?: (attempt: number) => void
   onAnswerCursor?: (state: { answerId: string; answerAfter: number }) => void
 }
@@ -201,6 +205,7 @@ export async function streamAgentTaskEvents(
   let answerId = String(options.answerId || '')
   let answerAfter = Math.max(0, Number(options.answerAfter || 0))
   let reconnects = 0
+  let segments = 0
 
   while (!signal?.aborted) {
     try {
@@ -266,10 +271,12 @@ export async function streamAgentTaskEvents(
       if (stopped) await reader.cancel().catch(() => undefined)
       if (stopped || signal?.aborted) return cursor
 
-      if (reconnects >= maxReconnects) return cursor
-      reconnects += 1
-      handlers.onReconnect?.(reconnects)
-      await wait(Math.min(250 * 2 ** (reconnects - 1), 2000), signal)
+      // The server ends a healthy SSE segment at its timeout. Resume
+      // immediately from the cursor; this must not consume the error retry
+      // budget or surface as a connection failure.
+      segments += 1
+      handlers.onWaiting?.(segments)
+      await wait(150, signal)
     } catch (error) {
       if (signal?.aborted || (error instanceof DOMException && error.name === 'AbortError')) return cursor
       if ((error as any)?.status === 401 || (error instanceof AgentApiError && !error.retryable)) throw error
@@ -1219,4 +1226,29 @@ export async function loadScheduleDrafts(options: LoadScheduleDraftsOptions = {}
   )
 
   return built.sort((left, right) => draftSortKey(left) - draftSortKey(right))
+}
+
+/**
+ * A weekly report the Agent generated. It lives in the Agent's temporary
+ * attachment bucket for 24 hours, so the card links straight at the streaming
+ * endpoint instead of carrying the bytes through the event stream.
+ */
+export function agentReportURL(attachmentID: string, download = false) {
+  const suffix = download ? '?download=true' : ''
+  return `${baseURL}/reports/${encodeURIComponent(attachmentID)}${suffix}`
+}
+
+export async function fetchAgentReport(attachmentID: string, download = false): Promise<Blob> {
+  const response = await authenticatedFetch(agentReportURL(attachmentID, download), {
+    headers: new Headers({ Accept: '*/*' }),
+  })
+  if (!response.ok) {
+    throw new AgentApiError(
+      response.status === 404 ? '周报已过期或不存在' : '周报获取失败',
+      'report_unavailable',
+      response.status,
+      response.status >= 500,
+    )
+  }
+  return response.blob()
 }

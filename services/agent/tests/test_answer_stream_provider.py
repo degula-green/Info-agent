@@ -138,3 +138,47 @@ def test_non_streaming_compose_still_uses_the_same_messages() -> None:
 
     assert draft.answer == "ok"
     assert "question" in client.messages[1]["content"]
+
+
+def test_person_section_compose_returns_per_category_text() -> None:
+    class CompletingClient:
+        last_call_count = 0
+
+        def complete(self, messages: list[dict[str, str]]) -> str:
+            self.complete_calls = getattr(self, "complete_calls", 0) + 1
+            self.all_messages = getattr(self, "all_messages", [])
+            self.all_messages.append(messages)
+            self.messages = messages
+            self.last_call_count = 1
+            if self.complete_calls > 1:
+                return '{"summary":"近期主要讨论支付 demo。"}'
+            return (
+                '{"sections":{"联系方式":"当前手机号是15325865236。",'
+                '"工作/项目":"正在开发支付 demo。"}}'
+            )
+
+    client = CompletingClient()
+    provider = LlmAnswerProvider(client)
+    sections = provider.compose_person_sections(
+        "小超的情况",
+        {
+            "contact": [{"value": "15325865236", "status": "current"}],
+            "work_project": [{"value": "支付 demo", "status": "current"}],
+        },
+        conversation_excerpts=[
+            {"quote": "我晚上还得搞支付demo", "sent_at": "2026-10-08T10:08:52+00:00"}
+        ],
+    )
+
+    assert sections == {
+        "contact": "当前手机号是15325865236。",
+        "work_project": "正在开发支付 demo。",
+        "recent_activity": "近期主要讨论支付 demo。",
+    }
+    first = client.all_messages[0][1]["content"]
+    second = client.all_messages[1][1]["content"]
+    assert "15325865236" in first
+    assert "支付 demo" in first
+    assert "我晚上还得搞支付demo" in second
+    assert client.complete_calls == 2
+    assert "我晚上还得搞支付demo" not in first

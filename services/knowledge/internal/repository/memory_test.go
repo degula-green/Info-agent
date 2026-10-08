@@ -334,6 +334,76 @@ func TestMemoryWechatRebindRequiresUnbindFirst(t *testing.T) {
 	}
 }
 
+func TestMemoryRePairingRecoversConversationCollectors(t *testing.T) {
+	repo := NewMemoryStore()
+	ctx := context.Background()
+	now := time.Now().UTC()
+	codeHash := hashForTest("pair-code")
+	pair := func(pairingID, deviceID, deviceKey string) *AgentPairingResult {
+		t.Helper()
+		if err := repo.CreatePairing(ctx, domain.Pairing{
+			ID: pairingID, OwnerUserID: "u1", Platform: domain.PlatformWechat,
+			CodeHash: codeHash, Status: "pending", WXID: "wxid-a",
+			ExpiresAt: now.Add(time.Minute), CreatedAt: now,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		result, err := repo.CompleteAgentPairing(ctx, AgentPairingInput{
+			PairingID: pairingID, CodeHash: codeHash, WXID: "wxid-a",
+			AgentVersion: "agent", DeviceID: deviceID,
+			DeviceKeyHash:   hashForTest(deviceKey),
+			DeviceExpiresAt: now.Add(time.Hour), Now: now,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return result
+	}
+	assertRecovered := func(stage string) {
+		t.Helper()
+		items, err := repo.ListKnowledgeLibraryItems(ctx, personalPrivateLibraryPrefix+"u1", "u1", "", "conversations", "", "", 50)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(items) != 1 || items[0].CollectionStatus == domain.ConversationError {
+			t.Fatalf("%s left the conversation card on 异常: %+v", stage, items)
+		}
+	}
+
+	first := pair("p1", "d1", "device-key-1")
+	conversation, err := repo.AttachConversation(ctx, AttachInput{UserID: "u1", Platform: domain.PlatformWechat, ExternalConversationID: "wxid-chat", ConversationType: "private", RequestedStartAt: &now, PrimaryConnectorID: first.Connector.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Re-pairing revokes the previous device on the same connector. The
+	// conversation must not stay stuck on 异常 afterwards.
+	pair("p2", "d2", "device-key-2")
+	fresh, err := repo.GetConversation(ctx, conversation.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fresh.Collectors) != 1 || fresh.Collectors[0].Status != domain.CollectorActive {
+		t.Fatalf("re-pairing left the conversation collector unavailable: %+v", fresh.Collectors)
+	}
+	assertRecovered("re-pairing")
+
+	// Unbinding revokes the connector outright, so the next pairing creates a
+	// new one. The parked collector has to move with it.
+	if err := repo.RevokeConnector(ctx, "u1", domain.PlatformWechat); err != nil {
+		t.Fatal(err)
+	}
+	second := pair("p3", "d3", "device-key-3")
+	fresh, err = repo.GetConversation(ctx, conversation.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fresh.Collectors) != 1 || fresh.Collectors[0].Status != domain.CollectorActive || fresh.Collectors[0].ConnectorAccountID != second.Connector.ID {
+		t.Fatalf("re-binding did not move the collector onto the new connector: %+v", fresh.Collectors)
+	}
+	assertRecovered("re-binding")
+}
+
 func TestMemoryAttachCreatesPrimaryCollectorAtomically(t *testing.T) {
 	repo := NewMemoryStore()
 	ctx := context.Background()

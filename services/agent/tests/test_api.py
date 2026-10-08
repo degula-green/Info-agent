@@ -15,6 +15,9 @@ class _Core:
     def current_organization(self, access_token: str) -> str:
         return "org-verified"
 
+    def current_user_name(self, access_token: str) -> str:
+        return "测试昵称"
+
 
 def test_create_task_returns_accepted_with_events_url() -> None:
     container, _store, _publisher, _registry = build_test_container()

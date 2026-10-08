@@ -116,6 +116,11 @@ def create_task(
     organization_id = container.core_client.current_organization(user.access_token)
     if organization_id:
         source_ref["organization_id"] = organization_id
+    # A self report has to print a name, and the identity rows only carry
+    # generated account labels, so the profile nickname travels with the task.
+    owner_name = container.core_client.current_user_name(user.access_token)
+    if owner_name:
+        source_ref["owner_name"] = owner_name
     try:
         task = container.task_service.create_task(
             owner_user_id=user.user_id,

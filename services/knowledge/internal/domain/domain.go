@@ -168,6 +168,7 @@ type AvailableContact struct {
 	Email          string `json:"email,omitempty"`
 	Department     string `json:"department,omitempty"`
 	JobTitle       string `json:"job_title,omitempty"`
+	Remark         string `json:"remark,omitempty"`
 	Selected       bool   `json:"selected"`
 }
 
@@ -187,6 +188,8 @@ type ContactView struct {
 	Kind            string            `json:"kind"` // internal or external
 	InternalUserID  string            `json:"internal_user_id,omitempty"`
 	DisplayName     string            `json:"display_name,omitempty"`
+	Remark          string            `json:"remark,omitempty"`
+	NameCore        string            `json:"name_core,omitempty"`
 	Identities      []ContactIdentity `json:"identities"`
 	ConversationIDs []string          `json:"conversation_ids,omitempty"`
 	MessageCount    int               `json:"message_count"`
@@ -198,6 +201,37 @@ type ContactDetail struct {
 	Profile     ContactProfile `json:"profile"`
 	Facts       []ContactFact  `json:"facts"`
 	Attachments []Attachment   `json:"attachments"`
+}
+
+// WechatContactEntry is one row pushed by a WeChat collector from its local
+// contact book. The remark is the machine owner's personal label and is stored
+// owner-scoped on the Knowledge side.
+type WechatContactEntry struct {
+	ExternalUserID string `json:"external_user_id"`
+	NickName       string `json:"nick_name"`
+	Remark         string `json:"remark"`
+}
+
+// PersonMatch is one person resolved from a name. A person can span several
+// platform identities that share an internal user mapping.
+type PersonMatchIdentity struct {
+	ID             string `json:"id"`
+	Platform       string `json:"platform"`
+	DisplayName    string `json:"display_name,omitempty"`
+	ExternalUserID string `json:"external_user_id,omitempty"`
+}
+
+type PersonMatch struct {
+	PersonKey              string   `json:"person_key"`
+	DisplayName            string   `json:"display_name,omitempty"`
+	Attached               bool     `json:"attached"`
+	IdentityIDs            []string `json:"identity_ids"`
+	PrivateConversationIDs []string `json:"private_conversation_ids"`
+	RelationIDs            []string `json:"relation_ids,omitempty"`
+	// Identities carries each platform account behind the person, with the
+	// name that platform actually shows. Retrieval anchors on those names:
+	// WeChat writes "稻成" where Feishu writes the Feishu name.
+	Identities []PersonMatchIdentity `json:"identities,omitempty"`
 }
 
 type ContactAccess struct {

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import threading
 from datetime import datetime, timedelta
+from typing import Any
 
 from app.kernel.events import utcnow
 from app.kernel.models import (
@@ -52,6 +53,35 @@ class InMemoryAgentStore:
         self.summary_jobs: dict[str, ConversationSummaryJob] = {}
         self.memories: dict[str, MemoryRecord] = {}
         self.memory_sources: dict[str, list[MemorySourceRecord]] = {}
+        self.person_fact_snapshots: dict[
+            tuple[str, str, str], list[dict[str, Any]]
+        ] = {}
+
+    def get_person_fact_snapshot(
+        self,
+        *,
+        owner_user_id: str,
+        person_key: str,
+        snapshot_fingerprint: str,
+    ) -> list[dict[str, Any]] | None:
+        with self._lock:
+            value = self.person_fact_snapshots.get(
+                (owner_user_id, person_key, snapshot_fingerprint)
+            )
+            return [dict(item) for item in value] if value is not None else None
+
+    def save_person_fact_snapshot(
+        self,
+        *,
+        owner_user_id: str,
+        person_key: str,
+        snapshot_fingerprint: str,
+        facts: list[dict[str, Any]],
+    ) -> None:
+        with self._lock:
+            self.person_fact_snapshots[
+                (owner_user_id, person_key, snapshot_fingerprint)
+            ] = [dict(item) for item in facts]
 
     # -- tasks ------------------------------------------------------------
 

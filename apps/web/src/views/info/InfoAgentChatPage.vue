@@ -47,6 +47,77 @@
                 <strong>没有找到满足条件的内容。</strong>
               </div>
 
+            <div
+              v-if="message.reportResult"
+              class="agent-report"
+              :class="`agent-report--${message.reportResult.status}`"
+            >
+              <div class="agent-report__head">
+                <t-icon :name="message.reportResult.status === 'ready' ? 'file-word' : 'info-circle'" />
+                <strong>{{ reportHeadline(message.reportResult) }}</strong>
+              </div>
+
+              <template v-if="message.reportResult.status === 'ready'">
+                <div class="agent-report__meta">
+                  <span v-if="message.reportResult.period">{{ message.reportResult.period }}</span>
+                  <span v-if="message.reportResult.file_name">{{ message.reportResult.file_name }}</span>
+                  <span v-if="reportRetentionLabel(message.reportResult)">
+                    {{ reportRetentionLabel(message.reportResult) }}
+                  </span>
+                </div>
+                <div class="agent-report__actions">
+                  <t-button size="small" theme="primary" @click="openReportPreview(message.reportResult, message.reportResult.file_name)">
+                    <template #icon><t-icon name="browse" /></template>预览
+                  </t-button>
+                  <t-button
+                    size="small"
+                    variant="outline"
+                    :loading="reportBusy[message.id] === 'download'"
+                    @click="downloadReportFile(message)"
+                  >
+                    <template #icon><t-icon name="download" /></template>下载
+                  </t-button>
+                  <t-button
+                    size="small"
+                    variant="outline"
+                    :loading="reportBusy[message.id] === 'archive'"
+                    :disabled="reportArchived[message.reportResult.attachment_id]"
+                    @click="archiveReport(message)"
+                  >
+                    <template #icon><t-icon name="folder-add" /></template>
+                    {{ reportArchived[message.reportResult.attachment_id] ? '已存入知识库' : '存入知识库' }}
+                  </t-button>
+                </div>
+              </template>
+
+              <template v-else-if="message.reportResult.status === 'needs_selection'">
+                <ul class="agent-report__candidates">
+                  <li v-for="candidate in message.reportResult.candidates" :key="candidate.attachment_id">
+                    <span>{{ candidate.file_name }}</span>
+                    <span class="agent-report__candidate-actions">
+                      <t-button
+                        v-if="candidate.preview_attachment_id"
+                        size="small"
+                        variant="text"
+                        @click="openReportPreview({ attachment_id: candidate.preview_attachment_id }, candidate.file_name)"
+                      >预览</t-button>
+                      <t-button size="small" variant="outline" theme="primary" @click="chooseReportTemplate(message.reportResult, candidate)">
+                        选择
+                      </t-button>
+                    </span>
+                  </li>
+                </ul>
+              </template>
+
+              <template v-else-if="message.reportResult.status === 'needs_person_choice'">
+                <ul class="agent-report__candidates">
+                  <li v-for="person in message.reportResult.candidates" :key="person.person_key || person.display_name">
+                    <span>{{ person.display_name || person.person_key }}</span>
+                  </li>
+                </ul>
+              </template>
+            </div>
+
               <AgentSourceList
                 v-if="visibleSourceItems(message).length"
                 :sources="visibleSourceItems(message)"
@@ -324,13 +395,42 @@
       </footer>
     </article>
   </t-dialog>
+
+  <t-dialog
+    v-model:visible="reportPreviewVisible"
+    attach="body"
+    width="min(92vw, 1720px)"
+    :footer="false"
+    destroy-on-close
+    :header="reportPreviewTitle || '周报预览'"
+    dialog-class-name="agent-source-preview-dialog"
+    placement="center"
+  >
+    <article v-if="reportPreviewFile" class="agent-source-preview">
+      <main>
+        <InfoAttachmentPreview
+          :file="reportPreviewFile"
+          :active="reportPreviewVisible"
+          :loader="reportPreviewLoader"
+        />
+      </main>
+      <footer>
+        <span>Agent 生成的周报（未归档文件保留 24 小时）</span>
+        <div class="agent-source-preview__actions">
+          <t-button variant="outline" :loading="reportPreviewDownloading" @click="downloadReportPreview">
+            <template #icon><t-icon name="download" /></template>下载
+          </t-button>
+        </div>
+      </footer>
+    </article>
+  </t-dialog>
 </template>
 
 <script setup lang="ts">
 import { nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { MessagePlugin } from 'tdesign-vue-next'
 import { useRoute, useRouter } from 'vue-router'
-import { getKnowledgeAttachmentContent, listKnowledgeConversationAttachments } from '@/api/info-knowledge'
+import { createLocalUploadTask, getKnowledgeAttachmentContent, listKnowledgeConversationAttachments, uploadLocalContent } from '@/api/info-knowledge'
 import InfoAttachmentPreview from '@/components/InfoAttachmentPreview.vue'
 import AgentAnswerContent from '@/components/agent-chat/AgentAnswerContent.vue'
 import AgentMark from '@/components/agent-chat/AgentMark.vue'
@@ -350,6 +450,7 @@ import {
   createAgentTask,
   dayOfISO,
   fetchTakeoverFrame,
+  fetchAgentReport,
   getAgentAnswerSnapshot,
   getAgentConversation,
   getAgentPlan,
@@ -391,6 +492,30 @@ type Citation = {
   position?: Record<string, any> | null
 }
 type TodoResult = { todo_id: string; title?: string; due_at?: string | null; due_expression?: string | null }
+type ReportTemplateCandidate = {
+  attachment_id?: string
+  file_name?: string
+  origin?: string
+  preview_attachment_id?: string
+  /** Person candidates reuse the same list shape when the name is ambiguous. */
+  person_key?: string
+  display_name?: string
+}
+/** A report.weekly result: the artifact handle plus the traceability list. */
+type ReportResult = {
+  status: string
+  summary?: string
+  title?: string
+  subject_name?: string
+  period?: string
+  file_name?: string
+  /** Always present: the capture step normalises a missing id to "". */
+  attachment_id: string
+  size_bytes?: number
+  expires_at?: string
+  template_origin?: string
+  candidates?: ReportTemplateCandidate[]
+}
 type Step = { id: string; label: string; status: string; stages?: string[] }
 type SourceInfo = {
   resource_id: string
@@ -476,6 +601,8 @@ type AgentMessage = {
   todo?: TodoResult
   /** Receipt for a form.preview / form.apply step, shown after a write. */
   formResult?: { summary: string; range?: string; verified?: boolean }
+  /** Weekly-report result: file handle, period, sources or template choices. */
+  reportResult?: ReportResult
   approval?: AgentApproval
   inputRequest?: { missing: string[] }
   submitting?: boolean
@@ -535,6 +662,14 @@ watch(
 const sourcePreviewVisible = ref(false)
 const previewDownloading = ref(false)
 const activeSourceFile = ref<InfoFile | null>(null)
+/** Weekly-report preview: its own dialog because the bytes come from the Agent. */
+const reportPreviewVisible = ref(false)
+const reportPreviewDownloading = ref(false)
+const reportPreviewFile = ref<InfoFile | null>(null)
+const reportPreviewTitle = ref('')
+const reportPreviewAttachmentID = ref('')
+const reportBusy = reactive<Record<string, string>>({})
+const reportArchived = reactive<Record<string, boolean>>({})
 const activeSourceTarget = ref<SourceInfo | Citation | null>(null)
 
 function newMessageID(): string {
@@ -678,6 +813,11 @@ function handleTaskEvent(message: AgentMessage, event: AgentTaskEvent): boolean 
           }
           void refreshFormUndo(message)
         }
+        if (preview?.block_type === 'report') {
+          message.reportResult = reportResultFromPayload(preview)
+          const reportCitations = citationsFromPayload(preview)
+          if (reportCitations.length) message.citations = reportCitations
+        }
       }
       message.status = event.event_type === 'step.failed' ? 'executing' : 'executing'
       message.statusText = event.event_type === 'step.started'
@@ -820,6 +960,31 @@ function mapCitation(value: any): Citation {
   }
 }
 
+/** The weekly-report card, rebuilt from the live step preview or a stored observation. */
+function reportResultFromPayload(preview: Record<string, any>): ReportResult {
+  return {
+    status: String(preview?.status || ''),
+    summary: typeof preview?.summary === 'string' ? preview.summary : '',
+    title: typeof preview?.title === 'string' ? preview.title : '',
+    subject_name: typeof preview?.subject_name === 'string' ? preview.subject_name : '',
+    period: typeof preview?.period === 'string' ? preview.period : '',
+    file_name: typeof preview?.file_name === 'string' ? preview.file_name : '',
+    attachment_id: typeof preview?.attachment_id === 'string' ? preview.attachment_id : '',
+    size_bytes: Number(preview?.size_bytes || 0),
+    expires_at: typeof preview?.expires_at === 'string' ? preview.expires_at : '',
+    template_origin: typeof preview?.template_origin === 'string' ? preview.template_origin : '',
+    candidates: Array.isArray(preview?.candidates)
+      ? (preview.candidates as ReportTemplateCandidate[])
+      : [],
+  }
+}
+
+/** A report's sources use the answer citation shape, so they share the same list. */
+function citationsFromPayload(preview: Record<string, any>): Citation[] {
+  if (!Array.isArray(preview?.citations)) return []
+  return preview.citations.map((value: any) => mapCitation(value))
+}
+
 function previewSummary(value: unknown): string {
   if (!value || typeof value !== 'object') return ''
   const summary = (value as Record<string, unknown>).summary
@@ -886,7 +1051,9 @@ function primaryAnswer(message: AgentMessage): string {
 
 function showsEmptyKnowledgeResult(message: AgentMessage): boolean {
   if (message.status !== 'succeeded') return false
-  if (primaryAnswer(message) || message.todo || message.formResult || message.approval || message.inputRequest) return false
+  // A weekly-report card is its own result: it carries the file and the
+  // sources, so the "nothing found" placeholder must not sit above it.
+  if (primaryAnswer(message) || message.todo || message.formResult || message.approval || message.inputRequest || message.reportResult) return false
   return !visibleSourceItems(message).length
 }
 
@@ -1309,6 +1476,133 @@ async function downloadActiveSourceFile(): Promise<void> {
   }
 }
 
+function reportHeadline(result: ReportResult): string {
+  if (result.status === 'ready') {
+    return result.title || (result.subject_name ? `${result.subject_name}的周报` : '周报')
+  }
+  if (result.status === 'needs_selection') return '请选择要使用的模板'
+  if (result.status === 'needs_person_choice') return '请确认是哪一位'
+  return result.summary || '写周报'
+}
+
+function reportRetentionLabel(result: ReportResult): string {
+  if (!result.expires_at) return ''
+  const expires = new Date(result.expires_at)
+  if (Number.isNaN(expires.getTime())) return ''
+  return `未归档文件保留至 ${expires.toLocaleString('zh-CN', { hour12: false })}`
+}
+
+function reportPreviewLoader(download = false): Promise<Blob> {
+  return fetchAgentReport(reportPreviewAttachmentID.value, download)
+}
+
+function openReportPreview(target: { attachment_id?: string } | undefined | null, fileName?: string): void {
+  const id = String(target?.attachment_id || '')
+  if (!id) return
+  reportPreviewAttachmentID.value = id
+  reportPreviewTitle.value = fileName || '周报预览'
+  reportPreviewFile.value = {
+    id,
+    name: fileName || '周报.docx',
+    type: 'docx',
+    mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    size: '-',
+    time: '',
+    uploadedAt: '',
+    uploader: '',
+    content: '',
+    documentStatus: 'completed',
+    parseStatus: 'completed',
+  }
+  reportPreviewVisible.value = true
+}
+
+function saveReportBlob(blob: Blob, fileName: string): void {
+  const url = URL.createObjectURL(blob)
+  const anchor = document.createElement('a')
+  anchor.href = url
+  anchor.download = fileName || '周报.docx'
+  anchor.click()
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000)
+}
+
+async function downloadReportFile(message: AgentMessage): Promise<void> {
+  const result = message.reportResult
+  if (!result?.attachment_id || reportBusy[message.id]) return
+  reportBusy[message.id] = 'download'
+  try {
+    saveReportBlob(
+      await fetchAgentReport(result.attachment_id, true),
+      result.file_name || '周报.docx',
+    )
+  } catch (error) {
+    MessagePlugin.error(error instanceof Error ? error.message : '周报下载失败')
+  } finally {
+    delete reportBusy[message.id]
+  }
+}
+
+async function downloadReportPreview(): Promise<void> {
+  if (!reportPreviewAttachmentID.value || reportPreviewDownloading.value) return
+  reportPreviewDownloading.value = true
+  try {
+    saveReportBlob(
+      await fetchAgentReport(reportPreviewAttachmentID.value, true),
+      reportPreviewFile.value?.name || '周报.docx',
+    )
+  } catch (error) {
+    MessagePlugin.error(error instanceof Error ? error.message : '周报下载失败')
+  } finally {
+    reportPreviewDownloading.value = false
+  }
+}
+
+/**
+ * Archiving is the user's own write into their personal local library, so it
+ * runs through the knowledge upload endpoints the library page already uses.
+ */
+async function archiveReport(message: AgentMessage): Promise<void> {
+  const result = message.reportResult
+  if (!result?.attachment_id || reportBusy[message.id] || reportArchived[result.attachment_id]) return
+  reportBusy[message.id] = 'archive'
+  try {
+    const blob = await fetchAgentReport(result.attachment_id)
+    const digest = await crypto.subtle.digest('SHA-256', await blob.arrayBuffer())
+    const hash = `sha256:${Array.from(new Uint8Array(digest)).map((item) => item.toString(16).padStart(2, '0')).join('')}`
+    const requestID = `report-${result.attachment_id}`
+    await createLocalUploadTask({
+      requestID,
+      traceID: `trace-${requestID}`,
+      uploadDestination: 'private_local_library',
+      fileName: result.file_name || '周报.docx',
+      mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      sizeBytes: blob.size,
+      contentHash: hash,
+    })
+    await uploadLocalContent(requestID, blob)
+    reportArchived[result.attachment_id] = true
+    MessagePlugin.success('已存入个人本地知识库')
+  } catch (error) {
+    MessagePlugin.error(error instanceof Error ? error.message : '存入知识库失败')
+  } finally {
+    delete reportBusy[message.id]
+  }
+}
+
+async function chooseReportTemplate(
+  result: ReportResult,
+  candidate: ReportTemplateCandidate,
+): Promise<void> {
+  const chosen = candidate.origin === 'uploaded'
+    ? candidate.attachment_id
+    : candidate.preview_attachment_id || candidate.attachment_id
+  if (!chosen) return
+  const requestedName = String(result.file_name || '').trim()
+  const nameHint = requestedName ? `，文件名叫${requestedName}` : ''
+  question.value = `用这份模板给${result.subject_name || '我'}写周报${nameHint} [模板:${chosen}]`
+  await sendMessage()
+}
+
 function applyRestoredApproval(message: AgentMessage, approval: AgentApproval): void {
   const args = approval.arguments || {}
   message.approval = approval
@@ -1375,6 +1669,21 @@ async function restoreAssistantMessage(
     const blocks = blocksFromObservations(observations, message.answer, message.citations)
     if (blocks.length) message.blocks = blocks
     message.todo = todoFromObservations(observations)
+    // A generated weekly report has no answer text: its result is the card.
+    // Rebuild it (and its sources) from the stored step output, otherwise the
+    // document disappears as soon as the user leaves and re-opens the chat.
+    const reportStep = [...observations]
+      .reverse()
+      .find(
+        (item) => item.capability === 'report.weekly'
+          && item.status === 'succeeded'
+          && item.output,
+      )
+    if (reportStep?.output) {
+      message.reportResult = reportResultFromPayload(reportStep.output as Record<string, any>)
+      const reportCitations = citationsFromPayload(reportStep.output as Record<string, any>)
+      if (reportCitations.length) message.citations = reportCitations
+    }
 
     if (message.status === 'waiting_approval') {
       const approval = approvals.find(
@@ -1520,6 +1829,9 @@ async function watchTask(message: AgentMessage, after = message.lastEventId): Pr
       message.taskId,
       {
         onEvent: (event) => handleTaskEvent(message, event),
+        onWaiting: () => {
+          message.statusText = '继续等待'
+        },
         onReconnect: (attempt) => {
           message.statusText = `正在恢复连接（${attempt}）`
         },
@@ -2103,6 +2415,18 @@ onBeforeUnmount(() => {
 .agent-form-result__title { display: inline-flex; align-items: center; gap: 6px; font-weight: 600; }
 .agent-form-result span { color: var(--td-text-color-secondary); font-size: 12px; }
 .agent-form-result__undo { justify-self: start; min-height: 30px; padding: 0 12px; }
+.agent-report { display: grid; gap: 10px; margin-top: 2px; padding: 14px 16px; border: 1px solid var(--td-brand-color-3); border-radius: 12px; background: var(--td-bg-color-container); }
+.agent-report--no_template, .agent-report--no_person, .agent-report--needs_person_choice { border-color: var(--td-warning-color-3); background: var(--td-warning-color-1); }
+.agent-report__head { display: inline-flex; align-items: center; gap: 7px; font-weight: 600; }
+.agent-report__meta { display: flex; flex-wrap: wrap; gap: 4px 14px; color: var(--td-text-color-secondary); font-size: 12px; }
+.agent-report__actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.agent-report__sources { display: grid; gap: 6px; margin: 0; padding: 10px 0 0; border-top: 1px solid var(--td-component-stroke); list-style: none; }
+.agent-report__sources li { display: grid; gap: 2px; min-width: 0; }
+.agent-report__source-title { color: var(--td-text-color-primary); font-size: 12px; font-weight: 600; }
+.agent-report__source-quote { overflow: hidden; color: var(--td-text-color-secondary); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.agent-report__candidates { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; }
+.agent-report__candidates li { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.agent-report__candidate-actions { display: inline-flex; gap: 4px; }
 .agent-approval, .agent-input-request { display: grid; gap: 11px; margin-top: 2px; padding: 16px; border: 1px solid var(--td-warning-color-3); border-radius: 12px; background: var(--td-warning-color-1); }
 .agent-approval__header, .agent-approval__actions { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 .agent-approval__header span { display: inline-flex; align-items: center; gap: 6px; font-weight: 600; }

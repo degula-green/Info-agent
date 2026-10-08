@@ -69,7 +69,16 @@ class Settings:
         "RAG_DATABASE_CONNECT_TIMEOUT_SECONDS", 5.0
     )
     database_command_timeout_seconds: float = _float(
-        "RAG_DATABASE_COMMAND_TIMEOUT_SECONDS", 10.0
+        "RAG_DATABASE_COMMAND_TIMEOUT_SECONDS", 30.0
+    )
+    # The database is often remote during local development. Keep pooled TCP
+    # connections fresh so a stale socket is replaced before it is handed to a
+    # job lane, and bound how long a caller may wait for a pooled connection.
+    database_pool_max_idle_seconds: float = _float(
+        "RAG_DATABASE_POOL_MAX_IDLE_SECONDS", 60.0
+    )
+    database_pool_max_lifetime_seconds: float = _float(
+        "RAG_DATABASE_POOL_MAX_LIFETIME_SECONDS", 300.0
     )
 
     # Elasticsearch 9.x. Username/password and API key are alternatives.
@@ -240,7 +249,7 @@ class Settings:
     authz_connect_timeout_seconds: float = _float(
         "RAG_AUTHZ_CONNECT_TIMEOUT_SECONDS", 0.2
     )
-    authz_timeout_seconds: float = _float("RAG_AUTHZ_TIMEOUT_SECONDS", 0.8)
+    authz_timeout_seconds: float = _float("RAG_AUTHZ_TIMEOUT_SECONDS", 10.0)
     authz_scope_cache_ttl_seconds: int = _int(
         "RAG_AUTHZ_SCOPE_CACHE_TTL_SECONDS", 30
     )
@@ -285,6 +294,7 @@ class Settings:
     qa_api_base_url: str = _text("QA_API_BASE_URL")
     qa_api_key: str = _text("QA_API_KEY")
     qa_model: str = _text("QA_MODEL")
+    qa_profile_model: str = _text("QA_PROFILE_MODEL", "deepseek-chat")
     qa_connect_timeout_seconds: float = _float("QA_CONNECT_TIMEOUT_SECONDS", 2.0)
     qa_timeout_seconds: float = _float("QA_TIMEOUT_SECONDS", 45.0)
     qa_stream: bool = _bool("QA_STREAM", True)
@@ -340,7 +350,13 @@ class Settings:
     lane_poll_interval_seconds: float = _float("RAG_LANE_POLL_INTERVAL_SECONDS", 0.5)
     task_lease_seconds: int = _int("RAG_TASK_LEASE_SECONDS", 300)
     task_heartbeat_seconds: int = _int("RAG_TASK_HEARTBEAT_SECONDS", 60)
-    task_max_retries: int = _int("RAG_TASK_MAX_RETRIES", 3)
+    task_max_retries: int = _int("RAG_TASK_MAX_RETRIES", 8)
+    task_retry_base_seconds: float = _float(
+        "RAG_TASK_RETRY_BASE_SECONDS", 5.0
+    )
+    task_retry_max_seconds: float = _float(
+        "RAG_TASK_RETRY_MAX_SECONDS", 300.0
+    )
     task_visibility_timeout_seconds: int = _int(
         "RAG_TASK_VISIBILITY_TIMEOUT_SECONDS", 900
     )

@@ -23,7 +23,11 @@ type Client struct {
 }
 
 func NewClient(cfg config.Config) *Client {
-	return &Client{baseURL: strings.TrimRight(cfg.OpenFGAURL, "/"), storeID: cfg.OpenFGAStoreID, modelID: cfg.OpenFGAModelID, token: cfg.OpenFGAAPIToken, http: &http.Client{Timeout: 2 * time.Second}}
+	timeout := cfg.OpenFGATimeout
+	if timeout <= 0 {
+		timeout = 10 * time.Second
+	}
+	return &Client{baseURL: strings.TrimRight(cfg.OpenFGAURL, "/"), storeID: cfg.OpenFGAStoreID, modelID: cfg.OpenFGAModelID, token: cfg.OpenFGAAPIToken, http: &http.Client{Timeout: timeout}}
 }
 
 func (c *Client) Check(ctx context.Context, subjectID, organizationID string, check application.AuthorizationCheck) (bool, error) {
@@ -236,7 +240,7 @@ func (c *Client) post(ctx context.Context, endpoint string, body any, output any
 	if c.token != "" {
 		req.Header.Set("Authorization", "Bearer "+c.token)
 	}
-	resp, err := c.http.Do(req)
+	resp, err := c.do(req, endpoint)
 	if err != nil {
 		return err
 	}
@@ -253,6 +257,35 @@ func (c *Client) post(ctx context.Context, endpoint string, body any, output any
 		return fmt.Errorf("invalid OpenFGA response: %w", err)
 	}
 	return nil
+}
+
+// do sends the request, retrying one transient failure for read endpoints.
+//
+// The authorization store can live on another host. A single dropped
+// connection or slow response there used to surface as an authorization
+// failure and a 503 for the whole search, which the RAG then read as
+// "this scope is unavailable"; one retry removes most of that noise.
+func (c *Client) do(req *http.Request, endpoint string) (*http.Response, error) {
+	response, err := c.http.Do(req)
+	if endpoint == "/write" {
+		return response, err
+	}
+	if err == nil && response.StatusCode < 500 {
+		return response, err
+	}
+	if err == nil {
+		io.Copy(io.Discard, io.LimitReader(response.Body, 4096))
+		response.Body.Close()
+	}
+	retry := req.Clone(req.Context())
+	if req.GetBody != nil {
+		body, bodyErr := req.GetBody()
+		if bodyErr != nil {
+			return response, err
+		}
+		retry.Body = body
+	}
+	return c.http.Do(retry)
 }
 
 func mapResource(check application.AuthorizationCheck) (string, string, string, error) {

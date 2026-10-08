@@ -12,18 +12,10 @@ from app.infrastructure.http import HttpClient, IntegrationError, join_url
 
 router = APIRouter(prefix="/api/v1", tags=["contact-profile"])
 NO_USEFUL_PROFILE = "__NO_USEFUL_PROFILE__"
-# The summariser runs on a reasoning-backed model: it thinks first and answers
-# afterwards, and on a long contact history the thinking alone can consume the
-# whole budget, leaving an empty answer string that reads as "provider
-# unavailable". A 142-message contact burned all 1200 tokens on reasoning;
-# 3000 leaves room for both passes.
-PROFILE_MIN_OUTPUT_TOKENS = 3000
-PROFILE_MAX_OUTPUT_TOKENS = 6000
-
-
-def _profile_max_tokens() -> int:
-    configured = int(settings.qa_max_output_tokens or 0)
-    return min(PROFILE_MAX_OUTPUT_TOKENS, max(PROFILE_MIN_OUTPUT_TOKENS, configured))
+# The profile runs on a dedicated non-reasoning model. The output is three
+# short sections, so a small budget is enough and the "reasoning ate the whole
+# budget" empty-answer failure cannot happen.
+PROFILE_MAX_OUTPUT_TOKENS = 600
 
 
 class ContactProfileRequest(BaseModel):
@@ -93,7 +85,11 @@ def summarize_contact_profile(
     _authorize(authorization, x_caller_service)
     if not body.lines:
         return {"summary": ""}
-    if not settings.qa_api_base_url or not settings.qa_api_key or not settings.qa_model:
+    if (
+        not settings.qa_api_base_url
+        or not settings.qa_api_key
+        or not (settings.qa_profile_model or settings.qa_model)
+    ):
         raise HTTPException(status_code=503, detail="profile provider is not configured")
     context = "\n".join(f"- {line}" for line in body.lines)
     max_context_chars = max(1000, settings.qa_max_context_tokens * 4)
@@ -102,48 +98,38 @@ def summarize_contact_profile(
         # message history.
         context = context[-max_context_chars:]
     payload = {
-        "model": settings.qa_model,
+        "model": settings.qa_profile_model or settings.qa_model,
         "stream": False,
         "temperature": 0.2,
-        # Reasoning-backed models can consume most of the response budget before
-        # emitting visible content. Keep enough room for both.
-        "max_tokens": _profile_max_tokens(),
+        "max_tokens": PROFILE_MAX_OUTPUT_TOKENS,
         "messages": [
             {
                 "role": "system",
                 "content": (
-                    "你是联系人信息整理器。只根据提供的联系人消息，提炼两类关键信息：\n"
-                    "1. 近期任务：该联系人正在做、承诺要做或参与推进的具体事项，"
-                    "写明事项、他的角色和当前进展；\n"
-                    "2. 达成的共识：消息中明确确认的结论、约定或决定。\n"
+                    "你是联系人画像整理器。只根据提供的联系人消息，输出固定三段：\n"
+                    "1. 是谁：这个人是谁（能确定的姓名、公司等身份信息）；\n"
+                    "2. 什么职务：他的职位或角色；\n"
+                    "3. 近期负责什么：近期负责的项目或任务。\n"
                     "硬性要求：\n"
-                    "1. 只保留任务与共识。闲聊、问候、表情、玩笑、吐槽、生活琐事、"
-                    "与工作无关的寒暄一律不写。\n"
+                    "1. 只写工作相关内容；闲聊、问候、表情、玩笑、家庭、生活、"
+                    "农活、娱乐、出行等私人内容一律不写。\n"
                     "2. 只写消息里明确出现的事实，不推断，不补充外部信息。\n"
-                    "3. 尽可能简洁：每条以“- ”开头、一行说完；同一事项多次出现要合并成一条；"
-                    "总长度控制在 150 字以内。\n"
-                    "4. 按“近期任务”“达成的共识”两组输出，标题单独一行；"
-                    "某一组没有内容就不输出该标题。\n"
-                    "5. 不要复述消息原文，要归纳。\n"
-                    f"6. 既没有任务也没有共识时，只返回 {NO_USEFUL_PROFILE}，不要输出解释。"
+                    "3. 固定输出三行：是谁 / 什么职务 / 近期负责什么；"
+                    "某项没有信息就写“未知”；总长度 150 字以内。\n"
+                    "4. 不要复述消息原文，要归纳。\n"
+                    f"5. 三项都没有时只返回 {NO_USEFUL_PROFILE}，不要输出解释。"
                 ),
             },
             {
                 "role": "user",
                 "content": (
                     f"联系人发送的消息（已标注时间、会话类型和会话名称）：\n{context}\n\n"
-                    "请按上述要求输出该联系人近期的任务与达成的共识（简洁，只保留关键信息）："
+                    "请按上述要求输出这个人的画像（是谁 / 什么职务 / 近期负责什么）："
                 ),
             },
         ],
     }
     summary = _summarize(payload)
-    if not summary.strip() and payload["max_tokens"] < PROFILE_MAX_OUTPUT_TOKENS:
-        # The reasoning pass ate the whole budget on this attempt -- it varies
-        # run to run, so one retry at the ceiling is what makes this endpoint
-        # dependable instead of 50/50.
-        payload["max_tokens"] = PROFILE_MAX_OUTPUT_TOKENS
-        summary = _summarize(payload)
     if summary.strip().strip("`").upper() == NO_USEFUL_PROFILE:
         return {"summary": ""}
     if not summary:

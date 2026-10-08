@@ -132,6 +132,11 @@ class RagChunkIndex:
         protected_object_keys: tuple[str, ...] = (),
         size: int | None = None,
     ) -> list[SearchResult]:
+        page_size = size or (
+            request.top_k
+            if request.entry in {"sources", "export"}
+            else settings.bm25_top_k
+        )
         branches = [
             (settings.elasticsearch_display_read_index, _filters(request, branch_keys=branch_keys)),
         ]
@@ -147,16 +152,22 @@ class RagChunkIndex:
             ))
         output: list[SearchResult] = []
         for index, filters in branches:
-            response = self._search(
-                index=index,
-                query=_bm25_query(request.query, filters),
-                size=size or settings.bm25_top_k,
-                sort=(
-                    [{"sent_at": {"order": "desc", "missing": "_last"}}]
+            search_kwargs: dict[str, Any] = {
+                "index": index,
+                "query": _bm25_query(request.query, filters),
+                "size": page_size,
+                "sort": (
+                    [
+                        {"sent_at": {"order": "desc", "missing": "_last"}},
+                        {"chunk_id": {"order": "asc"}},
+                    ]
                     if not request.query.strip()
                     else None
                 ),
-            )
+            }
+            if request.offset:
+                search_kwargs["from_"] = request.offset
+            response = self._search(**search_kwargs)
             output.extend(_results(response))
         return _dedupe_display_protected(output)
 
@@ -247,6 +258,68 @@ class RagChunkIndex:
                 size=len(neighbor_indexes),
             )
             output.extend(_results(response))
+        unique: dict[str, SearchResult] = {}
+        for result in output:
+            unique[result.chunk_id] = result
+        return list(unique.values())
+
+    def search_message_context(
+        self,
+        request: SearchRequest,
+        anchors: list[dict[str, Any]],
+        *,
+        radius: int = 2,
+    ) -> list[SearchResult]:
+        """Messages either side of an anchor, inside the anchor's conversation.
+
+        A form value is often a bare line ("小呆呆") whose field word sits in a
+        neighbouring message. The window is pinned to the anchor's own
+        conversation by ordering on ``sent_at``; authorization still decides
+        which of those neighbours may be shown.
+        """
+
+        if radius < 1:
+            return []
+        output: list[SearchResult] = []
+        seen: set[str] = set()
+        for anchor in anchors:
+            if not isinstance(anchor, dict):
+                continue
+            conversation_id = str(anchor.get("conversation_id") or "").strip()
+            sent_at = str(anchor.get("sent_at") or "").strip()
+            resource_id = str(anchor.get("resource_id") or "").strip()
+            if not conversation_id or not sent_at:
+                continue
+            key = f"{conversation_id}:{resource_id}"
+            if key in seen:
+                continue
+            seen.add(key)
+            base_filters = _filters(request)
+            base_filters.extend(
+                [
+                    {"term": {"source_conversation_id": conversation_id}},
+                    {"term": {"resource_type": "message"}},
+                ]
+            )
+            if resource_id:
+                base_filters.append(
+                    {"bool": {"must_not": {"term": {"resource_id": resource_id}}}}
+                )
+            for direction, order in (("lt", "desc"), ("gt", "asc")):
+                filters = [
+                    *base_filters,
+                    {"range": {"sent_at": {direction: sent_at}}},
+                ]
+                response = self._search(
+                    index=settings.elasticsearch_display_read_index,
+                    query={"bool": {"filter": filters}},
+                    size=radius,
+                    sort=[
+                        {"sent_at": {"order": order}},
+                        {"chunk_id": {"order": order}},
+                    ],
+                )
+                output.extend(_results(response))
         unique: dict[str, SearchResult] = {}
         for result in output:
             unique[result.chunk_id] = result
@@ -413,6 +486,12 @@ def _filters(
         )
     if request.resource_ids:
         output.append({"terms": {"resource_id": list(request.resource_ids)}})
+    if request.content_contains:
+        output.extend(
+            {"match_phrase": {"content": value}}
+            for value in request.content_contains
+            if str(value or "").strip()
+        )
     if request.resource_types:
         output.append({"terms": {"resource_type": list(request.resource_types)}})
     if request.file_extensions:

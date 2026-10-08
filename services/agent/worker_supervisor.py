@@ -71,9 +71,22 @@ def main() -> None:
     env = _child_env()
     recovery_container = build_container(settings)
     try:
-        recovered = recovery_container.execution_service.resume_unfinished_tasks()
-        if recovered:
-            logger.info("re-queued %s unfinished tasks once for all workers", recovered)
+        try:
+            recovered = recovery_container.execution_service.resume_unfinished_tasks()
+        except Exception:
+            # A shared database can briefly hit max_connections while the rest
+            # of the stack is starting. That must not leave the supervisor
+            # absent; the workers and Redis wake-ups can recover once a slot
+            # becomes available.
+            logger.exception(
+                "initial unfinished-task recovery failed; starting workers anyway"
+            )
+        else:
+            if recovered:
+                logger.info(
+                    "re-queued %s unfinished tasks once for all workers",
+                    recovered,
+                )
     finally:
         recovery_container.close()
     children = {index: _spawn(index, env) for index in range(1, count + 1)}

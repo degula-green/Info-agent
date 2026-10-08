@@ -28,8 +28,10 @@ BOOTSTRAP_MIGRATIONS = [
     REPO_ROOT / "db" / "migrations" / "20261003_agent_conversation_memory_phase1.up.sql",
     REPO_ROOT / "db" / "migrations" / "20261003_agent_conversation_memory_phase2.up.sql",
     REPO_ROOT / "db" / "migrations" / "20261004_agent_plan_step_dependencies.up.sql",
+    REPO_ROOT / "db" / "migrations" / "20261008_agent_person_fact_snapshots.up.sql",
 ]
 BOOTSTRAP_ROLLBACKS = [
+    REPO_ROOT / "db" / "migrations" / "20261008_agent_person_fact_snapshots.down.sql",
     REPO_ROOT / "db" / "migrations" / "20261004_agent_plan_step_dependencies.down.sql",
     REPO_ROOT / "db" / "migrations" / "20261003_agent_conversation_memory_phase2.down.sql",
     REPO_ROOT / "db" / "migrations" / "20261003_agent_conversation_memory_phase1.down.sql",

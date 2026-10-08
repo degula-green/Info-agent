@@ -634,8 +634,26 @@ type Repository interface {
 	ListContactActivity(ctx context.Context, userID, platform string) ([]ContactActivity, error)
 	UpsertContactRelation(ctx context.Context, relation ContactRelationInput) (*ContactRelation, error)
 	DeleteContactRelation(ctx context.Context, userID, relationID string) error
+	// WechatContactBook is the owner-scoped snapshot of one WeChat owner's local
+	// contact book. Sync replaces the snapshot for one connector, and
+	// ListVisibleWechatContactsByName resolves a personal remark only for the
+	// owner and only when the matched identity is actually visible to them.
+	SyncWechatContactBook(ctx context.Context, ownerUserID, connectorID string, entries []WechatContactBookInput, complete bool) (int, error)
+	ListWechatContactBook(ctx context.Context, ownerUserID, connectorID string) ([]WechatContactBookEntry, error)
+	ListVisibleWechatContactsByName(ctx context.Context, ownerUserID, name string) ([]WechatContactMatch, error)
 	ListContactIdentities(ctx context.Context, userID, platform string) ([]ExternalIdentity, error)
 	ListContactMemberships(ctx context.Context, userID string) ([]ContactMembership, error)
+	ListVisibleIdentitiesByName(ctx context.Context, userID, name string) ([]ExternalIdentity, error)
+	// ListPrivateConversationIDs returns the 1:1 conversations an identity is
+	// part of. ownerScope widens it to every private chat the caller collects,
+	// which is what "my own private chats" means when the identity is the
+	// owner: nobody is recorded as a member of their own 1:1 chats.
+	ListPrivateConversationIDs(ctx context.Context, userID string, identityIDs []string, ownerScope bool) ([]string, error)
+	ListOwnIdentities(ctx context.Context, userID string) ([]ExternalIdentity, error)
+	// UpdateOwnIdentityDisplayName rewrites the caller's own display name for
+	// one platform. Feishu hands out a placeholder for some tenants, so the
+	// owner has to be able to correct the name their reports are titled with.
+	UpdateOwnIdentityDisplayName(ctx context.Context, userID, platform, displayName string) (int, error)
 	UpsertConversationMemberships(ctx context.Context, conversationID string, members []domain.AvailableMember) error
 	ListConversationMemberships(ctx context.Context, conversationID string) ([]domain.ConversationMembership, error)
 	CheckConversationMembership(ctx context.Context, conversationID, platform, workspaceKey, userID string) (known bool, member bool, err error)
@@ -667,6 +685,8 @@ type Repository interface {
 	ListContactFacts(ctx context.Context, senderIdentityIDs []string) ([]domain.ContactFact, error)
 	ListContactMessages(ctx context.Context, userID, organizationID string, senderIdentityIDs []string, limit int) ([]domain.Message, error)
 	ListAttachmentsForMessages(ctx context.Context, messageIDs []string) ([]domain.Attachment, error)
+	SearchAttachmentsByName(ctx context.Context, userID, name string, limit int) ([]domain.Attachment, error)
+	GetVisibleAttachment(ctx context.Context, userID, attachmentID string) (*domain.Attachment, error)
 	GetContactKnowledgeItem(ctx context.Context, messageID, attachmentID, organizationID string) (string, error)
 	GetPrivateShareReference(ctx context.Context, resourceID, resourceType string) (*domain.PrivateShareReference, error)
 	ListPrivateAccessRequests(ctx context.Context, userID, scope string) ([]domain.PrivateAccessRequest, error)
@@ -772,6 +792,8 @@ type ContactRelationInput struct {
 	OwnerUserID        string
 	ConnectorID        string
 	ExternalIdentityID string
+	Remark             string
+	NameCore           string
 }
 
 type ContactRelation struct {
@@ -779,7 +801,38 @@ type ContactRelation struct {
 	OwnerUserID      string
 	ConnectorID      string
 	ExternalIdentity ExternalIdentity
+	Remark           string
+	NameCore         string
 	Status           string
 	CreatedAt        time.Time
 	UpdatedAt        time.Time
+}
+
+// WechatContactBookInput is one owner-local contact row: a platform account id
+// plus the machine owner's own nickname and remark for it.
+type WechatContactBookInput struct {
+	ExternalUserID string
+	NickName       string
+	Remark         string
+	NameCore       string
+}
+
+type WechatContactBookEntry struct {
+	ID             string
+	OwnerUserID    string
+	ConnectorID    string
+	ExternalUserID string
+	NickName       string
+	Remark         string
+	NameCore       string
+	Status         string
+	SyncedAt       time.Time
+}
+
+// WechatContactMatch is a personal-remark hit that survived the visibility
+// gate: the matched identity is one the requesting owner can actually see.
+type WechatContactMatch struct {
+	ExternalIdentity ExternalIdentity
+	Remark           string
+	NameCore         string
 }

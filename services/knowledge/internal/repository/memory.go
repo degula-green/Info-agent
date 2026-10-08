@@ -38,6 +38,7 @@ type MemoryStore struct {
 	attachmentReceipts map[string]attachmentCursorReceipt
 	identities         map[string]ExternalIdentity
 	contactRelations   map[string]ContactRelation
+	wechatContactBook  map[string]WechatContactBookEntry
 	contactProfiles    map[string]domain.ContactProfile
 	memberships        map[string]domain.ConversationMembership
 	outbox             map[string]domain.OutboxEvent
@@ -62,7 +63,7 @@ func NewMemoryStore() *MemoryStore {
 		conversations: map[string]domain.ConversationIngestion{}, collectors: map[string]domain.Collector{},
 		messages: map[string]domain.Message{}, contactFacts: map[string][]domain.ContactFact{}, sources: map[string]domain.MessageSource{},
 		privateContent: map[string]string{},
-		attachments:    map[string]domain.Attachment{}, identities: map[string]ExternalIdentity{}, contactRelations: map[string]ContactRelation{}, contactProfiles: map[string]domain.ContactProfile{},
+		attachments:    map[string]domain.Attachment{}, identities: map[string]ExternalIdentity{}, contactRelations: map[string]ContactRelation{}, wechatContactBook: map[string]WechatContactBookEntry{}, contactProfiles: map[string]domain.ContactProfile{},
 		knowledgeItems: map[string]domain.KnowledgeItem{},
 		cursorReceipts: map[string]time.Time{}, attachmentReceipts: map[string]attachmentCursorReceipt{},
 		memberships:   map[string]domain.ConversationMembership{},
@@ -448,6 +449,14 @@ func (s *MemoryStore) SetConnectorDefaultOrganization(_ context.Context, connect
 func (s *MemoryStore) RestoreAuthorizationCollectors(_ context.Context, connectorID string, now time.Time) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.restoreAuthorizationCollectorsLocked(connectorID, now)
+	return nil
+}
+
+// restoreAuthorizationCollectorsLocked moves collectors parked on a revoked
+// connector of the same owner onto the live connector and marks every
+// recoverable collector active again. Callers must hold s.mu.
+func (s *MemoryStore) restoreAuthorizationCollectorsLocked(connectorID string, now time.Time) {
 	target, ok := s.connectors[connectorID]
 	if ok {
 		for id, c := range s.collectors {
@@ -471,7 +480,6 @@ func (s *MemoryStore) RestoreAuthorizationCollectors(_ context.Context, connecto
 		c.LastAttemptAt = &now
 		s.collectors[id] = c
 	}
-	return nil
 }
 
 func (s *MemoryStore) RevokeConnector(_ context.Context, userID, platform string) error {
@@ -742,6 +750,11 @@ func (s *MemoryStore) CompleteAgentPairing(_ context.Context, input AgentPairing
 		}
 	}
 	s.connectors[connector.ID] = connector
+	// Pairing revokes the previous device and parks this owner's WeChat
+	// conversation collectors on whichever connector used to own them. The new
+	// device collects through connector.ID, so recover those collectors; without
+	// this every attached conversation keeps reporting 异常 after a re-pair.
+	s.restoreAuthorizationCollectorsLocked(connector.ID, now)
 	if _, ok := s.wechatConfigs[connector.ID]; !ok {
 		s.wechatConfigs[connector.ID] = domain.WechatCollectionConfig{
 			ConnectorID: connector.ID, SelectedConversations: []string{},
@@ -1013,6 +1026,12 @@ func (s *MemoryStore) UpsertContactRelation(_ context.Context, input ContactRela
 			existing.ConnectorID = input.ConnectorID
 			existing.Status = "active"
 			existing.ExternalIdentity = identity
+			if input.Remark != "" {
+				existing.Remark = input.Remark
+			}
+			if input.NameCore != "" {
+				existing.NameCore = input.NameCore
+			}
 			existing.UpdatedAt = time.Now().UTC()
 			s.contactRelations[id] = existing
 			copy := existing
@@ -1020,7 +1039,7 @@ func (s *MemoryStore) UpsertContactRelation(_ context.Context, input ContactRela
 		}
 	}
 	now := time.Now().UTC()
-	relation := ContactRelation{ID: uuid.NewString(), OwnerUserID: input.OwnerUserID, ConnectorID: input.ConnectorID, ExternalIdentity: identity, Status: "active", CreatedAt: now, UpdatedAt: now}
+	relation := ContactRelation{ID: uuid.NewString(), OwnerUserID: input.OwnerUserID, ConnectorID: input.ConnectorID, ExternalIdentity: identity, Remark: input.Remark, NameCore: input.NameCore, Status: "active", CreatedAt: now, UpdatedAt: now}
 	s.contactRelations[relation.ID] = relation
 	copy := relation
 	return &copy, nil
@@ -1037,6 +1056,121 @@ func (s *MemoryStore) DeleteContactRelation(_ context.Context, userID, relationI
 	relation.UpdatedAt = time.Now().UTC()
 	s.contactRelations[relationID] = relation
 	return nil
+}
+
+func (s *MemoryStore) SyncWechatContactBook(_ context.Context, ownerUserID, connectorID string, entries []WechatContactBookInput, complete bool) (int, error) {
+	ownerUserID = strings.TrimSpace(ownerUserID)
+	connectorID = strings.TrimSpace(connectorID)
+	if ownerUserID == "" || connectorID == "" {
+		return 0, apperror.New("invalid_wechat_contact_book", "owner and connector are required", 400, false)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := time.Now().UTC()
+	synced := map[string]bool{}
+	count := 0
+	for _, entry := range entries {
+		externalUserID := strings.TrimSpace(entry.ExternalUserID)
+		if externalUserID == "" {
+			continue
+		}
+		synced[externalUserID] = true
+		key := ownerUserID + "\x00" + connectorID + "\x00" + externalUserID
+		record := s.wechatContactBook[key]
+		if record.ID == "" {
+			record.ID = uuid.NewString()
+		}
+		record.OwnerUserID = ownerUserID
+		record.ConnectorID = connectorID
+		record.ExternalUserID = externalUserID
+		record.NickName = strings.TrimSpace(entry.NickName)
+		record.Remark = strings.TrimSpace(entry.Remark)
+		record.NameCore = strings.TrimSpace(entry.NameCore)
+		record.Status = "active"
+		record.SyncedAt = now
+		s.wechatContactBook[key] = record
+		count++
+	}
+	if complete {
+		for key, record := range s.wechatContactBook {
+			if record.OwnerUserID != ownerUserID || record.ConnectorID != connectorID || record.Status != "active" {
+				continue
+			}
+			if !synced[record.ExternalUserID] {
+				record.Status = "removed"
+				record.SyncedAt = now
+				s.wechatContactBook[key] = record
+			}
+		}
+	}
+	return count, nil
+}
+
+func (s *MemoryStore) ListWechatContactBook(_ context.Context, ownerUserID, connectorID string) ([]WechatContactBookEntry, error) {
+	ownerUserID = strings.TrimSpace(ownerUserID)
+	connectorID = strings.TrimSpace(connectorID)
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := []WechatContactBookEntry{}
+	for _, record := range s.wechatContactBook {
+		if record.OwnerUserID == ownerUserID && record.ConnectorID == connectorID {
+			out = append(out, record)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ExternalUserID < out[j].ExternalUserID })
+	return out, nil
+}
+
+func (s *MemoryStore) ListVisibleWechatContactsByName(_ context.Context, ownerUserID, name string) ([]WechatContactMatch, error) {
+	ownerUserID = strings.TrimSpace(ownerUserID)
+	name = strings.TrimSpace(name)
+	if ownerUserID == "" || name == "" {
+		return []WechatContactMatch{}, nil
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	visible := s.visibleConversationIDsLocked(ownerUserID)
+	out := []WechatContactMatch{}
+	for _, record := range s.wechatContactBook {
+		if record.OwnerUserID != ownerUserID || record.Status != "active" {
+			continue
+		}
+		if record.NameCore != name && record.Remark != name && record.NickName != name {
+			continue
+		}
+		connector, ok := s.connectors[record.ConnectorID]
+		if !ok || connector.Status == domain.ConnectorRevoked {
+			continue
+		}
+		identity, ok := s.identities[connector.Platform+"|"+connector.WorkspaceKey+"|"+record.ExternalUserID]
+		if !ok || identity.ID == "" {
+			continue
+		}
+		// Visibility gate: a remark resolves only to an identity the owner can
+		// actually see, otherwise the caller gets "no match" rather than a
+		// person with no data behind them.
+		found := false
+		for _, message := range s.messages {
+			if message.SenderIdentityID == identity.ID && visible[message.ConversationID] {
+				found = true
+				break
+			}
+		}
+		if !found {
+			for _, membership := range s.memberships {
+				if membership.ExternalIdentityID == identity.ID && membership.Status == "active" && visible[membership.ConversationID] {
+					found = true
+					break
+				}
+			}
+		}
+		if !found {
+			continue
+		}
+		out = append(out, WechatContactMatch{ExternalIdentity: identity, Remark: record.Remark, NameCore: record.NameCore})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ExternalIdentity.ID < out[j].ExternalIdentity.ID })
+	return out, nil
 }
 
 func (s *MemoryStore) ListContactIdentities(_ context.Context, userID, platform string) ([]ExternalIdentity, error) {
@@ -1080,6 +1214,170 @@ func (s *MemoryStore) ListContactMemberships(_ context.Context, userID string) (
 			out = append(out, ContactMembership{Identity: identity, ConversationID: conversation.ID})
 		}
 	}
+	return out, nil
+}
+
+func (s *MemoryStore) visibleConversationIDsLocked(userID string) map[string]bool {
+	visible := map[string]bool{}
+	for id, conversation := range s.conversations {
+		if conversation.OwnerUserID == userID {
+			visible[id] = true
+		}
+	}
+	for _, collector := range s.collectors {
+		if collector.CollectorUserID == userID && collector.Status != domain.CollectorRemoved {
+			visible[collector.ConversationID] = true
+		}
+	}
+	return visible
+}
+
+func (s *MemoryStore) ListVisibleIdentitiesByName(_ context.Context, userID, name string) ([]ExternalIdentity, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return []ExternalIdentity{}, nil
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	visible := s.visibleConversationIDsLocked(userID)
+	out := []ExternalIdentity{}
+	for _, identity := range s.identities {
+		if identity.DisplayName != name {
+			continue
+		}
+		found := false
+		for _, message := range s.messages {
+			if message.SenderIdentityID == identity.ID && visible[message.ConversationID] {
+				found = true
+				break
+			}
+		}
+		if !found {
+			for _, membership := range s.memberships {
+				if membership.ExternalIdentityID == identity.ID && membership.Status == "active" && visible[membership.ConversationID] {
+					found = true
+					break
+				}
+			}
+		}
+		if found {
+			out = append(out, identity)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	return out, nil
+}
+
+func (s *MemoryStore) ListPrivateConversationIDs(_ context.Context, userID string, identityIDs []string, ownerScope bool) ([]string, error) {
+	if len(identityIDs) == 0 {
+		return []string{}, nil
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	visible := s.visibleConversationIDsLocked(userID)
+	seen := map[string]bool{}
+	out := []string{}
+	for _, identityID := range identityIDs {
+		identity, ok := s.identities[identityID]
+		if !ok {
+			continue
+		}
+		for id, conversation := range s.conversations {
+			if conversation.ConversationType != "private" || !visible[id] {
+				continue
+			}
+			if conversation.Platform != identity.Platform || conversation.WorkspaceKey != identity.WorkspaceKey {
+				continue
+			}
+			matches := conversation.ExternalConversationID == identity.ExternalUserID || ownerScope
+			if !matches {
+				for _, membership := range s.memberships {
+					if membership.ConversationID == id && membership.ExternalIdentityID == identityID && membership.Status == "active" {
+						matches = true
+						break
+					}
+				}
+			}
+			if matches && !seen[id] {
+				seen[id] = true
+				out = append(out, id)
+			}
+		}
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
+// ListOwnIdentities mirrors the Postgres rule: identities mapped to the user,
+// plus the platform account behind each of their live connectors. WeChat sends
+// your own messages under the base wxid while the connector key carries a
+// "_<suffix>" tail, so a prefix match also belongs to the caller.
+func (s *MemoryStore) UpdateOwnIdentityDisplayName(_ context.Context, userID, platform, displayName string) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	accounts := []domain.ConnectorAccount{}
+	for _, account := range s.connectors {
+		if account.OwnerUserID == userID && account.Status != domain.ConnectorRevoked {
+			accounts = append(accounts, account)
+		}
+	}
+	updated := 0
+	for key, identity := range s.identities {
+		if platform != "" && identity.Platform != platform {
+			continue
+		}
+		owned := identity.MappedUserID == userID
+		if !owned {
+			for _, account := range accounts {
+				if account.Platform != identity.Platform {
+					continue
+				}
+				if account.ExternalAccountID == identity.ExternalUserID ||
+					strings.HasPrefix(account.ExternalAccountID, identity.ExternalUserID+"_") {
+					owned = true
+					break
+				}
+			}
+		}
+		if !owned || identity.DisplayName == displayName {
+			continue
+		}
+		identity.DisplayName = displayName
+		s.identities[key] = identity
+		updated++
+	}
+	return updated, nil
+}
+
+func (s *MemoryStore) ListOwnIdentities(_ context.Context, userID string) ([]ExternalIdentity, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	accounts := []domain.ConnectorAccount{}
+	for _, account := range s.connectors {
+		if account.OwnerUserID == userID && account.Status != domain.ConnectorRevoked {
+			accounts = append(accounts, account)
+		}
+	}
+	out := []ExternalIdentity{}
+	for _, identity := range s.identities {
+		owned := identity.MappedUserID == userID
+		if !owned {
+			for _, account := range accounts {
+				if account.Platform != identity.Platform {
+					continue
+				}
+				if account.ExternalAccountID == identity.ExternalUserID ||
+					strings.HasPrefix(account.ExternalAccountID, identity.ExternalUserID+"_") {
+					owned = true
+					break
+				}
+			}
+		}
+		if owned {
+			out = append(out, identity)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
 	return out, nil
 }
 
@@ -2062,6 +2360,59 @@ func (s *MemoryStore) ListAttachmentsForMessages(_ context.Context, messageIDs [
 		return out[i].CreatedAt.Before(out[j].CreatedAt)
 	})
 	return out, nil
+}
+
+// attachmentVisibleLocked reports whether the user may read the attachment:
+// its conversation is one they own or collect, or it is their own local upload.
+func (s *MemoryStore) attachmentVisibleLocked(attachment domain.Attachment, userID string) bool {
+	if attachment.ConversationID == "" {
+		return attachment.UploadedByUserID == userID
+	}
+	return s.visibleConversationIDsLocked(userID)[attachment.ConversationID]
+}
+
+func (s *MemoryStore) SearchAttachmentsByName(_ context.Context, userID, name string, limit int) ([]domain.Attachment, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return []domain.Attachment{}, nil
+	}
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+	needle := strings.ToLower(name)
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := []domain.Attachment{}
+	for _, attachment := range s.attachments {
+		if !strings.Contains(strings.ToLower(attachment.FileName), needle) {
+			continue
+		}
+		if !s.attachmentVisibleLocked(attachment, userID) {
+			continue
+		}
+		out = append(out, cloneAttachment(attachment))
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].CreatedAt.Equal(out[j].CreatedAt) {
+			return out[i].ID < out[j].ID
+		}
+		return out[i].CreatedAt.After(out[j].CreatedAt)
+	})
+	if len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
+}
+
+func (s *MemoryStore) GetVisibleAttachment(_ context.Context, userID, attachmentID string) (*domain.Attachment, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	attachment, ok := s.attachments[attachmentID]
+	if !ok || !s.attachmentVisibleLocked(attachment, userID) {
+		return nil, apperror.New("attachment_not_found", "attachment not found", 404, false)
+	}
+	out := cloneAttachment(attachment)
+	return &out, nil
 }
 
 func (s *MemoryStore) GetContactKnowledgeItem(_ context.Context, messageID, attachmentID, organizationID string) (string, error) {

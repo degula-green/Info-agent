@@ -15,12 +15,19 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"info-agent/knowledge/internal/apperror"
 	"info-agent/knowledge/internal/domain"
 	"info-agent/knowledge/internal/privacy"
 	"info-agent/knowledge/internal/trace"
 )
+
+// sqlExec is satisfied by both *pgxpool.Pool and pgx.Tx so authorization
+// recovery can also run inside the pairing transaction.
+type sqlExec interface {
+	Exec(ctx context.Context, sql string, arguments ...any) (pgconn.CommandTag, error)
+}
 
 type PostgresStore struct {
 	pool      *pgxpool.Pool
@@ -393,11 +400,19 @@ func (s *PostgresStore) UpdateConnectorStatus(ctx context.Context, id, status, l
 }
 
 func (s *PostgresStore) RestoreAuthorizationCollectors(ctx context.Context, connectorID string, now time.Time) error {
-	_, err := s.pool.Exec(ctx, `UPDATE knowledge.conversation_collectors cc SET connector_account_id=$1,status='active',last_error=NULL,next_poll_at=NULL,updated_at=$2 WHERE cc.connector_account_id IN (SELECT old.id FROM knowledge.connector_accounts old JOIN knowledge.connector_accounts current ON current.owner_user_id=old.owner_user_id AND current.platform=old.platform WHERE current.id=$1 AND old.status='revoked') AND cc.status='unavailable' AND cc.last_error IN ('authorization_expired','refresh_token_invalid','connector_revoked','connector_replaced')`, connectorID, now)
+	return restoreAuthorizationCollectors(ctx, s.pool, connectorID, now)
+}
+
+// restoreAuthorizationCollectors moves collectors that were parked on a
+// revoked connector of the same owner onto the live connector and marks every
+// recoverable collector active again. Without it, conversations stay stuck on
+// 异常 after the device is revoked or re-paired even though collection resumes.
+func restoreAuthorizationCollectors(ctx context.Context, exec sqlExec, connectorID string, now time.Time) error {
+	_, err := exec.Exec(ctx, `UPDATE knowledge.conversation_collectors cc SET connector_account_id=$1,status='active',last_error=NULL,next_poll_at=NULL,updated_at=$2 WHERE cc.connector_account_id IN (SELECT old.id FROM knowledge.connector_accounts old JOIN knowledge.connector_accounts current ON current.owner_user_id=old.owner_user_id AND current.platform=old.platform WHERE current.id=$1 AND old.status='revoked') AND cc.status='unavailable' AND cc.last_error IN ('authorization_expired','refresh_token_invalid','connector_revoked','connector_replaced')`, connectorID, now)
 	if err != nil {
 		return dbError(err)
 	}
-	_, err = s.pool.Exec(ctx, `UPDATE knowledge.conversation_collectors SET status='active',last_error=NULL,next_poll_at=NULL,updated_at=$2 WHERE connector_account_id=$1 AND status='unavailable' AND last_error IN ('authorization_expired','refresh_token_invalid','connector_revoked','connector_replaced')`, connectorID, now)
+	_, err = exec.Exec(ctx, `UPDATE knowledge.conversation_collectors SET status='active',last_error=NULL,next_poll_at=NULL,updated_at=$2 WHERE connector_account_id=$1 AND status='unavailable' AND last_error IN ('authorization_expired','refresh_token_invalid','connector_revoked','connector_replaced')`, connectorID, now)
 	return dbError(err)
 }
 func (s *PostgresStore) RevokeConnector(ctx context.Context, userID, platformName string) error {
@@ -577,6 +592,14 @@ func (s *PostgresStore) CompleteAgentPairing(ctx context.Context, input AgentPai
 	if err != nil {
 		return nil, dbError(err)
 	}
+	// Pairing revokes the previous device and parks this owner's WeChat
+	// conversation collectors on whatever connector used to own them. The
+	// freshly paired device collects through saved.ID, so restore those
+	// collectors inside the same transaction; otherwise every attached
+	// conversation keeps reporting 异常 after a re-pair.
+	if err := restoreAuthorizationCollectors(ctx, tx, saved.ID, now); err != nil {
+		return nil, err
+	}
 	if _, err = tx.Exec(ctx, `INSERT INTO knowledge.wechat_collection_configs (connector_account_id,selected_conversations,enabled,listen_mode,created_at,updated_at) VALUES ($1,'[]'::jsonb,TRUE,'whitelist',$2,$2) ON CONFLICT (connector_account_id) DO NOTHING`, saved.ID, now); err != nil {
 		return nil, dbError(err)
 	}
@@ -672,6 +695,31 @@ func (s *PostgresStore) UpsertExternalIdentity(ctx context.Context, input Extern
 	return id, nil
 }
 
+// UpdateOwnIdentityDisplayName rewrites the caller's own identity labels for
+// one platform (the mapped identity, plus the connector account behind it).
+func (s *PostgresStore) UpdateOwnIdentityDisplayName(ctx context.Context, userID, platform, displayName string) (int, error) {
+	tag, err := s.pool.Exec(ctx, `UPDATE knowledge.external_identities ei
+		SET display_name=$3, updated_at=now()
+		WHERE ei.platform=$2
+		  AND COALESCE(ei.display_name,'') <> $3
+		  AND (
+		    ei.mapped_user_id = $1::uuid
+		    OR EXISTS (
+		      SELECT 1 FROM knowledge.connector_accounts ca
+		      WHERE ca.owner_user_id = $1::uuid AND ca.status <> 'revoked'
+		        AND ca.platform = ei.platform
+		        AND (
+		          ca.external_account_id = ei.external_user_id
+		          OR left(ca.external_account_id, length(ei.external_user_id)+1) = ei.external_user_id || '_'
+		        )
+		    )
+		  )`, userID, platform, displayName)
+	if err != nil {
+		return 0, dbError(err)
+	}
+	return int(tag.RowsAffected()), nil
+}
+
 func (s *PostgresStore) GetExternalIdentity(ctx context.Context, platform, workspaceKey, externalUserID string) (*ExternalIdentity, error) {
 	var identity ExternalIdentity
 	err := s.pool.QueryRow(ctx, `SELECT id::text,platform,platform_workspace_key,external_user_id,COALESCE(display_name,''),COALESCE(avatar_url,''),COALESCE(mapped_user_id::text,''),mapping_status FROM knowledge.external_identities WHERE platform=$1 AND platform_workspace_key IS NOT DISTINCT FROM $2 AND external_user_id=$3`, platform, workspaceKey, externalUserID).Scan(&identity.ID, &identity.Platform, &identity.WorkspaceKey, &identity.ExternalUserID, &identity.DisplayName, &identity.AvatarURL, &identity.MappedUserID, &identity.MappingStatus)
@@ -684,11 +732,11 @@ func (s *PostgresStore) GetExternalIdentity(ctx context.Context, platform, works
 	return &identity, nil
 }
 
-const contactRelationColumns = `cr.id::text,cr.owner_user_id::text,cr.connector_account_id::text,cr.status,cr.created_at,cr.updated_at,ei.id::text,ei.platform,ei.platform_workspace_key,ei.external_user_id,COALESCE(ei.display_name,''),COALESCE(ei.avatar_url,''),COALESCE(ei.mapped_user_id::text,''),ei.mapping_status`
+const contactRelationColumns = `cr.id::text,cr.owner_user_id::text,cr.connector_account_id::text,cr.status,cr.created_at,cr.updated_at,ei.id::text,ei.platform,ei.platform_workspace_key,ei.external_user_id,COALESCE(ei.display_name,''),COALESCE(ei.avatar_url,''),COALESCE(ei.mapped_user_id::text,''),ei.mapping_status,COALESCE(cr.remark,''),COALESCE(cr.name_core,'')`
 
 func scanContactRelation(row rowScanner) (*ContactRelation, error) {
 	var relation ContactRelation
-	err := row.Scan(&relation.ID, &relation.OwnerUserID, &relation.ConnectorID, &relation.Status, &relation.CreatedAt, &relation.UpdatedAt, &relation.ExternalIdentity.ID, &relation.ExternalIdentity.Platform, &relation.ExternalIdentity.WorkspaceKey, &relation.ExternalIdentity.ExternalUserID, &relation.ExternalIdentity.DisplayName, &relation.ExternalIdentity.AvatarURL, &relation.ExternalIdentity.MappedUserID, &relation.ExternalIdentity.MappingStatus)
+	err := row.Scan(&relation.ID, &relation.OwnerUserID, &relation.ConnectorID, &relation.Status, &relation.CreatedAt, &relation.UpdatedAt, &relation.ExternalIdentity.ID, &relation.ExternalIdentity.Platform, &relation.ExternalIdentity.WorkspaceKey, &relation.ExternalIdentity.ExternalUserID, &relation.ExternalIdentity.DisplayName, &relation.ExternalIdentity.AvatarURL, &relation.ExternalIdentity.MappedUserID, &relation.ExternalIdentity.MappingStatus, &relation.Remark, &relation.NameCore)
 	return &relation, err
 }
 
@@ -776,7 +824,7 @@ func (s *PostgresStore) UpsertContactRelation(ctx context.Context, input Contact
 		// Read the inserted row from the data-modifying CTE's RETURNING output.
 		// A same-statement SELECT from contact_relations uses the statement's
 		// original snapshot and cannot see a brand-new relation.
-		row := s.pool.QueryRow(ctx, `WITH upserted AS (INSERT INTO knowledge.contact_relations (owner_user_id,connector_account_id,external_identity_id,status) SELECT $1,ca.id,$3,'active' FROM knowledge.connector_accounts ca JOIN knowledge.external_identities ei ON ei.id=$3 WHERE ca.id=$2 AND ca.owner_user_id=$1 AND ca.status<>'revoked' AND ca.platform=ei.platform AND ca.platform_workspace_key IS NOT DISTINCT FROM ei.platform_workspace_key ON CONFLICT (owner_user_id,external_identity_id) DO UPDATE SET connector_account_id=EXCLUDED.connector_account_id,status='active',updated_at=now() RETURNING id,owner_user_id,connector_account_id,external_identity_id,status,created_at,updated_at) SELECT u.id::text,u.owner_user_id::text,u.connector_account_id::text,u.status,u.created_at,u.updated_at,ei.id::text,ei.platform,ei.platform_workspace_key,ei.external_user_id,COALESCE(ei.display_name,''),COALESCE(ei.avatar_url,''),COALESCE(ei.mapped_user_id::text,''),ei.mapping_status FROM upserted u JOIN knowledge.external_identities ei ON ei.id=u.external_identity_id`, input.OwnerUserID, input.ConnectorID, input.ExternalIdentityID)
+		row := s.pool.QueryRow(ctx, `WITH upserted AS (INSERT INTO knowledge.contact_relations AS cr (owner_user_id,connector_account_id,external_identity_id,status,remark,name_core) SELECT $1,ca.id,$3,'active',NULLIF($4,''),NULLIF($5,'') FROM knowledge.connector_accounts ca JOIN knowledge.external_identities ei ON ei.id=$3 WHERE ca.id=$2 AND ca.owner_user_id=$1 AND ca.status<>'revoked' AND ca.platform=ei.platform AND ca.platform_workspace_key IS NOT DISTINCT FROM ei.platform_workspace_key ON CONFLICT (owner_user_id,external_identity_id) DO UPDATE SET connector_account_id=EXCLUDED.connector_account_id,status='active',remark=COALESCE(EXCLUDED.remark,cr.remark),name_core=COALESCE(EXCLUDED.name_core,cr.name_core),updated_at=now() RETURNING id,owner_user_id,connector_account_id,external_identity_id,status,created_at,updated_at,remark,name_core) SELECT u.id::text,u.owner_user_id::text,u.connector_account_id::text,u.status,u.created_at,u.updated_at,ei.id::text,ei.platform,ei.platform_workspace_key,ei.external_user_id,COALESCE(ei.display_name,''),COALESCE(ei.avatar_url,''),COALESCE(ei.mapped_user_id::text,''),ei.mapping_status,COALESCE(u.remark,''),COALESCE(u.name_core,'') FROM upserted u JOIN knowledge.external_identities ei ON ei.id=u.external_identity_id`, input.OwnerUserID, input.ConnectorID, input.ExternalIdentityID, input.Remark, input.NameCore)
 		var scanErr error
 		relation, scanErr = scanContactRelation(row)
 		return scanErr
@@ -799,6 +847,110 @@ func (s *PostgresStore) DeleteContactRelation(ctx context.Context, userID, relat
 		return apperror.New("contact_not_found", "contact relation was not found", 404, false)
 	}
 	return nil
+}
+
+func (s *PostgresStore) SyncWechatContactBook(ctx context.Context, ownerUserID, connectorID string, entries []WechatContactBookInput, complete bool) (int, error) {
+	ownerUserID = strings.TrimSpace(ownerUserID)
+	connectorID = strings.TrimSpace(connectorID)
+	if ownerUserID == "" || connectorID == "" {
+		return 0, apperror.New("invalid_wechat_contact_book", "owner and connector are required", 400, false)
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return 0, dbError(err)
+	}
+	defer tx.Rollback(ctx)
+	now := time.Now().UTC()
+	synced := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		externalUserID := strings.TrimSpace(entry.ExternalUserID)
+		if externalUserID == "" {
+			continue
+		}
+		if _, err = tx.Exec(ctx, `INSERT INTO knowledge.wechat_contact_book (owner_user_id,connector_account_id,external_user_id,nick_name,remark,name_core,status,synced_at) VALUES ($1,$2,$3,$4,$5,$6,'active',$7) ON CONFLICT (owner_user_id,connector_account_id,external_user_id) DO UPDATE SET nick_name=EXCLUDED.nick_name,remark=EXCLUDED.remark,name_core=EXCLUDED.name_core,status='active',synced_at=EXCLUDED.synced_at,updated_at=now()`, ownerUserID, connectorID, externalUserID, strings.TrimSpace(entry.NickName), strings.TrimSpace(entry.Remark), strings.TrimSpace(entry.NameCore), now); err != nil {
+			return 0, dbError(err)
+		}
+		synced = append(synced, externalUserID)
+	}
+	if complete {
+		if len(synced) == 0 {
+			_, err = tx.Exec(ctx, `UPDATE knowledge.wechat_contact_book SET status='removed',updated_at=now() WHERE owner_user_id=$1 AND connector_account_id=$2 AND status='active'`, ownerUserID, connectorID)
+		} else {
+			_, err = tx.Exec(ctx, `UPDATE knowledge.wechat_contact_book SET status='removed',updated_at=now() WHERE owner_user_id=$1 AND connector_account_id=$2 AND status='active' AND external_user_id <> ALL($3::text[])`, ownerUserID, connectorID, synced)
+		}
+		if err != nil {
+			return 0, dbError(err)
+		}
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return 0, dbError(err)
+	}
+	return len(synced), nil
+}
+
+func (s *PostgresStore) ListWechatContactBook(ctx context.Context, ownerUserID, connectorID string) ([]WechatContactBookEntry, error) {
+	rows, err := s.pool.Query(ctx, `SELECT id::text,owner_user_id::text,connector_account_id::text,external_user_id,nick_name,remark,name_core,status,synced_at FROM knowledge.wechat_contact_book WHERE owner_user_id=$1 AND connector_account_id=$2 ORDER BY external_user_id`, strings.TrimSpace(ownerUserID), strings.TrimSpace(connectorID))
+	if err != nil {
+		return nil, dbError(err)
+	}
+	defer rows.Close()
+	out := []WechatContactBookEntry{}
+	for rows.Next() {
+		var entry WechatContactBookEntry
+		if err := rows.Scan(&entry.ID, &entry.OwnerUserID, &entry.ConnectorID, &entry.ExternalUserID, &entry.NickName, &entry.Remark, &entry.NameCore, &entry.Status, &entry.SyncedAt); err != nil {
+			return nil, dbError(err)
+		}
+		out = append(out, entry)
+	}
+	return out, dbError(rows.Err())
+}
+
+// ListVisibleWechatContactsByName resolves an owner's own WeChat remark to the
+// matched identities, but only when that identity is actually visible to the
+// owner (a sender in one of their accessible conversations, or an active
+// member of one). An invisible match is dropped so the caller sees "no match"
+// instead of a person with no data.
+func (s *PostgresStore) ListVisibleWechatContactsByName(ctx context.Context, ownerUserID, name string) ([]WechatContactMatch, error) {
+	ownerUserID = strings.TrimSpace(ownerUserID)
+	name = strings.TrimSpace(name)
+	if ownerUserID == "" || name == "" {
+		return []WechatContactMatch{}, nil
+	}
+	rows, err := s.pool.Query(ctx, `SELECT ei.id::text,ei.platform,COALESCE(ei.platform_workspace_key,''),ei.external_user_id,COALESCE(ei.display_name,''),COALESCE(ei.avatar_url,''),COALESCE(ei.mapped_user_id::text,''),ei.mapping_status,COALESCE(b.remark,''),COALESCE(b.name_core,'')
+		FROM knowledge.wechat_contact_book b
+		JOIN knowledge.connector_accounts ca ON ca.id=b.connector_account_id AND ca.status<>'revoked'
+		JOIN knowledge.external_identities ei ON ei.platform=ca.platform AND ei.platform_workspace_key IS NOT DISTINCT FROM ca.platform_workspace_key AND ei.external_user_id=b.external_user_id
+		WHERE b.owner_user_id=$1
+		  AND b.status='active'
+		  AND (b.name_core=$2 OR b.remark=$2 OR b.nick_name=$2)
+		  AND (
+		    EXISTS (
+		      SELECT 1 FROM knowledge.messages m
+		      JOIN knowledge.conversation_ingestions ci ON ci.id=m.conversation_ingestion_id
+		      LEFT JOIN knowledge.conversation_collectors cc ON cc.conversation_ingestion_id=ci.id AND cc.collector_user_id=$1 AND cc.status<>'removed'
+		      WHERE m.sender_identity_id=ei.id AND m.lifecycle_status='active' AND (ci.owner_user_id=$1 OR cc.id IS NOT NULL)
+		    )
+		    OR EXISTS (
+		      SELECT 1 FROM knowledge.conversation_memberships cm
+		      JOIN knowledge.conversation_ingestions ci ON ci.id=cm.conversation_ingestion_id
+		      LEFT JOIN knowledge.conversation_collectors cc ON cc.conversation_ingestion_id=ci.id AND cc.collector_user_id=$1 AND cc.status<>'removed'
+		      WHERE cm.external_identity_id=ei.id AND cm.status='active' AND (ci.owner_user_id=$1 OR cc.id IS NOT NULL)
+		    )
+		  )
+		ORDER BY b.name_core, ei.id::text`, ownerUserID, name)
+	if err != nil {
+		return nil, dbError(err)
+	}
+	defer rows.Close()
+	out := []WechatContactMatch{}
+	for rows.Next() {
+		var match WechatContactMatch
+		if err := rows.Scan(&match.ExternalIdentity.ID, &match.ExternalIdentity.Platform, &match.ExternalIdentity.WorkspaceKey, &match.ExternalIdentity.ExternalUserID, &match.ExternalIdentity.DisplayName, &match.ExternalIdentity.AvatarURL, &match.ExternalIdentity.MappedUserID, &match.ExternalIdentity.MappingStatus, &match.Remark, &match.NameCore); err != nil {
+			return nil, dbError(err)
+		}
+		out = append(out, match)
+	}
+	return out, dbError(rows.Err())
 }
 
 func bindExternalIdentityTx(ctx context.Context, tx pgx.Tx, input ExternalIdentityInput) error {
@@ -2341,6 +2493,63 @@ func (s *PostgresStore) ListAttachmentsForMessages(ctx context.Context, messageI
 	return out, s.enrichAttachmentRAG(ctx, out)
 }
 
+// visibleAttachmentPredicate restricts attachments to the ones the user may
+// read: attachments of the conversations they own or collect, plus their own
+// local uploads. $1 is always the caller's user id.
+const visibleAttachmentPredicate = `(
+	(a.conversation_ingestion_id IS NOT NULL AND EXISTS (
+		SELECT 1 FROM knowledge.conversation_ingestions ci
+		WHERE ci.id=a.conversation_ingestion_id
+		  AND (ci.owner_user_id=$1::uuid
+		       OR EXISTS (SELECT 1 FROM knowledge.conversation_collectors cc
+		                  WHERE cc.conversation_ingestion_id=ci.id
+		                    AND cc.collector_user_id=$1::uuid
+		                    AND cc.status<>'removed'))
+	))
+	OR (a.conversation_ingestion_id IS NULL AND a.uploaded_by_user_id=$1::uuid)
+)`
+
+// SearchAttachmentsByName is the metadata half of template discovery: the
+// collected documents whose file name contains the query. Content search is a
+// separate pass because a template may be stored under an unrelated name.
+func (s *PostgresStore) SearchAttachmentsByName(ctx context.Context, userID, name string, limit int) ([]domain.Attachment, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return []domain.Attachment{}, nil
+	}
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+	rows, err := s.pool.Query(ctx, `SELECT `+attachmentColumns+` FROM knowledge.attachments a WHERE COALESCE(a.file_name,'') ILIKE '%'||$2||'%' AND `+visibleAttachmentPredicate+` ORDER BY a.created_at DESC,a.id LIMIT $3`, userID, name, limit)
+	if err != nil {
+		return nil, dbError(err)
+	}
+	defer rows.Close()
+	out := []domain.Attachment{}
+	for rows.Next() {
+		attachment, scanErr := scanAttachment(rows)
+		if scanErr != nil {
+			return nil, dbError(scanErr)
+		}
+		out = append(out, *attachment)
+	}
+	return out, dbError(rows.Err())
+}
+
+// GetVisibleAttachment returns one attachment only when it is inside the
+// caller's visible set, so the Agent can stream a collected template without
+// holding a knowledge-level read grant.
+func (s *PostgresStore) GetVisibleAttachment(ctx context.Context, userID, attachmentID string) (*domain.Attachment, error) {
+	attachment, err := scanAttachment(s.pool.QueryRow(ctx, `SELECT `+attachmentColumns+` FROM knowledge.attachments a WHERE a.id=$2::uuid AND `+visibleAttachmentPredicate, userID, attachmentID))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, apperror.New("attachment_not_found", "attachment not found", 404, false)
+	}
+	if err != nil {
+		return nil, dbError(err)
+	}
+	return attachment, nil
+}
+
 func (s *PostgresStore) GetContactKnowledgeItem(ctx context.Context, messageID, attachmentID, organizationID string) (string, error) {
 	var id string
 	err := s.pool.QueryRow(ctx, `SELECT COALESCE(
@@ -2924,6 +3133,123 @@ func (s *PostgresStore) ListContactMemberships(ctx context.Context, userID strin
 	return out, dbError(rows.Err())
 }
 
+// ListVisibleIdentitiesByName resolves a person name against identities the
+// user can actually see: senders in accessible conversations, or active
+// members of them. It is the V1 lookup behind /people/resolve.
+func (s *PostgresStore) ListVisibleIdentitiesByName(ctx context.Context, userID, name string) ([]ExternalIdentity, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return []ExternalIdentity{}, nil
+	}
+	rows, err := s.pool.Query(ctx, `SELECT DISTINCT ei.id::text,ei.platform,ei.platform_workspace_key,ei.external_user_id,COALESCE(ei.display_name,''),COALESCE(ei.avatar_url,''),COALESCE(ei.mapped_user_id::text,''),ei.mapping_status
+		FROM knowledge.external_identities ei
+		WHERE COALESCE(ei.display_name,'')=$2
+		  AND (
+		    EXISTS (
+		      SELECT 1 FROM knowledge.messages m
+		      JOIN knowledge.conversation_ingestions ci ON ci.id=m.conversation_ingestion_id
+		      LEFT JOIN knowledge.conversation_collectors cc ON cc.conversation_ingestion_id=ci.id AND cc.collector_user_id=$1 AND cc.status<>'removed'
+		      WHERE m.sender_identity_id=ei.id AND m.lifecycle_status='active' AND (ci.owner_user_id=$1 OR cc.id IS NOT NULL)
+		    )
+		    OR EXISTS (
+		      SELECT 1 FROM knowledge.conversation_memberships cm
+		      JOIN knowledge.conversation_ingestions ci ON ci.id=cm.conversation_ingestion_id
+		      LEFT JOIN knowledge.conversation_collectors cc ON cc.conversation_ingestion_id=ci.id AND cc.collector_user_id=$1 AND cc.status<>'removed'
+		      WHERE cm.external_identity_id=ei.id AND cm.status='active' AND (ci.owner_user_id=$1 OR cc.id IS NOT NULL)
+		    )
+		  )
+		ORDER BY ei.id::text`, userID, name)
+	if err != nil {
+		return nil, dbError(err)
+	}
+	defer rows.Close()
+	out := []ExternalIdentity{}
+	for rows.Next() {
+		var v ExternalIdentity
+		if err := rows.Scan(&v.ID, &v.Platform, &v.WorkspaceKey, &v.ExternalUserID, &v.DisplayName, &v.AvatarURL, &v.MappedUserID, &v.MappingStatus); err != nil {
+			return nil, dbError(err)
+		}
+		out = append(out, v)
+	}
+	return out, dbError(rows.Err())
+}
+
+// ListPrivateConversationIDs returns the private conversations between the
+// user and any of the given identities. Private chats are located by the
+// conversation (not the sender) because a connector may persist its own
+// identity as the sender.
+func (s *PostgresStore) ListPrivateConversationIDs(ctx context.Context, userID string, identityIDs []string, ownerScope bool) ([]string, error) {
+	if len(identityIDs) == 0 {
+		return []string{}, nil
+	}
+	// "My own private chats" cannot be derived from memberships -- nobody is
+	// recorded as a member of their own 1:1 chats -- so the owner's scope is
+	// every private conversation they collect.
+	rows, err := s.pool.Query(ctx, `SELECT DISTINCT ci.id::text
+		FROM knowledge.external_identities ei
+		JOIN knowledge.conversation_ingestions ci ON ci.conversation_type='private'
+		  AND ci.platform=ei.platform
+		  AND ci.platform_workspace_key IS NOT DISTINCT FROM ei.platform_workspace_key
+		  AND (
+		    ci.external_conversation_id=ei.external_user_id
+		    OR EXISTS (SELECT 1 FROM knowledge.conversation_memberships cm WHERE cm.conversation_ingestion_id=ci.id AND cm.external_identity_id=ei.id AND cm.status='active')
+		    OR (
+		      $3
+		      AND EXISTS (SELECT 1 FROM knowledge.conversation_collectors cc2 WHERE cc2.conversation_ingestion_id=ci.id AND cc2.collector_user_id=$1 AND cc2.status<>'removed')
+		    )
+		  )
+		LEFT JOIN knowledge.conversation_collectors cc ON cc.conversation_ingestion_id=ci.id AND cc.collector_user_id=$1 AND cc.status<>'removed'
+		WHERE ei.id = ANY($2::uuid[]) AND (ci.owner_user_id=$1 OR cc.id IS NOT NULL)
+		ORDER BY ci.id::text`, userID, identityIDs, ownerScope)
+	if err != nil {
+		return nil, dbError(err)
+	}
+	defer rows.Close()
+	out := []string{}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, dbError(err)
+		}
+		out = append(out, id)
+	}
+	return out, dbError(rows.Err())
+}
+
+// ListOwnIdentities returns the identities that belong to the caller: the ones
+// the connectors mapped to them, plus the platform account behind each
+// connector. WeChat sends your own messages under the base wxid while the
+// connector key carries a "_<suffix>" tail, so a connector id also matches the
+// identities it prefixes.
+func (s *PostgresStore) ListOwnIdentities(ctx context.Context, userID string) ([]ExternalIdentity, error) {
+	rows, err := s.pool.Query(ctx, `SELECT DISTINCT ei.id::text,ei.platform,ei.platform_workspace_key,ei.external_user_id,COALESCE(ei.display_name,''),COALESCE(ei.avatar_url,''),COALESCE(ei.mapped_user_id::text,''),ei.mapping_status
+		FROM knowledge.external_identities ei
+		WHERE ei.mapped_user_id=$1::uuid
+		   OR EXISTS (
+		     SELECT 1 FROM knowledge.connector_accounts ca
+		     WHERE ca.owner_user_id=$1::uuid AND ca.status<>'revoked'
+		       AND ca.platform=ei.platform
+		       AND (
+		         ca.external_account_id=ei.external_user_id
+		         OR left(ca.external_account_id,length(ei.external_user_id)+1)=ei.external_user_id||'_'
+		       )
+		   )
+		ORDER BY ei.id::text`, userID)
+	if err != nil {
+		return nil, dbError(err)
+	}
+	defer rows.Close()
+	out := []ExternalIdentity{}
+	for rows.Next() {
+		var v ExternalIdentity
+		if err := rows.Scan(&v.ID, &v.Platform, &v.WorkspaceKey, &v.ExternalUserID, &v.DisplayName, &v.AvatarURL, &v.MappedUserID, &v.MappingStatus); err != nil {
+			return nil, dbError(err)
+		}
+		out = append(out, v)
+	}
+	return out, dbError(rows.Err())
+}
+
 const knowledgeItemColumns = `ki.id::text,COALESCE(ki.knowledge_base_id::text,''),ki.knowledge_scope,ki.access_scope,COALESCE(ki.owner_user_id::text,''),COALESCE(ki.organization_id::text,''),COALESCE(ki.conversation_ingestion_id::text,''),COALESCE(ci.external_conversation_id,''),COALESCE(ci.conversation_type,''),ki.source_type,COALESCE(ki.source_message_id::text,''),COALESCE(ki.source_attachment_id::text,''),COALESCE(ki.source_private_item_id::text,''),COALESCE(ki.share_request_id,''),COALESCE(ki.share_batch_id::text,''),COALESCE(ki.shared_by_user_id::text,''),ki.shared_at,ki.content_type,ki.content_ref,COALESCE(ki.original_content_ref,''),ki.content_hash,ki.content_version,ki.content_visibility,ki.original_access_required,ki.security_status,COALESCE(ki.sensitivity,''),COALESCE(ki.security_policy_version,''),ki.content_saved,ki.ownership_ready,ki.security_ready,ki.permission_ready,ki.acl_version,ki.acl_sync_status,ki.processing_status,ki.lifecycle_status,(ki.source_type='shared_private_item' OR ki.original_access_required),COALESCE(ki.last_error,''),COALESCE(ki.rag_status,'pending'),COALESCE(ki.rag_source_event_id::text,''),COALESCE(ki.rag_job_id::text,''),COALESCE(ki.rag_content_version,0),COALESCE(ki.rag_acl_version,0),ki.rag_started_at,ki.rag_finished_at,COALESCE(ki.rag_last_error,''),COALESCE(ki.rag_result,'{}'::jsonb),ki.created_at,ki.updated_at`
 
 func scanKnowledgeItem(row rowScanner) (*domain.KnowledgeItem, error) {
@@ -3328,6 +3654,18 @@ func (s *PostgresStore) TryMarkKnowledgeReady(ctx context.Context, id, traceID s
 	}
 	if item.ProcessingStatus == "processing" || item.ProcessingStatus == "ready" {
 		return false, nil
+	}
+	if !item.ContentSaved && item.SourceAttachmentID != "" {
+		// Heal an upload that stored its object before the permission gate
+		// opened: the bytes are there, so the item is content-saved.
+		if _, err = tx.Exec(ctx, `UPDATE knowledge.knowledge_items ki SET content_ref=a.object_ref,content_hash=a.content_hash,content_saved=TRUE,updated_at=now() FROM knowledge.attachments a WHERE ki.id=$1 AND a.id=ki.source_attachment_id AND a.content_status='ready' AND COALESCE(a.object_ref,'')<>''`, id); err != nil {
+			return false, dbError(err)
+		}
+		refreshed, refreshErr := scanKnowledgeItem(tx.QueryRow(ctx, `SELECT `+knowledgeItemColumns+` FROM knowledge.knowledge_items ki LEFT JOIN knowledge.conversation_ingestions ci ON ci.id=ki.conversation_ingestion_id WHERE ki.id=$1`, id))
+		if refreshErr != nil {
+			return false, dbError(refreshErr)
+		}
+		item = refreshed
 	}
 	if !item.ContentSaved || !item.OwnershipReady || !item.SecurityReady || !item.PermissionReady || item.ACLSyncStatus != "synced" {
 		return false, nil
@@ -3960,7 +4298,15 @@ func (s *PostgresStore) FinalizeLocalUpload(ctx context.Context, requestID, obje
 	}
 	a = *scanned
 	a.AccessScope = a.ContentAccessScope
-	if _, err = tx.Exec(ctx, `UPDATE knowledge.knowledge_items SET content_ref=$2,content_hash=$3,content_saved=true,processing_status='ready',lifecycle_status='ready',updated_at=now() WHERE source_attachment_id=$1 AND ownership_ready AND security_ready AND permission_ready AND acl_sync_status='synced' AND acl_version>0`, a.ID, objectRef, contentHash); err != nil {
+	// The object is stored, so the content is saved regardless of how far the
+	// permission gate has progressed. Conflating the two left a local upload
+	// that finished before its permission sync permanently stuck: content_saved
+	// stayed false, TryMarkKnowledgeReady refused to queue it, and the file was
+	// never indexed.
+	if _, err = tx.Exec(ctx, `UPDATE knowledge.knowledge_items SET content_ref=$2,content_hash=$3,content_saved=true,updated_at=now() WHERE source_attachment_id=$1`, a.ID, objectRef, contentHash); err != nil {
+		return nil, dbError(err)
+	}
+	if _, err = tx.Exec(ctx, `UPDATE knowledge.knowledge_items SET processing_status='ready',lifecycle_status='ready',updated_at=now() WHERE source_attachment_id=$1 AND ownership_ready AND security_ready AND permission_ready AND acl_sync_status='synced' AND acl_version>0`, a.ID); err != nil {
 		return nil, dbError(err)
 	}
 	var resourceID string

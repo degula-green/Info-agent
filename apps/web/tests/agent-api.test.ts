@@ -910,6 +910,60 @@ test('Agent SSE parsing resumes after the last sequence', async () => {
   assert.match(urls[1], /after=1/)
 })
 
+test('Agent SSE reports a healthy segment end as waiting, not reconnect', async () => {
+  installStorage()
+  let streamCalls = 0
+  globalThis.fetch = async (input) => {
+    const url = String(input)
+    if (url.endsWith('/auth/me')) return json({ id: USER_ID, email: 'user@example.com', nickname: 'user', status: 'active' })
+    streamCalls += 1
+    if (streamCalls === 1) return sse(taskEvent(1, 'task.planning'))
+    return sse(taskEvent(2, 'task.completed', { answer: '完成' }))
+  }
+
+  const waiting: number[] = []
+  const reconnects: number[] = []
+  await streamAgentTaskEvents(
+    'task-1',
+    {
+      onEvent: (event) => event.event_type !== 'task.completed',
+      onWaiting: (segment) => waiting.push(segment),
+      onReconnect: (attempt) => reconnects.push(attempt),
+    },
+    { maxReconnects: 1 },
+  )
+
+  assert.deepEqual(waiting, [1])
+  assert.deepEqual(reconnects, [])
+})
+
+test('Agent SSE reports a request failure as reconnect, not waiting', async () => {
+  installStorage()
+  let streamCalls = 0
+  globalThis.fetch = async (input) => {
+    const url = String(input)
+    if (url.endsWith('/auth/me')) return json({ id: USER_ID, email: 'user@example.com', nickname: 'user', status: 'active' })
+    streamCalls += 1
+    if (streamCalls === 1) return json({ error: 'temporary' }, 503)
+    return sse(taskEvent(2, 'task.completed', { answer: '完成' }))
+  }
+
+  const waiting: number[] = []
+  const reconnects: number[] = []
+  await streamAgentTaskEvents(
+    'task-1',
+    {
+      onEvent: (event) => event.event_type !== 'task.completed',
+      onWaiting: (segment) => waiting.push(segment),
+      onReconnect: (attempt) => reconnects.push(attempt),
+    },
+    { maxReconnects: 1 },
+  )
+
+  assert.deepEqual(waiting, [])
+  assert.deepEqual(reconnects, [1])
+})
+
 test('Agent SSE tracks the answer cursor separately from the task cursor', async () => {
   installStorage()
   const urls: string[] = []

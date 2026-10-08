@@ -168,6 +168,9 @@ class MultiShardWeChatDB(WeChatDB):
 def current_runtime() -> RuntimeState:
     return _runtime_var.get() or _default_runtime
 
+def set_bootstrap_error(value: str | None) -> None:
+    current_runtime().bootstrap_error = value
+
 @contextmanager
 def use_runtime(runtime: RuntimeState):
     token = _runtime_var.set(runtime)
@@ -217,6 +220,7 @@ discovery_lock = threading.Lock()
 last_bootstrap_at = 0.0
 last_device_heartbeat_at = 0.0
 last_discovery_at = 0.0
+last_contact_sync_at = 0.0
 worker_thread: threading.Thread | None = None
 discovery_thread: threading.Thread | None = None
 
@@ -249,16 +253,16 @@ def load_state() -> None:
         binding.update(value.get("binding") or {})
     except (FileNotFoundError, ValueError, OSError): pass
 def bootstrap_from_knowledge() -> None:
-    global binding, config, bootstrap_error
+    global binding, config
     local_binding = dict(binding)
     binding.clear()
     config.clear(); config.update({"selected_conversations": [], "history_start_at": None, "enabled": True, "listen_mode": "whitelist", "connector_id": ""})
-    bootstrap_error = None
+    set_bootstrap_error(None)
     try:
         device_id = str(device_identity.get("device_id") or "").strip()
         device_key = str(device_identity.get("device_key") or "").strip()
         if not device_id or not device_key:
-            bootstrap_error = "agent is not paired; complete device pairing first"
+            set_bootstrap_error("agent is not paired; complete device pairing first")
             save_state()
             return
         result = knowledge(
@@ -266,7 +270,7 @@ def bootstrap_from_knowledge() -> None:
             + urllib.parse.quote(device_id)
         )
         if str(result.get("status") or "") != "bound":
-            bootstrap_error = "agent device has no active connector assignment"
+            set_bootstrap_error("agent device has no active connector assignment")
             save_state()
             return
         entry = result
@@ -283,11 +287,11 @@ def bootstrap_from_knowledge() -> None:
         if not local_wxid:
             local_wxid = wxid
         if not wxid or not db_dir or not local_wxid:
-            bootstrap_error = "local pairing state is missing its WeChat path"
+            set_bootstrap_error("local pairing state is missing its WeChat path")
             save_state()
             return
         if not same_wechat_account(local_wxid, wxid):
-            bootstrap_error = "local WeChat path does not match the assigned connector"
+            set_bootstrap_error("local WeChat path does not match the assigned connector")
             save_state()
             return
         binding.update({"wxid": wxid, "db_dir": db_dir, "status": runtime.get("status") or "running", "connector_id": connector.get("id")})
@@ -300,16 +304,17 @@ def bootstrap_from_knowledge() -> None:
             device_identity.clear()
             binding.clear()
             save_state()
-            bootstrap_error = "agent device is expired or revoked; pair it again"
+            set_bootstrap_error("agent device is expired or revoked; pair it again")
             return
-        bootstrap_error = f"Knowledge bootstrap failed: {exc}"[:500]
+        set_bootstrap_error(f"Knowledge bootstrap failed: {exc}"[:500])
     except Exception as exc:
-        bootstrap_error = f"Knowledge bootstrap failed: {exc}"[:500]
+        set_bootstrap_error(f"Knowledge bootstrap failed: {exc}"[:500])
 
 def ensure_bootstrap() -> bool:
     """Retry Knowledge bootstrap after startup ordering or transient outages."""
-    global db, media, last_bootstrap_at, bootstrap_error
-    if binding.get("status") == "running" and db is not None and config.get("connector_id"):
+    global last_bootstrap_at
+    runtime = current_runtime()
+    if binding.get("status") == "running" and runtime.db is not None and config.get("connector_id"):
         return True
     now = time.time()
     retry_interval = max(1.0, float(os.getenv("WECHAT_BOOTSTRAP_RETRY_INTERVAL", "5")))
@@ -322,14 +327,14 @@ def ensure_bootstrap() -> bool:
     try:
         opened = open_db(str(binding["db_dir"]), str(binding["wxid"]))
         with lock:
-            db = opened
-            media = MediaDownloader(opened)
-        bootstrap_error = None
+            runtime.db = opened
+            runtime.media = MediaDownloader(opened)
+        set_bootstrap_error(None)
         return True
     except Exception as exc:
         binding["status"] = "error"
         binding["last_error"] = str(exc)[:500]
-        bootstrap_error = f"WeChat database bootstrap failed: {exc}"[:500]
+        set_bootstrap_error(f"WeChat database bootstrap failed: {exc}"[:500])
         return False
 
 def send_device_heartbeat(*, force: bool = False) -> bool:
@@ -361,19 +366,28 @@ def save_state() -> None:
     path = state_path(); path.parent.mkdir(parents=True, exist_ok=True); temp = path.with_suffix(path.suffix + ".tmp")
     temp.write_text(json.dumps({"device": dict(device_identity), "binding": dict(binding), "checkpoints": checkpoints, "replayed_media": {key: sorted(values) for key, values in replayed_media.items()}}, ensure_ascii=False), encoding="utf-8"); temp.replace(path)
 
-def auth_headers_for(path: str, method: str, body: bytes | None) -> dict[str, str]:
+def auth_headers_for(
+    path: str,
+    method: str,
+    body: bytes | None,
+    *,
+    payload_hash: str | None = None,
+) -> dict[str, str]:
     device_id = str(device_identity.get("device_id") or "").strip()
     device_key = str(device_identity.get("device_key") or "").strip()
     if device_id and device_key:
         timestamp = str(int(time.time()))
         request_path = urllib.parse.urlsplit(path).path
-        payload_hash = hashlib.sha256(body or b"").hexdigest()
-        signed = f"{timestamp}\n{method.upper()}\n{request_path}\n{payload_hash}"
+        # A multipart attachment upload declares the file's content hash, not
+        # the hash of the multipart envelope; the Knowledge service verifies
+        # that this header equals meta.content_hash.
+        declared_hash = payload_hash or hashlib.sha256(body or b"").hexdigest()
+        signed = f"{timestamp}\n{method.upper()}\n{request_path}\n{declared_hash}"
         signature = hmac.new(device_key.encode("utf-8"), signed.encode("utf-8"), hashlib.sha256).hexdigest()
         return {
             "X-Agent-Device-Key": device_key,
             "X-Agent-Timestamp": timestamp,
-            "X-Agent-Payload-Hash": payload_hash,
+            "X-Agent-Payload-Hash": declared_hash,
             "X-Agent-Signature": signature,
         }
     return {"X-Service-Token": os.getenv("KNOWLEDGE_INTERNAL_SERVICE_TOKEN", "local-development-only")}
@@ -757,7 +771,7 @@ def upload_attachment(collector_id: str, attachment_id: str, path: Path, name: s
     base = os.getenv("KNOWLEDGE_BASE_URL", "http://127.0.0.1:8090").rstrip("/")
     path_value = f"/api/knowledge/v1/internal/collectors/{collector_id}/attachments"
     headers = {"Content-Type": f"multipart/form-data; boundary={boundary}", "Accept": "application/json"}
-    headers.update(auth_headers_for(path_value, "POST", body))
+    headers.update(auth_headers_for(path_value, "POST", body, payload_hash=digest))
     request = urllib.request.Request(f"{base}{path_value}", data=body, method="POST", headers=headers)
     with urllib.request.urlopen(request, timeout=60) as response: return json.loads(response.read().decode() or "{}")
 
@@ -994,6 +1008,53 @@ def collect_once() -> None:
         # stale failure after the collector has recovered.
         binding.pop("last_error", None)
 
+def contact_book_snapshot() -> list[dict[str, str]] | None:
+    """Read the local WeChat contact table.
+
+    Returns ``None`` when no contact table is available so the caller can skip
+    the sync instead of mistaking a missing database for an empty contact book
+    and wiping the owner's stored snapshot.
+    """
+    if not db:
+        return None
+    files = getattr(db, "_db_files", None)
+    if not files:
+        return None
+    for rel, path, _ in files:
+        if Path(path).name != "contact.db":
+            continue
+        conn = db._open(rel)
+        try:
+            records = conn.execute(
+                "SELECT username,nick_name,remark FROM contact ORDER BY id ASC"
+            ).fetchall()
+        finally:
+            conn.close()
+        return [
+            {
+                "external_user_id": str(row["username"] or ""),
+                "nick_name": str(row["nick_name"] or ""),
+                "remark": str(row["remark"] or ""),
+            }
+            for row in records
+            if str(row["username"] or "").strip()
+        ]
+    return None
+
+def sync_contact_book() -> None:
+    """Push the owner's local contact book to Knowledge, owner-scoped there."""
+    connector_id = str(binding.get("connector_id") or config.get("connector_id") or "").strip()
+    if not connector_id:
+        return
+    items = contact_book_snapshot()
+    if items is None:
+        return
+    knowledge(
+        "/api/knowledge/v1/internal/wechat/contacts",
+        "POST",
+        {"connector_id": connector_id, "items": items, "complete": True},
+    )
+
 def discover_conversations() -> dict[str, Any]:
     connector_id = str(binding.get("connector_id") or config.get("connector_id") or "").strip()
     if db is None or not connector_id:
@@ -1060,7 +1121,7 @@ def group_members(chat_id: str) -> list[dict[str, str]]:
     return []
 
 def collector_worker() -> None:
-    global last_discovery_at
+    global last_discovery_at, last_contact_sync_at
     while True:
         try:
             if not ensure_bootstrap():
@@ -1069,6 +1130,8 @@ def collector_worker() -> None:
             send_device_heartbeat()
             if time.time() - last_discovery_at >= float(os.getenv("WECHAT_DISCOVERY_INTERVAL", "60")):
                 refresh_discovery(); last_discovery_at = time.time()
+            if time.time() - last_contact_sync_at >= float(os.getenv("WECHAT_CONTACT_SYNC_INTERVAL", "3600")):
+                sync_contact_book(); last_contact_sync_at = time.time()
             collect_once()
         except Exception as exc: binding["last_error"] = str(exc)[:500]
         time.sleep(float(os.getenv("WECHAT_COLLECTOR_POLL_INTERVAL", "5")))
@@ -1247,10 +1310,10 @@ def pair_local_device(
     save_state()
     bootstrap_from_knowledge()
     send_device_heartbeat(force=True)
-    return {"device": dict(device_identity), "binding": dict(binding), "bootstrap_error": bootstrap_error}
+    return {"device": dict(device_identity), "binding": dict(binding), "bootstrap_error": current_runtime().bootstrap_error}
 
 @app.get("/health")
-def health() -> dict[str, Any]: return {"service": "wechat-collector", "status": "degraded" if bootstrap_error else "ok", "bound": bool(binding), "bootstrap_error": bootstrap_error}
+def health() -> dict[str, Any]: return {"service": "wechat-collector", "status": "degraded" if current_runtime().bootstrap_error else "ok", "bound": bool(binding), "bootstrap_error": current_runtime().bootstrap_error}
 @app.get("/device")
 def device_status(x_collector_token: str | None = Header(default=None)) -> dict[str, Any]:
     auth(x_collector_token)
@@ -1260,7 +1323,7 @@ def device_status(x_collector_token: str | None = Header(default=None)) -> dict[
         "connector_id": binding.get("connector_id") or "",
         "wxid": binding.get("wxid") or "",
         "status": binding.get("status") or "unbound",
-        "bootstrap_error": bootstrap_error,
+        "bootstrap_error": current_runtime().bootstrap_error,
     }
 @app.get("/local/accounts")
 def local_accounts(x_collector_token: str | None = Header(default=None)) -> dict[str, Any]:
@@ -1331,7 +1394,7 @@ def pair_device(req: PairDeviceRequest, x_collector_token: str | None = Header(d
 def bootstrap_device(x_collector_token: str | None = Header(default=None)) -> dict[str, Any]:
     auth(x_collector_token)
     bootstrap_from_knowledge()
-    return {"status": binding.get("status") or "unbound", "bound": bool(binding), "bootstrap_error": bootstrap_error}
+    return {"status": binding.get("status") or "unbound", "bound": bool(binding), "bootstrap_error": current_runtime().bootstrap_error}
 @app.get("/status")
 def status(x_collector_token: str | None = Header(default=None)) -> dict[str, Any]: auth(x_collector_token); return {"status": binding.get("status", "stopped"), **binding}
 @app.post("/stop")
@@ -1391,7 +1454,9 @@ def save_config(value: dict[str, Any], x_collector_token: str | None = Header(de
 
 if binding.get("status") == "running" and binding.get("db_dir") and binding.get("wxid"):
     try:
-        db = open_db(str(binding["db_dir"]), str(binding["wxid"])); media = MediaDownloader(db)
+        _runtime = current_runtime()
+        _runtime.db = open_db(str(binding["db_dir"]), str(binding["wxid"]))
+        _runtime.media = MediaDownloader(_runtime.db)
         refresh_discovery()
     except Exception as exc:
         binding["status"] = "error"; binding["last_error"] = str(exc)[:500]; save_state()

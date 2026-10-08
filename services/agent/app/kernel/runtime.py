@@ -654,6 +654,23 @@ class AgentRuntime:
             "fallback_reason": getattr(
                 self.understanding_provider, "last_fallback_reason", None
             ),
+            # Optional Jev boundary questions. They explain why the primary
+            # classifier chose person.query vs knowledge.answer.
+            "subject_kind": getattr(
+                self.understanding_provider, "last_subject_kind", None
+            ),
+            "query_focus": getattr(
+                self.understanding_provider, "last_query_focus", None
+            ),
+            "aux_confidence": getattr(
+                self.understanding_provider, "last_aux_confidence", None
+            ),
+            "combined_intent": getattr(
+                self.understanding_provider, "last_combined_intent", None
+            ),
+            "combined_reason": getattr(
+                self.understanding_provider, "last_combined_reason", None
+            ),
             # Generic names; the laya_* pair below is kept for existing
             # dashboards built before Jev could be the primary classifier.
             "primary_confidence": primary_confidence,
@@ -2580,6 +2597,30 @@ def _result_preview(capability: str, output: dict[str, Any]) -> dict[str, Any] |
             "item_count": len(observed),
             "written_range": str(output.get("written_range") or ""),
             "verified": bool(output.get("verified")),
+        }
+    if capability == "report.weekly":
+        # The card needs the artifact id, the resolved period and the source
+        # list; the .docx body never travels through the event stream.
+        return {
+            "block_type": "report",
+            "summary": str(output.get("message") or ""),
+            "status": str(output.get("status") or ""),
+            "title": str(output.get("title") or ""),
+            "subject_name": str(output.get("subject_name") or ""),
+            "period": str(output.get("period") or ""),
+            "file_name": str(output.get("file_name") or ""),
+            "attachment_id": str(output.get("attachment_id") or ""),
+            "size_bytes": int(output.get("size_bytes") or 0),
+            "expires_at": str(output.get("expires_at") or ""),
+            "template_origin": str(output.get("template_origin") or ""),
+            "citations": [
+                item for item in (output.get("citations") or []) if isinstance(item, dict)
+            ][:30],
+            "candidates": [
+                item
+                for item in (output.get("candidates") or [])
+                if isinstance(item, dict)
+            ][:10],
         }
     return None
 

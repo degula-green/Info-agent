@@ -499,7 +499,7 @@ func registerUserRoutes(r *gin.Engine, app *App, prefix string) {
 		}
 		items := make([]publicContact, 0, len(out))
 		for _, value := range out {
-			items = append(items, publicContact{ID: value.ID, Kind: value.Kind, InternalUserID: value.InternalUserID, DisplayName: value.DisplayName, Identities: value.Identities, ConversationIDs: value.ConversationIDs, MessageCount: value.MessageCount, AttachmentCount: value.AttachmentCount})
+			items = append(items, publicContact{ID: value.ID, Kind: value.Kind, InternalUserID: value.InternalUserID, DisplayName: value.DisplayName, Remark: value.Remark, NameCore: value.NameCore, Identities: value.Identities, ConversationIDs: value.ConversationIDs, MessageCount: value.MessageCount, AttachmentCount: value.AttachmentCount})
 		}
 		c.JSON(http.StatusOK, gin.H{"items": items})
 	})
@@ -512,7 +512,7 @@ func registerUserRoutes(r *gin.Engine, app *App, prefix string) {
 		}
 		items := make([]publicAvailableContact, 0, len(out))
 		for _, value := range out {
-			items = append(items, publicAvailableContact{ExternalUserID: value.ExternalUserID, DisplayName: value.DisplayName, AvatarURL: value.AvatarURL, Email: value.Email, Department: value.Department, JobTitle: value.JobTitle, Selected: value.Selected})
+			items = append(items, publicAvailableContact{ExternalUserID: value.ExternalUserID, DisplayName: value.DisplayName, AvatarURL: value.AvatarURL, Email: value.Email, Department: value.Department, JobTitle: value.JobTitle, Remark: value.Remark, Selected: value.Selected})
 		}
 		c.JSON(http.StatusOK, gin.H{"items": items})
 	})
@@ -523,17 +523,37 @@ func registerUserRoutes(r *gin.Engine, app *App, prefix string) {
 			ExternalUserID string `json:"external_user_id"`
 			DisplayName    string `json:"display_name"`
 			AvatarURL      string `json:"avatar_url"`
+			Remark         string `json:"remark"`
 		}
 		if err := c.ShouldBindJSON(&body); err != nil {
 			writeError(c, apperror.New("invalid_request", "invalid contact request", 400, false))
 			return
 		}
-		out, err := app.Service.AttachContact(c, p.UserID, body.Platform, body.ExternalUserID, body.DisplayName, body.AvatarURL)
+		out, err := app.Service.AttachContact(c, p.UserID, body.Platform, body.ExternalUserID, body.DisplayName, body.AvatarURL, body.Remark)
 		if err != nil {
 			writeError(c, err)
 			return
 		}
-		c.JSON(http.StatusCreated, publicContact{ID: out.ID, Kind: out.Kind, InternalUserID: out.InternalUserID, DisplayName: out.DisplayName, Identities: out.Identities, ConversationIDs: out.ConversationIDs})
+		c.JSON(http.StatusCreated, publicContact{ID: out.ID, Kind: out.Kind, InternalUserID: out.InternalUserID, DisplayName: out.DisplayName, Remark: out.Remark, NameCore: out.NameCore, Identities: out.Identities, ConversationIDs: out.ConversationIDs})
+	})
+	g.POST("/people/resolve", func(c *gin.Context) {
+		p := principal(c)
+		var body struct {
+			Name string `json:"name"`
+		}
+		if err := c.ShouldBindJSON(&body); err != nil {
+			writeError(c, apperror.New("invalid_request", "invalid person request", 400, false))
+			return
+		}
+		subject, matches, err := app.Service.ResolvePerson(c, p.UserID, body.Name)
+		if err != nil {
+			writeError(c, err)
+			return
+		}
+		if matches == nil {
+			matches = []domain.PersonMatch{}
+		}
+		c.JSON(http.StatusOK, gin.H{"subject_name": subject, "matches": matches})
 	})
 	g.DELETE("/contacts/:contact_id", func(c *gin.Context) {
 		if err := app.Service.RemoveContact(c, principal(c).UserID, c.Param("contact_id")); err != nil {
@@ -1407,6 +1427,27 @@ func registerInternalRoutes(r *gin.Engine, app *App, prefix string) {
 		}
 		c.JSON(http.StatusOK, publicDiscoveryFromDomain(out))
 	})
+	g.POST("/wechat/contacts", func(c *gin.Context) {
+		var body struct {
+			ConnectorID string                      `json:"connector_id"`
+			Items       []domain.WechatContactEntry `json:"items"`
+			Complete    bool                        `json:"complete"`
+		}
+		if err := c.ShouldBindJSON(&body); err != nil || strings.TrimSpace(body.ConnectorID) == "" {
+			writeError(c, apperror.New("invalid_request", "invalid contact book payload", 400, false))
+			return
+		}
+		if !serviceAuthorized(c) && !deviceCanAccessConnector(c, app, agentDevice(c), body.ConnectorID) {
+			writeError(c, apperror.Clone(apperror.ErrForbidden))
+			return
+		}
+		synced, err := app.Service.ReportWechatContacts(c, body.ConnectorID, body.Items, body.Complete)
+		if err != nil {
+			writeError(c, err)
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"synced": synced})
+	})
 	g.POST("/:platform/discovery", func(c *gin.Context) {
 		if !serviceAuthorized(c) {
 			writeError(c, apperror.Clone(apperror.ErrUnauthorized))
@@ -1721,6 +1762,169 @@ func registerInternalRoutes(r *gin.Engine, app *App, prefix string) {
 		}
 		c.JSON(http.StatusOK, snapshot)
 	})
+	g.POST("/agent/people-resolve", func(c *gin.Context) {
+		if !agentCaller(c) {
+			return
+		}
+		userID := strings.TrimSpace(c.GetHeader("X-User-ID"))
+		if userID == "" {
+			writeError(c, apperror.New("invalid_user", "X-User-ID is required", 400, false))
+			return
+		}
+		var body struct {
+			Name string `json:"name"`
+		}
+		if err := c.ShouldBindJSON(&body); err != nil {
+			writeError(c, apperror.New("invalid_request", "invalid person request", 400, false))
+			return
+		}
+		subject, matches, err := app.Service.ResolvePerson(c, userID, body.Name)
+		if err != nil {
+			writeError(c, err)
+			return
+		}
+		if matches == nil {
+			matches = []domain.PersonMatch{}
+		}
+		c.JSON(http.StatusOK, gin.H{"subject_name": subject, "matches": matches})
+	})
+	// The owner's own name on a platform. Feishu sometimes only exposes a
+	// placeholder, and that placeholder must not become the report title.
+	g.POST("/agent/self-name", func(c *gin.Context) {
+		if !agentCaller(c) {
+			return
+		}
+		userID := strings.TrimSpace(c.GetHeader("X-User-ID"))
+		if userID == "" {
+			writeError(c, apperror.New("invalid_user", "X-User-ID is required", 400, false))
+			return
+		}
+		var body struct {
+			Platform    string `json:"platform"`
+			DisplayName string `json:"display_name"`
+		}
+		if err := c.ShouldBindJSON(&body); err != nil {
+			writeError(c, apperror.New("invalid_request", "invalid self name request", 400, false))
+			return
+		}
+		updated, err := app.Service.SetSelfDisplayName(c, userID, body.Platform, body.DisplayName)
+		if err != nil {
+			writeError(c, err)
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"updated": updated})
+	})
+	// The Agent treats this as a person profile cache: it is not the source of
+	// truth, but when the contact already has a generated profile or extracted
+	// facts it avoids rebuilding the whole message archive for one question.
+	g.POST("/agent/people-profile", func(c *gin.Context) {
+		if !agentCaller(c) {
+			return
+		}
+		userID := strings.TrimSpace(c.GetHeader("X-User-ID"))
+		if userID == "" {
+			writeError(c, apperror.New("invalid_user", "X-User-ID is required", 400, false))
+			return
+		}
+		var body struct {
+			RelationIDs    []string `json:"relation_ids"`
+			OrganizationID string   `json:"organization_id"`
+		}
+		if err := c.ShouldBindJSON(&body); err != nil {
+			writeError(c, apperror.New("invalid_request", "invalid profile request", 400, false))
+			return
+		}
+		var detail *domain.ContactDetail
+		for _, relationID := range body.RelationIDs {
+			candidate, err := app.Service.GetContact(
+				c,
+				userID,
+				strings.TrimSpace(relationID),
+				strings.TrimSpace(body.OrganizationID),
+			)
+			if err != nil || candidate == nil {
+				continue
+			}
+			if strings.TrimSpace(candidate.Profile.Summary) != "" ||
+				len(candidate.Facts) > 0 ||
+				len(candidate.Attachments) > 0 {
+				detail = candidate
+				break
+			}
+		}
+		if detail == nil {
+			c.JSON(http.StatusOK, gin.H{
+				"relation_id":  "",
+				"display_name": "",
+				"profile":      nil,
+				"facts":        []domain.ContactFact{},
+				"attachments":  []domain.Attachment{},
+			})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{
+			"relation_id":  detail.ID,
+			"display_name": detail.DisplayName,
+			"profile":      detail.Profile,
+			"facts":        detail.Facts,
+			"attachments":  detail.Attachments,
+		})
+	})
+	// Weekly-report template discovery. The Agent searches by file name, then
+	// streams the chosen template's original bytes so it can render that exact
+	// layout instead of regenerating one.
+	g.GET("/agent/attachments", func(c *gin.Context) {
+		if !agentCaller(c) {
+			return
+		}
+		userID := strings.TrimSpace(c.GetHeader("X-User-ID"))
+		if userID == "" {
+			writeError(c, apperror.New("invalid_user", "X-User-ID is required", 400, false))
+			return
+		}
+		limit, _ := strconv.Atoi(c.DefaultQuery("limit", "50"))
+		items, err := app.Service.SearchVisibleAttachments(c, userID, c.Query("name"), limit)
+		if err != nil {
+			writeError(c, err)
+			return
+		}
+		out := make([]gin.H, 0, len(items))
+		for _, item := range items {
+			out = append(out, gin.H{
+				"attachment_id":   item.ID,
+				"file_name":       item.FileName,
+				"mime_type":       item.MIMEType,
+				"size_bytes":      item.SizeBytes,
+				"content_status":  item.ContentStatus,
+				"content_hash":    item.ContentHash,
+				"conversation_id": item.ConversationID,
+				"created_at":      item.CreatedAt,
+			})
+		}
+		c.JSON(http.StatusOK, gin.H{"items": out})
+	})
+	g.GET("/agent/attachments/:attachment_id/content", func(c *gin.Context) {
+		if !agentCaller(c) {
+			return
+		}
+		userID := strings.TrimSpace(c.GetHeader("X-User-ID"))
+		if userID == "" {
+			writeError(c, apperror.New("invalid_user", "X-User-ID is required", 400, false))
+			return
+		}
+		attachment, reader, err := app.Service.OpenVisibleAttachment(c, userID, c.Param("attachment_id"))
+		if err != nil {
+			writeError(c, err)
+			return
+		}
+		defer reader.Close()
+		c.Header("Content-Type", attachment.MIMEType)
+		c.Header("Content-Disposition", `attachment; filename="`+safeHeaderName(attachment.FileName)+`"`)
+		if attachment.SizeBytes > 0 {
+			c.Header("Content-Length", strconv.FormatInt(attachment.SizeBytes, 10))
+		}
+		_, _ = io.Copy(c.Writer, reader)
+	})
 }
 
 func agentCaller(c *gin.Context) bool {
@@ -1993,7 +2197,7 @@ func serviceTokenPathAllowed(path string) bool {
 	if strings.Contains(path, "/internal/knowledge/") || strings.Contains(path, "/internal/attachments/") || strings.Contains(path, "/internal/agent/") {
 		return true
 	}
-	if strings.HasSuffix(path, "/internal/worker/publish") || strings.HasSuffix(path, "/internal/fixtures/replay") || strings.HasSuffix(path, "/internal/wechat/assignments") || strings.HasSuffix(path, "/internal/wechat/bootstrap") || strings.HasSuffix(path, "/internal/wechat/discovery") || strings.HasSuffix(path, "/internal/feishu/discovery") {
+	if strings.HasSuffix(path, "/internal/worker/publish") || strings.HasSuffix(path, "/internal/fixtures/replay") || strings.HasSuffix(path, "/internal/wechat/assignments") || strings.HasSuffix(path, "/internal/wechat/bootstrap") || strings.HasSuffix(path, "/internal/wechat/discovery") || strings.HasSuffix(path, "/internal/wechat/contacts") || strings.HasSuffix(path, "/internal/feishu/discovery") {
 		return true
 	}
 	if !strings.Contains(path, "/internal/collectors/") {

@@ -1,8 +1,16 @@
-"""Integrity checks for the intent-v6 Laya datasets.
+"""Integrity checks for the Laya intent datasets.
 
 The fine-tuning script fails on bad labels and leakage at training time; these
 offline checks make the same guarantees visible in the normal test run, and pin
 the coverage the migration document requires.
+
+The JSONL fixtures below are frozen artifacts built for the intent-v6 label
+set. ``person.query`` and ``report.weekly`` were added in intent-v7 and are
+recognised by the remote Jev provider, whose criteria are sent per request.
+Extending the Laya datasets for the new labels is deferred with the Laya
+pipeline itself (the pinned checkpoint already fails the v7 contract check via
+``LayaUnderstandingProvider``), so coverage is asserted over the labels the
+fixtures actually carry.
 """
 
 from __future__ import annotations
@@ -21,6 +29,12 @@ MIGRATED_PATHS = (
     FIXTURES / "laya_intent_eval.jsonl",
     FIXTURES / "laya_intent_eval2.jsonl",
 )
+
+# Labels that exist in the live contract but not yet in the frozen Laya
+# datasets. Keep this list shrink-only: it must be empty once the datasets are
+# regenerated.
+DEFERRED_LABELS = frozenset({"person.query", "report.weekly"})
+FROZEN_LABELS = set(INTENT_OPTION_ORDER) - DEFERRED_LABELS
 
 
 def load(path: Path) -> list[dict]:
@@ -42,17 +56,17 @@ def normalize(text: str) -> str:
 def test_training_set_meets_coverage_target() -> None:
     rows = load(TRAIN_PATH)
     counts = Counter(row["intent"] for row in rows)
-    assert set(counts) == set(INTENT_OPTION_ORDER)
+    assert set(counts) == FROZEN_LABELS
     assert len(rows) >= 700
-    for name in INTENT_OPTION_ORDER:
+    for name in FROZEN_LABELS:
         assert counts[name] >= 100, f"{name}: {counts[name]}"
 
 
 def test_frozen_evaluation_set_meets_coverage_target() -> None:
     rows = load(EVAL_V6_PATH)
     counts = Counter(row["intent"] for row in rows)
-    assert set(counts) == set(INTENT_OPTION_ORDER)
-    for name in INTENT_OPTION_ORDER:
+    assert set(counts) == FROZEN_LABELS
+    for name in FROZEN_LABELS:
         assert counts[name] >= 30, f"{name}: {counts[name]}"
     handwritten = {" ".join(row["text"].split()) for row in load(HANDWRITTEN_PATH)}
     assert handwritten, "the hand-written evaluation split is empty"

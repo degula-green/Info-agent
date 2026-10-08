@@ -43,6 +43,10 @@ class SearchSourcesInput(BaseModel):
     sender_ids: list[str] = Field(default_factory=list, max_length=10)
     conversation_names: list[str] = Field(default_factory=list, max_length=10)
     conversation_ids: list[str] = Field(default_factory=list, max_length=10)
+    # A phrase that must appear in the resource body. Used to keep a subject
+    # lookup honest: BM25 matches "深空公司" and "公司" alike, so a caller that
+    # needs the full subject name adds it here and the index enforces it.
+    content_contains: list[str] = Field(default_factory=list, max_length=5)
     occurred_after: str | None = None
     occurred_before: str | None = None
     attachment_types: list[str] = Field(default_factory=list, max_length=5)
@@ -53,6 +57,10 @@ class SearchSourcesInput(BaseModel):
     )
     include_personal: bool = False
     top_k: int = Field(default=20, ge=1, le=50)
+    # Paging for callers that need the whole set ("everything he ever sent")
+    # rather than the newest page. The index sorts newest-first when the query
+    # is empty, so offset walks backwards through time deterministically.
+    offset: int = Field(default=0, ge=0, le=100000)
 
 
 class SourceInfo(BaseModel):
@@ -91,7 +99,15 @@ class SearchContentInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     query: str = Field(min_length=1, max_length=500)
-    resource_ids: list[str] = Field(default_factory=list, max_length=20)
+    # The RAG service accepts 100 per call; a wider scope is chunked by the
+    # caller instead of being silently dropped here.
+    resource_ids: list[str] = Field(default_factory=list, max_length=100)
+    # A person's scope can also be expressed as filters, which is what lets one
+    # query cover the whole window instead of enumerating every resource id:
+    # what he sent, the chats he is part of, and what mentions him.
+    sender_ids: list[str] = Field(default_factory=list, max_length=20)
+    conversation_ids: list[str] = Field(default_factory=list, max_length=20)
+    content_contains: list[str] = Field(default_factory=list, max_length=10)
     knowledge_base_ids: list[str] = Field(default_factory=list, max_length=5)
     include_personal: bool = False
     restrict_to_resource_ids: bool = False
@@ -165,6 +181,9 @@ class KnowledgeAnswerInput(BaseModel):
     # The user's timezone, so evidence timestamps can be rendered locally
     # instead of leaving the model to convert UTC in its head.
     timezone: str | None = Field(default=None, max_length=64)
+    # A caller that scoped the retrieval to a subject ("深空公司") knows why
+    # the evidence is empty; saying so beats the generic empty-result line.
+    empty_answer: str | None = Field(default=None, max_length=300)
 
 
 class KnowledgeAnswerPlanInput(BaseModel):
@@ -180,6 +199,11 @@ class KnowledgeAnswerPlanInput(BaseModel):
     sources_ref: StepOutputRef | None = Field(
         default=None,
         description="引用更早 knowledge.search_sources 步骤输出的 sources",
+    )
+    empty_answer: str | None = Field(
+        default=None,
+        description="检索结果为空时直接返回的说明，例如“没有找到深空公司的资料”。",
+        max_length=300,
     )
 
 
@@ -227,12 +251,14 @@ class KnowledgeSearchSourcesCapability:
             "sender_names": arguments.sender_names,
             "conversation_ids": arguments.conversation_ids,
             "conversation_names": arguments.conversation_names,
+            "content_contains": arguments.content_contains,
             "resource_types": arguments.resource_types,
             "file_extensions": _attachment_extensions(arguments.attachment_types),
             "message_types": arguments.message_types,
             "occurred_after": arguments.occurred_after,
             "occurred_before": arguments.occurred_before,
             "top_k": arguments.top_k,
+            "offset": arguments.offset,
             "include_protected": True,
         }
         responses = _parallel_scope_calls(
@@ -312,6 +338,9 @@ class KnowledgeSearchContentCapability:
         body = {
             "query": arguments.query,
             "resource_ids": arguments.resource_ids,
+            "sender_ids": arguments.sender_ids,
+            "conversation_ids": arguments.conversation_ids,
+            "content_contains": arguments.content_contains,
             "knowledge_base_ids": arguments.knowledge_base_ids,
             "top_k": arguments.top_k,
             "include_protected": True,
@@ -385,7 +414,7 @@ class KnowledgeAnswerCapability:
             evidence = _source_evidence(arguments.sources, arguments.timezone)
         if not evidence:
             return KnowledgeAnswerOutput(
-                answer="没有找到满足条件的内容。",
+                answer=arguments.empty_answer or "没有找到满足条件的内容。",
                 citations=[],
                 metadata_coverage=arguments.metadata_coverage,
                 model_calls=0,
@@ -416,7 +445,7 @@ class KnowledgeAnswerCapability:
         if not evidence:
             evidence = _source_evidence(arguments.sources, arguments.timezone)
         if not evidence:
-            answer = "没有找到满足条件的内容。"
+            answer = arguments.empty_answer or "没有找到满足条件的内容。"
             sink.push(answer)
             sink.complete(answer=answer, citations=[], warnings=[])
             return KnowledgeAnswerOutput(

@@ -8,11 +8,15 @@ were merged into the Agent's own ledger.
 
 from __future__ import annotations
 
+import urllib.parse
 from typing import Any, Protocol
 
 from app.infrastructure.http import HttpClient, IntegrationError, join_url, with_query
 
 SNAPSHOT_PATH = "/api/knowledge/v1/internal/agent/conversation-snapshot"
+PERSON_RESOLVE_PATH = "/api/knowledge/v1/internal/agent/people-resolve"
+PERSON_PROFILE_PATH = "/api/knowledge/v1/internal/agent/people-profile"
+ATTACHMENT_SEARCH_PATH = "/api/knowledge/v1/internal/agent/attachments"
 
 
 class KnowledgeError(RuntimeError):
@@ -57,6 +61,48 @@ class KnowledgeClient(Protocol):
     def conversation_snapshot(self, knowledge_item_id: str) -> dict[str, Any]:
         ...
 
+    def resolve_person(
+        self,
+        *,
+        owner_user_id: str,
+        name: str,
+        request_id: str = "",
+        trace_id: str = "",
+    ) -> dict[str, Any]:
+        ...
+
+    def person_profile(
+        self,
+        *,
+        owner_user_id: str,
+        relation_ids: list[str],
+        organization_id: str = "",
+        request_id: str = "",
+        trace_id: str = "",
+    ) -> dict[str, Any]:
+        ...
+
+    def search_attachments(
+        self,
+        *,
+        owner_user_id: str,
+        name: str,
+        limit: int = 50,
+        request_id: str = "",
+        trace_id: str = "",
+    ) -> dict[str, Any]:
+        ...
+
+    def open_attachment(
+        self,
+        *,
+        owner_user_id: str,
+        attachment_id: str,
+        request_id: str = "",
+        trace_id: str = "",
+    ) -> bytes:
+        ...
+
 
 class HttpKnowledgeClient:
     """Talks to the Knowledge service over its internal, token-protected API."""
@@ -95,6 +141,144 @@ class HttpKnowledgeClient:
         if not isinstance(body, dict):
             raise KnowledgeUnavailable("snapshot response is not a JSON object")
         return body
+
+    def resolve_person(
+        self,
+        *,
+        owner_user_id: str,
+        name: str,
+        request_id: str = "",
+        trace_id: str = "",
+    ) -> dict[str, Any]:
+        if not self.base_url:
+            raise KnowledgeUnavailable("AGENT_KNOWLEDGE_BASE_URL is not configured")
+        headers = self._headers()
+        headers["X-User-ID"] = str(owner_user_id or "").strip()
+        if request_id:
+            headers["X-Request-ID"] = request_id
+        if trace_id:
+            headers["X-Trace-ID"] = trace_id
+        try:
+            result = self.http.request(
+                "POST",
+                join_url(self.base_url, PERSON_RESOLVE_PATH),
+                body={"name": name},
+                headers=headers,
+                token=self.token,
+                timeout=self.timeout_seconds,
+            )
+        except IntegrationError as exc:
+            raise self._snapshot_transport_error(exc) from exc
+        body = _decode(result)
+        if not isinstance(body, dict):
+            raise KnowledgeUnavailable("person response is not a JSON object")
+        return body
+
+    def person_profile(
+        self,
+        *,
+        owner_user_id: str,
+        relation_ids: list[str],
+        organization_id: str = "",
+        request_id: str = "",
+        trace_id: str = "",
+    ) -> dict[str, Any]:
+        if not self.base_url:
+            raise KnowledgeUnavailable("AGENT_KNOWLEDGE_BASE_URL is not configured")
+        headers = self._headers()
+        headers["X-User-ID"] = str(owner_user_id or "").strip()
+        if request_id:
+            headers["X-Request-ID"] = request_id
+        if trace_id:
+            headers["X-Trace-ID"] = trace_id
+        try:
+            result = self.http.request(
+                "POST",
+                join_url(self.base_url, PERSON_PROFILE_PATH),
+                body={
+                    "relation_ids": list(relation_ids),
+                    "organization_id": organization_id,
+                },
+                headers=headers,
+                token=self.token,
+                timeout=self.timeout_seconds,
+            )
+        except IntegrationError as exc:
+            raise self._snapshot_transport_error(exc) from exc
+        body = _decode(result)
+        if not isinstance(body, dict):
+            raise KnowledgeUnavailable("person profile response is not a JSON object")
+        return body
+
+    def search_attachments(
+        self,
+        *,
+        owner_user_id: str,
+        name: str,
+        limit: int = 50,
+        request_id: str = "",
+        trace_id: str = "",
+    ) -> dict[str, Any]:
+        """Collected documents whose file name matches, scoped to this user."""
+
+        if not self.base_url:
+            raise KnowledgeUnavailable("AGENT_KNOWLEDGE_BASE_URL is not configured")
+        headers = self._headers()
+        headers["X-User-ID"] = str(owner_user_id or "").strip()
+        if request_id:
+            headers["X-Request-ID"] = request_id
+        if trace_id:
+            headers["X-Trace-ID"] = trace_id
+        url = with_query(
+            join_url(self.base_url, ATTACHMENT_SEARCH_PATH),
+            name=name,
+            limit=max(int(limit), 1),
+        )
+        try:
+            result = self.http.request(
+                "GET",
+                url,
+                headers=headers,
+                token=self.token,
+                timeout=self.timeout_seconds,
+            )
+        except IntegrationError as exc:
+            raise self._snapshot_transport_error(exc) from exc
+        body = _decode(result)
+        if not isinstance(body, dict):
+            raise KnowledgeUnavailable("attachment search response is not a JSON object")
+        return body
+
+    def open_attachment(
+        self,
+        *,
+        owner_user_id: str,
+        attachment_id: str,
+        request_id: str = "",
+        trace_id: str = "",
+    ) -> bytes:
+        """The original bytes of a collected attachment the user may read."""
+
+        if not self.base_url:
+            raise KnowledgeUnavailable("AGENT_KNOWLEDGE_BASE_URL is not configured")
+        headers = self._headers()
+        headers["X-User-ID"] = str(owner_user_id or "").strip()
+        if request_id:
+            headers["X-Request-ID"] = request_id
+        if trace_id:
+            headers["X-Trace-ID"] = trace_id
+        path = f"{ATTACHMENT_SEARCH_PATH}/{urllib.parse.quote(str(attachment_id))}/content"
+        try:
+            result = self.http.request(
+                "GET",
+                join_url(self.base_url, path),
+                headers=headers,
+                token=self.token,
+                timeout=self.timeout_seconds,
+            )
+        except IntegrationError as exc:
+            raise self._snapshot_transport_error(exc) from exc
+        return result.body
 
     def _snapshot_transport_error(self, exc: IntegrationError) -> KnowledgeError:
         status = exc.status

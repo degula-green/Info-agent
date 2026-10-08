@@ -409,6 +409,7 @@ async function runLibrarySearch() {
           query: normalized,
           knowledgeBaseIds: scope.knowledgeBaseIds,
           organizationId: scope.organizationId,
+          scopeType: scope.scopeType,
           topK: 30,
           signal: controller.signal,
         })
@@ -416,6 +417,7 @@ async function runLibrarySearch() {
           query: normalized,
           organizationId: scope.organizationId,
           knowledgeBaseIds: scope.knowledgeBaseIds,
+          scopeType: scope.scopeType,
           topK: 30,
           signal: controller.signal,
         })

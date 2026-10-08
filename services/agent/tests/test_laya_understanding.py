@@ -380,19 +380,38 @@ def _jev_response(
     probabilities: dict[str, float],
     *,
     confidence: float | None = None,
+    subject_kind: tuple[str, float] | None = None,
+    query_focus: tuple[str, float] | None = None,
 ) -> dict:
+    answers = {
+        "intent": {
+            "type": "choice",
+            "choice": label,
+            "probabilities": probabilities,
+            "confidence": (
+                probabilities[label] if confidence is None else confidence
+            ),
+        }
+    }
+    if subject_kind is not None:
+        kind, kind_confidence = subject_kind
+        answers["subject_kind"] = {
+            "type": "choice",
+            "choice": kind,
+            "probabilities": {kind: kind_confidence},
+            "confidence": kind_confidence,
+        }
+    if query_focus is not None:
+        focus, focus_confidence = query_focus
+        answers["query_focus"] = {
+            "type": "choice",
+            "choice": focus,
+            "probabilities": {focus: focus_confidence},
+            "confidence": focus_confidence,
+        }
     return {
         "model": "typesafe/jev-1.13-20260917",
-        "answers": {
-            "intent": {
-                "type": "choice",
-                "choice": label,
-                "probabilities": probabilities,
-                "confidence": (
-                    probabilities[label] if confidence is None else confidence
-                ),
-            }
-        },
+        "answers": answers,
         "usage": {"input_tokens": 539, "output_tokens": 95},
         "provider": "TypeSafe",
     }
@@ -430,6 +449,205 @@ def test_jev_offers_the_full_contract_option_set() -> None:
     # The option set and its order are the model's label space: a fine-tuned
     # Laya head indexes into it positionally, so it is never filtered.
     assert list(criteria) == list(INTENT_OPTION_ORDER)
+
+
+def test_jev_asks_the_subject_focus_questions() -> None:
+    client = StubLayaClient(
+        _jev_response("todo.create", {"todo.create": 0.95, "non_task": 0.05})
+    )
+    provider = JevUnderstandingProvider(client)
+
+    provider.understand(ChatIngress().create_task("user-1", {"text": "明天开会"}))
+
+    questions = client.questions[0]
+    assert set(questions) >= {"intent", "subject_kind", "query_focus"}
+    assert set(questions["subject_kind"]["criteria"]) == {
+        "person",
+        "organization",
+        "none",
+    }
+    assert set(questions["query_focus"]["criteria"]) == {
+        "person_self",
+        "work_object",
+        "general_knowledge",
+        "other",
+    }
+
+
+def test_jev_person_self_rescues_a_low_confidence_knowledge_answer() -> None:
+    provider = JevUnderstandingProvider(
+        StubLayaClient(
+            _jev_response(
+                "knowledge.answer",
+                {"knowledge.answer": 0.44, "person.query": 0.39},
+                confidence=0.44,
+                subject_kind=("person", 0.93),
+                query_focus=("person_self", 0.91),
+            )
+        ),
+        min_confidence=0.90,
+    )
+
+    result = provider.evaluate(
+        ChatIngress().create_task("user-1", {"text": "我想要知道小呆呆仓鼠的情况"})
+    )
+
+    assert result.accepted is True
+    assert result.label == "person.query"
+    assert result.understanding.intent_candidates[0].name == "person.query"
+    assert provider.last_combined_reason == "person_self"
+    assert provider.last_subject_kind == "person"
+    assert provider.last_query_focus == "person_self"
+
+
+def test_jev_person_subject_agreement_rescues_generic_situation() -> None:
+    provider = JevUnderstandingProvider(
+        StubLayaClient(
+            _jev_response(
+                "person.query",
+                {"person.query": 0.57, "knowledge.answer": 0.19},
+                confidence=0.57,
+                subject_kind=("person", 0.79),
+                query_focus=("other", 0.25),
+            )
+        ),
+        min_confidence=0.90,
+    )
+
+    result = provider.evaluate(
+        ChatIngress().create_task("user-1", {"text": "我想要知道小呆呆仓鼠的情况"})
+    )
+
+    assert result.accepted is True
+    assert result.label == "person.query"
+    assert provider.last_combined_reason == "person_subject_agreement"
+    assert provider.last_aux_confidence == pytest.approx(0.25)
+
+
+def test_jev_work_object_overrides_a_person_verdict() -> None:
+    provider = JevUnderstandingProvider(
+        StubLayaClient(
+            _jev_response(
+                "person.query",
+                {"person.query": 0.95, "knowledge.answer": 0.05},
+                subject_kind=("person", 0.92),
+                query_focus=("work_object", 0.93),
+            )
+        )
+    )
+
+    result = provider.evaluate(
+        ChatIngress().create_task("user-1", {"text": "小超的项目情况"})
+    )
+
+    assert result.label == "knowledge.answer"
+    assert provider.last_combined_reason == "work_object"
+
+
+def test_jev_organization_subject_overrides_a_person_verdict() -> None:
+    provider = JevUnderstandingProvider(
+        StubLayaClient(
+            _jev_response(
+                "person.query",
+                {"person.query": 0.95, "knowledge.answer": 0.05},
+                subject_kind=("organization", 0.92),
+                query_focus=("person_self", 0.90),
+            )
+        )
+    )
+
+    result = provider.evaluate(
+        ChatIngress().create_task("user-1", {"text": "深空公司的情况"})
+    )
+
+    assert result.label == "knowledge.answer"
+    assert provider.last_combined_reason == "organization_subject"
+
+
+def test_jev_general_knowledge_uses_subject_focus() -> None:
+    provider = JevUnderstandingProvider(
+        StubLayaClient(
+            _jev_response(
+                "todo.create",
+                {"todo.create": 0.42, "knowledge.answer": 0.38},
+                confidence=0.42,
+                subject_kind=("none", 0.91),
+                query_focus=("general_knowledge", 0.92),
+            )
+        ),
+        min_confidence=0.90,
+    )
+
+    result = provider.evaluate(
+        ChatIngress().create_task("user-1", {"text": "公司的报销制度是什么"})
+    )
+
+    assert result.label == "knowledge.answer"
+    assert provider.last_combined_reason == "general_knowledge"
+
+
+def test_jev_missing_subject_focus_keeps_the_existing_fallback() -> None:
+    provider = JevUnderstandingProvider(
+        StubLayaClient(
+            _jev_response(
+                "knowledge.answer",
+                {"knowledge.answer": 0.44, "person.query": 0.39},
+                confidence=0.44,
+            )
+        ),
+        min_confidence=0.90,
+    )
+
+    result = provider.evaluate(
+        ChatIngress().create_task("user-1", {"text": "我想要知道小呆呆仓鼠的情况"})
+    )
+
+    assert result.accepted is False
+    assert result.fallback_reason == "low_probability"
+    assert provider.last_combined_reason is None
+
+
+def test_jev_invalid_subject_focus_is_ignored() -> None:
+    provider = JevUnderstandingProvider(
+        StubLayaClient(
+            _jev_response(
+                "knowledge.answer",
+                {"knowledge.answer": 0.44, "person.query": 0.39},
+                confidence=0.44,
+                subject_kind=("animal", 0.99),
+                query_focus=("person_self", 0.95),
+            )
+        ),
+        min_confidence=0.90,
+    )
+
+    result = provider.evaluate(
+        ChatIngress().create_task("user-1", {"text": "我想要知道小呆呆仓鼠的情况"})
+    )
+
+    assert result.accepted is False
+    assert result.fallback_reason == "low_probability"
+    assert provider.last_combined_reason is None
+
+
+def test_jev_high_confidence_other_intent_is_not_overridden() -> None:
+    provider = JevUnderstandingProvider(
+        StubLayaClient(
+            _jev_response(
+                "todo.create",
+                {"todo.create": 0.96, "person.query": 0.02},
+                subject_kind=("person", 0.99),
+                query_focus=("person_self", 0.99),
+            )
+        )
+    )
+
+    result = provider.evaluate(
+        ChatIngress().create_task("user-1", {"text": "提醒我给张三打电话"})
+    )
+
+    assert result.label == "todo.create"
+    assert provider.last_combined_reason is None
 
 
 def test_response_without_any_confidence_field_is_rejected() -> None:
@@ -538,6 +756,34 @@ def test_hybrid_can_use_jev_as_primary() -> None:
     assert provider.last_decision_source == "jev"
     assert provider.last_primary_confidence == pytest.approx(0.95)
     assert provider.laya is provider.primary
+    assert fallback.calls == 0
+
+
+def test_hybrid_forwards_jev_subject_focus_diagnostics() -> None:
+    fallback = StubFallback(_fallback_result())
+    primary = JevUnderstandingProvider(
+        StubLayaClient(
+            _jev_response(
+                "knowledge.answer",
+                {"knowledge.answer": 0.44, "person.query": 0.39},
+                confidence=0.44,
+                subject_kind=("person", 0.93),
+                query_focus=("person_self", 0.91),
+            )
+        ),
+        min_confidence=0.90,
+    )
+    provider = HybridUnderstandingProvider(primary=primary, fallback=fallback)
+
+    result = provider.understand(
+        ChatIngress().create_task("user-1", {"text": "我想要知道小呆呆仓鼠的情况"})
+    )
+
+    assert result.intent_candidates[0].name == "person.query"
+    assert provider.last_decision_source == "jev"
+    assert provider.last_subject_kind == "person"
+    assert provider.last_query_focus == "person_self"
+    assert provider.last_combined_reason == "person_self"
     assert fallback.calls == 0
 
 

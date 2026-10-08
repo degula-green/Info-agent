@@ -959,6 +959,62 @@
         "false_positive"
       ],
       "note": "是转述别人要做的事，不是用户自己的待办"
+    },
+    {
+      "id": "chat-person-query",
+      "text": "张三最近在忙什么",
+      "source": "chat",
+      "gate": "n/a",
+      "is_task": true,
+      "expect": [
+        "person.query"
+      ],
+      "forbid": [],
+      "tags": [
+        "person"
+      ]
+    },
+    {
+      "id": "chat-person-query-intro",
+      "text": "李四的情况介绍一下",
+      "source": "chat",
+      "gate": "n/a",
+      "is_task": true,
+      "expect": [
+        "person.query"
+      ],
+      "forbid": [],
+      "tags": [
+        "person"
+      ]
+    },
+    {
+      "id": "chat-report-weekly",
+      "text": "帮我写一份上周的周报",
+      "source": "chat",
+      "gate": "n/a",
+      "is_task": true,
+      "expect": [
+        "report.weekly"
+      ],
+      "forbid": [],
+      "tags": [
+        "report"
+      ]
+    },
+    {
+      "id": "chat-report-weekly-person",
+      "text": "给张三搞一份周报",
+      "source": "chat",
+      "gate": "n/a",
+      "is_task": true,
+      "expect": [
+        "report.weekly"
+      ],
+      "forbid": [],
+      "tags": [
+        "report"
+      ]
     }
   ]
 }

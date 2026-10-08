@@ -51,6 +51,12 @@ class AnswerDraft(BaseModel):
     model_calls: int = 0
 
 
+class PersonSectionDraft(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    sections: dict[str, str] = Field(default_factory=dict)
+
+
 class AnswerProvider(Protocol):
     def compose(
         self,
@@ -85,8 +91,66 @@ SYSTEM_PROMPT = (
     "这类片段不要写进回答，也不要为它们生成 citation。\n"
     "12. evidence 的 fetch_method 标明来源：attachment 是用户上传的附件，"
     "knowledge 是知识库检索结果。说明依据时要区分两者"
-    "（例如“你上传的材料里……”与“公司知识库中……”），不要把它们混为一谈。"
+    "（例如“你上传的材料里……”与“公司知识库中……”），不要把它们混为一谈。\n"
+    "13. evidence 的 attribution 标明说话人：subject_said 是目标人物本人说的；"
+    "other_said 是别人说的或转述的；mentioned 是正文提到目标人物；"
+    "profile 是系统已归纳的人物画像。\n"
+    "14. 只把 subject_said 或 profile 的内容写成目标人物的事实；"
+    "other_said / mentioned 只能作为补充，并说明“这是别人的说法，请核对”，"
+    "不能写成目标人物本人的确认结论。\n"
+    "15. 对“介绍某人”这类问题，优先按身份、联系方式、角色/单位、近期活动归纳；"
+    "没有的字段不要编造，也不要用别人的信息填空。\n"
+    "16. 如果 evidence 中包含工作、项目、任务、职责、进展类事实（fact_type 为 "
+    "project/work/task/role/event，或文字明确属于这些），必须在回答中单独列出，"
+    "不要只回答身份和联系方式；有多条此类事实时逐条列出，不要只举一个例子；"
+    "没有这类证据时不要编造。\n"
+    "17. 如果问题附带了别名说明，evidence 的 sender_name 命中别名时，就按目标"
+    "人物本人的内容处理；不要因为 evidence 没有出现问题里的字面名字，就回答"
+    "“没有这个人的信息”。\n"
+    "18. 如果 evidence 只有与目标人物别名相关的可见对话，没有个人画像或身份字段，"
+    "先说明没有画像信息，再只描述这些可见内容；evidence_kind=conversation_excerpt "
+    "的内容是可见对话摘录，可以概括其涉及的主题、安排和讨论事项，"
+    "但不要把它们写成目标人物的确认身份、工作或项目。"
 )
+
+PERSON_SECTION_SYSTEM_PROMPT = (
+    "你是人物资料整理器。输入是已经按类别分好的结构化事实。\n"
+    "硬性要求：\n"
+    "1. 只输出 JSON：{\"sections\":{\"类别键\":\"自然语言描述\"}}。\n"
+    "2. 只能使用输入事实，不增加、不推断、不补全。\n"
+    "3. 每个类别写一段自然语言，不要 Markdown 标题，不要项目符号。\n"
+    "4. 结构化事实必须保留数字、联系人、项目名、日期、当前/历史状态。\n"
+    "5. 不要写“subject_said”“other_said”等内部标签。"
+    "如果事实来自对话转载，用中性措辞“对话中提到”。\n"
+    "6. 不要输出空类别。\n"
+)
+
+PERSON_ACTIVITY_SYSTEM_PROMPT = (
+    "你只负责归纳目标人物的近期活动。输入是原始可见对话摘录。\n"
+    "要求：\n"
+    "1. 只输出 JSON：{\"summary\":\"自然语言描述\"}。\n"
+    "2. 按主题合并活动，不要逐条转述，不要引用原句。\n"
+    "3. 不要为每句话重复完整时间戳；可以概括为一个日期范围或某一天。\n"
+    "4. 只使用输入摘录，不增加信息和推断。\n"
+    "5. 用中性措辞，不写内部说话人标签。\n"
+)
+
+PERSON_SECTION_ALIASES = {
+    "identity": "identity",
+    "身份": "identity",
+    "contact": "contact",
+    "联系方式": "contact",
+    "role": "role",
+    "角色/单位": "role",
+    "work_project": "work_project",
+    "工作/项目": "work_project",
+    "recent_activity": "recent_activity",
+    "近期活动": "recent_activity",
+    "relationship": "relationship",
+    "关系/群组": "relationship",
+    "other": "other",
+    "其他": "other",
+}
 
 
 class LlmAnswerProvider:
@@ -120,6 +184,98 @@ class LlmAnswerProvider:
         messages = self._messages(question, evidence, time_range, conversation_context)
         raw = self._complete(messages)
         return self._finalize(messages, raw)
+
+    def compose_person_sections(
+        self,
+        question: str,
+        sections: dict[str, list[dict[str, Any]]],
+        *,
+        conversation_excerpts: list[dict[str, Any]] | None = None,
+        time_range: str | None = None,
+    ) -> dict[str, str]:
+        """Let the model phrase each fixed person section without changing it."""
+
+        self.last_call_count = 0
+        payload: dict[str, Any] = {
+            "question": question,
+            "sections": sections,
+        }
+        if time_range:
+            payload["time_range"] = time_range
+        messages = [
+            {"role": "system", "content": PERSON_SECTION_SYSTEM_PROMPT},
+            {
+                "role": "user",
+                "content": json.dumps(
+                    payload,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ),
+            },
+        ]
+        raw = self._complete(messages)
+        draft = self._parse_person_sections(raw)
+        if draft is None:
+            repaired = self._complete(
+                messages
+                + [
+                    {"role": "assistant", "content": raw},
+                    {
+                        "role": "user",
+                        "content": (
+                            "上一个输出不是合法 JSON。只返回修正后的 JSON，"
+                            "结构为 {\"sections\":{\"类别键\":\"描述\"}}。"
+                            f"错误：{self._last_error}"
+                        ),
+                    },
+                ]
+            )
+            draft = self._parse_person_sections(repaired)
+        if draft is None:
+            raise AnswerError(
+                f"person section output failed after repair: {self._last_error}"
+            )
+        output = dict(draft.sections)
+        if conversation_excerpts:
+            activity = self._compose_recent_activity(
+                question,
+                conversation_excerpts,
+            )
+            if activity:
+                output["recent_activity"] = activity
+        return output
+
+    def _compose_recent_activity(
+        self,
+        question: str,
+        conversation_excerpts: list[dict[str, Any]],
+    ) -> str:
+        messages = [
+            {"role": "system", "content": PERSON_ACTIVITY_SYSTEM_PROMPT},
+            {
+                "role": "user",
+                "content": json.dumps(
+                    {
+                        "question": question,
+                        "conversation_excerpts": conversation_excerpts,
+                    },
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ),
+            },
+        ]
+        try:
+            raw = self._complete(messages)
+            payload = parse_json_object(raw)
+        except (AnswerError, ValueError):
+            return ""
+        if not isinstance(payload, dict):
+            return ""
+        return str(
+            payload.get("summary")
+            or payload.get("recent_activity")
+            or ""
+        ).strip()
 
     def stream_compose(
         self,
@@ -270,3 +426,19 @@ class LlmAnswerProvider:
             return None
         draft.model_calls = max(self.last_call_count, 1)
         return draft
+
+    def _parse_person_sections(self, raw: str) -> PersonSectionDraft | None:
+        try:
+            draft = PersonSectionDraft.model_validate(parse_json_object(raw))
+        except (ValueError, ValidationError) as exc:
+            self._last_error = str(exc)
+            return None
+        sections: dict[str, str] = {}
+        for key, value in draft.sections.items():
+            normalized = PERSON_SECTION_ALIASES.get(str(key).strip())
+            if not normalized:
+                continue
+            text = str(value or "").strip()
+            if text:
+                sections[normalized] = text
+        return PersonSectionDraft(sections=sections)

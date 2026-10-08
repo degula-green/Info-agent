@@ -66,6 +66,8 @@ type publicContact struct {
 	Kind            string                   `json:"kind"`
 	InternalUserID  string                   `json:"internal_user_id,omitempty"`
 	DisplayName     string                   `json:"display_name,omitempty"`
+	Remark          string                   `json:"remark,omitempty"`
+	NameCore        string                   `json:"name_core,omitempty"`
 	Identities      []domain.ContactIdentity `json:"identities"`
 	ConversationIDs []string                 `json:"conversation_ids,omitempty"`
 	MessageCount    int                      `json:"message_count"`
@@ -93,6 +95,7 @@ type publicAvailableContact struct {
 	Email          string `json:"email,omitempty"`
 	Department     string `json:"department,omitempty"`
 	JobTitle       string `json:"job_title,omitempty"`
+	Remark         string `json:"remark,omitempty"`
 	Selected       bool   `json:"selected"`
 }
 
@@ -375,7 +378,7 @@ func publicAttachmentFromDomain(value domain.Attachment) publicAttachment {
 func publicContactFromDomain(value domain.ContactView) publicContact {
 	return publicContact{
 		ID: value.ID, Kind: value.Kind, InternalUserID: value.InternalUserID,
-		DisplayName: value.DisplayName, Identities: value.Identities,
+		DisplayName: value.DisplayName, Remark: value.Remark, NameCore: value.NameCore, Identities: value.Identities,
 		ConversationIDs: value.ConversationIDs, MessageCount: value.MessageCount,
 		AttachmentCount: value.AttachmentCount,
 	}

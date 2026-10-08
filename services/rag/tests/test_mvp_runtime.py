@@ -1,7 +1,12 @@
 from __future__ import annotations
 
+import threading
+import time
 import unittest
+from dataclasses import replace
+from unittest import mock
 
+from app.application import runtime as runtime_module
 from app.application.callback_service import CallbackLane
 from app.application.index_service import MVPIndexService
 from app.application.memory_service import MemoryCandidateService
@@ -82,7 +87,92 @@ class _Publisher:
         self.payloads.append(payload)
 
 
+class _FlakyRepository(InMemoryRagMVPRepository):
+    def __init__(self):
+        super().__init__()
+        self.claim_failures = 1
+
+    def claim_jobs(self, *args, **kwargs):
+        if self.claim_failures:
+            self.claim_failures -= 1
+            raise RuntimeError("transient database error")
+        return super().claim_jobs(*args, **kwargs)
+
+
 class RuntimeTests(unittest.TestCase):
+    def _runtime(self, repository):
+        return MVPWorkerRuntime(
+            repository=repository,
+            parse_service=MVPParseService(
+                knowledge=_Knowledge(),
+                artifact_store=_ArtifactStore(),
+            ),
+            index_service=MVPIndexService(
+                repository=repository,
+                indexer=_Indexer(),
+                embedding=HashEmbeddingProvider(dimensions=1536),
+            ),
+            memory_service=MemoryCandidateService(repository=repository),
+            callback_lane=CallbackLane(
+                repository=repository,
+                publisher=_Publisher(),
+            ),
+        )
+
+    def _event(self) -> dict:
+        return {
+            "event_id": "00000000-0000-0000-0000-000000000010",
+            "event_type": "knowledge.ready",
+            "schema_version": 1,
+            "occurred_at": "2026-09-27T00:00:00Z",
+            "trace_id": "trace",
+            "organization_id": SCOPE_ID,
+            "producer": "module-2",
+            "payload": {
+                "resource_type": "message",
+                "resource_id": RESOURCE_ID,
+                "knowledge_item_id": KNOWLEDGE_ITEM,
+                "source_audience_policy": "organization_members",
+                "content_version": 1,
+                "acl_version": 1,
+                "content_hash": "a" * 64,
+                "content_access_required": False,
+            },
+        }
+
+    def test_lane_loop_survives_transient_claim_error(self) -> None:
+        repository = _FlakyRepository()
+        runtime = self._runtime(repository)
+        fast_settings = replace(
+            runtime_module.settings,
+            lane_poll_interval_seconds=0.01,
+        )
+
+        with mock.patch.object(runtime_module, "settings", fast_settings):
+            runtime.handle(self._event())
+            thread = threading.Thread(
+                target=runtime._lane_loop,
+                args=("parse",),
+                daemon=True,
+            )
+            thread.start()
+            deadline = time.monotonic() + 3
+            job = None
+            while time.monotonic() < deadline:
+                job = repository.get_job(
+                    source_event_id="00000000-0000-0000-0000-000000000010"
+                )
+                if job and job.get("current_stage") == "index":
+                    break
+                time.sleep(0.01)
+            runtime.stop_event.set()
+            thread.join(timeout=1)
+
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(repository.claim_failures, 0)
+        self.assertIsNotNone(job)
+        self.assertEqual(job["current_stage"], "index")
+
     def test_dispatch_parse_index_memory_callback(self) -> None:
         repository = InMemoryRagMVPRepository()
         indexer = _Indexer()

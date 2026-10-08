@@ -27,7 +27,12 @@ import { getKnowledgeAttachmentContent } from '@/api/info-knowledge'
 
 GlobalWorkerOptions.workerSrc = pdfWorker
 interface AttachmentAccess { status: string; share_reference_id?: string; resource_type?: string; resource_id?: string; requested_action?: string }
-const props = defineProps<{ file: InfoFile; active: boolean; access?: AttachmentAccess }>()
+/**
+ * ``loader`` lets a caller preview bytes from somewhere other than the
+ * knowledge attachment endpoint — the generated weekly report, for instance,
+ * which lives in the Agent's temporary bucket.
+ */
+const props = defineProps<{ file: InfoFile; active: boolean; access?: AttachmentAccess; loader?: (download: boolean) => Promise<Blob> }>()
 const emit = defineEmits<{ request: [access: AttachmentAccess] }>()
 const accessState = computed<AttachmentAccess>(() => props.access || { status: props.file.contentAccessRequired ? 'locked' : 'granted' })
 const loading = ref(false); const error = ref(''); const textContent = ref(''); const blobUrl = ref('')
@@ -47,7 +52,7 @@ async function downloadOriginal() {
   if (downloading.value) return
   downloading.value = true
   try {
-    const blob = await getKnowledgeAttachmentContent(props.file.id, true)
+    const blob = props.loader ? await props.loader(true) : await getKnowledgeAttachmentContent(props.file.id, true)
     const url = URL.createObjectURL(blob)
     const anchor = document.createElement('a')
     anchor.href = url
@@ -87,7 +92,7 @@ async function load() {
   if (oversizedPresentation.value) return
   loading.value = true
   try {
-    const blob = await getKnowledgeAttachmentContent(props.file.id); if (version !== loadVersion) return
+    const blob = props.loader ? await props.loader(false) : await getKnowledgeAttachmentContent(props.file.id); if (version !== loadVersion) return
     // Metadata can be unavailable for older citations. The content response
     // still carries the authoritative MIME type, so use it before rendering.
     if (!props.file.mimeType && blob.type) { mime = blob.type.toLowerCase().split(';', 1)[0]; setPresentationKind() }

@@ -137,6 +137,9 @@ class PostgresRagMVPRepository:
                     conninfo=settings.database_url,
                     min_size=max(1, settings.database_min_pool_size),
                     max_size=max(settings.database_min_pool_size, settings.database_max_pool_size),
+                    timeout=max(1.0, float(settings.database_connect_timeout_seconds)),
+                    max_idle=max(1.0, float(settings.database_pool_max_idle_seconds)),
+                    max_lifetime=max(1.0, float(settings.database_pool_max_lifetime_seconds)),
                     # The database is remote in local development, so TCP
                     # connections can be dropped while idle. Validate a pooled
                     # connection before handing it to a request instead of
@@ -144,7 +147,14 @@ class PostgresRagMVPRepository:
                     check=ConnectionPool.check_connection,
                     kwargs={
                         "connect_timeout": max(1, int(settings.database_connect_timeout_seconds)),
-                        "options": f"-c statement_timeout={max(1, int(settings.database_command_timeout_seconds * 1000))}",
+                        "keepalives": 1,
+                        "keepalives_idle": 30,
+                        "keepalives_interval": 10,
+                        "keepalives_count": 5,
+                        "options": (
+                            f"-c statement_timeout={max(1, int(settings.database_command_timeout_seconds * 1000))}"
+                            " -c idle_in_transaction_session_timeout=60000"
+                        ),
                     },
                     open=True,
                 )
