@@ -92,6 +92,30 @@ alerts                        使其它指标失去解释力的状态
 
 新增接口：`GET /api/v1/admin/tree-metrics`（与其它管理接口同一套 Core 能力校验）。
 
+### 2.8 检索侧降级率（"降级率可查"）
+
+同一接口返回 `search` 段，来自 `search_history` 最近 24 小时的诊断：
+
+```text
+query_count              查询数
+execution_paths          各执行路径占比（tree / tree_shadow / traditional / metadata_filter / scope_export）
+fallback_reasons         降级原因计数（no_entity_match / empty_scope / branch_failed）
+degraded_reasons         技术降级计数（embedding_failed / relation_lookup_failed 等）
+resolved_entity_rate     成功定位到实体的查询占比
+no_entity_match_rate     未命中实体而回落全库的比例
+l4_invocation_rate       L4 被触发的查询占比
+latency_ms               p50 / p95 / max
+```
+
+配套改动：检索诊断新增顶层 `locate_llm_invoked`，让 L4 调用率变成可查询的单个
+标志，而不必解析嵌套的逐 mention 轨迹。
+
+**这一条修掉了一个此前被静默吞掉的真问题**：`search_history.tree_mode` 的 CHECK
+还是 `off/shadow/boost`，而 Phase 1 已把模式改名为 `tree`。结果是**所有 tree 模式
+的检索记录都写入失败**，而 `record_search` 被 `except Exception: pass` 吞掉，所以
+线上一直没有任何报错——观测数据静默缺失了整整一个版本。修复：迁移放宽约束
+（保留 `boost` 以兼容历史行），并把静默 pass 改成 `logger.warning`。
+
 ### 2.7 并发与调度
 
 **并发**：同一个会话的多个窗口彼此独立，用 `ThreadPoolExecutor` 并发执行，
@@ -181,7 +205,28 @@ tree-metrics(org scope)    = 2 个会话已扫、5 条待审候选、覆盖率�
 4. 扫描阻塞回调通道
    扫描最初同步跑在 callback 循环里，一次批次持续数分钟，期间 knowledge 回写
    无法 flush。改为后台线程 + 单批次互斥后修复。
+5. 检索历史写入被约束拒绝且静默吞掉
+   `search_history.tree_mode` 的 CHECK 未随模式改名更新，tree 模式的记录全部
+   写入失败；`record_search` 的 `except Exception: pass` 让它无声无息。已加迁移
+   放宽约束，并把静默 pass 改为 warning 日志。
 ```
+
+### 3.5 检索侧指标的真实数据
+
+```
+tree-metrics?scope_type=organization 的 search 段（近 24 小时）:
+  query_count        475
+  execution_paths    scope_export 393 / tree_shadow 80 / metadata_filter 2
+  fallback_reasons   no_entity_match 80
+  degraded_reasons   embedding_failed 4
+  resolved_entity_rate   0.0（注册表为空，冷启动预期）
+  no_entity_match_rate   0.1684
+  latency_ms         p50 633 / p95 1803 / max 11138
+```
+
+**关于延迟口径的说明**：这里的 p95 覆盖全部入口（含 `scope_export` 这类批量导出），
+不等于实施计划 3.4 的"常规路径 p95 ≤ 80ms"。后者需要用 `entry=global/ai` 且 L4
+未触发的查询集单独测量，属于尚未完成的实测项。
 
 ## 4. 未完成项
 

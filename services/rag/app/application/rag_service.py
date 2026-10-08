@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import re
 import time
 import uuid
@@ -18,6 +19,9 @@ from app.application.mvp_ports import (
 from app.config import settings
 from app.domain.rag import AccessCheck, AuthorizationScope, SearchRequest, SearchResult
 from app.domain.location import EntityScope, LocateRequest, LocateResult
+
+
+logger = logging.getLogger("rag.retrieval")
 
 
 class SearchUnavailable(RuntimeError):
@@ -232,6 +236,15 @@ class RAGRetrievalService:
                 "unresolved": list(locate.scope.unresolved) if locate else [],
             },
             "locate": locate.diagnostics if locate else None,
+            # Lifted out of the per-mention trace so the L4 call rate is a single
+            # queryable flag rather than nested JSON.
+            "locate_llm_invoked": bool(
+                locate
+                and any(
+                    item.get("llm_invoked")
+                    for item in (locate.diagnostics.get("mentions") or [])
+                )
+            ),
             "branch_candidate_count": raw_branch_candidate_count,
             "related_entity_count": len(related_entities),
             "related_candidate_count": raw_related_candidate_count,
@@ -283,7 +296,10 @@ class RAGRetrievalService:
                 request_id=request_id,
             )
         except Exception:
-            pass
+            # Search must not fail because history could not be written, but a
+            # silent pass hid a check-constraint mismatch that dropped every
+            # tree-mode row for a whole release. Log it so it is visible.
+            logger.warning("search history was not recorded", exc_info=True)
         return RetrievalResponse(request_id=request_id, results=results, diagnostics=diagnostics)
 
     def answer(self, request: SearchRequest) -> dict[str, Any]:

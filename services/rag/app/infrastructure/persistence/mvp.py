@@ -2265,6 +2265,49 @@ class PostgresRagMVPRepository:
                     ),
                 )
 
+    def list_search_diagnostics(
+        self,
+        *,
+        scope_type: str,
+        scope_id: str,
+        window_hours: int = 24,
+        limit: int = 2000,
+    ) -> list[dict[str, Any]]:
+        """Recent retrieval diagnostics, flattened for aggregation.
+
+        Only the fields the metrics need are projected: the full diagnostics
+        blob carries a per-mention trace and would be wasteful to pull back.
+        """
+        with self._connection() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    f"""SELECT execution_path,
+                               COALESCE(diagnostics->>'fallback_reason',''),
+                               COALESCE(diagnostics->>'degraded_reason',''),
+                               COALESCE((diagnostics->>'locate_llm_invoked')::boolean,false),
+                               COALESCE((diagnostics->>'resolved_entity_count')::int,0),
+                               COALESCE(duration_ms,0)
+                        FROM {self.schema}.search_history
+                        WHERE scope_type=%s AND scope_id=%s::uuid
+                          AND created_at > CURRENT_TIMESTAMP - make_interval(hours => %s)
+                        ORDER BY created_at DESC LIMIT %s""",
+                    (
+                        scope_type, scope_id, max(1, int(window_hours)),
+                        max(1, int(limit)),
+                    ),
+                )
+                return [
+                    {
+                        "execution_path": row[0] or "",
+                        "fallback_reason": row[1] or "",
+                        "degraded_reason": row[2] or "",
+                        "llm_invoked": bool(row[3]),
+                        "resolved_entity_count": int(row[4] or 0),
+                        "duration_ms": int(row[5] or 0),
+                    }
+                    for row in cursor.fetchall()
+                ]
+
     def create_qa_conversation(
         self,
         *,
@@ -3776,6 +3819,31 @@ class InMemoryRagMVPRepository:
 
     def record_search(self, **value: Any) -> None:
         self.searches.append(dict(value))
+
+    def list_search_diagnostics(
+        self,
+        *,
+        scope_type: str,
+        scope_id: str,
+        window_hours: int = 24,
+        limit: int = 2000,
+    ) -> list[dict[str, Any]]:
+        output: list[dict[str, Any]] = []
+        for item in reversed(self.searches):
+            if item.get("scope_type") != scope_type or item.get("scope_id") != scope_id:
+                continue
+            diagnostics = item.get("diagnostics") or {}
+            output.append({
+                "execution_path": str(item.get("execution_path") or ""),
+                "fallback_reason": str(diagnostics.get("fallback_reason") or ""),
+                "degraded_reason": str(diagnostics.get("degraded_reason") or ""),
+                "llm_invoked": bool(diagnostics.get("locate_llm_invoked")),
+                "resolved_entity_count": int(diagnostics.get("resolved_entity_count") or 0),
+                "duration_ms": int(item.get("duration_ms") or 0),
+            })
+            if len(output) >= max(1, int(limit)):
+                break
+        return output
 
     def create_qa_conversation(self, **value: Any) -> str:
         conversation_id = new_uuid()

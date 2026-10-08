@@ -1,6 +1,10 @@
 """Zero-annotation tree metrics and their guard-rail alerts."""
 
-from app.application.tree_metrics_service import TreeMetricsService, evaluate_alerts
+from app.application.tree_metrics_service import (
+    TreeMetricsService,
+    evaluate_alerts,
+    summarize_search,
+)
 from app.domain.rag import Chunk, EntityMount, normalized_text
 from app.infrastructure.persistence.mvp import InMemoryRagMVPRepository
 
@@ -104,3 +108,65 @@ def test_missing_relations_is_reported_separately():
     })
 
     assert alerts == ["no_relations"]
+
+
+class TestSearchMetrics:
+    def test_empty_window_reports_zeros(self):
+        summary = summarize_search([])
+
+        assert summary["query_count"] == 0
+        assert summary["no_entity_match_rate"] == 0.0
+        assert summary["l4_invocation_rate"] == 0.0
+        assert summary["latency_ms"] == {"p50": 0, "p95": 0, "max": 0}
+
+    def test_rates_and_reason_buckets(self):
+        rows = [
+            {"execution_path": "tree", "fallback_reason": "", "degraded_reason": "",
+             "llm_invoked": False, "resolved_entity_count": 2, "duration_ms": 40},
+            {"execution_path": "tree", "fallback_reason": "", "degraded_reason": "",
+             "llm_invoked": True, "resolved_entity_count": 1, "duration_ms": 900},
+            # A query with no entity match degrades to the traditional path.
+            {"execution_path": "traditional", "fallback_reason": "no_entity_match",
+             "degraded_reason": "embedding_failed", "llm_invoked": False,
+             "resolved_entity_count": 0, "duration_ms": 120},
+            {"execution_path": "traditional", "fallback_reason": "no_entity_match",
+             "degraded_reason": "branch_failed,embedding_failed", "llm_invoked": False,
+             "resolved_entity_count": 0, "duration_ms": 200},
+        ]
+
+        summary = summarize_search(rows, window_hours=24)
+
+        assert summary["query_count"] == 4
+        assert summary["execution_paths"] == {"tree": 2, "traditional": 2}
+        assert summary["fallback_reasons"] == {"no_entity_match": 2}
+        # Comma-separated degradation reasons are split so each can be counted.
+        assert summary["degraded_reasons"] == {"embedding_failed": 2, "branch_failed": 1}
+        assert summary["resolved_entity_rate"] == 0.5
+        assert summary["no_entity_match_rate"] == 0.5
+        assert summary["l4_invocation_rate"] == 0.25
+        assert summary["latency_ms"]["max"] == 900
+        assert summary["latency_ms"]["p95"] >= 200
+
+    def test_high_no_entity_match_is_flagged(self):
+        alerts = evaluate_alerts({
+            "search": {"query_count": 10, "no_entity_match_rate": 0.7},
+        })
+
+        assert "high_no_entity_match" in alerts
+
+    def test_no_queries_means_no_alert(self):
+        assert evaluate_alerts({"search": {"query_count": 0, "no_entity_match_rate": 0.0}}) == []
+
+    def test_snapshot_includes_the_search_section(self):
+        repo = InMemoryRagMVPRepository()
+        repo.record_search(
+            scope_type=SCOPE["scope_type"], scope_id=SCOPE["scope_id"],
+            execution_path="tree", duration_ms=50,
+            diagnostics={"resolved_entity_count": 1, "locate_llm_invoked": True},
+        )
+
+        snapshot = TreeMetricsService(repository=repo).snapshot(**SCOPE)
+
+        assert snapshot["search"]["query_count"] == 1
+        assert snapshot["search"]["l4_invocation_rate"] == 1.0
+        assert snapshot["search"]["resolved_entity_rate"] == 1.0

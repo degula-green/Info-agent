@@ -243,6 +243,14 @@ class BranchRepository(Protocol):
 
 class SearchHistoryRepository(Protocol):
     def record_search(self, **values: Any) -> None: ...
+    def list_search_diagnostics(
+        self,
+        *,
+        scope_type: str,
+        scope_id: str,
+        window_hours: int = 24,
+        limit: int = 2000,
+    ) -> list[dict[str, Any]]: ...
 
 
 class QAHistoryRepository(Protocol):
