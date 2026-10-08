@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Info Agent 飞书授权</title>
+    <style>
+      :root {
+        color-scheme: light;
+        font-family: "Microsoft YaHei", "PingFang SC", sans-serif;
+        background: #f4f6f8;
+        color: #1f2937;
+      }
+      body {
+        min-height: 100vh;
+        margin: 0;
+        display: grid;
+        place-items: center;
+      }
+      main {
+        width: min(520px, calc(100vw - 40px));
+        padding: 40px;
+        border: 1px solid #e5e7eb;
+        border-radius: 8px;
+        background: #fff;
+        box-sizing: border-box;
+        box-shadow: 0 16px 48px rgb(15 23 42 / 8%);
+      }
+      h1 {
+        margin: 0 0 12px;
+        font-size: 24px;
+      }
+      p {
+        margin: 0 0 24px;
+        line-height: 1.7;
+        color: #4b5563;
+      }
+      button {
+        width: 100%;
+        min-height: 44px;
+        border: 1px solid #315efb;
+        border-radius: 6px;
+        background: #315efb;
+        color: #fff;
+        font-size: 15px;
+        cursor: pointer;
+      }
+      #status {
+        min-height: 24px;
+        margin-top: 16px;
+        font-size: 13px;
+        color: #6b7280;
+      }
+      #status.error {
+        color: #b42318;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1 id="title">飞书授权已完成</h1>
+      <p id="description">
+        正在尝试打开 Info Agent 桌面端并刷新连接状态。若没有自动打开，请点击下方按钮。
+      </p>
+      <button id="open" type="button">打开 Info Agent</button>
+      <div id="status" role="status"></div>
+    </main>
+    <script>
+      (() => {
+        const params = new URLSearchParams(window.location.search);
+        const provider = String(params.get("provider") || "feishu").trim();
+        const state = String(params.get("state") || "").trim();
+        const statusValue = String(params.get("status") || "").trim();
+        const errorCode = String(params.get("error_code") || "").trim();
+        const successful = statusValue === "active" && !errorCode;
+        const title = document.getElementById("title");
+        const description = document.getElementById("description");
+        const button = document.getElementById("open");
+        const status = document.getElementById("status");
+
+        if (!successful) {
+          title.textContent = "飞书授权未完成";
+          description.textContent =
+            "授权没有成功完成，请回到 Info Agent 桌面端重新发起授权。";
+        }
+
+        function setStatus(message, error = false) {
+          status.textContent = message;
+          status.classList.toggle("error", error);
+        }
+
+        function deepLink() {
+          const link = new URL("infoagent://oauth/callback");
+          link.searchParams.set("provider", provider);
+          if (state) link.searchParams.set("state", state);
+          link.searchParams.set("status", statusValue || "error");
+          if (errorCode) link.searchParams.set("error_code", errorCode);
+          return link.toString();
+        }
+
+        function openDesktopApp() {
+          setStatus("正在打开 Info Agent…");
+          window.location.href = deepLink();
+        }
+
+        button.addEventListener("click", openDesktopApp);
+        window.setTimeout(openDesktopApp, 250);
+        window.setTimeout(() => {
+          setStatus("如果应用没有自动打开，请点击上方“打开 Info Agent”按钮。");
+        }, 1500);
+      })();
+    </script>
+  </body>
+</html>

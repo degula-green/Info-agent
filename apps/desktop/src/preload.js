@@ -24,6 +24,7 @@ contextBridge.exposeInMainWorld("infoAgentDesktop", {
   webBaseUrl,
   invitationBaseUrl,
   getStatus: () => ipcRenderer.invoke("info-agent:status"),
+  refreshCoreSession: () => ipcRenderer.invoke("info-agent:core-refresh"),
   openExternal: (url) => ipcRenderer.invoke("info-agent:open-external", url),
   onDeepLink: (callback) => {
     const listener = (_event, link) => callback(link);

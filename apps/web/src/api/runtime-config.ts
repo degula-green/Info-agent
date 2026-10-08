@@ -3,6 +3,7 @@ export interface DesktopRuntimeBridge {
   webBaseUrl?: string
   invitationBaseUrl?: string
   getStatus?: () => Promise<unknown>
+  refreshCoreSession?: () => Promise<{ status: number; body: any }>
   openExternal?: (url: string) => Promise<void>
   onDeepLink?: (callback: (link: {
     type?: string

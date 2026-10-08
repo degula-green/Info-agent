@@ -24,3 +24,6 @@ data/wechat-collector.json
 data/wechat-detail.json
 # The form-browser sidecar rewrites its session state on every run.
 services/form-browser/data/form-browser-state.json
+# Generated desktop sidecar binaries and bundled browsers are build outputs.
+apps/desktop/resources/wechat-collector/
+apps/desktop/resources/form-browser/

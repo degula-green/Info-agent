@@ -73,6 +73,16 @@ class SidecarManager extends EventEmitter {
       FORM_BROWSER_HOST: "127.0.0.1",
       FORM_BROWSER_API_TOKEN: config.formBrowserToken,
       FORM_BROWSER_HEADLESS: config.formBrowserHeadless ? "true" : "false",
+      FORM_BROWSER_STORAGE_STATE: path.join(
+        this.userDataPath,
+        "form-browser-state.json",
+      ),
+      PLAYWRIGHT_BROWSERS_PATH: path.join(
+        this.resourcesPath,
+        "resources",
+        "form-browser",
+        "ms-playwright",
+      ),
     });
   }
 

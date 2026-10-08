@@ -1,5 +1,13 @@
 const path = require("node:path");
-const { app, BrowserWindow, ipcMain, shell } = require("electron");
+const crypto = require("node:crypto");
+const {
+  app,
+  BrowserWindow,
+  ipcMain,
+  net,
+  session,
+  shell,
+} = require("electron");
 
 const { loadConfig } = require("./config");
 const { findDeepLink, parseDesktopLink } = require("./desktop-links");
@@ -12,6 +20,11 @@ let sidecarManager = null;
 let taskRunner = null;
 let desktopConfig = null;
 let pendingDeepLink = null;
+let refreshCookie = "";
+
+function localSidecarToken() {
+  return crypto.randomBytes(32).toString("hex");
+}
 
 const gotSingleInstanceLock = app.requestSingleInstanceLock();
 if (!gotSingleInstanceLock) {
@@ -61,6 +74,84 @@ function resolveWebEntry(resourcesPath) {
   return path.resolve(__dirname, "../../web/dist/index.html");
 }
 
+function responseCookieValues(headers = {}) {
+  for (const [name, value] of Object.entries(headers)) {
+    if (name.toLowerCase() !== "set-cookie") continue;
+    return Array.isArray(value) ? value : [String(value)];
+  }
+  return [];
+}
+
+function rememberRefreshCookie(headers) {
+  for (const value of responseCookieValues(headers)) {
+    const pair = String(value).split(";", 1)[0];
+    const separator = pair.indexOf("=");
+    if (separator < 0) continue;
+    const name = pair.slice(0, separator).trim();
+    if (name !== "info_agent_refresh") continue;
+    refreshCookie = pair.slice(separator + 1).trim();
+  }
+}
+
+function parseResponseBody(raw) {
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return raw;
+  }
+}
+
+function requestCoreRefresh(config) {
+  return new Promise((resolve, reject) => {
+    if (!refreshCookie) {
+      resolve({
+        status: 401,
+        body: {
+          code: "AUTH_UNAUTHENTICATED",
+          message: "authentication required",
+        },
+      });
+      return;
+    }
+    const request = net.request({
+      method: "POST",
+      url: `${config.apiBaseUrl}/api/core/auth/refresh`,
+      session: session.defaultSession,
+      credentials: "omit",
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/json",
+        Cookie: `info_agent_refresh=${refreshCookie}`,
+      },
+    });
+    const chunks = [];
+    request.on("response", (response) => {
+      response.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
+      response.on("end", () => {
+        rememberRefreshCookie(response.headers);
+        resolve({
+          status: response.statusCode,
+          body: parseResponseBody(Buffer.concat(chunks).toString("utf8")),
+        });
+      });
+    });
+    request.on("error", reject);
+    request.end();
+  });
+}
+
+function installCoreAuthCookieBridge(config) {
+  const authURLPattern = `${config.apiBaseUrl}/api/core/auth/*`;
+  session.defaultSession.webRequest.onHeadersReceived(
+    { urls: [authURLPattern] },
+    (details, callback) => {
+      rememberRefreshCookie(details.responseHeaders);
+      callback({ responseHeaders: details.responseHeaders });
+    },
+  );
+}
+
 async function createWindow(config) {
   mainWindow = new BrowserWindow({
     width: 1440,
@@ -87,6 +178,8 @@ async function createWindow(config) {
 }
 
 async function start(config) {
+  config.collectorToken ||= localSidecarToken();
+  config.formBrowserToken ||= localSidecarToken();
   const sidecarResourcesPath = app.isPackaged
     ? process.resourcesPath
     : path.resolve(__dirname, "..");
@@ -125,9 +218,13 @@ if (!gotSingleInstanceLock) {
       app,
       resourcesPath: process.resourcesPath,
     });
+    installCoreAuthCookieBridge(desktopConfig);
     ipcMain.handle("info-agent:status", () => ({
       sidecars: sidecarManager ? sidecarManager.status() : {},
     }));
+    ipcMain.handle("info-agent:core-refresh", () =>
+      requestCoreRefresh(desktopConfig),
+    );
     ipcMain.handle("info-agent:open-external", async (_event, url) => {
       await shell.openExternal(String(url || ""));
     });

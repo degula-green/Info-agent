@@ -174,6 +174,30 @@ async function performOwnedRefresh(owner: string): Promise<CoreTokenResponse> {
 }
 
 async function refreshWithCrossTabCoordination(): Promise<CoreTokenResponse> {
+  const desktopRefresh =
+    typeof window === 'undefined'
+      ? undefined
+      : window.infoAgentDesktop?.refreshCoreSession
+  if (desktopRefresh) {
+    const response = await desktopRefresh()
+    const body = response?.body
+    if (response?.status === 401) {
+      throw refreshError(
+        body?.message || 'authentication required',
+        'AUTH_UNAUTHENTICATED',
+        401,
+      )
+    }
+    if (response?.status < 200 || response.status >= 300 || !body?.access_token) {
+      throw refreshError(
+        body?.message || 'authentication required',
+        body?.code,
+        response?.status || 401,
+      )
+    }
+    saveAccessToken(body.access_token, body.expires_at)
+    return body as CoreTokenResponse
+  }
   // SSR, tests, and embedded non-browser consumers have no shared storage;
   // the process-local promise still protects those callers.
   if (typeof window === 'undefined' || typeof localStorage === 'undefined' || typeof navigator === 'undefined') {

@@ -10,10 +10,6 @@
           <template #icon><t-icon name="logout" /></template>
           退出组织
         </t-button>
-        <t-button variant="outline" @click="router.push('/organization/knowledge')">
-          <template #icon><t-icon name="folder-open" /></template>
-          知识结构
-        </t-button>
         <t-button v-if="canInvite" theme="primary" :loading="pageLoading" @click="openInvitationDialog">
           <template #icon><t-icon name="user-add" /></template>
           生成邀请链接

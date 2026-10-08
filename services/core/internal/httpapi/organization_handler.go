@@ -36,27 +36,60 @@ type OrganizationHandler struct{ service OrganizationApplication }
 
 type InternalOrganizationHandler struct {
 	service OrganizationApplication
-	token   string
+	tokens  map[string]string
 }
 
 func NewOrganizationHandler(s OrganizationApplication) *OrganizationHandler {
 	return &OrganizationHandler{service: s}
 }
 
-func NewInternalOrganizationHandler(s OrganizationApplication, token string) *InternalOrganizationHandler {
-	return &InternalOrganizationHandler{service: s, token: strings.TrimSpace(token)}
+// NewInternalOrganizationHandler registers one service token per allowed caller.
+// Knowledge and RAG both resolve organization capability through this endpoint
+// but authenticate with their own service tokens, so a single shared token
+// cannot authorize both callers.
+func NewInternalOrganizationHandler(s OrganizationApplication, ragToken, knowledgeToken string) *InternalOrganizationHandler {
+	return &InternalOrganizationHandler{
+		service: s,
+		tokens: map[string]string{
+			"rag":       strings.TrimSpace(ragToken),
+			"knowledge": strings.TrimSpace(knowledgeToken),
+		},
+	}
 }
 
-// CheckMember authenticates Knowledge with the service-to-service token and
-// returns a boolean result instead of exposing the member directory.
+// hasConfiguredServiceToken reports whether at least one caller token is set,
+// so a deployment that configures none fails as "unavailable" rather than
+// silently rejecting every caller.
+func hasConfiguredServiceToken(tokens map[string]string) bool {
+	for _, token := range tokens {
+		if strings.TrimSpace(token) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// authorizeCaller matches the bearer token against the token registered for the
+// caller named in X-Caller-Service. Callers with no registered token never
+// authenticate, so a token leak from one service cannot impersonate another.
+func authorizeCaller(c *gin.Context, tokens map[string]string) bool {
+	parts := strings.Fields(c.GetHeader("Authorization"))
+	token := ""
+	if len(parts) == 2 && strings.EqualFold(parts[0], "Bearer") {
+		token = parts[1]
+	}
+	expected, known := tokens[strings.TrimSpace(c.GetHeader("X-Caller-Service"))]
+	return known && strings.TrimSpace(expected) != "" && token == expected
+}
+
+// CheckMember authenticates the calling service with its own service-to-service
+// token and returns a boolean result instead of exposing the member directory.
 func (h *InternalOrganizationHandler) CheckMember(c *gin.Context) {
-	if h == nil || h.service == nil || h.token == "" {
+	if h == nil || h.service == nil || !hasConfiguredServiceToken(h.tokens) {
 		writeError(c, http.StatusServiceUnavailable, "ORG_SERVICE_UNAVAILABLE", "organization service unavailable", true)
 		return
 	}
-	parts := strings.Fields(c.GetHeader("Authorization"))
-	caller := strings.TrimSpace(c.GetHeader("X-Caller-Service"))
-	if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") || parts[1] != h.token || (caller != "knowledge" && caller != "rag") {
+	if !authorizeCaller(c, h.tokens) {
 		writeError(c, http.StatusForbidden, "ORG_CALLER_FORBIDDEN", "caller is not authorized", false)
 		return
 	}

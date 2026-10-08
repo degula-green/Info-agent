@@ -6,10 +6,10 @@
   "collectorCommand": "",
   "collectorArgs": [],
   "collectorUrl": "http://127.0.0.1:8091",
-  "collectorToken": "local-development-only",
+  "collectorToken": "",
   "formBrowserCommand": "",
   "formBrowserArgs": [],
   "formBrowserUrl": "http://127.0.0.1:8500",
-  "formBrowserToken": "local-development-only",
-  "formBrowserHeadless": false
+  "formBrowserToken": "",
+  "formBrowserHeadless": true
 }
