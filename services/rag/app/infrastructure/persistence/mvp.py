@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 import uuid
 from collections import defaultdict
@@ -55,6 +56,36 @@ def _uuid_or_none(value: Any) -> str | None:
     if value is None or not str(value).strip():
         return None
     return str(value)
+
+
+def _vector_literal(values: list[float]) -> str:
+    """pgvector takes a bracketed literal; passing text avoids needing a
+    registered adapter for the vector type."""
+    return "[" + ",".join(f"{float(value):.8g}" for value in values) + "]"
+
+
+def _similarity_ratio(left: str, right: str) -> float:
+    """String ratio for the in-memory fuzzy locator.
+
+    Postgres uses pg_trgm; the test double only has to be close enough to
+    exercise the locator's layer ordering without a database.
+    """
+    if not left or not right:
+        return 0.0
+    import difflib
+
+    return difflib.SequenceMatcher(None, left, right).ratio()
+
+
+def _cosine_similarity(left: list[float], right: list[float]) -> float:
+    if not left or not right or len(left) != len(right):
+        return 0.0
+    dot = sum(a * b for a, b in zip(left, right))
+    left_norm = math.sqrt(sum(a * a for a in left))
+    right_norm = math.sqrt(sum(b * b for b in right))
+    if not left_norm or not right_norm:
+        return 0.0
+    return dot / (left_norm * right_norm)
 
 
 def _as_json(value: Any) -> str:
@@ -974,6 +1005,207 @@ class PostgresRagMVPRepository:
                 )
                 version = int(cursor.fetchone()[0] or 1)
         return entities, aliases, version
+
+    def locate_entities_exact(
+        self, *, scope_type: str, scope_id: str, normalized: str
+    ) -> list[dict[str, Any]]:
+        """L1: canonical or alias equality within the scope.
+
+        Returns every match rather than a single row: the same name may exist in
+        two domains, and the caller decides which one the mention means.
+        """
+        if not normalized:
+            return []
+        with self._connection() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    f"""SELECT e.id::text,e.domain,e.canonical_name,e.registry_version,'exact'
+                        FROM {self.schema}.entity_registry e
+                        WHERE e.scope_type=%s AND e.scope_id=%s::uuid AND e.status='active'
+                          AND e.normalized_key=%s
+                        UNION
+                        SELECT e.id::text,e.domain,e.canonical_name,e.registry_version,'alias'
+                        FROM {self.schema}.entity_aliases a
+                        JOIN {self.schema}.entity_registry e ON e.id=a.entity_id
+                        WHERE a.scope_type=%s AND a.scope_id=%s::uuid AND a.status='active'
+                          AND a.normalized_alias=%s""",
+                    (scope_type, scope_id, normalized, scope_type, scope_id, normalized),
+                )
+                return [
+                    {
+                        "entity_id": row[0], "domain": row[1], "canonical_name": row[2],
+                        "registry_version": int(row[3]), "match_method": row[4],
+                        "match_score": 0.95 if row[4] == "exact" else 0.93,
+                    }
+                    for row in cursor.fetchall()
+                ]
+
+    def locate_entities_fuzzy(
+        self, *, scope_type: str, scope_id: str, normalized: str, limit: int = 10
+    ) -> list[dict[str, Any]]:
+        """L2: trigram similarity over canonical names, normalized keys and aliases.
+
+        Trigram similarity tolerates typos; it does not resolve abbreviations
+        such as "aims" for "AIMS系统开发项目", which is L3's job. A plain
+        containment match is included at a lower score because it still needs
+        verification downstream.
+        """
+        if not normalized:
+            return []
+        limit = max(1, min(int(limit), 50))
+        found: dict[str, dict[str, Any]] = {}
+
+        def keep(
+            entity_id: str, domain: str, name: str, version: int,
+            score: float, method: str = "fuzzy",
+        ) -> None:
+            current = found.get(entity_id)
+            if current is None or score > current["match_score"]:
+                found[entity_id] = {
+                    "entity_id": entity_id, "domain": domain, "canonical_name": name,
+                    "registry_version": version, "match_method": method,
+                    "match_score": round(float(score), 4),
+                }
+
+        def fuzzy_score(raw: float) -> float:
+            """Trigram scores below 0.8 are not trustworthy enough to call a
+            fuzzy match; map the accepted band onto 0.80-0.85."""
+            return min(0.85, 0.80 + (float(raw) - 0.80) * 0.25)
+
+        with self._connection() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    f"""SELECT e.id::text,e.domain,e.canonical_name,e.registry_version,
+                               GREATEST(similarity(e.canonical_name,%s),
+                                        similarity(e.normalized_key,%s))
+                        FROM {self.schema}.entity_registry e
+                        WHERE e.scope_type=%s AND e.scope_id=%s::uuid AND e.status='active'
+                          AND (e.canonical_name %% %s OR e.normalized_key %% %s)
+                        ORDER BY 5 DESC LIMIT %s""",
+                    (normalized, normalized, scope_type, scope_id, normalized, normalized, limit),
+                )
+                for row in cursor.fetchall():
+                    raw = float(row[4] or 0)
+                    if raw < 0.8:
+                        continue
+                    keep(row[0], row[1], row[2], int(row[3]), fuzzy_score(raw))
+                cursor.execute(
+                    f"""SELECT e.id::text,e.domain,e.canonical_name,e.registry_version,
+                               similarity(a.normalized_alias,%s)
+                        FROM {self.schema}.entity_aliases a
+                        JOIN {self.schema}.entity_registry e ON e.id=a.entity_id
+                        WHERE a.scope_type=%s AND a.scope_id=%s::uuid AND a.status='active'
+                          AND a.normalized_alias %% %s
+                        ORDER BY 5 DESC LIMIT %s""",
+                    (normalized, scope_type, scope_id, normalized, limit),
+                )
+                for row in cursor.fetchall():
+                    raw = float(row[4] or 0)
+                    if raw < 0.8:
+                        continue
+                    keep(row[0], row[1], row[2], int(row[3]), fuzzy_score(raw))
+                # Containment catches omitted qualifiers ("青云" -> "青云飞鹏项目")
+                # that a trigram score rates as too different to trust alone.
+                if len(normalized) >= 2:
+                    cursor.execute(
+                        f"""SELECT e.id::text,e.domain,e.canonical_name,e.registry_version
+                            FROM {self.schema}.entity_registry e
+                            WHERE e.scope_type=%s AND e.scope_id=%s::uuid AND e.status='active'
+                              AND e.normalized_key LIKE %s
+                            ORDER BY length(e.normalized_key) LIMIT %s""",
+                        (scope_type, scope_id, f"%{normalized}%", limit),
+                    )
+                    for row in cursor.fetchall():
+                        keep(row[0], row[1], row[2], int(row[3]), 0.70, method="substring")
+        ranked = sorted(found.values(), key=lambda item: (-item["match_score"], item["entity_id"]))
+        return ranked[:limit]
+
+    def locate_entities_semantic(
+        self,
+        *,
+        scope_type: str,
+        scope_id: str,
+        embedding: list[float],
+        limit: int = 10,
+    ) -> list[dict[str, Any]]:
+        """L3: pgvector ANN over the scope, ordered by cosine distance.
+
+        over_fetch widens the candidate list because a filtered ANN can return
+        fewer than ``limit`` rows once the scope predicate is applied.
+        """
+        if not embedding:
+            return []
+        limit = max(1, min(int(limit), 50))
+        over_fetch = min(limit * 5, 200)
+        literal = _vector_literal(embedding)
+        with self._connection() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    f"""SELECT e.id::text,e.domain,e.canonical_name,e.registry_version,
+                               1-(e.embedding <=> %s::vector) AS score
+                        FROM {self.schema}.entity_registry e
+                        WHERE e.scope_type=%s AND e.scope_id=%s::uuid AND e.status='active'
+                          AND e.embedding IS NOT NULL
+                        ORDER BY e.embedding <=> %s::vector
+                        LIMIT %s""",
+                    (literal, scope_type, scope_id, literal, over_fetch),
+                )
+                return [
+                    {
+                        "entity_id": row[0], "domain": row[1], "canonical_name": row[2],
+                        "registry_version": int(row[3]), "match_method": "semantic",
+                        "match_score": round(float(row[4] or 0), 4),
+                    }
+                    for row in cursor.fetchall()
+                ][:limit]
+
+    def list_entities_pending_embedding(self, *, limit: int = 50) -> list[dict[str, Any]]:
+        with self._connection() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    f"""SELECT e.id::text,e.scope_type,e.scope_id::text,e.domain,
+                               e.canonical_name,COALESCE(e.description,''),
+                               COALESCE(array_to_string(e.keywords,' '),''),
+                               COALESCE(array_to_string(
+                                   (SELECT array_agg(a.display_alias ORDER BY a.display_alias)
+                                      FROM {self.schema}.entity_aliases a
+                                     WHERE a.entity_id=e.id AND a.status='active'),' '),'')
+                        FROM {self.schema}.entity_registry e
+                        WHERE e.status='active' AND e.embedding_status IN ('pending','failed')
+                        ORDER BY e.updated_at LIMIT %s""",
+                    (max(1, int(limit)),),
+                )
+                return [
+                    {
+                        "entity_id": row[0], "scope_type": row[1], "scope_id": row[2],
+                        "domain": row[3], "canonical_name": row[4], "description": row[5],
+                        "keywords": row[6], "aliases": row[7],
+                    }
+                    for row in cursor.fetchall()
+                ]
+
+    def update_entity_embedding(
+        self,
+        *,
+        entity_id: str,
+        embedding: list[float],
+        model: str,
+        dimensions: int,
+        status: str = "ready",
+    ) -> None:
+        with self._connection() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    f"""UPDATE {self.schema}.entity_registry
+                        SET embedding=%s::vector,embedding_model=%s,embedding_dimensions=%s,
+                            embedding_status=%s,embedding_updated_at=CURRENT_TIMESTAMP,
+                            updated_at=CURRENT_TIMESTAMP
+                        WHERE id=%s::uuid""",
+                    (
+                        _vector_literal(embedding) if embedding else None,
+                        model, int(dimensions), status, entity_id,
+                    ),
+                )
 
     def upsert_entity(
         self,
@@ -2267,6 +2499,149 @@ class InMemoryRagMVPRepository:
         ]
         version = max((int(item.get("registry_version") or 1) for item in self.entities), default=1)
         return entities, aliases, version
+
+    def locate_entities_exact(
+        self, *, scope_type: str, scope_id: str, normalized: str
+    ) -> list[dict[str, Any]]:
+        if not normalized:
+            return []
+        found: dict[str, dict[str, Any]] = {}
+        for item in self.entities:
+            if item["scope_type"] != scope_type or item["scope_id"] != scope_id:
+                continue
+            if item.get("status") != "active" or item["normalized_key"] != normalized:
+                continue
+            found[item["id"]] = {
+                "entity_id": item["id"], "domain": item["domain"],
+                "canonical_name": item["canonical_name"],
+                "registry_version": int(item.get("registry_version") or 1),
+                "match_method": "exact", "match_score": 0.95,
+            }
+        for alias in self.aliases:
+            if alias.get("scope_type") != scope_type or alias.get("scope_id") != scope_id:
+                continue
+            if alias.get("status", "active") != "active":
+                continue
+            if alias.get("normalized_alias") != normalized:
+                continue
+            entity = next((e for e in self.entities if e["id"] == alias["entity_id"]), None)
+            if entity is None or entity["id"] in found:
+                continue
+            found[entity["id"]] = {
+                "entity_id": entity["id"], "domain": entity["domain"],
+                "canonical_name": entity["canonical_name"],
+                "registry_version": int(entity.get("registry_version") or 1),
+                "match_method": "alias", "match_score": 0.93,
+            }
+        return list(found.values())
+
+    def locate_entities_fuzzy(
+        self, *, scope_type: str, scope_id: str, normalized: str, limit: int = 10
+    ) -> list[dict[str, Any]]:
+        if not normalized:
+            return []
+        scored: dict[str, dict[str, Any]] = {}
+
+        def consider(entity: dict[str, Any], text: str) -> None:
+            ratio = _similarity_ratio(normalized, text)
+            if ratio >= 0.8:
+                method, score = "fuzzy", min(0.85, 0.8 + (ratio - 0.8) * 0.25)
+            elif len(normalized) >= 2 and normalized in text:
+                # Containment is useful but must be verified downstream, so it
+                # carries its own method rather than masquerading as a fuzzy hit.
+                method, score = "substring", 0.70
+            else:
+                return
+            current = scored.get(entity["id"])
+            if current is None or score > current["match_score"]:
+                scored[entity["id"]] = {
+                    "entity_id": entity["id"], "domain": entity["domain"],
+                    "canonical_name": entity["canonical_name"],
+                    "registry_version": int(entity.get("registry_version") or 1),
+                    "match_method": method, "match_score": round(score, 4),
+                }
+
+        for item in self.entities:
+            if item["scope_type"] != scope_type or item["scope_id"] != scope_id:
+                continue
+            if item.get("status") == "active":
+                consider(item, item["normalized_key"])
+        for alias in self.aliases:
+            if alias.get("scope_type") != scope_type or alias.get("scope_id") != scope_id:
+                continue
+            if alias.get("status", "active") != "active":
+                continue
+            entity = next((e for e in self.entities if e["id"] == alias["entity_id"]), None)
+            if entity is not None and entity.get("status") == "active":
+                consider(entity, alias.get("normalized_alias", ""))
+        ranked = sorted(scored.values(), key=lambda item: (-item["match_score"], item["entity_id"]))
+        return ranked[: max(1, int(limit))]
+
+    def locate_entities_semantic(
+        self,
+        *,
+        scope_type: str,
+        scope_id: str,
+        embedding: list[float],
+        limit: int = 10,
+    ) -> list[dict[str, Any]]:
+        if not embedding:
+            return []
+        output: list[dict[str, Any]] = []
+        for item in self.entities:
+            if item["scope_type"] != scope_type or item["scope_id"] != scope_id:
+                continue
+            if item.get("status") != "active":
+                continue
+            vector = item.get("embedding")
+            if not vector:
+                continue
+            output.append({
+                "entity_id": item["id"], "domain": item["domain"],
+                "canonical_name": item["canonical_name"],
+                "registry_version": int(item.get("registry_version") or 1),
+                "match_method": "semantic",
+                "match_score": round(_cosine_similarity(embedding, vector), 4),
+            })
+        output.sort(key=lambda value: (-value["match_score"], value["entity_id"]))
+        return output[: max(1, int(limit))]
+
+    def list_entities_pending_embedding(self, *, limit: int = 50) -> list[dict[str, Any]]:
+        pending = [
+            {
+                "entity_id": item["id"], "scope_type": item["scope_type"],
+                "scope_id": item["scope_id"], "domain": item["domain"],
+                "canonical_name": item["canonical_name"],
+                "description": item.get("description", ""),
+                "keywords": " ".join(item.get("keywords") or ()),
+                "aliases": " ".join(
+                    alias.get("display_alias", "")
+                    for alias in self.aliases
+                    if alias.get("entity_id") == item["id"]
+                ),
+            }
+            for item in self.entities
+            if item.get("status") == "active"
+            and item.get("embedding_status", "pending") in {"pending", "failed"}
+        ]
+        return pending[: max(1, int(limit))]
+
+    def update_entity_embedding(
+        self,
+        *,
+        entity_id: str,
+        embedding: list[float],
+        model: str,
+        dimensions: int,
+        status: str = "ready",
+    ) -> None:
+        for item in self.entities:
+            if item["id"] != entity_id:
+                continue
+            item["embedding"] = list(embedding)
+            item["embedding_model"] = model
+            item["embedding_dimensions"] = int(dimensions)
+            item["embedding_status"] = status
 
     def upsert_entity(
         self,
