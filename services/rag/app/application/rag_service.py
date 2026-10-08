@@ -16,7 +16,7 @@ from app.application.mvp_ports import (
     SearchIndexer,
 )
 from app.config import settings
-from app.domain.rag import AccessCheck, AuthorizationScope, SearchRequest, SearchResult, time_bucket
+from app.domain.rag import AccessCheck, AuthorizationScope, SearchRequest, SearchResult
 
 
 class SearchUnavailable(RuntimeError):
@@ -72,7 +72,7 @@ class RAGRetrievalService:
         if not scope.available:
             request = replace(request, include_protected=False)
             protected_keys = ()
-        branch_keys, entity_matches = self._resolve_branches(request)
+        entity_ids, entity_matches = self._resolve_entities(request)
         query_vector: list[float] | None = None
         degraded: list[str] = []
         if request.entry not in {"knowledge", "sources"}:
@@ -102,13 +102,13 @@ class RAGRetrievalService:
         except Exception as exc:
             raise SearchUnavailable("Elasticsearch retrieval failed") from exc
         branch_branches: dict[str, list[SearchResult]] = {}
-        if settings.tree_mode != "off" and branch_keys:
+        if settings.tree_mode != "off" and entity_ids:
             try:
                 branch_branches["branch_bm25"] = _annotate_branch(
                     "bm25",
                     self.indexer.search_bm25(
                         request,
-                        branch_keys=branch_keys,
+                        entity_ids=entity_ids,
                         protected_object_keys=protected_keys,
                     ),
                 )
@@ -118,7 +118,7 @@ class RAGRetrievalService:
                         self.indexer.search_knn(
                             request,
                             query_vector,
-                            branch_keys=branch_keys,
+                            entity_ids=entity_ids,
                             protected_object_keys=protected_keys,
                         ),
                     )
@@ -143,8 +143,8 @@ class RAGRetrievalService:
             weights={
                 "bm25": settings.rrf_keyword_weight,
                 "knn": settings.rrf_vector_weight,
-                "branch_bm25": settings.tree_branch_weight,
-                "branch_knn": settings.tree_branch_weight,
+                "branch_bm25": settings.tree_mount_weight,
+                "branch_knn": settings.tree_mount_weight,
             },
         )
         fused = dedupe_logical_positions(fused)
@@ -194,7 +194,7 @@ class RAGRetrievalService:
             "authorized_protected_object_count": len(protected_keys),
             "scope_truncated": scope.truncated,
             "resolved_entity_count": len(entity_matches),
-            "resolved_branch_count": len(branch_keys),
+            "resolved_entity_count": len(entity_ids),
             "branch_candidate_count": raw_branch_candidate_count,
             "global_candidate_count": raw_global_candidate_count,
             "score_gate_dropped_count": gate_dropped,
@@ -219,7 +219,7 @@ class RAGRetrievalService:
             ),
             "fallback_reason": (
                 None if request.entry == "sources"
-                else "no_entity_match" if settings.tree_mode != "off" and not branch_keys
+                else "no_entity_match" if settings.tree_mode != "off" and not entity_ids
                 else "branch_failed" if "branch_failed" in degraded
                 else None
             ),
@@ -267,7 +267,7 @@ class RAGRetrievalService:
             "execution_path": response.diagnostics["effective_execution_path"],
         }
 
-    def _resolve_branches(self, request: SearchRequest) -> tuple[tuple[str, ...], list[Any]]:
+    def _resolve_entities(self, request: SearchRequest) -> tuple[tuple[str, ...], list[Any]]:
         if settings.tree_mode == "off" or request.entry == "sources":
             return (), []
         entities, aliases, version = self.repository.load_entity_registry(
@@ -276,12 +276,12 @@ class RAGRetrievalService:
         )
         matcher = EntityMatcher(entities, aliases, registry_version=version)
         matches = matcher.match_text(request.query)
-        bucket = time_bucket(request.occurred_after) or time_bucket(request.occurred_before)
-        values = []
-        for match in matches:
-            base = f"entity:{match.domain}:{match.entity_id}"
-            values.append(f"{base}:{bucket}" if bucket else base)
-        return tuple(values[: settings.tree_max_branches]), matches
+        # Time no longer narrows the entity set: occurred_after/occurred_before
+        # are applied as ES metadata filters instead of a monthly branch key.
+        values = tuple(
+            dict.fromkeys(match.entity_id for match in matches)
+        )
+        return values[: settings.tree_max_entities], matches
 
     def _authorize_branches(
         self,

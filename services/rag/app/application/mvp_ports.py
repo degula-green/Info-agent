@@ -5,10 +5,10 @@ from typing import Any, Protocol
 from app.domain.rag import (
     AccessCheck,
     AuthorizationScope,
-    BranchMatch,
     Chunk,
     Entity,
     EntityAlias,
+    EntityMount,
     ResourceContext,
     SearchRequest,
     SearchResult,
@@ -130,7 +130,7 @@ class EntityRegistryRepository(Protocol):
 
 class BranchRepository(Protocol):
     def ensure_tree_branch(self, **values: Any) -> str: ...
-    def replace_chunk_branches(self, chunk: Chunk, branches: list[BranchMatch]) -> None: ...
+    def replace_chunk_mounts(self, chunk: Chunk, mounts: list[EntityMount]) -> None: ...
     def get_tree(self, *, scope_type: str, scope_id: str) -> dict[str, Any]: ...
 
 
@@ -193,7 +193,7 @@ class SearchIndexer(Protocol):
         self,
         request: SearchRequest,
         *,
-        branch_keys: tuple[str, ...] = (),
+        entity_ids: tuple[str, ...] = (),
         protected_object_keys: tuple[str, ...] = (),
         size: int | None = None,
     ) -> list[SearchResult]: ...
@@ -202,7 +202,7 @@ class SearchIndexer(Protocol):
         request: SearchRequest,
         query_vector: list[float],
         *,
-        branch_keys: tuple[str, ...] = (),
+        entity_ids: tuple[str, ...] = (),
         protected_object_keys: tuple[str, ...] = (),
         size: int | None = None,
     ) -> list[SearchResult]: ...

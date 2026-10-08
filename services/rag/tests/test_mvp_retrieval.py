@@ -130,8 +130,8 @@ class RetrievalTests(unittest.TestCase):
         finally:
             object.__setattr__(settings, "tree_mode", original)
         self.assertEqual(len(response.results), 1)
-        self.assertTrue(any(call[1].get("branch_keys") for call in indexer.calls))
-        self.assertTrue(any(not call[1].get("branch_keys") for call in indexer.calls))
+        self.assertTrue(any(call[1].get("entity_ids") for call in indexer.calls))
+        self.assertTrue(any(not call[1].get("entity_ids") for call in indexer.calls))
         self.assertEqual(response.diagnostics["effective_execution_path"], "tree_boost")
         self.assertEqual(response.diagnostics["authorization_candidate_count"], 1)
         self.assertEqual(service.authorization.batch_sizes, [1])

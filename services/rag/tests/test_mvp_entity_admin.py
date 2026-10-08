@@ -33,7 +33,7 @@ class _Indexer:
     def __init__(self):
         self.updated = []
 
-    def update_chunk_branches(self, chunks):
+    def update_chunk_mounts(self, chunks):
         self.updated.extend(chunks)
         return len(chunks)
 
@@ -82,7 +82,7 @@ class EntityAdminTests(unittest.TestCase):
         refreshed = BranchRefreshService(repository=repository, indexer=indexer).run_pending()
         self.assertEqual(refreshed, 1)
         self.assertTrue(indexer.updated)
-        self.assertTrue(indexer.updated[0].branch_keys)
+        self.assertTrue(indexer.updated[0].entity_ids)
         self.assertTrue(repository.get_tree(
             scope_type="organization",
             scope_id=context.scope_id,

@@ -121,7 +121,7 @@ class RagChunkIndex:
                 total += int(response.get("deleted") or 0)
         return total
 
-    def update_chunk_branches(self, chunks: list[Chunk]) -> int:
+    def update_chunk_mounts(self, chunks: list[Chunk]) -> int:
         if not chunks:
             return 0
         operations: list[dict[str, Any]] = []
@@ -134,25 +134,38 @@ class RagChunkIndex:
             operations.extend((
                 {"update": {"_index": alias, "_id": chunk.chunk_id}},
                 {"doc": {
-                    "branch_keys": list(chunk.branch_keys),
+                    "entity_ids": list(chunk.entity_ids),
+                    "entity_mounts": [dict(mount) for mount in chunk.entity_mounts],
                     "registry_version": chunk.registry_version,
                 }},
             ))
         response = self.client.bulk(operations=operations, refresh="wait_for")
-        if _response_body(response).get("errors"):
-            raise ElasticsearchUnavailable("branch projection update failed")
+        body = _response_body(response)
+        if body.get("errors"):
+            # A chunk that is not in the index has nothing to update; that is not
+            # a failure. Anything else is.
+            failures = [
+                item["update"]["error"]
+                for item in body.get("items", [])
+                if isinstance(item, dict)
+                and isinstance(item.get("update"), dict)
+                and item["update"].get("error")
+                and item["update"]["error"].get("type") != "document_missing_exception"
+            ]
+            if failures:
+                raise ElasticsearchUnavailable("mount projection update failed")
         return len(chunks)
 
     def search_bm25(
         self,
         request: SearchRequest,
         *,
-        branch_keys: tuple[str, ...] = (),
+        entity_ids: tuple[str, ...] = (),
         protected_object_keys: tuple[str, ...] = (),
         size: int | None = None,
     ) -> list[SearchResult]:
         branches = [
-            (settings.elasticsearch_display_read_index, _filters(request, branch_keys=branch_keys)),
+            (settings.elasticsearch_display_read_index, _filters(request, entity_ids=entity_ids)),
         ]
         if request.include_protected:
             # Do NOT filter the protected index by the enumerated key list.
@@ -162,7 +175,7 @@ class RagChunkIndex:
             # candidates and RAG authorizes each one exactly before exposing it.
             branches.append((
                 settings.elasticsearch_protected_read_index,
-                _filters(request, branch_keys=branch_keys),
+                _filters(request, entity_ids=entity_ids),
             ))
         output: list[SearchResult] = []
         for index, filters in branches:
@@ -184,17 +197,17 @@ class RagChunkIndex:
         request: SearchRequest,
         query_vector: list[float],
         *,
-        branch_keys: tuple[str, ...] = (),
+        entity_ids: tuple[str, ...] = (),
         protected_object_keys: tuple[str, ...] = (),
         size: int | None = None,
     ) -> list[SearchResult]:
         branches = [
-            (settings.elasticsearch_display_read_index, _filters(request, branch_keys=branch_keys)),
+            (settings.elasticsearch_display_read_index, _filters(request, entity_ids=entity_ids)),
         ]
         if request.include_protected:
             branches.append((
                 settings.elasticsearch_protected_read_index,
-                _filters(request, branch_keys=branch_keys),
+                _filters(request, entity_ids=entity_ids),
             ))
         output: list[SearchResult] = []
         for index, filters in branches:
@@ -345,7 +358,7 @@ def _bm25_query(query: str, filters: list[dict[str, Any]]) -> dict[str, Any]:
 def _filters(
     request: SearchRequest,
     *,
-    branch_keys: tuple[str, ...] = (),
+    entity_ids: tuple[str, ...] = (),
     protected_object_keys: tuple[str, ...] = (),
 ) -> list[dict[str, Any]]:
     output: list[dict[str, Any]] = [
@@ -446,17 +459,11 @@ def _filters(
         )
     if request.message_types:
         output.append({"terms": {"message_type": list(request.message_types)}})
-    if branch_keys:
-        should: list[dict[str, Any]] = []
-        exact: list[str] = []
-        for key in branch_keys:
-            if re.search(r":\d{4}-\d{2}$", key):
-                exact.append(key)
-            else:
-                should.append({"prefix": {"branch_keys": key}})
-        if exact:
-            should.append({"terms": {"branch_keys": exact}})
-        output.append({"bool": {"should": should, "minimum_should_match": 1}})
+    if entity_ids:
+        # Flat terms over the synchronised mount list. Time filtering stays in
+        # occurred_after/occurred_before above; it is no longer encoded into the
+        # mount key.
+        output.append({"terms": {"entity_ids": list(entity_ids)}})
     if protected_object_keys:
         output.append({"terms": {"auth_object_key": list(protected_object_keys)}})
     return output

@@ -11,11 +11,11 @@ from typing import Any, Iterator
 
 from app.config import settings
 from app.domain.rag import (
-    BranchMatch,
     Candidate,
     Chunk,
     Entity,
     EntityAlias,
+    EntityMount,
     ResourceContext,
     stable_id,
 )
@@ -106,10 +106,6 @@ def _resolve_job_scope(
             raise ValueError("owner_only event is missing owner_user_id")
         return "user", owner_user_id
     raise ValueError("knowledge.ready scope is not authoritative")
-
-
-def _looks_like_month(value: str) -> bool:
-    return bool(re.search(r":\d{4}-\d{2}$", value or ""))
 
 
 class PostgresRagMVPRepository:
@@ -671,10 +667,20 @@ class PostgresRagMVPRepository:
                                document_id::text,message_id::text,sent_at,auth_partition_key,auth_object_key,
                                acl_version,sensitivity,embedding_model,embedding_dimensions,
                                embedding_status,rag_eligible,lifecycle_status,
-                               COALESCE((SELECT array_agg(branch_key ORDER BY branch_key)
+                               COALESCE((SELECT array_agg(b.entity_id::text ORDER BY b.entity_id::text)
                                          FROM {self.schema}.chunk_branches b
                                          WHERE b.chunk_id={self.schema}.chunks.chunk_id
                                            AND b.status='active'),ARRAY[]::text[]),
+                               COALESCE((SELECT jsonb_agg(jsonb_build_object(
+                                                   'entity_id', b.entity_id::text,
+                                                   'domain', e.domain,
+                                                   'confidence', b.confidence,
+                                                   'method', b.mount_method)
+                                               ORDER BY b.entity_id::text)
+                                         FROM {self.schema}.chunk_branches b
+                                         JOIN {self.schema}.entity_registry e ON e.id=b.entity_id
+                                         WHERE b.chunk_id={self.schema}.chunks.chunk_id
+                                           AND b.status='active'),'[]'::jsonb),
                                COALESCE((SELECT MAX(registry_version)
                                          FROM {self.schema}.chunk_branches b
                                          WHERE b.chunk_id={self.schema}.chunks.chunk_id
@@ -1081,92 +1087,56 @@ class PostgresRagMVPRepository:
                 ]
         return value
 
-    def ensure_tree_branch(
-        self,
-        *,
-        scope_type: str,
-        scope_id: str,
-        domain: str,
-        entity_id: str,
-        entity_name: str,
-        bucket: str | None,
-        registry_version: int,
-        branch_key: str | None = None,
-    ) -> str:
-        branch_key = branch_key or (
-            f"entity:{domain}:{entity_id}" + (f":{bucket}" if bucket else "")
-        )
-        scope_node_key = f"scope:{scope_type}:{scope_id}"
-        domain_node_key = f"domain:{domain}"
-        entity_node_key = f"entity:{domain}:{entity_id}"
-        with self._connection() as connection:
-            with connection.cursor() as cursor:
-                scope_id_value = self._ensure_tree_node(
-                    cursor, scope_type, scope_id, domain, None, None, "scope", scope_node_key,
-                    f"scope:{scope_type}:{scope_id}", registry_version,
-                )
-                domain_id = self._ensure_tree_node(
-                    cursor, scope_type, scope_id, domain, None, scope_id_value, "domain",
-                    domain_node_key, f"domain:{domain}", registry_version,
-                )
-                entity_id_value = self._ensure_tree_node(
-                    cursor, scope_type, scope_id, domain, entity_id, domain_id, "entity",
-                    entity_node_key, f"entity:{domain}:{entity_id}", registry_version,
-                )
-                if bucket:
-                    self._ensure_tree_node(
-                        cursor, scope_type, scope_id, domain, entity_id, entity_id_value, "time",
-                        f"{entity_node_key}:{bucket}", branch_key, registry_version,
-                    )
-                elif not bucket:
-                    cursor.execute(
-                        f"""UPDATE {self.schema}.tree_nodes SET branch_key=%s,updated_at=CURRENT_TIMESTAMP
-                            WHERE id=%s::uuid""",
-                        (branch_key, entity_id_value),
-                    )
-        return branch_key
+    def replace_chunk_mounts(self, chunk: Chunk, mounts: list[EntityMount]) -> None:
+        """Make the chunk's active mounts match ``mounts`` exactly.
 
-    def replace_chunk_branches(self, chunk: Chunk, branches: list[BranchMatch]) -> None:
-        for branch in branches:
-            self.ensure_tree_branch(
-                scope_type=chunk.scope_type,
-                scope_id=chunk.scope_id,
-                domain=branch.domain,
-                entity_id=branch.entity_id,
-                entity_name=branch.entity_id,
-                bucket=branch.branch_key.rsplit(":", 1)[-1] if _looks_like_month(branch.branch_key) else None,
-                registry_version=branch.registry_version,
-                branch_key=branch.branch_key,
-            )
+        Re-running a window scan must not duplicate or downgrade a mount, so
+        rows are upserted on (chunk_id, entity_id): confidence only moves up and
+        a stronger channel is never replaced by a weaker one. That is what makes
+        the 50%-overlap window scan idempotent.
+        """
+        entity_ids = [mount.entity_id for mount in mounts]
         with self._connection() as connection:
             with connection.cursor() as cursor:
-                keys = [branch.branch_key for branch in branches]
-                if keys:
+                if entity_ids:
                     cursor.execute(
-                        f"""UPDATE {self.schema}.chunk_branches SET status='removed',updated_at=CURRENT_TIMESTAMP
-                            WHERE chunk_id=%s AND status='active' AND NOT (branch_key=ANY(%s))""",
-                        (chunk.chunk_id, keys),
+                        f"""UPDATE {self.schema}.chunk_branches
+                            SET status='removed',updated_at=CURRENT_TIMESTAMP
+                            WHERE chunk_id=%s AND status='active'
+                              AND NOT (entity_id=ANY(%s::uuid[]))""",
+                        (chunk.chunk_id, entity_ids),
                     )
                 else:
                     cursor.execute(
-                        f"""UPDATE {self.schema}.chunk_branches SET status='removed',updated_at=CURRENT_TIMESTAMP
+                        f"""UPDATE {self.schema}.chunk_branches
+                            SET status='removed',updated_at=CURRENT_TIMESTAMP
                             WHERE chunk_id=%s AND status='active'""",
                         (chunk.chunk_id,),
                     )
-                for branch in branches:
+                for mount in mounts:
                     cursor.execute(
                         f"""INSERT INTO {self.schema}.chunk_branches
-                        (chunk_id,branch_key,entity_id,scope_type,scope_id,registry_version,
-                         match_method,match_score,status)
-                        VALUES (%s,%s,%s::uuid,%s,%s::uuid,%s,%s,%s,'active')
-                        ON CONFLICT (chunk_id,branch_key) DO UPDATE SET
-                          entity_id=EXCLUDED.entity_id,registry_version=EXCLUDED.registry_version,
-                          match_method=EXCLUDED.match_method,match_score=EXCLUDED.match_score,
+                        (chunk_id,entity_id,scope_type,scope_id,registry_version,
+                         confidence,mount_method,status)
+                        VALUES (%s,%s::uuid,%s,%s::uuid,%s,%s,%s,'active')
+                        ON CONFLICT (chunk_id,entity_id) DO UPDATE SET
+                          registry_version=EXCLUDED.registry_version,
+                          confidence=GREATEST({self.schema}.chunk_branches.confidence,
+                                              EXCLUDED.confidence),
+                          mount_method=CASE
+                            WHEN EXCLUDED.mount_method='explicit'
+                              OR {self.schema}.chunk_branches.mount_method='explicit'
+                              THEN 'explicit'
+                            WHEN EXCLUDED.mount_method='window_batch'
+                              OR {self.schema}.chunk_branches.mount_method='window_batch'
+                              THEN 'window_batch'
+                            ELSE 'llm_infer'
+                          END,
                           status='active',updated_at=CURRENT_TIMESTAMP""",
                         (
-                            chunk.chunk_id, branch.branch_key, branch.entity_id, chunk.scope_type,
-                            chunk.scope_id, branch.registry_version, branch.match_method,
-                            branch.match_score,
+                            chunk.chunk_id, mount.entity_id, chunk.scope_type,
+                            chunk.scope_id, mount.registry_version, mount.confidence,
+                            mount.mount_method,
                         ),
                     )
 
@@ -1421,31 +1391,60 @@ class PostgresRagMVPRepository:
                 }
 
     def get_tree(self, *, scope_type: str, scope_id: str) -> dict[str, Any]:
+        """Derive the admin tree from the registry and the mount table.
+
+        tree_nodes was dropped in the v2 schema: the domain layer is the fixed
+        set of five types and the entity layer is entity_registry itself, so a
+        materialised copy only added a way for the two to drift apart.
+        """
         with self._connection() as connection:
             with connection.cursor() as cursor:
                 cursor.execute(
-                    f"""SELECT COALESCE(MAX(registry_version),1) FROM {self.schema}.tree_nodes
+                    f"""SELECT COALESCE(MAX(registry_version),1) FROM {self.schema}.entity_registry
                         WHERE scope_type=%s AND scope_id=%s::uuid""",
                     (scope_type, scope_id),
                 )
                 version = int(cursor.fetchone()[0] or 1)
                 cursor.execute(
-                    f"""SELECT id::text,node_type,domain,entity_id::text,time_bucket,node_key,
-                               branch_key,parent_id::text,registry_version,statistics
-                        FROM {self.schema}.tree_nodes
+                    f"""SELECT domain,COUNT(*) FROM {self.schema}.entity_registry
                         WHERE scope_type=%s AND scope_id=%s::uuid AND status='active'
-                        ORDER BY node_type,node_key""",
+                        GROUP BY domain ORDER BY domain""",
                     (scope_type, scope_id),
                 )
-                nodes = []
-                for row in cursor.fetchall():
-                    nodes.append({
-                        "node_id": row[0], "node_type": row[1], "domain": row[2],
-                        "entity_id": row[3], "time_bucket": row[4], "node_key": row[5],
-                        "branch_key": row[6], "parent_id": row[7],
-                        "registry_version": int(row[8]), "statistics": row[9] or {},
-                    })
-                return {"scope_key": f"{scope_type}:{scope_id}", "registry_version": version, "nodes": nodes}
+                domain_rows = cursor.fetchall()
+                cursor.execute(
+                    f"""SELECT e.id::text,e.domain,e.canonical_name,e.registry_version,
+                               COALESCE((SELECT COUNT(*) FROM {self.schema}.chunk_branches b
+                                          WHERE b.entity_id=e.id AND b.status='active'),0)
+                        FROM {self.schema}.entity_registry e
+                        WHERE e.scope_type=%s AND e.scope_id=%s::uuid AND e.status='active'
+                        ORDER BY e.domain,e.canonical_name""",
+                    (scope_type, scope_id),
+                )
+                entity_rows = cursor.fetchall()
+        nodes: list[dict[str, Any]] = []
+        for domain, entity_count in domain_rows:
+            nodes.append({
+                "node_id": f"domain:{domain}", "node_type": "domain", "domain": domain,
+                "entity_id": None, "canonical_name": None, "time_bucket": None,
+                "node_key": f"domain:{domain}", "branch_key": None, "parent_id": None,
+                "registry_version": version,
+                "statistics": {"entity_count": int(entity_count)},
+            })
+        for entity_id, domain, name, entity_version, mount_count in entity_rows:
+            nodes.append({
+                "node_id": entity_id, "node_type": "entity", "domain": domain,
+                "entity_id": entity_id, "canonical_name": name, "time_bucket": None,
+                "node_key": f"entity:{domain}:{entity_id}", "branch_key": None,
+                "parent_id": f"domain:{domain}",
+                "registry_version": int(entity_version or 1),
+                "statistics": {"chunk_count": int(mount_count)},
+            })
+        return {
+            "scope_key": f"{scope_type}:{scope_id}",
+            "registry_version": version,
+            "nodes": nodes,
+        }
 
     def add_outbox_event(self, event: dict[str, Any]) -> str:
         event_id = str(event.get("event_id") or new_uuid())
@@ -1722,35 +1721,6 @@ class PostgresRagMVPRepository:
                 )
                 return cursor.rowcount == 1
 
-    def _ensure_tree_node(
-        self,
-        cursor: Any,
-        scope_type: str,
-        scope_id: str,
-        domain: str,
-        entity_id: str | None,
-        parent_id: str | None,
-        node_type: str,
-        node_key: str,
-        branch_key: str,
-        registry_version: int,
-    ) -> str:
-        cursor.execute(
-            f"""INSERT INTO {self.schema}.tree_nodes
-            (scope_type,scope_id,domain,entity_id,parent_id,node_type,node_key,branch_key,registry_version)
-            VALUES (%s,%s::uuid,%s,%s::uuid,%s::uuid,%s,%s,%s,%s)
-            ON CONFLICT (scope_type,scope_id,node_key) DO UPDATE SET
-              parent_id=COALESCE(EXCLUDED.parent_id,{self.schema}.tree_nodes.parent_id),
-              branch_key=EXCLUDED.branch_key,registry_version=EXCLUDED.registry_version,
-              status='active',updated_at=CURRENT_TIMESTAMP
-            RETURNING id::text""",
-            (
-                scope_type, scope_id, domain, entity_id, parent_id, node_type, node_key,
-                branch_key, registry_version,
-            ),
-        )
-        return str(cursor.fetchone()[0])
-
     @staticmethod
     def _job_row(row: Any) -> dict[str, Any]:
         return {
@@ -1793,7 +1763,9 @@ class PostgresRagMVPRepository:
             auth_object_key=row[27], acl_version=int(row[28] or 0), sensitivity=row[29],
             embedding_model=row[30], embedding_dimensions=row[31], embedding_status=row[32],
             rag_eligible=bool(row[33]), lifecycle_status=row[34],
-            branch_keys=tuple(row[35] or ()), registry_version=int(row[36] or 0),
+            entity_ids=tuple(row[35] or ()),
+            entity_mounts=tuple(dict(item) for item in (row[36] or ())),
+            registry_version=int(row[37] or 0),
         )
 
     @staticmethod
@@ -1824,7 +1796,6 @@ class InMemoryRagMVPRepository:
         self.entities: list[dict[str, Any]] = []
         self.aliases: list[dict[str, Any]] = []
         self.branches: dict[tuple[str, str], dict[str, Any]] = {}
-        self.tree_nodes: dict[str, dict[str, Any]] = {}
         self.candidates: dict[str, dict[str, Any]] = {}
         self.candidate_mentions: list[dict[str, Any]] = []
         self.reviews: list[dict[str, Any]] = []
@@ -2105,7 +2076,17 @@ class InMemoryRagMVPRepository:
                 value for (chunk_id, _), value in self.branches.items()
                 if chunk_id == chunk.chunk_id and value.get("status") == "active"
             ]
-            chunk.branch_keys = tuple(sorted(value["branch_key"] for value in active))
+            ordered = sorted(active, key=lambda value: value["entity_id"])
+            chunk.entity_ids = tuple(value["entity_id"] for value in ordered)
+            chunk.entity_mounts = tuple(
+                {
+                    "entity_id": value["entity_id"],
+                    "domain": value.get("domain", ""),
+                    "confidence": float(value.get("confidence", 1.0)),
+                    "method": value.get("mount_method", "explicit"),
+                }
+                for value in ordered
+            )
             chunk.registry_version = max(
                 (int(value.get("registry_version") or 0) for value in active),
                 default=0,
@@ -2337,42 +2318,18 @@ class InMemoryRagMVPRepository:
         ]
         return value
 
-    def ensure_tree_branch(self, **value: Any) -> str:
-        branch_key = str(value["branch_key"])
-        self.tree_nodes[branch_key] = {
-            "node_id": value.get("node_id") or new_uuid(),
-            "scope_key": f"{value['scope_type']}:{value['scope_id']}",
-            "domain": value["domain"],
-            "entity_id": value["entity_id"],
-            "time_bucket": value.get("bucket"),
-            "branch_key": branch_key,
-            "node_type": "time" if value.get("bucket") else "entity",
-            "registry_version": value["registry_version"],
-            "statistics": {},
-            "status": "active",
-        }
-        return branch_key
-
-    def replace_chunk_branches(self, chunk: Chunk, branches: list[BranchMatch]) -> None:
+    def replace_chunk_mounts(self, chunk: Chunk, mounts: list[EntityMount]) -> None:
         for key in list(self.branches):
             if key[0] == chunk.chunk_id:
                 self.branches.pop(key)
-        for branch in branches:
-            self.ensure_tree_branch(
-                scope_type=chunk.scope_type,
-                scope_id=chunk.scope_id,
-                domain=branch.domain,
-                entity_id=branch.entity_id,
-                entity_name=branch.entity_id,
-                bucket=(
-                    branch.branch_key.rsplit(":", 1)[-1]
-                    if re.search(r":\d{4}-\d{2}$", branch.branch_key) else None
-                ),
-                registry_version=branch.registry_version,
-                branch_key=branch.branch_key,
-            )
-            self.branches[(chunk.chunk_id, branch.branch_key)] = {
-                **branch.__dict__, "status": "active",
+        for mount in mounts:
+            self.branches[(chunk.chunk_id, mount.entity_id)] = {
+                "entity_id": mount.entity_id,
+                "domain": mount.domain,
+                "registry_version": mount.registry_version,
+                "mount_method": mount.mount_method,
+                "confidence": mount.confidence,
+                "status": "active",
             }
 
     def upsert_candidate_mention(
@@ -2530,12 +2487,40 @@ class InMemoryRagMVPRepository:
 
     def get_tree(self, *, scope_type: str, scope_id: str) -> dict[str, Any]:
         prefix = f"{scope_type}:{scope_id}"
-        nodes = [dict(value) for value in self.tree_nodes.values() if value["scope_key"] == prefix]
-        return {
-            "scope_key": prefix,
-            "registry_version": max((int(value.get("registry_version") or 1) for value in nodes), default=1),
-            "nodes": nodes,
-        }
+        scoped = [
+            item for item in self.entities
+            if item["scope_type"] == scope_type and item["scope_id"] == scope_id
+        ]
+        active = [item for item in scoped if item.get("status") == "active"]
+        version = max(
+            (int(item.get("registry_version") or 1) for item in scoped), default=1
+        )
+        counts: dict[str, int] = {}
+        for item in active:
+            counts[item["domain"]] = counts.get(item["domain"], 0) + 1
+        nodes: list[dict[str, Any]] = []
+        for domain, entity_count in sorted(counts.items()):
+            nodes.append({
+                "node_id": f"domain:{domain}", "node_type": "domain", "domain": domain,
+                "entity_id": None, "canonical_name": None, "time_bucket": None,
+                "node_key": f"domain:{domain}", "branch_key": None, "parent_id": None,
+                "registry_version": version,
+                "statistics": {"entity_count": entity_count},
+            })
+        for item in sorted(active, key=lambda v: (v["domain"], v.get("canonical_name") or "")):
+            mount_count = sum(
+                1 for (_, entity_id), value in self.branches.items()
+                if entity_id == item["id"] and value.get("status") == "active"
+            )
+            nodes.append({
+                "node_id": item["id"], "node_type": "entity", "domain": item["domain"],
+                "entity_id": item["id"], "canonical_name": item["canonical_name"],
+                "time_bucket": None, "node_key": f"entity:{item['domain']}:{item['id']}",
+                "branch_key": None, "parent_id": f"domain:{item['domain']}",
+                "registry_version": int(item.get("registry_version") or 1),
+                "statistics": {"chunk_count": mount_count},
+            })
+        return {"scope_key": prefix, "registry_version": version, "nodes": nodes}
 
     def add_outbox_event(self, event: dict[str, Any]) -> str:
         event_id = str(event.get("event_id") or new_uuid())

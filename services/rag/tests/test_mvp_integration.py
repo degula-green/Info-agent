@@ -86,7 +86,7 @@ class MVPEndToEndIntegrationTests(unittest.TestCase):
             chunks = repository.list_chunks(scope_type="organization", scope_id=identifiers["scope"])
             self.assertEqual(len(chunks), 1)
             self.assertEqual(chunks[0].embedding_status, "ready")
-            self.assertTrue(chunks[0].branch_keys)
+            self.assertTrue(chunks[0].entity_ids)
             service = RAGRetrievalService(
                 repository=repository,
                 indexer=index,

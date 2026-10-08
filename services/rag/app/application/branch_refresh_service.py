@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from app.application.entity_service import EntityMatcher, match_chunk_branches
+from app.application.entity_service import EntityMatcher, match_chunk_mounts
 
 
 logger = logging.getLogger("rag.branch-refresh")
@@ -47,15 +47,21 @@ class BranchRefreshService:
         for chunk in chunks:
             if chunk.lifecycle_status != "active":
                 continue
-            branches = match_chunk_branches(chunk, matcher)
-            keys = tuple(branch.branch_key for branch in branches)
-            if keys == chunk.branch_keys and chunk.registry_version == version:
-                continue
-            chunk.branch_keys = keys
+            mounts = match_chunk_mounts(chunk, matcher)
+            entity_ids = tuple(mount.entity_id for mount in mounts)
+            if entity_ids == chunk.entity_ids:
+                # A chunk with no mounts has nothing to persist: registry_version
+                # only lives on mount rows, so re-processing every mountless
+                # chunk on each registry change would rewrite the whole corpus
+                # for no effect.
+                if not entity_ids or chunk.registry_version == version:
+                    continue
+            chunk.entity_ids = entity_ids
+            chunk.entity_mounts = tuple(mount.es_document() for mount in mounts)
             chunk.registry_version = version
-            self.repository.replace_chunk_branches(chunk, branches)
+            self.repository.replace_chunk_mounts(chunk, mounts)
             changed.append(chunk)
-        update = getattr(self.indexer, "update_chunk_branches", None)
+        update = getattr(self.indexer, "update_chunk_mounts", None)
         if callable(update):
             update(changed)
         return len(changed)

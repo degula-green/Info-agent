@@ -4,7 +4,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from app.application.entity_service import EntityMatcher, match_chunk_branches
+from app.application.entity_service import EntityMatcher, match_chunk_mounts
 from app.application.mvp_ports import EmbeddingProvider, SearchIndexer
 from app.config import settings
 from app.domain.rag import Chunk
@@ -129,12 +129,13 @@ class MVPIndexService:
         branch_count = 0
         indexable: list[Chunk] = []
         for chunk in retryable_chunks:
-            branches = match_chunk_branches(chunk, matcher)
-            chunk.branch_keys = tuple(branch.branch_key for branch in branches)
+            mounts = match_chunk_mounts(chunk, matcher)
+            chunk.entity_ids = tuple(mount.entity_id for mount in mounts)
+            chunk.entity_mounts = tuple(mount.es_document() for mount in mounts)
             chunk.registry_version = registry_version
-            if branches:
-                self.repository.replace_chunk_branches(chunk, branches)
-                branch_count += len(branches)
+            if mounts:
+                self.repository.replace_chunk_mounts(chunk, mounts)
+                branch_count += len(mounts)
             chunk.embedding_model = chunk.embedding_model or self.embedding.model
             chunk.embedding_dimensions = chunk.embedding_dimensions or self.embedding.dimensions
             indexable.append(chunk)

@@ -342,9 +342,9 @@ class Settings:
     # a navigation miss cannot drop the answer.
     tree_mode: str = _text("RAG_TREE_MODE", "shadow").lower()
     tree_shadow_sample_rate: float = _float("RAG_TREE_SHADOW_SAMPLE_RATE", 1.0)
-    tree_branch_weight: float = _float("RAG_TREE_BRANCH_WEIGHT", 0.5)
-    tree_max_branches: int = _int("RAG_TREE_MAX_BRANCHES", 8)
-    tree_max_branch_keys_per_chunk: int = _int("RAG_TREE_MAX_BRANCH_KEYS_PER_CHUNK", 8)
+    tree_mount_weight: float = _float("RAG_TREE_MOUNT_WEIGHT", 0.5)
+    tree_max_entities: int = _int("RAG_TREE_MAX_ENTITIES", 8)
+    tree_max_mounts_per_chunk: int = _int("RAG_TREE_MAX_MOUNTS_PER_CHUNK", 8)
     query_rewrite_enabled: bool = _bool("RAG_QUERY_REWRITE_ENABLED", False)
     query_rewrite_max: int = _int("RAG_QUERY_REWRITE_MAX", 1)
     highlight_final_only: bool = _bool("RAG_HIGHLIGHT_FINAL_ONLY", True)

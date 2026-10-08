@@ -287,6 +287,26 @@
       "branch_keys": {
         "type": "keyword"
       },
+      "entity_ids": {
+        "type": "keyword"
+      },
+      "entity_mounts": {
+        "type": "nested",
+        "properties": {
+          "entity_id": {
+            "type": "keyword"
+          },
+          "domain": {
+            "type": "keyword"
+          },
+          "confidence": {
+            "type": "float"
+          },
+          "method": {
+            "type": "keyword"
+          }
+        }
+      },
       "registry_version": {
         "type": "long"
       },
