@@ -40,6 +40,10 @@ _DEICTIC_PHRASES = (
 
 # Score below which the semantic layer is considered unsure and L4 is asked.
 _LLM_GATE_SCORE = 0.85
+# When L4 cannot answer (timeout, refusal, low confidence) the draft keeps the
+# lexical answer only if it was already this strong; otherwise the mention stays
+# unresolved rather than being guessed.
+_LLM_FALLBACK_SCORE = 0.85
 # Top-1/top-2 gap below which the semantic layer cannot separate candidates.
 _LLM_GATE_GAP = 0.08
 
@@ -204,10 +208,14 @@ class EntityLocator:
         # else that is ambiguous or weak asks L4, if L4 is available.
         chosen = candidates[0]
         accepted: list[EntityCandidate]
+        verified_attempted = False
+        llm_confirmed = False
         if self._needs_verification(mention, candidates, exact) and request.allow_llm and self.verifier is not None:
             l4_started = time.perf_counter()
-            verified = self._verify(request, mention, candidates)
+            verified_attempted = True
+            verified = self._verify(request, mention, candidates, trace)
             trace["llm_invoked"] = True
+            llm_confirmed = verified is not None
             trace["layer_trace"].append({
                 "layer": "L4", "method": "llm",
                 "candidate_count": len(candidates), "elapsed_ms": _ms(l4_started),
@@ -219,6 +227,12 @@ class EntityLocator:
             accepted = candidates
         else:
             accepted = [chosen]
+
+        if verified_attempted and not accepted and candidates[0].match_score >= _LLM_FALLBACK_SCORE:
+            # L4 degraded. A lexical match this strong is still worth keeping,
+            # but the trace says it was not verified.
+            accepted = [chosen]
+            trace["llm_degraded"] = True
 
         # Containment-only matches are explicitly not trustworthy on their own.
         # If nothing verified this mention, drop it rather than guess.
@@ -249,7 +263,10 @@ class EntityLocator:
                     canonical_name=item.canonical_name,
                     match_method=item.match_method,
                     match_score=item.match_score,
-                    verified=bool(trace["llm_invoked"]),
+                    # "verified" means L4 confirmed this entity, not merely that
+                    # L4 was called: a degraded fallback keeps the lexical
+                    # answer and must not be labelled as verified.
+                    verified=llm_confirmed,
                 )
                 for item in accepted
             ],
@@ -325,6 +342,7 @@ class EntityLocator:
         request: LocateRequest,
         mention: EntityMention,
         candidates: Sequence[EntityCandidate],
+        trace: dict[str, Any],
     ) -> EntityCandidate | None:
         try:
             decision = self.verifier.verify(
@@ -337,6 +355,11 @@ class EntityLocator:
         if not isinstance(decision, dict):
             return None
         entity_id = str(decision.get("entity_id") or "")
+        trace["llm_decision"] = {
+            "entity_id": entity_id,
+            "confidence": decision.get("confidence"),
+            "reason": decision.get("reason"),
+        }
         # The model may only choose from the offered set; anything else is a
         # hallucination and gets discarded rather than trusted.
         for candidate in candidates:

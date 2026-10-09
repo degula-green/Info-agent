@@ -7,6 +7,7 @@ from app.application.callback_service import CallbackLane
 from app.application.branch_refresh_service import BranchRefreshService
 from app.application.entity_review_service import EntityReviewService
 from app.application.index_service import MVPIndexService
+from app.application.location_verifier import LLMEntityVerifier
 from app.application.memory_service import MemoryCandidateService
 from app.application.parse_service import MVPParseService
 from app.application.qa_service import QAService
@@ -71,11 +72,15 @@ def build_container() -> ApplicationContainer:
     indexer = RagChunkIndex()
     embedding = EmbeddingClient()
     authorization = _build_authorization()
+    # L4 is opt-in: it adds a model round trip to the query path, so it stays
+    # off until the escalation rate has been measured.
+    verifier = LLMEntityVerifier() if settings.locate_llm_enabled else None
     retrieval = RAGRetrievalService(
         repository=repository,
         indexer=indexer,
         embedding=embedding,
         authorization=authorization,
+        verifier=verifier,
     )
     qa_service = QAService(
         repository=repository,

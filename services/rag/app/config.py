@@ -350,6 +350,21 @@ class Settings:
     tree_mount_weight: float = _float("RAG_TREE_MOUNT_WEIGHT", 0.5)
     tree_max_entities: int = _int("RAG_TREE_MAX_ENTITIES", 8)
     tree_max_mounts_per_chunk: int = _int("RAG_TREE_MAX_MOUNTS_PER_CHUNK", 8)
+    # L4 escalation. Off by default: it puts a model round trip on the query
+    # path, so it stays opt-in until the call rate and latency are measured.
+    # Base URL / key / model fall back to the extraction model when unset.
+    locate_llm_enabled: bool = _bool("RAG_LOCATE_LLM_ENABLED", False)
+    locate_llm_base_url: str = _text("RAG_LOCATE_LLM_BASE_URL")
+    locate_llm_api_key: str = _text("RAG_LOCATE_LLM_API_KEY")
+    locate_llm_model: str = _text("RAG_LOCATE_LLM_MODEL")
+    # Measured 2026-10-09: a 643-char verdict prompt returning ~40 tokens took
+    # 6.4-7.5s on the configured extraction gateway, so anything near the draft's
+    # 800ms budget only produces timeouts and wasted calls. 8s lets the call
+    # actually finish; whether that is affordable is a deployment decision.
+    locate_llm_timeout_seconds: float = _float("RAG_LOCATE_LLM_TIMEOUT_SECONDS", 8.0)
+    locate_llm_min_confidence: float = _float("RAG_LOCATE_LLM_MIN_CONFIDENCE", 0.7)
+    locate_llm_max_candidates: int = _int("RAG_LOCATE_LLM_MAX_CANDIDATES", 10)
+    locate_llm_context_messages: int = _int("RAG_LOCATE_LLM_CONTEXT_MESSAGES", 10)
     # Relation expansion: when the located entity's own node is thin, widen to
     # one hop of neighbours instead of falling straight back to full-corpus
     # search. Depth stays at one hop and the fan-out is bounded.

@@ -231,3 +231,76 @@ def test_layer_time_sums_across_mentions():
     assert result.diagnostics["layer_ms"]["L1"] == round(
         sum(entry["elapsed_ms"] for entry in entries), 3
     )
+
+
+class _SemanticOnlyRepository:
+    """Registry is empty; only the semantic layer answers, with fixed scores."""
+
+    def __init__(self, scores):
+        self.scores = scores
+
+    def load_entity_registry(self, *, scope_type, scope_id):
+        return [], [], 1
+
+    def locate_entities_exact(self, *, scope_type, scope_id, normalized):
+        return []
+
+    def locate_entities_fuzzy(self, *, scope_type, scope_id, normalized):
+        return []
+
+    def locate_entities_semantic(self, *, scope_type, scope_id, embedding, limit):
+        return [
+            {
+                "entity_id": f"e{index}",
+                "domain": "project",
+                "canonical_name": f"候选{index}",
+                "match_method": "semantic",
+                "match_score": score,
+                "registry_version": 1,
+            }
+            for index, score in enumerate(self.scores, start=1)
+        ]
+
+
+class _NoAnswerVerifier:
+    """Models the timeout / refusal path: no verdict at all."""
+
+    def __init__(self):
+        self.calls = 0
+
+    def verify(self, *, mention, candidates, context_messages):
+        self.calls += 1
+        return None
+
+
+def _locate_with_candidates(scores, *, min_confidence=0.5):
+    # A gap under 0.08 forces the L4 gate even when the top score is high.
+    locator = EntityLocator(
+        repository=_SemanticOnlyRepository(scores),
+        embedding=FakeEmbedding([1.0, 0.0, 0.0]),
+        verifier=_NoAnswerVerifier(),
+    )
+    request = LocateRequest(
+        query="青云项目进展", **SCOPE, min_confidence=min_confidence
+    )
+    return locator, locator.locate(request)
+
+
+def test_degraded_verification_keeps_a_strong_lexical_match():
+    locator, result = _locate_with_candidates([0.90, 0.85])
+
+    assert locator.verifier.calls == 1
+    assert result.scope.entity_ids == ("e1",)
+    assert result.entities[0].verified is False
+    trace = result.diagnostics["mentions"][0]
+    assert trace["llm_degraded"] is True
+
+
+def test_degraded_verification_drops_a_weak_lexical_match():
+    locator, result = _locate_with_candidates([0.60, 0.56])
+
+    assert locator.verifier.calls == 1
+    # Below the fallback score the mention stays unresolved: a guess would be
+    # worse than not narrowing, because the tree would then hide the answer.
+    assert result.scope.entity_ids == ()
+    assert result.diagnostics["mentions"][0].get("llm_degraded") is None
