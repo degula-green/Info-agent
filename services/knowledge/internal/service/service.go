@@ -3896,12 +3896,17 @@ func (s *Service) CreateDeletionRequest(ctx context.Context, userID, organizatio
 	}
 	input.RequesterUserID = userID
 	input.OrganizationID = strings.TrimSpace(organizationID)
-	if input.PurgeAfter.IsZero() {
-		input.PurgeAfter = s.Now().UTC().Add(7 * 24 * time.Hour)
-	}
 	item, itemErr := s.Repo.GetKnowledgeItemByMessage(ctx, input.ScopeID)
 	if itemErr != nil {
 		return nil, itemErr
+	}
+	input.ContentType = item.ContentType
+	if input.PurgeAfter.IsZero() {
+		if strings.EqualFold(strings.TrimSpace(item.ContentType), "text") {
+			input.PurgeAfter = s.Now().UTC()
+		} else {
+			input.PurgeAfter = s.Now().UTC().Add(7 * 24 * time.Hour)
+		}
 	}
 	allowed, checkErr := s.canDeleteKnowledge(ctx, userID, item)
 	if checkErr != nil {
@@ -3930,6 +3935,11 @@ func (s *Service) CreateDeletionRequest(ctx context.Context, userID, organizatio
 		DeletionRequestID: request.ID, ActorUserID: userID, Action: "deletion.requested",
 	}); err != nil {
 		return nil, err
+	}
+	if request.Status == "executing" && strings.EqualFold(strings.TrimSpace(item.ContentType), "text") {
+		if err := s.PurgeDeletionRequests(ctx); err != nil {
+			return nil, err
+		}
 	}
 	return s.Repo.GetDeletionRequest(ctx, request.ID)
 }
@@ -4101,6 +4111,9 @@ func (s *Service) PurgeDeletionRequests(ctx context.Context) error {
 		}
 		for _, target := range request.Targets {
 			if _, failed := failedTargets[target.ID]; failed {
+				continue
+			}
+			if target.ObjectState == "not_required" {
 				continue
 			}
 			state := "deleted"

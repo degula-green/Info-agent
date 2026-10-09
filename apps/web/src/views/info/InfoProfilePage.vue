@@ -483,7 +483,7 @@ function deletionStatusTheme(status: string) {
 }
 
 function deletionStageLabel(status: string) {
-  return ({ active: '待处理', hidden: '已隐藏', pending: '待处理', revoked: '已撤销', deleted: '已删除', skipped: '无需处理', failed: '失败' } as Record<string, string>)[status] || status
+  return ({ active: '待处理', hidden: '已隐藏', pending: '待处理', revoked: '已撤销', deleted: '已删除', skipped: '无需处理', not_required: '无需处理', failed: '失败' } as Record<string, string>)[status] || status
 }
 function unifiedPrivateAccessRequest(request: PrivateAccessRequestDTO): UnifiedAccessRequest {
   const resource = request.resource_type === 'attachment' ? '附件' : '私聊信息'

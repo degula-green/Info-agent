@@ -3611,8 +3611,12 @@ func (s *PostgresStore) ApplyRAGResult(ctx context.Context, id string, input RAG
 				WHERE target.deletion_request_id=request.id
 				  AND (
 					target.vector_state NOT IN ('deleted','not_required')
-					OR target.object_state NOT IN ('deleted','skipped')
+					OR target.object_state NOT IN ('deleted','skipped','not_required')
 					OR target.auth_state<>'revoked'
+					OR (target.knowledge_item_id IS NOT NULL AND EXISTS (
+						SELECT 1 FROM knowledge.knowledge_items item
+						WHERE item.id=target.knowledge_item_id AND item.content_purged_at IS NULL
+					))
 				  )
 			  )`, id, input.OccurredAt); err != nil {
 			return nil, dbError(err)
@@ -4147,7 +4151,7 @@ func (s *PostgresStore) CreateDeletionRequest(ctx context.Context, input Deletio
 		return nil, dbError(itemErr)
 	}
 	targetID := uuid.NewString()
-	_, err = tx.Exec(ctx, `INSERT INTO knowledge.deletion_targets (id,deletion_request_id,resource_type,resource_id,knowledge_item_id,conversation_ingestion_id,content_version,acl_version,visibility_state,vector_state,object_state,auth_state,created_at,updated_at) VALUES ($1,$2,'message',$3,NULLIF($4,'')::uuid,$5,$6,$7,'hidden',CASE WHEN NULLIF($4,'') IS NULL THEN 'not_required' ELSE 'pending' END,'pending',CASE WHEN NULLIF($4,'') IS NULL THEN 'revoked' ELSE 'pending' END,$8,$8)`, targetID, requestID, message.ID, itemID, message.ConversationID, message.ContentVersion, aclVersion, now)
+	_, err = tx.Exec(ctx, `INSERT INTO knowledge.deletion_targets (id,deletion_request_id,resource_type,resource_id,knowledge_item_id,conversation_ingestion_id,content_version,acl_version,visibility_state,vector_state,object_state,auth_state,created_at,updated_at) VALUES ($1,$2,'message',$3,NULLIF($4,'')::uuid,$5,$6,$7,'hidden',CASE WHEN NULLIF($4,'') IS NULL THEN 'not_required' ELSE 'pending' END,CASE WHEN NULLIF($4,'') IS NULL OR LOWER(COALESCE($9,''))='text' THEN 'not_required' ELSE 'pending' END,CASE WHEN NULLIF($4,'') IS NULL THEN 'revoked' ELSE 'pending' END,$8,$8)`, targetID, requestID, message.ID, itemID, message.ConversationID, message.ContentVersion, aclVersion, now, input.ContentType)
 	if err != nil {
 		return nil, dbError(err)
 	}
@@ -4443,7 +4447,7 @@ func (s *PostgresStore) DeletionObjectRefs(ctx context.Context, requestID string
 		LEFT JOIN knowledge.knowledge_items item ON item.id=target.knowledge_item_id
 		LEFT JOIN knowledge.attachments attachment ON attachment.id=target.resource_id
 		LEFT JOIN knowledge.messages message ON message.id=target.resource_id
-		WHERE target.deletion_request_id=$1
+		WHERE target.deletion_request_id=$1 AND target.object_state NOT IN ('deleted','skipped','not_required')
 		ORDER BY target.created_at`, requestID)
 	if err != nil {
 		return nil, dbError(err)
@@ -4626,7 +4630,7 @@ func (s *PostgresStore) MarkDeletionPurged(ctx context.Context, requestID string
 	if _, err = tx.Exec(ctx, `UPDATE knowledge.knowledge_items ki SET lifecycle_status='purged',content_ref='',original_content_ref=NULL,content_hash=postgresEmptyContentHash,content_purged_at=$2,updated_at=$2 FROM knowledge.deletion_targets dt WHERE dt.deletion_request_id=$1 AND dt.knowledge_item_id=ki.id`, requestID, now); err != nil {
 		return dbError(err)
 	}
-	if _, err = tx.Exec(ctx, `UPDATE knowledge.deletion_targets SET object_state='deleted',updated_at=$2 WHERE deletion_request_id=$1`, requestID, now); err != nil {
+	if _, err = tx.Exec(ctx, `UPDATE knowledge.deletion_targets SET object_state=CASE WHEN object_state='not_required' THEN object_state ELSE 'deleted' END,updated_at=$2 WHERE deletion_request_id=$1`, requestID, now); err != nil {
 		return dbError(err)
 	}
 	if err = tx.Commit(ctx); err != nil {
@@ -4646,8 +4650,12 @@ func (s *PostgresStore) reconcileDeletionCompletion(ctx context.Context, request
 			WHERE target.deletion_request_id=request.id
 			  AND (
 				target.vector_state NOT IN ('deleted','not_required')
-				OR target.object_state NOT IN ('deleted','skipped')
+				OR target.object_state NOT IN ('deleted','skipped','not_required')
 				OR target.auth_state<>'revoked'
+				OR (target.knowledge_item_id IS NOT NULL AND EXISTS (
+					SELECT 1 FROM knowledge.knowledge_items item
+					WHERE item.id=target.knowledge_item_id AND item.content_purged_at IS NULL
+				))
 			  )
 		  )`, requestID, now)
 	return dbError(err)

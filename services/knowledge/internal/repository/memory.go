@@ -3578,6 +3578,9 @@ func (s *MemoryStore) CreateDeletionRequest(_ context.Context, input DeletionReq
 		target.VectorState = "not_required"
 		target.AuthState = "revoked"
 	}
+	if strings.EqualFold(strings.TrimSpace(input.ContentType), "text") {
+		target.ObjectState = "not_required"
+	}
 	request.Targets = []DeletionTarget{target}
 	s.deletionRequests[request.ID] = deletionRequestRecord{Request: request}
 	s.deletionAudit = append(s.deletionAudit, DeletionAuditInput{
@@ -3971,6 +3974,9 @@ func (s *MemoryStore) DeletionObjectRefs(_ context.Context, requestID string) ([
 	}
 	out := make([]DeletionObjectRef, 0, len(value.Request.Targets))
 	for _, target := range value.Request.Targets {
+		if target.ObjectState == "not_required" {
+			continue
+		}
 		ref := DeletionObjectRef{TargetID: target.ID}
 		if item, ok := s.knowledgeItems[target.KnowledgeItemID]; ok {
 			ref.ObjectRef = item.ContentRef
@@ -4171,6 +4177,9 @@ func (s *MemoryStore) MarkDeletionPurged(_ context.Context, requestID string, no
 		if target.KnowledgeItemID != "" {
 			if item, exists := s.knowledgeItems[target.KnowledgeItemID]; exists {
 				item.LifecycleStatus = "purged"
+				item.ContentRef = ""
+				item.OriginalContentRef = ""
+				item.ContentHash = emptyContentHash
 				item.ContentPurgedAt = &now
 				item.UpdatedAt = now
 				s.knowledgeItems[target.KnowledgeItemID] = item
@@ -4178,7 +4187,9 @@ func (s *MemoryStore) MarkDeletionPurged(_ context.Context, requestID string, no
 		}
 		for index := range value.Request.Targets {
 			if value.Request.Targets[index].ID == target.ID {
-				value.Request.Targets[index].ObjectState = "deleted"
+				if value.Request.Targets[index].ObjectState != "not_required" {
+					value.Request.Targets[index].ObjectState = "deleted"
+				}
 				value.Request.Targets[index].UpdatedAt = now
 			}
 		}
@@ -4199,11 +4210,17 @@ func (s *MemoryStore) reconcileDeletionCompletionLocked(value *deletionRequestRe
 		if target.VectorState != "deleted" && target.VectorState != "not_required" {
 			return
 		}
-		if target.ObjectState != "deleted" && target.ObjectState != "skipped" {
+		if target.ObjectState != "deleted" && target.ObjectState != "skipped" && target.ObjectState != "not_required" {
 			return
 		}
 		if target.AuthState != "revoked" {
 			return
+		}
+		if target.KnowledgeItemID != "" {
+			item, exists := s.knowledgeItems[target.KnowledgeItemID]
+			if !exists || item.ContentPurgedAt == nil {
+				return
+			}
 		}
 	}
 	value.Request.Status = "completed"

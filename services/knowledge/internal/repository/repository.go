@@ -599,6 +599,7 @@ type DeletionRequestInput struct {
 	Status          string
 	Reason          string
 	IdempotencyKey  string
+	ContentType     string
 	PurgeAfter      time.Time
 }
 
