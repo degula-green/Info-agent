@@ -3611,8 +3611,12 @@ func (s *PostgresStore) ApplyRAGResult(ctx context.Context, id string, input RAG
 				WHERE target.deletion_request_id=request.id
 				  AND (
 					target.vector_state NOT IN ('deleted','not_required')
-					OR target.object_state NOT IN ('deleted','skipped')
+					OR target.object_state NOT IN ('deleted','skipped','not_required')
 					OR target.auth_state<>'revoked'
+					OR (target.knowledge_item_id IS NOT NULL AND EXISTS (
+						SELECT 1 FROM knowledge.knowledge_items item
+						WHERE item.id=target.knowledge_item_id AND item.content_purged_at IS NULL
+					))
 				  )
 			  )`, id, input.OccurredAt); err != nil {
 			return nil, dbError(err)
@@ -4147,7 +4151,7 @@ func (s *PostgresStore) CreateDeletionRequest(ctx context.Context, input Deletio
 		return nil, dbError(itemErr)
 	}
 	targetID := uuid.NewString()
-	_, err = tx.Exec(ctx, `INSERT INTO knowledge.deletion_targets (id,deletion_request_id,resource_type,resource_id,knowledge_item_id,conversation_ingestion_id,content_version,acl_version,visibility_state,vector_state,object_state,auth_state,created_at,updated_at) VALUES ($1,$2,'message',$3,NULLIF($4,'')::uuid,$5,$6,$7,'hidden',CASE WHEN NULLIF($4,'') IS NULL THEN 'not_required' ELSE 'pending' END,'pending',CASE WHEN NULLIF($4,'') IS NULL THEN 'revoked' ELSE 'pending' END,$8,$8)`, targetID, requestID, message.ID, itemID, message.ConversationID, message.ContentVersion, aclVersion, now)
+	_, err = tx.Exec(ctx, `INSERT INTO knowledge.deletion_targets (id,deletion_request_id,resource_type,resource_id,knowledge_item_id,conversation_ingestion_id,content_version,acl_version,visibility_state,vector_state,object_state,auth_state,created_at,updated_at) VALUES ($1,$2,'message',$3,NULLIF($4,'')::uuid,$5,$6,$7,'hidden',CASE WHEN NULLIF($4,'') IS NULL THEN 'not_required' ELSE 'pending' END,CASE WHEN NULLIF($4,'') IS NULL OR LOWER(COALESCE($9,''))='text' THEN 'not_required' ELSE 'pending' END,CASE WHEN NULLIF($4,'') IS NULL THEN 'revoked' ELSE 'pending' END,$8,$8)`, targetID, requestID, message.ID, itemID, message.ConversationID, message.ContentVersion, aclVersion, now, input.ContentType)
 	if err != nil {
 		return nil, dbError(err)
 	}
@@ -4188,35 +4192,38 @@ func (s *PostgresStore) GetDeletionRequest(ctx context.Context, id string) (*Del
 	return value, nil
 }
 
-func (s *PostgresStore) ListDeletionRequests(ctx context.Context, userID, status string, limit int) ([]DeletionRequest, error) {
-	return s.listDeletionRequests(ctx, "requester_user_id", userID, status, limit)
-}
-
-func (s *PostgresStore) ListDeletionRequestsByOrganization(ctx context.Context, organizationID, status string, limit int) ([]DeletionRequest, error) {
-	return s.listDeletionRequests(ctx, "organization_id", organizationID, status, limit)
-}
-
-func (s *PostgresStore) listDeletionRequests(ctx context.Context, userField, userValue, status string, limit int) ([]DeletionRequest, error) {
-	if limit <= 0 || limit > 100 {
-		limit = 50
+func (s *PostgresStore) ListDeletionRequests(ctx context.Context, filter DeletionRequestFilter) ([]DeletionRequest, error) {
+	if filter.Limit <= 0 || filter.Limit > 100 {
+		filter.Limit = 50
+	}
+	if filter.Offset < 0 {
+		filter.Offset = 0
 	}
 	innerConditions := []string{"1=1"}
 	args := []any{}
-	if strings.TrimSpace(status) != "" {
-		args = append(args, status)
+	if strings.TrimSpace(filter.OrganizationID) != "" {
+		args = append(args, strings.TrimSpace(filter.OrganizationID))
+		innerConditions = append(innerConditions, "organization_id=$"+strconv.Itoa(len(args))+"::uuid")
+	}
+	if strings.TrimSpace(filter.RequesterUserID) != "" {
+		args = append(args, strings.TrimSpace(filter.RequesterUserID))
+		innerConditions = append(innerConditions, "requester_user_id=$"+strconv.Itoa(len(args))+"::uuid")
+	}
+	if strings.TrimSpace(filter.ReviewerUserID) != "" {
+		args = append(args, strings.TrimSpace(filter.ReviewerUserID))
+		innerConditions = append(innerConditions, "reviewer_user_id=$"+strconv.Itoa(len(args))+"::uuid")
+	}
+	if strings.TrimSpace(filter.Status) != "" {
+		args = append(args, strings.TrimSpace(filter.Status))
 		innerConditions = append(innerConditions, "status=$"+strconv.Itoa(len(args)))
 	}
-	outerConditions := []string{"row_number=1"}
-	if strings.TrimSpace(userValue) != "" {
-		args = append(args, userValue)
-		outerConditions = append(outerConditions, "requester_user_id=$"+strconv.Itoa(len(args))+"::uuid")
-		if userField == "organization_id" {
-			outerConditions[len(outerConditions)-1] = "organization_id=$" + strconv.Itoa(len(args)) + "::uuid"
-		}
+	if strings.TrimSpace(filter.ScopeID) != "" {
+		args = append(args, strings.TrimSpace(filter.ScopeID))
+		innerConditions = append(innerConditions, "scope_id=$"+strconv.Itoa(len(args))+"::uuid")
 	}
-	args = append(args, limit)
+	args = append(args, filter.Limit, filter.Offset)
 	rows, err := s.pool.Query(ctx, `SELECT id::text FROM (
-		SELECT id,requester_user_id,scope_type,scope_id,requested_at,
+		SELECT id,requested_at,
 			ROW_NUMBER() OVER (
 				PARTITION BY scope_type,scope_id
 				ORDER BY CASE status
@@ -4230,7 +4237,7 @@ func (s *PostgresStore) listDeletionRequests(ctx context.Context, userField, use
 			) AS row_number
 		FROM knowledge.deletion_requests
 		WHERE `+strings.Join(innerConditions, " AND ")+`
-	) ranked WHERE `+strings.Join(outerConditions, " AND ")+` ORDER BY requested_at DESC LIMIT $`+strconv.Itoa(len(args)), args...)
+	) ranked WHERE row_number=1 ORDER BY requested_at DESC LIMIT $`+strconv.Itoa(len(args)-1)+` OFFSET $`+strconv.Itoa(len(args)), args...)
 	if err != nil {
 		return nil, dbError(err)
 	}
@@ -4257,6 +4264,8 @@ func (s *PostgresStore) listDeletionRequests(ctx context.Context, userField, use
 	return out, nil
 }
 
+const postgresEmptyContentHash = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+
 func (s *PostgresStore) RecordDeletionAudit(ctx context.Context, input DeletionAuditInput) error {
 	detail, err := json.Marshal(input.Detail)
 	if err != nil {
@@ -4264,6 +4273,30 @@ func (s *PostgresStore) RecordDeletionAudit(ctx context.Context, input DeletionA
 	}
 	_, err = s.pool.Exec(ctx, `INSERT INTO knowledge.deletion_audit_logs (deletion_request_id,actor_user_id,action,resource_type,resource_id,detail) VALUES ($1,NULLIF($2,'')::uuid,$3,NULLIF($4,''),NULLIF($5,'')::uuid,$6::jsonb)`, input.DeletionRequestID, input.ActorUserID, input.Action, input.ResourceType, input.ResourceID, string(detail))
 	return dbError(err)
+}
+
+func (s *PostgresStore) ListDeletionAudit(ctx context.Context, requestID string, limit int) ([]DeletionAudit, error) {
+	if limit <= 0 || limit > 200 {
+		limit = 100
+	}
+	rows, err := s.pool.Query(ctx, `SELECT id::text,deletion_request_id::text,COALESCE(actor_user_id::text,''),action,COALESCE(resource_type,''),COALESCE(resource_id::text,''),detail,created_at FROM knowledge.deletion_audit_logs WHERE ($1='' OR deletion_request_id=$1::uuid) ORDER BY created_at DESC LIMIT $2`, strings.TrimSpace(requestID), limit)
+	if err != nil {
+		return nil, dbError(err)
+	}
+	defer rows.Close()
+	out := make([]DeletionAudit, 0)
+	for rows.Next() {
+		var item DeletionAudit
+		var detail []byte
+		if err := rows.Scan(&item.ID, &item.DeletionRequestID, &item.ActorUserID, &item.Action, &item.ResourceType, &item.ResourceID, &detail, &item.CreatedAt); err != nil {
+			return nil, dbError(err)
+		}
+		if len(detail) > 0 {
+			_ = json.Unmarshal(detail, &item.Detail)
+		}
+		out = append(out, item)
+	}
+	return out, dbError(rows.Err())
 }
 
 func (s *PostgresStore) ReviewDeletionRequest(ctx context.Context, requestID, reviewerUserID, status, reason string, now time.Time) (*DeletionRequest, error) {
@@ -4345,6 +4378,42 @@ func (s *PostgresStore) ListDueDeletionTargets(ctx context.Context, now time.Tim
 	return out, nil
 }
 
+func (s *PostgresStore) DeletionMetrics(ctx context.Context, now time.Time) (DeletionMetrics, error) {
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	var metrics DeletionMetrics
+	err := s.pool.QueryRow(ctx, `
+		WITH request_stats AS (
+			SELECT
+				COUNT(*) FILTER (WHERE status IN ('pending','approved','executing')) AS pending_count,
+				COUNT(*) FILTER (WHERE status='failed') AS failed_count,
+				COALESCE(EXTRACT(EPOCH FROM ($1 - MIN(requested_at) FILTER (WHERE status IN ('pending','approved','executing')))),0) AS oldest_pending,
+				COALESCE(EXTRACT(EPOCH FROM ($1 - MIN(COALESCE(execution_started_at,requested_at)) FILTER (WHERE status IN ('pending','approved','executing')))),0) AS stuck_max
+			FROM knowledge.deletion_requests
+		), target_stats AS (
+			SELECT
+			COUNT(*) FILTER (WHERE dt.last_error IS NOT NULL AND dt.last_error<>'') AS failed_target_count,
+				COALESCE(AVG(EXTRACT(EPOCH FROM (dt.updated_at - COALESCE(dr.execution_started_at,dr.requested_at)))) FILTER (WHERE dt.visibility_state='hidden'),0) AS visibility_avg,
+				COALESCE(percentile_cont(0.95) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM (dt.updated_at - COALESCE(dr.execution_started_at,dr.requested_at)))) FILTER (WHERE dt.visibility_state='hidden'),0) AS visibility_p95,
+				COALESCE(AVG(EXTRACT(EPOCH FROM (dt.updated_at - COALESCE(dr.execution_started_at,dr.requested_at)))) FILTER (WHERE dt.vector_state='deleted'),0) AS vector_avg,
+				COALESCE(percentile_cont(0.95) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM (dt.updated_at - COALESCE(dr.execution_started_at,dr.requested_at)))) FILTER (WHERE dt.vector_state='deleted'),0) AS vector_p95,
+				COALESCE(AVG(EXTRACT(EPOCH FROM (dt.updated_at - COALESCE(dr.execution_started_at,dr.requested_at)))) FILTER (WHERE dt.object_state='deleted'),0) AS object_avg,
+				COALESCE(percentile_cont(0.95) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM (dt.updated_at - COALESCE(dr.execution_started_at,dr.requested_at)))) FILTER (WHERE dt.object_state='deleted'),0) AS object_p95
+			FROM knowledge.deletion_targets dt
+			JOIN knowledge.deletion_requests dr ON dr.id=dt.deletion_request_id
+		)
+		SELECT rs.pending_count,rs.failed_count+ts.failed_target_count,rs.oldest_pending,ts.visibility_avg,ts.vector_avg,ts.object_avg,ts.visibility_p95,ts.vector_p95,ts.object_p95,rs.stuck_max
+		FROM request_stats rs CROSS JOIN target_stats ts`, now).Scan(
+		&metrics.Pending, &metrics.Failed, &metrics.OldestPendingSeconds,
+		&metrics.VisibilityLatencyAvg, &metrics.VectorLatencyAvg, &metrics.ObjectLatencyAvg,
+		&metrics.VisibilityLatencyP95, &metrics.VectorLatencyP95, &metrics.ObjectLatencyP95, &metrics.StageStuckMaxSeconds,
+	)
+	if err != nil {
+		return DeletionMetrics{}, dbError(err)
+	}
+	return metrics, nil
+}
 func (s *PostgresStore) AttachmentObjectRefs(ctx context.Context, attachmentIDs []string) ([]AttachmentObjectRef, error) {
 	ids := uniqueSorted(attachmentIDs)
 	if len(ids) == 0 {
@@ -4378,7 +4447,7 @@ func (s *PostgresStore) DeletionObjectRefs(ctx context.Context, requestID string
 		LEFT JOIN knowledge.knowledge_items item ON item.id=target.knowledge_item_id
 		LEFT JOIN knowledge.attachments attachment ON attachment.id=target.resource_id
 		LEFT JOIN knowledge.messages message ON message.id=target.resource_id
-		WHERE target.deletion_request_id=$1
+		WHERE target.deletion_request_id=$1 AND target.object_state NOT IN ('deleted','skipped','not_required')
 		ORDER BY target.created_at`, requestID)
 	if err != nil {
 		return nil, dbError(err)
@@ -4555,13 +4624,13 @@ func (s *PostgresStore) MarkDeletionPurged(ctx context.Context, requestID string
 		return dbError(err)
 	}
 	defer tx.Rollback(ctx)
-	if _, err = tx.Exec(ctx, `UPDATE knowledge.messages m SET lifecycle_status='purged',normalized_content='',normalized_content_ref=NULL,content_hash='',content_purged_at=$2 FROM knowledge.deletion_targets dt WHERE dt.deletion_request_id=$1 AND dt.resource_type='message' AND m.id=dt.resource_id`, requestID, now); err != nil {
+	if _, err = tx.Exec(ctx, `UPDATE knowledge.messages m SET lifecycle_status='purged',normalized_content='',normalized_content_ref=NULL,content_hash=$3,content_purged_at=$2 FROM knowledge.deletion_targets dt WHERE dt.deletion_request_id=$1 AND dt.resource_type='message' AND m.id=dt.resource_id`, requestID, now, postgresEmptyContentHash); err != nil {
 		return dbError(err)
 	}
-	if _, err = tx.Exec(ctx, `UPDATE knowledge.knowledge_items ki SET lifecycle_status='purged',content_ref='',original_content_ref=NULL,content_hash='',content_purged_at=$2,updated_at=$2 FROM knowledge.deletion_targets dt WHERE dt.deletion_request_id=$1 AND dt.knowledge_item_id=ki.id`, requestID, now); err != nil {
+	if _, err = tx.Exec(ctx, `UPDATE knowledge.knowledge_items ki SET lifecycle_status='purged',content_ref='',original_content_ref=NULL,content_hash=$3,content_purged_at=$2,updated_at=$2 FROM knowledge.deletion_targets dt WHERE dt.deletion_request_id=$1 AND dt.knowledge_item_id=ki.id`, requestID, now, postgresEmptyContentHash); err != nil {
 		return dbError(err)
 	}
-	if _, err = tx.Exec(ctx, `UPDATE knowledge.deletion_targets SET object_state='deleted',updated_at=$2 WHERE deletion_request_id=$1`, requestID, now); err != nil {
+	if _, err = tx.Exec(ctx, `UPDATE knowledge.deletion_targets SET object_state=CASE WHEN object_state='not_required' THEN object_state ELSE 'deleted' END,updated_at=$2 WHERE deletion_request_id=$1`, requestID, now); err != nil {
 		return dbError(err)
 	}
 	if err = tx.Commit(ctx); err != nil {
@@ -4581,13 +4650,57 @@ func (s *PostgresStore) reconcileDeletionCompletion(ctx context.Context, request
 			WHERE target.deletion_request_id=request.id
 			  AND (
 				target.vector_state NOT IN ('deleted','not_required')
-				OR target.object_state NOT IN ('deleted','skipped')
+				OR target.object_state NOT IN ('deleted','skipped','not_required')
 				OR target.auth_state<>'revoked'
+				OR (target.knowledge_item_id IS NOT NULL AND EXISTS (
+					SELECT 1 FROM knowledge.knowledge_items item
+					WHERE item.id=target.knowledge_item_id AND item.content_purged_at IS NULL
+				))
 			  )
 		  )`, requestID, now)
 	return dbError(err)
 }
 
+func (s *PostgresStore) RetryDeletionRequest(ctx context.Context, requestID string, now time.Time) (int, error) {
+	requestID = strings.TrimSpace(requestID)
+	if requestID == "" {
+		return 0, apperror.New("invalid_request", "request is required", 400, false)
+	}
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return 0, dbError(err)
+	}
+	defer tx.Rollback(ctx)
+	var status string
+	err = tx.QueryRow(ctx, "SELECT status FROM knowledge.deletion_requests WHERE id=$1 FOR UPDATE", requestID).Scan(&status)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return 0, apperror.New("deletion_request_not_found", "deletion request was not found", 404, false)
+	}
+	if err != nil {
+		return 0, dbError(err)
+	}
+	if status == "completed" || status == "rejected" || status == "pending" {
+		return 0, apperror.New("deletion_request_not_retryable", "only failed deletion stages can be retried", 409, false)
+	}
+	tag, err := tx.Exec(ctx, `UPDATE knowledge.deletion_targets SET attempt_count=attempt_count+1,last_error=NULL,vector_state=CASE WHEN vector_state='failed' THEN 'pending' ELSE vector_state END,object_state=CASE WHEN object_state='failed' THEN 'pending' ELSE object_state END,auth_state=CASE WHEN auth_state='failed' THEN 'pending' ELSE auth_state END,updated_at=$2 WHERE deletion_request_id=$1 AND (visibility_state='active' OR auth_state='failed' OR vector_state='failed' OR object_state='failed' OR last_error IS NOT NULL)`, requestID, now)
+	if err != nil {
+		return 0, dbError(err)
+	}
+	retried := int(tag.RowsAffected())
+	if retried == 0 {
+		return 0, apperror.New("deletion_retry_not_required", "no failed deletion stage requires retry", 409, false)
+	}
+	if _, err = tx.Exec(ctx, "UPDATE knowledge.deletion_requests SET status='executing',last_error=NULL,updated_at=$2 WHERE id=$1", requestID, now); err != nil {
+		return 0, dbError(err)
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return 0, dbError(err)
+	}
+	return retried, nil
+}
 func (s *PostgresStore) HideDeletionTargets(ctx context.Context, requestID string) (int, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {

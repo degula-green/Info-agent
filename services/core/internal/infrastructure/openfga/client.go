@@ -443,6 +443,10 @@ func mapResource(check application.AuthorizationCheck) (string, string, string, 
 		if part == "content" {
 			return "attachment_content", check.Action, check.ResourceID, nil
 		}
+	case "organization":
+		if part == "information_admin" && check.Action == "view" {
+			return "organization", "information_admin", check.ResourceID, nil
+		}
 	}
 	return "", "", "", fmt.Errorf("unsupported resource type/part/action")
 }
