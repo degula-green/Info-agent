@@ -136,6 +136,16 @@ export interface DeletionTargetDTO {
   updated_at: string
 }
 
+export interface DeletionAuditDTO {
+  id: string
+  actor_user_id?: string
+  action: string
+  resource_type?: string
+  resource_id?: string
+  detail?: Record<string, unknown>
+  created_at: string
+}
+
 export interface DeletionRequestDTO {
   id: string
   organization_id?: string
@@ -162,6 +172,7 @@ export interface DeletionRequestDTO {
   stage_summary?: string
   can_review: boolean
   can_cancel: boolean
+  audit?: DeletionAuditDTO[]
 }
 export interface LocalUploadTaskDTO {
   request_id: string
@@ -473,9 +484,17 @@ export async function getDeletionRequest(requestID: string) {
   return knowledgeRequest<DeletionRequestDTO>(`/deletion-requests/${encodeURIComponent(requestID)}`)
 }
 
-export async function listDeletionRequests(scope: 'mine' | 'inbox' = 'mine', view: 'active' | 'history' | 'all' = 'active', status = '') {
+export async function listDeletionRequests(
+  scope: 'mine' | 'inbox' | 'governance' = 'mine',
+  view: 'active' | 'history' | 'all' = 'active',
+  status = '',
+  options: { limit?: number; offset?: number; scopeID?: string } = {},
+) {
   const params = new URLSearchParams({ scope, view })
   if (status) params.set('status', status)
+  if (options.limit) params.set('limit', String(options.limit))
+  if (options.offset) params.set('offset', String(options.offset))
+  if (options.scopeID) params.set('scope_id', options.scopeID)
   const suffix = `?${params.toString()}`
   const body = await knowledgeRequest<{ items: DeletionRequestDTO[] }>(`/deletion-requests${suffix}`)
   return body.items || []
@@ -493,6 +512,10 @@ export async function rejectDeletionRequest(requestID: string, reason = '') {
     method: 'POST',
     body: JSON.stringify({ reason }),
   })
+}
+
+export async function retryDeletionRequest(requestID: string) {
+  return knowledgeRequest<DeletionRequestDTO>(`/deletion-requests/${encodeURIComponent(requestID)}/retry`, { method: 'POST' })
 }
 export async function getMessageOriginal(messageID: string) {
   return knowledgeRequest<KnowledgeOriginalDTO>(`/knowledge/messages/${encodeURIComponent(messageID)}/original`)

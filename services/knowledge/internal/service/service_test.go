@@ -719,6 +719,78 @@ func TestDeletionApprovalHidesPendingMessage(t *testing.T) {
 	}
 }
 
+func TestDeletionGovernanceListAuditAndRetry(t *testing.T) {
+	ctx := context.Background()
+	fixture := newPipelineFixture(t, domain.PlatformWechat)
+	fixture.service.Core = allowAllCoreClient(t)
+	service, repo := fixture.service, fixture.repo
+	ingested, err := repo.IngestMessage(ctx, pipelineInput(fixture, "govern-delete-message", "text", "govern delete"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request, err := service.CreateDeletionRequest(ctx, "owner", "org-1", repository.DeletionRequestInput{
+		ScopeType: "message", ScopeID: ingested.Message.ID, Reason: "governance test", IdempotencyKey: "govern-delete-1",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	items, err := service.ListDeletionRequestPage(ctx, "owner", "org-1", repository.DeletionRequestFilter{ScopeID: ingested.Message.ID, Limit: 50})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 || items[0].ID != request.ID {
+		t.Fatalf("governance list did not return request: %+v", items)
+	}
+	audits, err := service.ListDeletionAudit(ctx, "owner", "org-1", request.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(audits) == 0 || audits[len(audits)-1].Action == "" {
+		t.Fatalf("deletion audit was not returned: %+v", audits)
+	}
+	if err := repo.MarkDeletionObjectState(ctx, request.Targets[0].ID, "failed", "object store unavailable"); err != nil {
+		t.Fatal(err)
+	}
+	retried, err := service.RetryDeletionRequest(ctx, "owner", "org-1", request.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if retried.Status != "executing" || len(retried.Targets) != 1 || retried.Targets[0].ObjectState != "pending" || retried.Targets[0].AttemptCount != 1 {
+		t.Fatalf("failed deletion stage was not reset: %+v", retried)
+	}
+	service.Core = coreclient.New("http://127.0.0.1:1", "test-token")
+	if _, err := service.RetryDeletionRequest(ctx, "member", "org-1", request.ID); err == nil {
+		t.Fatal("ordinary member retried a deletion request without a Core decision")
+	}
+}
+
+func TestApplyRAGDeletedResultIsAccepted(t *testing.T) {
+	ctx := context.Background()
+	fixture := newPipelineFixture(t, domain.PlatformWechat)
+	service, repo := fixture.service, fixture.repo
+	ingested, err := repo.IngestMessage(ctx, pipelineInput(fixture, "rag-deleted-message", "text", "rag delete"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	item, err := repo.GetKnowledgeItemByMessage(ctx, ingested.Message.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := service.ApplyRAGResult(ctx, item.ID, repository.RAGResultInput{
+		SourceEventID:  "11111111-1111-4111-8111-111111111111",
+		RAGJobID:       "22222222-2222-4222-8222-222222222222",
+		ContentVersion: item.ContentVersion,
+		ACLVersion:     item.ACLVersion,
+		Status:         "deleted",
+		OccurredAt:     time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Applied || result.Status != "deleted" {
+		t.Fatalf("RAG deleted callback was not applied: %+v", result)
+	}
+}
 func TestDeletionRejectionKeepsPendingMessageVisible(t *testing.T) {
 	ctx := context.Background()
 	fixture := newPipelineFixture(t, domain.PlatformWechat)
@@ -774,7 +846,7 @@ func TestDeletionRequestIsUniquePerMessageAcrossUsers(t *testing.T) {
 	if second.ID != first.ID {
 		t.Fatalf("message-level deletion was duplicated: first=%s second=%s", first.ID, second.ID)
 	}
-	requests, err := repo.ListDeletionRequests(ctx, "owner", "", 50)
+	requests, err := repo.ListDeletionRequests(ctx, repository.DeletionRequestFilter{RequesterUserID: "owner", Limit: 50})
 	if err != nil {
 		t.Fatal(err)
 	}

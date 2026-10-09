@@ -78,6 +78,42 @@
           <t-tab-panel value="inbox" label="待我审批" />
           <t-tab-panel value="history" label="历史记录" />
         </t-tabs>
+        <div class="access-toolbar">
+          <t-radio-group v-model="deletionStatusFilter" variant="default-filled" size="small" @change="loadDeletionGovernance">
+            <t-radio-button value="">全部</t-radio-button>
+            <t-radio-button value="pending">待审批</t-radio-button>
+            <t-radio-button value="executing">执行中</t-radio-button>
+            <t-radio-button value="failed">失败</t-radio-button>
+            <t-radio-button value="completed">已完成</t-radio-button>
+          </t-radio-group>
+          <t-button size="small" variant="outline" :loading="deletionLoading" @click="loadDeletionGovernance">刷新</t-button>
+        </div>
+        <div v-if="deletionLoading" class="access-request-state"><t-icon name="loading" />正在加载删除治理记录…</div>
+        <div v-else-if="!deletionRequests.length" class="access-request-state">暂无删除治理记录</div>
+        <div v-else class="deletion-governance-list">
+          <article v-for="item in deletionRequests" :key="item.id" class="deletion-governance">
+            <div class="deletion-governance__head">
+              <strong>{{ item.scope_type === 'message' ? '消息删除' : item.scope_type }}</strong>
+              <t-tag :theme="deletionStatusTheme(item.status)" variant="light">{{ deletionStatusLabel(item.status) }}</t-tag>
+            </div>
+            <small>申请：{{ item.requester_user_id }} · {{ formatDateTime(item.requested_at) }}</small>
+            <small v-if="item.reviewer_user_id">审批：{{ item.reviewer_user_id }} · {{ item.reviewed_at ? formatDateTime(item.reviewed_at) : '处理中' }}</small>
+            <div class="deletion-progress">
+              <span v-for="target in item.targets" :key="target.id" class="deletion-progress__item">
+                <em>可见性 {{ deletionStageLabel(target.visibility_state) }}</em>
+                <em>授权 {{ deletionStageLabel(target.auth_state) }}</em>
+                <em>向量 {{ deletionStageLabel(target.vector_state) }}</em>
+                <em>对象 {{ deletionStageLabel(target.object_state) }}</em>
+              </span>
+            </div>
+            <small v-if="item.last_error || item.targets.some((target) => target.last_error)" class="deletion-error">
+              失败原因：{{ item.last_error || item.targets.find((target) => target.last_error)?.last_error }}
+            </small>
+            <div v-if="item.status === 'failed' || item.targets.some((target) => target.last_error)" class="deletion-governance__actions">
+              <t-button size="small" theme="primary" variant="outline" :loading="deletionRetrying[item.id]" @click="retryGovernance(item)">重试失败阶段</t-button>
+            </div>
+          </article>
+        </div>
         <div class="access-request-list">
           <div v-if="accessLoading" class="access-request-state"><t-icon name="loading" />正在加载权限申请…</div>
           <div v-else-if="!accessRequests.length" class="access-request-state">{{ accessEmptyText }}</div>
@@ -201,7 +237,7 @@ import { oauthCallbackNotice } from '@/knowledge-mapping'
 import { downloadAvatar, getCurrentUser, updateCurrentUser, uploadAvatar as uploadCoreAvatar } from '@/api/core-auth'
 import { acceptOrganizationInvitation, approveAccessRequest, createOrganization, getCurrentOrganization, listAccessRequests, rejectAccessRequest, type CoreAccessRequest, type CoreOrganizationResponse } from '@/api/core-organization'
 import { CoreAuthError } from '@/api/core-auth'
-import { approveDeletionRequest, approvePrivateAccessRequest, createWechatPairing, getWechatPairingStatus, listDeletionRequests, listPrivateAccessRequests, rejectDeletionRequest, rejectPrivateAccessRequest, type DeletionRequestDTO, type PrivateAccessRequestDTO } from '@/api/info-knowledge'
+import { approveDeletionRequest, approvePrivateAccessRequest, createWechatPairing, getDeletionRequest, getWechatPairingStatus, listDeletionRequests, listPrivateAccessRequests, rejectDeletionRequest, rejectPrivateAccessRequest, retryDeletionRequest, type DeletionRequestDTO, type PrivateAccessRequestDTO } from '@/api/info-knowledge'
 import { listLocalWechatAccounts, pairLocalWechatAccount, type LocalWechatAccount } from '@/api/wechat-local-agent'
 import { desktopRuntimeActive, openExternalUrl } from '@/api/runtime-config'
 
@@ -243,6 +279,11 @@ const accessRequests = ref<UnifiedAccessRequest[]>([])
 const accessLoading = ref(false)
 let accessRequestSequence = 0
 const currentUserID = ref('')
+const deletionStatusFilter = ref('')
+const deletionRequests = ref<DeletionRequestDTO[]>([])
+const deletionLoading = ref(false)
+const deletionRetrying = reactive<Record<string, boolean>>({})
+let deletionRequestSequence = 0
 const wechatPairingID = ref('')
 const wechatPairingCode = ref('')
 const wechatAccounts = ref<LocalWechatAccount[]>([])
@@ -325,6 +366,7 @@ async function loadPage() {
   await Promise.all([coreProfileRequest, connectorRequest, organizationRequest])
   organizationLoading.value = false
   await loadAccessRequests()
+  await loadDeletionGovernance()
 }
 async function loadAccessRequests() {
   const sequence = ++accessRequestSequence
@@ -374,6 +416,53 @@ async function reviewAccess(request: UnifiedAccessRequest, action: 'approve' | '
   } catch (cause) {
     MessagePlugin.error(errorMessage(cause, action === 'approve' ? '审批失败' : '拒绝失败'))
   }
+}
+
+async function loadDeletionGovernance() {
+  const sequence = ++deletionRequestSequence
+  deletionLoading.value = true
+  try {
+    const items = await listDeletionRequests('governance', 'all', deletionStatusFilter.value, {
+      limit: 50,
+    }).catch(() => [] as DeletionRequestDTO[])
+    const detailed = await Promise.all(items.map(async (item) => {
+      if (item.status === 'failed' || item.targets.some((target) => target.last_error)) {
+        return getDeletionRequest(item.id).catch(() => item)
+      }
+      return item
+    }))
+    if (sequence === deletionRequestSequence) deletionRequests.value = detailed
+  } finally {
+    if (sequence === deletionRequestSequence) deletionLoading.value = false
+  }
+}
+
+async function retryGovernance(request: DeletionRequestDTO) {
+  deletionRetrying[request.id] = true
+  try {
+    await retryDeletionRequest(request.id)
+    MessagePlugin.success('已重新提交失败阶段')
+    await loadDeletionGovernance()
+  } catch (cause) {
+    MessagePlugin.error(errorMessage(cause, '重试失败'))
+  } finally {
+    deletionRetrying[request.id] = false
+  }
+}
+
+function deletionStatusLabel(status: string) {
+  return ({ pending: '待审批', approved: '已通过', rejected: '已拒绝', executing: '执行中', completed: '已完成', failed: '失败' } as Record<string, string>)[status] || status
+}
+
+function deletionStatusTheme(status: string) {
+  if (status === 'completed') return 'success'
+  if (status === 'failed' || status === 'rejected') return 'danger'
+  if (status === 'pending') return 'warning'
+  return 'primary'
+}
+
+function deletionStageLabel(status: string) {
+  return ({ active: '待处理', hidden: '已隐藏', pending: '待处理', revoked: '已撤销', deleted: '已删除', skipped: '无需处理', failed: '失败' } as Record<string, string>)[status] || status
 }
 function unifiedPrivateAccessRequest(request: PrivateAccessRequestDTO): UnifiedAccessRequest {
   const resource = request.resource_type === 'attachment' ? '附件' : '私聊信息'
@@ -1029,6 +1118,66 @@ onBeforeUnmount(() => {
   font-size: 12px;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.access-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 12px;
+}
+
+.deletion-governance-list {
+  display: grid;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.deletion-governance {
+  display: grid;
+  gap: 8px;
+  padding: 14px;
+  border: 1px solid var(--td-component-stroke);
+  border-radius: 7px;
+  background: var(--td-bg-color-container);
+}
+
+.deletion-governance__head,
+.deletion-governance__actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.deletion-governance small {
+  color: var(--td-text-color-secondary);
+  font-size: 12px;
+}
+
+.deletion-progress {
+  display: grid;
+  gap: 6px;
+}
+
+.deletion-progress__item {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.deletion-progress__item em {
+  padding: 3px 7px;
+  border-radius: 4px;
+  color: var(--td-text-color-secondary);
+  background: var(--td-bg-color-secondarycontainer);
+  font-size: 11px;
+  font-style: normal;
+}
+
+.deletion-error {
+  color: var(--td-error-color-7);
 }
 
 .access-request-list {

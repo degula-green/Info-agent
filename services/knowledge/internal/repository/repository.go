@@ -673,13 +673,48 @@ type DeletionAuditInput struct {
 	ResourceID        string
 	Detail            map[string]any
 }
+
+type DeletionAudit struct {
+	ID                string
+	DeletionRequestID string
+	ActorUserID       string
+	Action            string
+	ResourceType      string
+	ResourceID        string
+	Detail            map[string]any
+	CreatedAt         time.Time
+}
+
+type DeletionRequestFilter struct {
+	OrganizationID  string
+	RequesterUserID string
+	Status          string
+	ScopeID         string
+	ReviewerUserID  string
+	Limit           int
+	Offset          int
+}
+type DeletionMetrics struct {
+	Pending              int
+	Failed               int
+	OldestPendingSeconds float64
+	VisibilityLatencyAvg float64
+	VectorLatencyAvg     float64
+	ObjectLatencyAvg     float64
+	VisibilityLatencyP95 float64
+	VectorLatencyP95     float64
+	ObjectLatencyP95     float64
+	StageStuckMaxSeconds float64
+}
+
 type Repository interface {
 	CreateDeletionRequest(ctx context.Context, input DeletionRequestInput) (*DeletionRequest, error)
 	GetDeletionRequest(ctx context.Context, id string) (*DeletionRequest, error)
-	ListDeletionRequests(ctx context.Context, userID, status string, limit int) ([]DeletionRequest, error)
-	ListDeletionRequestsByOrganization(ctx context.Context, organizationID, status string, limit int) ([]DeletionRequest, error)
+	ListDeletionRequests(ctx context.Context, filter DeletionRequestFilter) ([]DeletionRequest, error)
 	RecordDeletionAudit(ctx context.Context, input DeletionAuditInput) error
+	ListDeletionAudit(ctx context.Context, requestID string, limit int) ([]DeletionAudit, error)
 	ReviewDeletionRequest(ctx context.Context, requestID, reviewerUserID, status, reason string, now time.Time) (*DeletionRequest, error)
+	RetryDeletionRequest(ctx context.Context, requestID string, now time.Time) (int, error)
 	HideDeletionTargets(ctx context.Context, requestID string) (int, error)
 	MarkDeletionAuthorizationRevoked(ctx context.Context, requestID string, now time.Time) error
 	ListDeletionRequestsPendingAuthorization(ctx context.Context, limit int) ([]DeletionRequest, error)
@@ -690,6 +725,7 @@ type Repository interface {
 	DeletionObjectRefs(ctx context.Context, requestID string) ([]DeletionObjectRef, error)
 	MarkDeletionObjectState(ctx context.Context, targetID, state, lastError string) error
 	MarkDeletionPurged(ctx context.Context, requestID string, now time.Time) error
+	DeletionMetrics(ctx context.Context, now time.Time) (DeletionMetrics, error)
 
 	Close() error
 

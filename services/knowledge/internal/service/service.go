@@ -4027,6 +4027,23 @@ func (s *Service) revokeDeletionAuthorization(ctx context.Context, request *repo
 	return s.Repo.MarkDeletionAuthorizationRevoked(ctx, request.ID, s.Now().UTC())
 }
 
+func (s *Service) canGovernDeletions(ctx context.Context, userID, organizationID string) (bool, error) {
+	userID, organizationID = strings.TrimSpace(userID), strings.TrimSpace(organizationID)
+	if userID == "" || organizationID == "" {
+		return false, nil
+	}
+	if s.Core == nil {
+		return true, nil
+	}
+	decisions, err := s.Core.CheckBatch(ctx, userID, organizationID, []coreclient.AuthorizationCheck{{
+		ResourceType: "organization", ResourcePart: "content_governance", ResourceID: organizationID, Action: "view",
+	}})
+	if err != nil {
+		return false, err
+	}
+	return len(decisions) == 1 && decisions[0].Allowed, nil
+}
+
 func (s *Service) canReviewDeletion(ctx context.Context, userID, organizationID string, request *repository.DeletionRequest) (bool, error) {
 	if request == nil {
 		return false, nil
@@ -4147,12 +4164,20 @@ func (s *Service) RepairStaleDeletionRequests(ctx context.Context) error {
 	return firstErr
 }
 
-func (s *Service) GetDeletionRequest(ctx context.Context, userID, id string) (*repository.DeletionRequest, error) {
+func (s *Service) GetDeletionRequest(ctx context.Context, userID, organizationID, id string) (*repository.DeletionRequest, error) {
+	userID = strings.TrimSpace(userID)
 	request, err := s.Repo.GetDeletionRequest(ctx, id)
 	if err != nil {
 		return nil, err
 	}
-	if request.RequesterUserID != strings.TrimSpace(userID) {
+	if request.RequesterUserID == userID || request.ReviewerUserID == userID {
+		return request, nil
+	}
+	allowed, checkErr := s.canReviewDeletion(ctx, userID, organizationID, request)
+	if checkErr != nil {
+		return nil, checkErr
+	}
+	if !allowed {
 		return nil, apperror.Clone(apperror.ErrForbidden)
 	}
 	return request, nil
@@ -4171,7 +4196,7 @@ func (s *Service) ListDeletionRequests(ctx context.Context, userID, organization
 		return nil, apperror.New("invalid_deletion_view", "view must be active, history, or all", 400, false)
 	}
 	if scope == "" || scope == "mine" {
-		requests, err := s.Repo.ListDeletionRequests(ctx, userID, "", 100)
+		requests, err := s.Repo.ListDeletionRequests(ctx, repository.DeletionRequestFilter{RequesterUserID: userID, Limit: 100})
 		if err != nil {
 			return nil, err
 		}
@@ -4193,7 +4218,7 @@ func (s *Service) ListDeletionRequests(ctx context.Context, userID, organization
 	if organizationID == "" {
 		return nil, apperror.New("organization_required", "organization is required for deletion review", 400, false)
 	}
-	requests, err := s.Repo.ListDeletionRequestsByOrganization(ctx, organizationID, "pending", 100)
+	requests, err := s.Repo.ListDeletionRequests(ctx, repository.DeletionRequestFilter{OrganizationID: organizationID, Status: "pending", Limit: 100})
 	if err != nil {
 		return nil, err
 	}
@@ -4364,6 +4389,94 @@ func compactDisplayText(value string, maxRunes int) string {
 	}
 	return string(runes[:maxRunes]) + "…"
 }
+
+func (s *Service) ListDeletionRequestPage(ctx context.Context, userID, organizationID string, filter repository.DeletionRequestFilter) ([]repository.DeletionRequest, error) {
+	userID, organizationID = strings.TrimSpace(userID), strings.TrimSpace(organizationID)
+	filter.Status = strings.TrimSpace(filter.Status)
+	filter.ScopeID = strings.TrimSpace(filter.ScopeID)
+	if filter.Status != "" && !validDeletionStatus(filter.Status) {
+		return nil, apperror.New("invalid_deletion_status", "deletion status is invalid", 400, false)
+	}
+	if organizationID != "" {
+		allowed, err := s.canGovernDeletions(ctx, userID, organizationID)
+		if err != nil {
+			return nil, err
+		}
+		if allowed {
+			filter.OrganizationID = organizationID
+		} else {
+			filter.RequesterUserID = userID
+		}
+	} else {
+		filter.RequesterUserID = userID
+	}
+	return s.Repo.ListDeletionRequests(ctx, filter)
+}
+
+func (s *Service) ListDeletionAudit(ctx context.Context, userID, organizationID, requestID string) ([]repository.DeletionAudit, error) {
+	request, err := s.Repo.GetDeletionRequest(ctx, strings.TrimSpace(requestID))
+	if err != nil {
+		return nil, err
+	}
+	allowed, checkErr := s.canReviewDeletion(ctx, userID, organizationID, request)
+	if checkErr != nil {
+		return nil, checkErr
+	}
+	if !allowed && request.RequesterUserID != strings.TrimSpace(userID) {
+		return nil, apperror.Clone(apperror.ErrForbidden)
+	}
+	return s.Repo.ListDeletionAudit(ctx, request.ID, 200)
+}
+
+func (s *Service) RetryDeletionRequest(ctx context.Context, userID, organizationID, requestID string) (*repository.DeletionRequest, error) {
+	request, err := s.Repo.GetDeletionRequest(ctx, strings.TrimSpace(requestID))
+	if err != nil {
+		return nil, err
+	}
+	allowed, checkErr := s.canReviewDeletion(ctx, userID, organizationID, request)
+	if checkErr != nil {
+		return nil, checkErr
+	}
+	if !allowed {
+		return nil, apperror.Clone(apperror.ErrForbidden)
+	}
+	retried, err := s.Repo.RetryDeletionRequest(ctx, request.ID, s.Now().UTC())
+	if err != nil {
+		return nil, err
+	}
+	_ = s.Repo.RecordDeletionAudit(ctx, repository.DeletionAuditInput{
+		DeletionRequestID: request.ID, ActorUserID: strings.TrimSpace(userID), Action: "deletion.retry_requested",
+		Detail: map[string]any{"targets": retried},
+	})
+	return s.Repo.GetDeletionRequest(ctx, request.ID)
+}
+
+func validDeletionStatus(status string) bool {
+	switch status {
+	case "pending", "approved", "rejected", "executing", "completed", "failed":
+		return true
+	default:
+		return false
+	}
+}
+func (s *Service) DeletionMetrics(ctx context.Context) (repository.DeletionMetrics, error) {
+	return s.Repo.DeletionMetrics(ctx, s.Now().UTC())
+}
+
+func (s *Service) DeletionAlerts(metrics repository.DeletionMetrics) []map[string]any {
+	alerts := []map[string]any{}
+	if metrics.Failed > 0 {
+		alerts = append(alerts, map[string]any{"code": "deletion_failed_total", "severity": "critical", "value": metrics.Failed})
+	}
+	if metrics.OldestPendingSeconds > 24*60*60 {
+		alerts = append(alerts, map[string]any{"code": "deletion_oldest_pending_seconds", "severity": "warning", "value": metrics.OldestPendingSeconds})
+	}
+	if metrics.StageStuckMaxSeconds > 60*60 {
+		alerts = append(alerts, map[string]any{"code": "deletion_stage_stuck_seconds", "severity": "warning", "value": metrics.StageStuckMaxSeconds})
+	}
+	return alerts
+}
+
 func (s *Service) GetKnowledgeOriginalByMessage(ctx context.Context, userID, messageID string) (*domain.KnowledgeContent, error) {
 	item, err := s.Repo.GetKnowledgeItemByMessage(ctx, strings.TrimSpace(messageID))
 	if err != nil {

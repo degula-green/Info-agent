@@ -3599,39 +3599,50 @@ func (s *MemoryStore) GetDeletionRequest(_ context.Context, id string) (*Deletio
 	return &copy, nil
 }
 
-func (s *MemoryStore) ListDeletionRequests(_ context.Context, userID, status string, limit int) ([]DeletionRequest, error) {
-	return s.listDeletionRequests(userID, status, limit)
-}
-
-func (s *MemoryStore) ListDeletionRequestsByOrganization(_ context.Context, organizationID, status string, limit int) ([]DeletionRequest, error) {
-	return s.listDeletionRequests(organizationID, status, limit)
-}
-
-func (s *MemoryStore) listDeletionRequests(userID, status string, limit int) ([]DeletionRequest, error) {
+func (s *MemoryStore) ListDeletionRequests(_ context.Context, filter DeletionRequestFilter) ([]DeletionRequest, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	limit := filter.Limit
 	if limit <= 0 || limit > 100 {
 		limit = 50
 	}
 	canonical := make(map[string]DeletionRequest)
 	for _, value := range s.deletionRequests {
-		if status != "" && value.Request.Status != status {
+		request := value.Request
+		if filter.OrganizationID != "" && request.OrganizationID != filter.OrganizationID {
 			continue
 		}
-		key := value.Request.ScopeType + "\x00" + value.Request.ScopeID
+		if filter.RequesterUserID != "" && request.RequesterUserID != filter.RequesterUserID {
+			continue
+		}
+		if filter.ReviewerUserID != "" && request.ReviewerUserID != filter.ReviewerUserID {
+			continue
+		}
+		if filter.Status != "" && request.Status != filter.Status {
+			continue
+		}
+		if filter.ScopeID != "" && request.ScopeID != filter.ScopeID {
+			continue
+		}
+		key := request.ScopeType + "\x00" + request.ScopeID
 		current, exists := canonical[key]
-		if !exists || preferredDeletionRequest(value.Request, current) {
-			canonical[key] = cloneDeletionRequest(value.Request)
+		if !exists || preferredDeletionRequest(request, current) {
+			canonical[key] = cloneDeletionRequest(request)
 		}
 	}
 	out := make([]DeletionRequest, 0, len(canonical))
 	for _, value := range canonical {
-		if userID != "" && value.RequesterUserID != userID && value.OrganizationID != userID {
-			continue
-		}
 		out = append(out, value)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].RequestedAt.After(out[j].RequestedAt) })
+	offset := filter.Offset
+	if offset < 0 {
+		offset = 0
+	}
+	if offset >= len(out) {
+		return []DeletionRequest{}, nil
+	}
+	out = out[offset:]
 	if len(out) > limit {
 		out = out[:limit]
 	}
@@ -3667,6 +3678,30 @@ func (s *MemoryStore) RecordDeletionAudit(_ context.Context, input DeletionAudit
 	defer s.mu.Unlock()
 	s.deletionAudit = append(s.deletionAudit, input)
 	return nil
+}
+
+func (s *MemoryStore) ListDeletionAudit(_ context.Context, requestID string, limit int) ([]DeletionAudit, error) {
+	if limit <= 0 || limit > 200 {
+		limit = 100
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]DeletionAudit, 0)
+	for _, item := range s.deletionAudit {
+		if strings.TrimSpace(requestID) != "" && item.DeletionRequestID != requestID {
+			continue
+		}
+		out = append(out, DeletionAudit{
+			ID: uuid.NewString(), DeletionRequestID: item.DeletionRequestID, ActorUserID: item.ActorUserID,
+			Action: item.Action, ResourceType: item.ResourceType, ResourceID: item.ResourceID,
+			Detail: item.Detail, CreatedAt: time.Now().UTC(),
+		})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.After(out[j].CreatedAt) })
+	if len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
 }
 
 func (s *MemoryStore) ReviewDeletionRequest(_ context.Context, requestID, reviewerUserID, status, reason string, now time.Time) (*DeletionRequest, error) {
@@ -3711,6 +3746,52 @@ func (s *MemoryStore) ReviewDeletionRequest(_ context.Context, requestID, review
 	s.deletionRequests[requestID] = value
 	copy := cloneDeletionRequest(value.Request)
 	return &copy, nil
+}
+
+const emptyContentHash = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+
+func (s *MemoryStore) RetryDeletionRequest(_ context.Context, requestID string, now time.Time) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	value, ok := s.deletionRequests[requestID]
+	if !ok {
+		return 0, apperror.New("deletion_request_not_found", "deletion request was not found", 404, false)
+	}
+	if value.Request.Status == "completed" || value.Request.Status == "rejected" || value.Request.Status == "pending" {
+		return 0, apperror.New("deletion_request_not_retryable", "only failed deletion stages can be retried", 409, false)
+	}
+	retried := 0
+	for index := range value.Request.Targets {
+		target := &value.Request.Targets[index]
+		failed := strings.TrimSpace(target.LastError) != "" || target.AuthState == "failed" || target.VectorState == "failed" || target.ObjectState == "failed"
+		if !failed {
+			continue
+		}
+		if target.ObjectState == "failed" {
+			target.ObjectState = "pending"
+		}
+		if target.VectorState == "failed" {
+			target.VectorState = "pending"
+		}
+		if target.AuthState == "failed" {
+			target.AuthState = "pending"
+		}
+		target.AttemptCount++
+		target.LastError = ""
+		target.UpdatedAt = now
+		if target.VisibilityState != "hidden" {
+			target.VisibilityState = "hidden"
+		}
+		retried++
+	}
+	if retried == 0 {
+		return 0, apperror.New("deletion_retry_not_required", "no failed deletion stage requires retry", 409, false)
+	}
+	value.Request.Status = "executing"
+	value.Request.LastError = ""
+	value.Request.UpdatedAt = now
+	s.deletionRequests[requestID] = value
+	return retried, nil
 }
 
 func (s *MemoryStore) HideDeletionTargets(_ context.Context, requestID string) (int, error) {
@@ -3801,6 +3882,67 @@ func (s *MemoryStore) ListDueDeletionTargets(_ context.Context, now time.Time, l
 	return out, nil
 }
 
+func (s *MemoryStore) DeletionMetrics(_ context.Context, now time.Time) (DeletionMetrics, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	metrics := DeletionMetrics{}
+	visibility := []float64{}
+	vector := []float64{}
+	object := []float64{}
+	stuck := []float64{}
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	for _, value := range s.deletionRequests {
+		request := value.Request
+		if request.Status == "failed" {
+			metrics.Failed++
+		}
+		if request.Status == "pending" || request.Status == "approved" || request.Status == "executing" {
+			metrics.Pending++
+			age := now.Sub(request.RequestedAt).Seconds()
+			if age > metrics.OldestPendingSeconds {
+				metrics.OldestPendingSeconds = age
+			}
+			if metrics.StageStuckMaxSeconds < age {
+				metrics.StageStuckMaxSeconds = age
+			}
+			stuck = append(stuck, age)
+		}
+		for _, target := range request.Targets {
+			if target.VisibilityState == "hidden" && request.ExecutionStartedAt != nil {
+				visibility = append(visibility, target.UpdatedAt.Sub(*request.ExecutionStartedAt).Seconds())
+			}
+			if target.VectorState == "deleted" && request.ExecutionStartedAt != nil {
+				vector = append(vector, target.UpdatedAt.Sub(*request.ExecutionStartedAt).Seconds())
+			}
+			if target.ObjectState == "deleted" && request.ExecutionStartedAt != nil {
+				object = append(object, target.UpdatedAt.Sub(*request.ExecutionStartedAt).Seconds())
+			}
+			if target.LastError != "" {
+				metrics.Failed++
+			}
+		}
+	}
+	metrics.VisibilityLatencyAvg, metrics.VisibilityLatencyP95 = deletionLatency(visibility)
+	metrics.VectorLatencyAvg, metrics.VectorLatencyP95 = deletionLatency(vector)
+	metrics.ObjectLatencyAvg, metrics.ObjectLatencyP95 = deletionLatency(object)
+	_ = stuck
+	return metrics, nil
+}
+
+func deletionLatency(values []float64) (float64, float64) {
+	if len(values) == 0 {
+		return 0, 0
+	}
+	total := 0.0
+	for _, value := range values {
+		total += value
+	}
+	sort.Float64s(values)
+	index := int(float64(len(values)-1) * 0.95)
+	return total / float64(len(values)), values[index]
+}
 func (s *MemoryStore) AttachmentObjectRefs(_ context.Context, attachmentIDs []string) ([]AttachmentObjectRef, error) {
 	wanted := map[string]struct{}{}
 	for _, id := range attachmentIDs {
@@ -4021,7 +4163,7 @@ func (s *MemoryStore) MarkDeletionPurged(_ context.Context, requestID string, no
 				}
 				message.LifecycleStatus = "purged"
 				message.Content = ""
-				message.ContentHash = ""
+				message.ContentHash = emptyContentHash
 				message.ContentPurgedAt = &now
 				s.messages[key] = message
 			}

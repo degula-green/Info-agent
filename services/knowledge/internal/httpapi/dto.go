@@ -226,6 +226,16 @@ type publicDeletionTargetDTO struct {
 	UpdatedAt       string `json:"updated_at"`
 }
 
+type publicDeletionAuditDTO struct {
+	ID           string         `json:"id"`
+	ActorUserID  string         `json:"actor_user_id,omitempty"`
+	Action       string         `json:"action"`
+	ResourceType string         `json:"resource_type,omitempty"`
+	ResourceID   string         `json:"resource_id,omitempty"`
+	Detail       map[string]any `json:"detail,omitempty"`
+	CreatedAt    string         `json:"created_at"`
+}
+
 type publicDeletionRequestDTO struct {
 	ID                   string                    `json:"id"`
 	OrganizationID       string                    `json:"organization_id,omitempty"`
@@ -252,6 +262,19 @@ type publicDeletionRequestDTO struct {
 	StageSummary         string                    `json:"stage_summary,omitempty"`
 	CanReview            bool                      `json:"can_review"`
 	CanCancel            bool                      `json:"can_cancel"`
+	Audit                []publicDeletionAuditDTO  `json:"audit,omitempty"`
+}
+
+func publicDeletionAudits(values []repository.DeletionAudit) []publicDeletionAuditDTO {
+	out := make([]publicDeletionAuditDTO, 0, len(values))
+	for _, value := range values {
+		out = append(out, publicDeletionAuditDTO{
+			ID: value.ID, ActorUserID: value.ActorUserID, Action: value.Action,
+			ResourceType: value.ResourceType, ResourceID: value.ResourceID, Detail: value.Detail,
+			CreatedAt: value.CreatedAt.UTC().Format(time.RFC3339Nano),
+		})
+	}
+	return out
 }
 
 func publicDeletionRequest(value repository.DeletionRequest) publicDeletionRequestDTO {
