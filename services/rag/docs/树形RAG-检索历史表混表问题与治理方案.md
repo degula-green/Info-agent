@@ -14,7 +14,10 @@
 
 1. 真实检索（做实体定位与排序）；
 2. 联系人工具的**全量 scope 导出**（`scope_export`，按页写入）；
-3. 联系人工具的**锚点上下文读取**（`context_scope`，当前未写 execution_path，落库为 NULL）。
+3. 联系人工具的**锚点上下文读取**（`context_scope`）。**v1.3 更正**：它此前根本
+   没有写进 `search_history` —— 调用只传了 7 个参数，缺 `tree_mode` / `execution_path` /
+   `diagnostics` / `duration_ms` / `request_id`，生产 `record_search` 是严格签名会抛
+   `TypeError`，而调用处的 `except Exception: pass` 把它吞掉了。修法与验证见 §2.2 与 §11。
 
 后果是已经发生的事故：真实的实体定位失败率 96.24% 被导出行稀释成 16.9%，
 `high_no_entity_match` 告警长期不触发。根因不是"混表"本身，而是
@@ -60,7 +63,7 @@ metadata_filter     81 行
 |---|---|---|
 | 检索 | `services/rag/app/application/rag_service.py` `search()` | `traditional` / `tree_shadow` / `tree_boost` / `metadata_filter` |
 | 全量导出 | `feature/agent-main` `rag_service.py` `export_scope()` | `scope_export` |
-| 锚点上下文 | `feature/agent-main` `rag_service.py` `context_scope()` | **未传，落库 NULL** |
+| 锚点上下文 | `feature/agent-main` `rag_service.py` `context_scope()` | 期望 `context_scope`；**v1.3 更正：此前缺参被静默吞掉，一行都没写** |
 
 读取方（两处，均在 RAG 内部）：
 
@@ -373,6 +376,58 @@ services/agent/app/capabilities/form.py                     表单填充（多�
 **结论：这次合并已验证可行**——只有 1 处冲突、解法机械（两边保留 + 时间序），
 合并后的六套测试全绿，且不存在"引用了已删除接口"的暗雷。
 
+## 11. PR #18 review 后的修复（2026-10-09）
+
+review 指出两处问题，均已核实并修复。
+
+### 11.1 `context_scope` 的写入被静默吞掉（实质 bug）
+
+核实：`context_scope()` 的 `record_search` 调用只传了 7 个参数
+（user_id / scope_type / scope_id / query_hash / query_redacted / filters / result_count），
+而生产 `PostgresRagMVPRepository.record_search` 是**严格签名**，还要求
+tree_mode / execution_path / diagnostics / duration_ms / request_id → `TypeError`，
+又被调用处的 `except Exception: pass` 吞掉。真实库里 `execution_path='context_scope'`
+的行数为 **0**，与推断一致。
+
+测试为什么没抓到：`InMemoryRagMVPRepository.record_search(self, **value)` 是宽松签名，
+缺参数不会报错。
+
+修法：
+
+- 调用补齐 5 个参数；
+- `context_scope` 与 `export_scope` 两处 `except Exception: pass` 改为
+  `logger.warning(..., exc_info=True)`，让静默失败变成有日志的降级；
+- 新增 `_StrictRecordSearchRepository`：**用 `inspect.signature` 从生产方法派生必需参数集**，
+  让 in-memory 替身按生产签名报错（而不是手抄一份参数表），另加一条"守卫自检"用例。
+
+验证方式不是"看代码觉得对"：**把修复临时摘掉后重跑，新增用例失败**（`0 != 1`），
+恢复后全绿（245 passed）。
+
+### 11.2 `knowledge_lifecycle_ready` 没接进任何迁移链
+
+核实：`20261007_knowledge_lifecycle_ready.up.sql` 在 `docker/` 与 `services/` 下**零引用**。
+（同批的 `20261008_agent_person_fact_snapshots` 其实在 agent-migrate 的
+`BOOTSTRAP_MIGRATIONS` 里，**不算缺失**。）
+
+影响：它把 `knowledge_items_lifecycle_chk` 从只允许 `active` 扩到含 `ready`，而 knowledge
+的 local upload 完成路径会写 `lifecycle_status='ready'`。共享库的约束已被历史过程扩过
+（实测含 ready），所以**现有环境看不出问题**；但 **fresh deploy** 会先被更早的迁移设成
+不允许 ready，之后的 ready 写入可能被 CHECK 拒绝。
+
+修法：该迁移补进 `docker/docker-compose.yml` 的 knowledge-migrate 链（含卷挂载）；
+并把三个 agent 侧 knowledge 迁移（contact_name_core / knowledge_lifecycle_ready /
+wechat_contact_book）补进 `docker/docker-compose.server.yml` 的迁移循环——它此前只有
+wechat_control_flow + 6 个 tree-RAG 迁移。
+
+三个迁移都是幂等的（`ADD COLUMN IF NOT EXISTS` / `CREATE TABLE IF NOT EXISTS` /
+`DROP CONSTRAINT IF EXISTS` + `ADD CONSTRAINT`），重复执行安全。
+
+### 11.3 关于"哨兵抓不到根本没写"
+
+review 说得对：`unknown_path_count` 只能发现"写了未知标签"，发现不了"该写的 writer
+完全没写"。后者现在的可见性来自 11.1 的 `logger.warning`——沉默的失败变成有日志的降级。
+要更强的保障需要"预期写入速率"类的断言，目前没有数据基础，暂不做。
+
 **版本控制**:
 - v1.0 (2026-10-09): 初始版本，问题复盘与治理方案
 - v1.1 (2026-10-09): Phase 1 标记为已落地并修正为"白名单 + locate_ms 双闸门"；
@@ -380,3 +435,6 @@ services/agent/app/capabilities/form.py                     表单填充（多�
   合并策略由 rebase 改为 merge；新增 §10 合并 dry-run 验证结果
 - v1.2 (2026-10-09): `unknown_path_count` 哨兵落地（拆成检索/已知非检索/未知三分类，
   含 Prometheus 序列、服务内护栏与监控栈告警）
+- v1.3 (2026-10-09): 按 PR #18 review 修复两处——`context_scope` 缺参被静默吞掉
+  （补参 + 记日志 + 从生产签名派生的严格测试替身）、`knowledge_lifecycle_ready`
+  未接入任何迁移链（补进两个 compose）；见 §11
