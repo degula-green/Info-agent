@@ -1,0 +1,167 @@
+x-agent-environment: &agent-environment
+  AGENT_HTTP_HOST: 0.0.0.0
+  AGENT_HTTP_PORT: 8080
+  AGENT_KNOWLEDGE_BASE_URL: http://knowledge-service:8090
+  AGENT_CORE_BASE_URL: http://core-service:8080
+  AGENT_RAG_BASE_URL: http://rag-service:8000
+  AGENT_KNOWLEDGE_READY_STREAM: knowledge:ready
+  AGENT_RAG_AGENT_TOOLS_ENABLED: "true"
+
+services:
+  core-service:
+    build: ../services/core
+    env_file: .env.server
+    environment:
+      CORE_KNOWLEDGE_URL: http://knowledge-service:8090
+    volumes:
+      - ../services/core/.runtime/jwt-private.pem:/run/secrets/jwt-private.pem:ro
+      - ../services/core/.runtime/jwt-public.pem:/run/secrets/jwt-public.pem:ro
+    expose:
+      - "8080"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+  knowledge-migrate:
+    image: postgres:16-alpine
+    env_file: .env.server
+    command:
+      - sh
+      - -ec
+      - |
+        for migration in \
+          20261007_wechat_control_flow.up.sql; do
+          psql "$${KNOWLEDGE_DATABASE_URL}" --set=ON_ERROR_STOP=1 --file="/migrations/$${migration}";
+        done
+    volumes:
+      - ../db/migrations:/migrations:ro
+    restart: "no"
+
+  knowledge-service:
+    build: ../services/knowledge
+    env_file: .env.server
+    environment:
+      KNOWLEDGE_HTTP_PORT: 8090
+      KNOWLEDGE_CORE_URL: http://core-service:8080
+      KNOWLEDGE_RAG_URL: http://rag-service:8000
+    depends_on:
+      knowledge-migrate:
+        condition: service_completed_successfully
+      core-service:
+        condition: service_healthy
+    expose:
+      - "8090"
+    restart: unless-stopped
+
+  rag-service:
+    build: ../services/rag
+    env_file: .env.server
+    environment:
+      RAG_KNOWLEDGE_BASE_URL: http://knowledge-service:8090
+      RAG_AUTHZ_BASE_URL: http://core-service:8080
+    depends_on:
+      core-service:
+        condition: service_healthy
+      knowledge-service:
+        condition: service_started
+    expose:
+      - "8000"
+    restart: unless-stopped
+
+  rag-worker:
+    build: ../services/rag
+    command: ["python", "worker.py"]
+    env_file: .env.server
+    environment:
+      RAG_KNOWLEDGE_BASE_URL: http://knowledge-service:8090
+    depends_on:
+      core-service:
+        condition: service_healthy
+      knowledge-service:
+        condition: service_started
+    restart: unless-stopped
+
+  agent-migrate:
+    build: ../services/agent
+    command: ["python", "-m", "app.infrastructure.postgres.migrate"]
+    env_file: .env.server
+    environment:
+      <<: *agent-environment
+      AGENT_MIGRATIONS_DIR: /migrations
+    volumes:
+      - ../db/migrations:/migrations:ro
+      - ../services/core/.runtime/jwt-public.pem:/run/secrets/jwt-public.pem:ro
+    depends_on:
+      core-service:
+        condition: service_healthy
+      knowledge-migrate:
+        condition: service_completed_successfully
+    restart: "no"
+
+  agent-service:
+    build: ../services/agent
+    env_file: .env.server
+    environment: *agent-environment
+    volumes:
+      - ../services/core/.runtime/jwt-public.pem:/run/secrets/jwt-public.pem:ro
+    depends_on:
+      agent-migrate:
+        condition: service_completed_successfully
+      knowledge-service:
+        condition: service_started
+      core-service:
+        condition: service_healthy
+    expose:
+      - "8080"
+    restart: unless-stopped
+
+  agent-task-worker:
+    build: ../services/agent
+    command: ["python", "worker_supervisor.py"]
+    env_file: .env.server
+    environment: *agent-environment
+    volumes:
+      - ../services/core/.runtime/jwt-public.pem:/run/secrets/jwt-public.pem:ro
+    depends_on:
+      agent-migrate:
+        condition: service_completed_successfully
+      knowledge-service:
+        condition: service_started
+    restart: unless-stopped
+
+  agent-knowledge-worker:
+    build: ../services/agent
+    command: ["python", "knowledge_worker.py"]
+    env_file: .env.server
+    environment: *agent-environment
+    volumes:
+      - ../services/core/.runtime/jwt-public.pem:/run/secrets/jwt-public.pem:ro
+    depends_on:
+      agent-migrate:
+        condition: service_completed_successfully
+      knowledge-service:
+        condition: service_started
+    restart: unless-stopped
+
+  nginx:
+    image: nginx:1.27-alpine
+    ports:
+      - "80:80"
+    volumes:
+      - ../gateway/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ../gateway/nginx/conf.d/server.default.conf:/etc/nginx/conf.d/default.conf:ro
+      - ../gateway/app-links:/usr/share/nginx/html/app-links:ro
+    depends_on:
+      core-service:
+        condition: service_healthy
+      knowledge-service:
+        condition: service_started
+      rag-service:
+        condition: service_started
+      agent-service:
+        condition: service_started
+    restart: unless-stopped

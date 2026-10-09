@@ -1,3 +1,5 @@
+import { desktopLocalAgentAvailable, desktopLocalAgentRequest } from './runtime-config.ts'
+
 export type LocalWechatAccount = {
   wxid: string
   db_dir: string
@@ -15,6 +17,9 @@ const env = ((import.meta as ImportMeta & { env?: Record<string, string> }).env 
 const baseURL = String(env.VITE_WECHAT_AGENT_URL || 'http://localhost:8091').replace(/\/$/, '')
 
 async function localAgentRequest<T>(path: string, init: { method?: string; body?: string } = {}): Promise<T> {
+  if (desktopLocalAgentAvailable()) {
+    return desktopLocalAgentRequest<T>(path, init)
+  }
   const controller = new AbortController()
   const timeout = window.setTimeout(() => controller.abort(), 20000)
   try {

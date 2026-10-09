@@ -47,7 +47,15 @@ type MemoryStore struct {
 	accessRequests     map[string]domain.PrivateAccessRequest
 	wechatConfigs      map[string]domain.WechatCollectionConfig
 	wechatRuntime      map[string]domain.WechatCollectorRuntime
+	wechatCommands     map[string]domain.WechatCommand
+	wechatSnapshots    map[string]domain.WechatSnapshot
 	ragSourceAudits    []RAGSourceAuditInput
+	deletionRequests   map[string]deletionRequestRecord
+	deletionAudit      []DeletionAuditInput
+}
+
+type deletionRequestRecord struct {
+	Request DeletionRequest
 }
 
 type attachmentCursorReceipt struct {
@@ -70,7 +78,9 @@ func NewMemoryStore() *MemoryStore {
 		outbox:        map[string]domain.OutboxEvent{},
 		shareRequests: map[string]domain.PrivateShareRequest{}, shareRefs: map[string]domain.PrivateShareReference{}, accessRequests: map[string]domain.PrivateAccessRequest{},
 		wechatConfigs: map[string]domain.WechatCollectionConfig{}, wechatRuntime: map[string]domain.WechatCollectorRuntime{},
-		ragSourceAudits: []RAGSourceAuditInput{},
+		wechatCommands: map[string]domain.WechatCommand{}, wechatSnapshots: map[string]domain.WechatSnapshot{},
+		ragSourceAudits:  []RAGSourceAuditInput{},
+		deletionRequests: map[string]deletionRequestRecord{}, deletionAudit: []DeletionAuditInput{},
 	}
 }
 
@@ -79,7 +89,14 @@ func (s *MemoryStore) GetWechatConfig(_ context.Context, connectorID string) (*d
 	defer s.mu.RUnlock()
 	v, ok := s.wechatConfigs[connectorID]
 	if !ok {
-		return &domain.WechatCollectionConfig{ConnectorID: connectorID, SelectedConversations: []string{}, Enabled: true, ListenMode: "whitelist"}, nil
+		return &domain.WechatCollectionConfig{
+			ConnectorID:           connectorID,
+			SelectedConversations: []string{},
+			Enabled:               true,
+			ListenMode:            "whitelist",
+			DesiredStatus:         "running",
+			ConfigVersion:         1,
+		}, nil
 	}
 	c := v
 	c.SelectedConversations = append([]string(nil), v.SelectedConversations...)
@@ -90,6 +107,18 @@ func (s *MemoryStore) SaveWechatConfig(_ context.Context, c domain.WechatCollect
 	defer s.mu.Unlock()
 	if c.ListenMode == "" {
 		c.ListenMode = "whitelist"
+	}
+	if c.DesiredStatus == "" {
+		if c.Enabled {
+			c.DesiredStatus = "running"
+		} else {
+			c.DesiredStatus = "stopped"
+		}
+	}
+	if existing, exists := s.wechatConfigs[c.ConnectorID]; exists {
+		c.ConfigVersion = existing.ConfigVersion + 1
+	} else if c.ConfigVersion <= 0 {
+		c.ConfigVersion = 1
 	}
 	c.SelectedConversations = append([]string(nil), c.SelectedConversations...)
 	c.UpdatedAt = time.Now().UTC()
@@ -129,6 +158,163 @@ func (s *MemoryStore) UpdateWechatRuntime(_ context.Context, id, status, lastErr
 	v.UpdatedAt = time.Now().UTC()
 	s.wechatRuntime[id] = v
 	return nil
+}
+
+func cloneWechatPayload(value map[string]any) map[string]any {
+	if value == nil {
+		return map[string]any{}
+	}
+	out := make(map[string]any, len(value))
+	for key, item := range value {
+		out[key] = item
+	}
+	return out
+}
+
+func (s *MemoryStore) CreateWechatCommand(_ context.Context, command domain.WechatCommand) (*domain.WechatCommand, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, existing := range s.wechatCommands {
+		if existing.IdempotencyKey == command.IdempotencyKey {
+			out := existing
+			out.Payload = cloneWechatPayload(existing.Payload)
+			out.Result = cloneWechatPayload(existing.Result)
+			return &out, nil
+		}
+	}
+	if command.CommandID == "" {
+		command.CommandID = uuid.NewString()
+	}
+	if command.Status == "" {
+		command.Status = "pending"
+	}
+	now := time.Now().UTC()
+	if command.CreatedAt.IsZero() {
+		command.CreatedAt = now
+	}
+	command.UpdatedAt = now
+	command.Payload = cloneWechatPayload(command.Payload)
+	command.Result = cloneWechatPayload(command.Result)
+	s.wechatCommands[command.CommandID] = command
+	out := command
+	out.Payload = cloneWechatPayload(command.Payload)
+	out.Result = cloneWechatPayload(command.Result)
+	return &out, nil
+}
+
+func (s *MemoryStore) ClaimWechatCommands(_ context.Context, connectorID, deviceID string, now time.Time, limit int) ([]domain.WechatCommand, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if limit <= 0 {
+		limit = 20
+	}
+	candidates := make([]domain.WechatCommand, 0)
+	for id, command := range s.wechatCommands {
+		if command.ConnectorID != connectorID {
+			continue
+		}
+		if command.Status == "pending" || command.Status == "delivered" || command.Status == "running" {
+			if !command.Deadline.After(now) {
+				command.Status = "expired"
+				command.UpdatedAt = now
+				s.wechatCommands[id] = command
+				continue
+			}
+		}
+		if command.Status != "pending" {
+			continue
+		}
+		if command.DeviceID != "" && command.DeviceID != deviceID {
+			continue
+		}
+		candidates = append(candidates, command)
+	}
+	sort.Slice(candidates, func(i, j int) bool {
+		return candidates[i].CreatedAt.Before(candidates[j].CreatedAt)
+	})
+	if len(candidates) > limit {
+		candidates = candidates[:limit]
+	}
+	out := make([]domain.WechatCommand, 0, len(candidates))
+	for _, command := range candidates {
+		command.DeviceID = deviceID
+		command.Status = "delivered"
+		command.Attempt++
+		command.DeliveredAt = &now
+		command.UpdatedAt = now
+		s.wechatCommands[command.CommandID] = command
+		copyCommand := command
+		copyCommand.Payload = cloneWechatPayload(command.Payload)
+		copyCommand.Result = cloneWechatPayload(command.Result)
+		out = append(out, copyCommand)
+	}
+	return out, nil
+}
+
+func (s *MemoryStore) AcknowledgeWechatCommand(_ context.Context, commandID, deviceID, status, errorCode, errorMessage string, result map[string]any, now time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	command, ok := s.wechatCommands[commandID]
+	if !ok || (command.DeviceID != "" && command.DeviceID != deviceID) {
+		return apperror.New("wechat_command_not_found", "wechat command was not found", 404, false)
+	}
+	if command.Status == "acknowledged" || command.Status == "failed" || command.Status == "expired" {
+		return nil
+	}
+	if status == "" {
+		status = "acknowledged"
+	}
+	command.Status = status
+	command.ErrorCode = errorCode
+	command.ErrorMessage = errorMessage
+	command.Result = cloneWechatPayload(result)
+	command.UpdatedAt = now
+	if status == "running" && command.StartedAt == nil {
+		command.StartedAt = &now
+	}
+	if status == "acknowledged" || status == "failed" || status == "expired" {
+		command.CompletedAt = &now
+		if command.StartedAt == nil {
+			command.StartedAt = &now
+		}
+	}
+	s.wechatCommands[commandID] = command
+	return nil
+}
+
+func wechatSnapshotKey(connectorID, snapshotType string) string {
+	return connectorID + ":" + snapshotType
+}
+
+func (s *MemoryStore) UpsertWechatSnapshot(_ context.Context, snapshot domain.WechatSnapshot) (*domain.WechatSnapshot, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	key := wechatSnapshotKey(snapshot.ConnectorID, snapshot.SnapshotType)
+	if existing, ok := s.wechatSnapshots[key]; ok && snapshot.Version < existing.Version {
+		out := existing
+		out.Items = append([]map[string]any(nil), existing.Items...)
+		return &out, nil
+	}
+	now := time.Now().UTC()
+	snapshot.CreatedAt = now
+	snapshot.UpdatedAt = now
+	snapshot.Items = append([]map[string]any(nil), snapshot.Items...)
+	s.wechatSnapshots[key] = snapshot
+	out := snapshot
+	out.Items = append([]map[string]any(nil), snapshot.Items...)
+	return &out, nil
+}
+
+func (s *MemoryStore) GetWechatSnapshot(_ context.Context, connectorID, snapshotType string) (*domain.WechatSnapshot, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	snapshot, ok := s.wechatSnapshots[wechatSnapshotKey(connectorID, snapshotType)]
+	if !ok {
+		return nil, apperror.New("wechat_snapshot_not_found", "wechat snapshot was not found", 404, false)
+	}
+	out := snapshot
+	out.Items = append([]map[string]any(nil), snapshot.Items...)
+	return &out, nil
 }
 
 func (s *MemoryStore) Close() error { return nil }
@@ -797,6 +983,29 @@ func (s *MemoryStore) GetDeviceByHash(_ context.Context, keyHash string) (*domai
 		}
 	}
 	return nil, apperror.New("agent_device_invalid", "agent device is invalid", 401, false)
+}
+
+func (s *MemoryStore) GetActiveDeviceByOwner(_ context.Context, ownerUserID string) (*domain.AgentDevice, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var selected *domain.AgentDevice
+	for _, device := range s.devices {
+		if device.OwnerUserID != ownerUserID || device.RevokedAt != nil || device.ExpiresAt.Before(time.Now().UTC()) {
+			continue
+		}
+		assignment, ok := s.assignments[device.ID]
+		if !ok || assignment.Status != "active" || assignment.RevokedAt != nil {
+			continue
+		}
+		copyDevice := cloneDevice(device)
+		if selected == nil || device.CreatedAt.After(selected.CreatedAt) {
+			selected = &copyDevice
+		}
+	}
+	if selected == nil {
+		return nil, apperror.New("device_not_found", "agent device not found", 404, false)
+	}
+	return selected, nil
 }
 
 func (s *MemoryStore) RevokeDevices(_ context.Context, connectorID string) error {
@@ -1911,6 +2120,9 @@ func (s *MemoryStore) IngestMessage(ctx context.Context, input IngestMessageInpu
 	// Cursor advancement is deliberately a separate commit. Attachments are
 	// uploaded after this metadata transaction, so advancing here could skip a
 	// message when its content upload fails.
+	if exists && (message.LifecycleStatus == "deleting" || message.LifecycleStatus == "deleted" || message.LifecycleStatus == "purged") {
+		return &IngestResult{Message: cloneMessage(message), Duplicate: true, CursorUpdated: false}, nil
+	}
 	result := &IngestResult{Duplicate: exists, CursorUpdated: false}
 	legacyTypeCorrection := false
 	legacyAttachmentCleanup := false
@@ -2280,6 +2492,9 @@ func (s *MemoryStore) ListContactMessages(_ context.Context, userID, organizatio
 	defer s.mu.RUnlock()
 	out := []domain.Message{}
 	for _, message := range s.messages {
+		if message.LifecycleStatus != "active" {
+			continue
+		}
 		if _, ok := allowed[message.SenderIdentityID]; !ok {
 			continue
 		}
@@ -3287,6 +3502,573 @@ func (s *MemoryStore) TryMarkKnowledgeReady(ctx context.Context, id, traceID str
 	return true, nil
 }
 
+func cloneDeletionTarget(value DeletionTarget) DeletionTarget {
+	return value
+}
+
+func cloneDeletionRequest(value DeletionRequest) DeletionRequest {
+	out := value
+	out.Targets = append([]DeletionTarget(nil), value.Targets...)
+	return out
+}
+
+func (s *MemoryStore) CreateDeletionRequest(_ context.Context, input DeletionRequestInput) (*DeletionRequest, error) {
+	input.ScopeType = strings.TrimSpace(input.ScopeType)
+	input.ScopeID = strings.TrimSpace(input.ScopeID)
+	input.RequesterUserID = strings.TrimSpace(input.RequesterUserID)
+	input.Reason = strings.TrimSpace(input.Reason)
+	input.IdempotencyKey = strings.TrimSpace(input.IdempotencyKey)
+	if input.ScopeType != "message" {
+		return nil, apperror.New("unsupported_deletion_scope", "only message deletion is implemented in this phase", 400, false)
+	}
+	if input.ScopeID == "" || input.RequesterUserID == "" || input.Reason == "" || input.IdempotencyKey == "" {
+		return nil, apperror.New("invalid_deletion_request", "scope, requester, reason and idempotency key are required", 400, false)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, existing := range s.deletionRequests {
+		if existing.Request.ScopeType != input.ScopeType || existing.Request.ScopeID != input.ScopeID {
+			continue
+		}
+		switch existing.Request.Status {
+		case "pending", "approved", "executing":
+			copy := cloneDeletionRequest(existing.Request)
+			return &copy, nil
+		}
+	}
+	for _, existing := range s.deletionRequests {
+		if existing.Request.RequesterUserID == input.RequesterUserID && existing.Request.IdempotencyKey == input.IdempotencyKey {
+			copy := cloneDeletionRequest(existing.Request)
+			return &copy, nil
+		}
+	}
+	messageID := input.ScopeID
+	var targetMessage domain.Message
+	foundMessage := false
+	for key, message := range s.messages {
+		if message.ID == messageID {
+			targetMessage = message
+			targetMessage = message
+			_ = key
+			foundMessage = true
+			break
+		}
+	}
+	if !foundMessage {
+		return nil, apperror.New("message_not_found", "message was not found", 404, false)
+	}
+	item := s.knowledgeItemByMessageLocked(messageID)
+	now := time.Now().UTC()
+	request := DeletionRequest{
+		ID: uuid.NewString(), OrganizationID: input.OrganizationID, RequesterUserID: input.RequesterUserID,
+		ScopeType: input.ScopeType, ScopeID: input.ScopeID, Status: map[bool]string{true: input.Status, false: "executing"}[strings.TrimSpace(input.Status) != ""], Reason: input.Reason,
+		IdempotencyKey: input.IdempotencyKey, RequestedAt: now, ExecutionStartedAt: &now,
+		PurgeAfter: &input.PurgeAfter, CreatedAt: now, UpdatedAt: now,
+	}
+	target := DeletionTarget{
+		ID: uuid.NewString(), DeletionRequestID: request.ID, ResourceType: "message", ResourceID: messageID,
+		ConversationID: targetMessage.ConversationID, ContentVersion: targetMessage.ContentVersion,
+		VisibilityState: "hidden", VectorState: "pending", ObjectState: "pending", AuthState: "pending",
+		CreatedAt: now, UpdatedAt: now,
+	}
+	if item != nil {
+		target.KnowledgeItemID = item.ID
+		target.ACLVersion = item.ACLVersion
+	} else {
+		target.VectorState = "not_required"
+		target.AuthState = "revoked"
+	}
+	request.Targets = []DeletionTarget{target}
+	s.deletionRequests[request.ID] = deletionRequestRecord{Request: request}
+	s.deletionAudit = append(s.deletionAudit, DeletionAuditInput{
+		DeletionRequestID: request.ID, ActorUserID: input.RequesterUserID, Action: "deletion.requested",
+		ResourceType: "message", ResourceID: messageID, Detail: map[string]any{"scope_type": input.ScopeType},
+	})
+	copy := cloneDeletionRequest(request)
+	return &copy, nil
+}
+
+func (s *MemoryStore) GetDeletionRequest(_ context.Context, id string) (*DeletionRequest, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	value, ok := s.deletionRequests[id]
+	if !ok {
+		return nil, apperror.New("deletion_request_not_found", "deletion request was not found", 404, false)
+	}
+	copy := cloneDeletionRequest(value.Request)
+	return &copy, nil
+}
+
+func (s *MemoryStore) ListDeletionRequests(_ context.Context, userID, status string, limit int) ([]DeletionRequest, error) {
+	return s.listDeletionRequests(userID, status, limit)
+}
+
+func (s *MemoryStore) ListDeletionRequestsByOrganization(_ context.Context, organizationID, status string, limit int) ([]DeletionRequest, error) {
+	return s.listDeletionRequests(organizationID, status, limit)
+}
+
+func (s *MemoryStore) listDeletionRequests(userID, status string, limit int) ([]DeletionRequest, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if limit <= 0 || limit > 100 {
+		limit = 50
+	}
+	canonical := make(map[string]DeletionRequest)
+	for _, value := range s.deletionRequests {
+		if status != "" && value.Request.Status != status {
+			continue
+		}
+		key := value.Request.ScopeType + "\x00" + value.Request.ScopeID
+		current, exists := canonical[key]
+		if !exists || preferredDeletionRequest(value.Request, current) {
+			canonical[key] = cloneDeletionRequest(value.Request)
+		}
+	}
+	out := make([]DeletionRequest, 0, len(canonical))
+	for _, value := range canonical {
+		if userID != "" && value.RequesterUserID != userID && value.OrganizationID != userID {
+			continue
+		}
+		out = append(out, value)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].RequestedAt.After(out[j].RequestedAt) })
+	if len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
+}
+
+func preferredDeletionRequest(candidate, current DeletionRequest) bool {
+	rank := func(status string) int {
+		switch status {
+		case "executing":
+			return 0
+		case "approved":
+			return 1
+		case "pending":
+			return 2
+		case "failed":
+			return 3
+		case "superseded":
+			return 4
+		default:
+			return 5
+		}
+	}
+	candidateRank, currentRank := rank(candidate.Status), rank(current.Status)
+	if candidateRank != currentRank {
+		return candidateRank < currentRank
+	}
+	return candidate.RequestedAt.After(current.RequestedAt)
+}
+
+func (s *MemoryStore) RecordDeletionAudit(_ context.Context, input DeletionAuditInput) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.deletionAudit = append(s.deletionAudit, input)
+	return nil
+}
+
+func (s *MemoryStore) ReviewDeletionRequest(_ context.Context, requestID, reviewerUserID, status, reason string, now time.Time) (*DeletionRequest, error) {
+	requestID = strings.TrimSpace(requestID)
+	reviewerUserID = strings.TrimSpace(reviewerUserID)
+	status = strings.TrimSpace(status)
+	if requestID == "" || reviewerUserID == "" {
+		return nil, apperror.New("invalid_request", "request and reviewer are required", 400, false)
+	}
+	if status != "approved" && status != "rejected" {
+		return nil, apperror.New("invalid_request", "status must be approved or rejected", 400, false)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	value, ok := s.deletionRequests[requestID]
+	if !ok {
+		return nil, apperror.New("deletion_request_not_found", "deletion request was not found", 404, false)
+	}
+	if value.Request.Status == "rejected" || value.Request.Status == "completed" {
+		copy := cloneDeletionRequest(value.Request)
+		return &copy, nil
+	}
+	if value.Request.Status != "pending" && value.Request.Status != "approved" {
+		return nil, apperror.New("deletion_request_not_pending", "deletion request is not pending", 409, false)
+	}
+	if value.Request.Status == "approved" && status == "approved" {
+		copy := cloneDeletionRequest(value.Request)
+		return &copy, nil
+	}
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	value.Request.ReviewerUserID = reviewerUserID
+	value.Request.ReviewedAt = &now
+	value.Request.UpdatedAt = now
+	if status == "rejected" {
+		value.Request.Status = "rejected"
+	} else {
+		value.Request.Status = "approved"
+		value.Request.ExecutionStartedAt = &now
+	}
+	s.deletionRequests[requestID] = value
+	copy := cloneDeletionRequest(value.Request)
+	return &copy, nil
+}
+
+func (s *MemoryStore) HideDeletionTargets(_ context.Context, requestID string) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	value, ok := s.deletionRequests[requestID]
+	if !ok {
+		return 0, apperror.New("deletion_request_not_found", "deletion request was not found", 404, false)
+	}
+	changed := 0
+	for index := range value.Request.Targets {
+		target := &value.Request.Targets[index]
+		if target.ResourceType == "message" {
+			for key, message := range s.messages {
+				if message.ID != target.ResourceID {
+					continue
+				}
+				if message.LifecycleStatus == "active" {
+					message.LifecycleStatus = "deleting"
+					changed++
+				}
+				message.DeleteRequestID = requestID
+				deletedAt := time.Now().UTC()
+				message.DeletedAt = &deletedAt
+				message.DeletedByUserID = value.Request.RequesterUserID
+				message.DeleteReason = value.Request.Reason
+				s.messages[key] = message
+			}
+		}
+		if target.KnowledgeItemID != "" {
+			if item, ok := s.knowledgeItems[target.KnowledgeItemID]; ok {
+				now := time.Now().UTC()
+				if item.LifecycleStatus == "active" {
+					item.LifecycleStatus = "deleting"
+					changed++
+				}
+				item.DeleteRequestID = requestID
+				item.DeletedAt = &now
+				item.DeletedByUserID = value.Request.RequesterUserID
+				item.DeleteReason = value.Request.Reason
+				item.UpdatedAt = now
+				s.knowledgeItems[target.KnowledgeItemID] = item
+			}
+		}
+		target.VisibilityState = "hidden"
+		target.UpdatedAt = time.Now().UTC()
+	}
+	for _, target := range value.Request.Targets {
+		payload := map[string]any{
+			"deletion_request_id": requestID,
+			"deletion_target_id":  target.ID,
+			"knowledge_item_id":   target.KnowledgeItemID,
+			"resource_type":       target.ResourceType,
+			"resource_id":         target.ResourceID,
+			"content_version":     target.ContentVersion,
+			"acl_version":         target.ACLVersion,
+			"scope_type":          "organization",
+			"scope_id":            value.Request.OrganizationID,
+			"requested_by":        value.Request.RequesterUserID,
+			"reason":              value.Request.Reason,
+		}
+		event := domain.OutboxEvent{ID: uuid.NewString(), EventType: "knowledge.deletion.requested", SchemaVersion: 1, OccurredAt: time.Now().UTC(), TraceID: requestID, OrganizationID: value.Request.OrganizationID, Producer: "module-2", Payload: payload, AvailableAt: time.Now().UTC()}
+		s.outbox[event.ID] = event
+	}
+	value.Request.UpdatedAt = time.Now().UTC()
+	s.deletionRequests[requestID] = value
+	return changed, nil
+}
+func (s *MemoryStore) ListDueDeletionTargets(_ context.Context, now time.Time, limit int) ([]DeletionRequest, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+	out := make([]DeletionRequest, 0)
+	for _, value := range s.deletionRequests {
+		if value.Request.Status != "approved" && value.Request.Status != "executing" {
+			continue
+		}
+		if value.Request.PurgeAfter == nil || value.Request.PurgeAfter.After(now) {
+			continue
+		}
+		out = append(out, cloneDeletionRequest(value.Request))
+		if len(out) >= limit {
+			break
+		}
+	}
+	return out, nil
+}
+
+func (s *MemoryStore) AttachmentObjectRefs(_ context.Context, attachmentIDs []string) ([]AttachmentObjectRef, error) {
+	wanted := map[string]struct{}{}
+	for _, id := range attachmentIDs {
+		if id = strings.TrimSpace(id); id != "" {
+			wanted[id] = struct{}{}
+		}
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]AttachmentObjectRef, 0)
+	for _, attachment := range s.attachments {
+		if _, ok := wanted[attachment.ID]; !ok {
+			continue
+		}
+		out = append(out, AttachmentObjectRef{AttachmentID: attachment.ID, ObjectRef: attachment.ObjectRef, ExtractedOriginalRef: attachment.ExtractedOriginalRef, ExtractedDisplayRef: attachment.ExtractedDisplayRef})
+	}
+	return out, nil
+}
+
+func (s *MemoryStore) DeletionObjectRefs(_ context.Context, requestID string) ([]DeletionObjectRef, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	value, ok := s.deletionRequests[requestID]
+	if !ok {
+		return nil, apperror.New("deletion_request_not_found", "deletion request was not found", 404, false)
+	}
+	out := make([]DeletionObjectRef, 0, len(value.Request.Targets))
+	for _, target := range value.Request.Targets {
+		ref := DeletionObjectRef{TargetID: target.ID}
+		if item, ok := s.knowledgeItems[target.KnowledgeItemID]; ok {
+			ref.ObjectRef = item.ContentRef
+			ref.OriginalRef = item.OriginalContentRef
+		}
+		if attachment, ok := s.attachments[target.ResourceID]; ok {
+			ref.ExtractedOriginalRef = attachment.ExtractedOriginalRef
+			ref.ExtractedDisplayRef = attachment.ExtractedDisplayRef
+		}
+		if message, ok := s.messageByIDLocked(target.ResourceID); ok {
+			ref.NormalizedRef = message.NormalizedContentRef
+		}
+		out = append(out, ref)
+	}
+	return out, nil
+}
+
+func (s *MemoryStore) MarkDeletionObjectState(_ context.Context, targetID, state, lastError string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for requestID, value := range s.deletionRequests {
+		for index := range value.Request.Targets {
+			target := &value.Request.Targets[index]
+			if target.ID == targetID {
+				target.ObjectState, target.LastError, target.UpdatedAt = state, lastError, time.Now().UTC()
+				s.deletionRequests[requestID] = value
+				return nil
+			}
+		}
+	}
+	return apperror.New("deletion_target_not_found", "deletion target was not found", 404, false)
+}
+
+func (s *MemoryStore) MarkDeletionAuthorizationRevoked(_ context.Context, requestID string, now time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	value, ok := s.deletionRequests[requestID]
+	if !ok {
+		return apperror.New("deletion_request_not_found", "deletion request was not found", 404, false)
+	}
+	for index := range value.Request.Targets {
+		value.Request.Targets[index].AuthState = "revoked"
+		value.Request.Targets[index].UpdatedAt = now
+	}
+	s.reconcileDeletionCompletionLocked(&value, now)
+	s.deletionRequests[requestID] = value
+	return nil
+}
+
+func (s *MemoryStore) ListDeletionRequestsPendingAuthorization(_ context.Context, limit int) ([]DeletionRequest, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+	out := make([]DeletionRequest, 0)
+	for _, value := range s.deletionRequests {
+		if value.Request.Status != "approved" && value.Request.Status != "executing" {
+			continue
+		}
+		needsRevoke := false
+		for _, target := range value.Request.Targets {
+			if target.AuthState != "revoked" {
+				needsRevoke = true
+				break
+			}
+		}
+		if needsRevoke {
+			out = append(out, cloneDeletionRequest(value.Request))
+			if len(out) >= limit {
+				break
+			}
+		}
+	}
+	return out, nil
+}
+
+func (s *MemoryStore) ListStalePendingDeletionRequests(_ context.Context, limit int) ([]DeletionRequest, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+	out := make([]DeletionRequest, 0)
+	for _, value := range s.deletionRequests {
+		if value.Request.Status != "pending" {
+			continue
+		}
+		message, ok := s.messageByIDLocked(value.Request.ScopeID)
+		if !ok || (message.LifecycleStatus != "deleting" && message.LifecycleStatus != "deleted") || message.DeleteRequestID != value.Request.ID {
+			continue
+		}
+		hidden := false
+		for _, target := range value.Request.Targets {
+			if target.VisibilityState == "hidden" {
+				hidden = true
+				break
+			}
+		}
+		if !hidden {
+			continue
+		}
+		out = append(out, cloneDeletionRequest(value.Request))
+		if len(out) >= limit {
+			break
+		}
+	}
+	return out, nil
+}
+
+func (s *MemoryStore) RepairStalePendingDeletionRequest(_ context.Context, requestID string, now time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	value, ok := s.deletionRequests[requestID]
+	if !ok {
+		return apperror.New("deletion_request_not_found", "deletion request was not found", 404, false)
+	}
+	if value.Request.Status != "pending" {
+		return apperror.New("deletion_request_not_pending", "deletion request is not pending", 409, false)
+	}
+	value.Request.Status = "executing"
+	value.Request.ExecutionStartedAt = &now
+	value.Request.UpdatedAt = now
+	for index := range value.Request.Targets {
+		value.Request.Targets[index].AuthState = "revoked"
+		value.Request.Targets[index].VisibilityState = "hidden"
+		value.Request.Targets[index].UpdatedAt = now
+	}
+	s.deletionRequests[requestID] = value
+	found := false
+	for id, event := range s.outbox {
+		if event.TraceID != requestID || event.EventType != "knowledge.deletion.requested" {
+			continue
+		}
+		event.PublishedAt = nil
+		event.RetryCount = 0
+		event.LastError = ""
+		event.AvailableAt = now
+		s.outbox[id] = event
+		found = true
+	}
+	if !found {
+		for _, target := range value.Request.Targets {
+			if target.KnowledgeItemID == "" {
+				continue
+			}
+			payload := map[string]any{
+				"deletion_request_id": requestID,
+				"deletion_target_id":  target.ID,
+				"knowledge_item_id":   target.KnowledgeItemID,
+				"resource_type":       target.ResourceType,
+				"resource_id":         target.ResourceID,
+				"content_version":     target.ContentVersion,
+				"acl_version":         target.ACLVersion,
+				"scope_type":          "organization",
+				"scope_id":            value.Request.OrganizationID,
+				"requested_by":        value.Request.RequesterUserID,
+				"reason":              value.Request.Reason,
+			}
+			event := domain.OutboxEvent{
+				ID: uuid.NewString(), EventType: "knowledge.deletion.requested", SchemaVersion: 1,
+				OccurredAt: now, TraceID: requestID, OrganizationID: value.Request.OrganizationID,
+				Producer: "module-2", Payload: payload, AvailableAt: now,
+			}
+			s.outbox[event.ID] = event
+		}
+	}
+	s.deletionAudit = append(s.deletionAudit, DeletionAuditInput{
+		DeletionRequestID: requestID,
+		Action:            "deletion.state_repaired",
+		ResourceType:      value.Request.ScopeType,
+		ResourceID:        value.Request.ScopeID,
+		Detail:            map[string]any{"reason": "pending request target was already hidden"},
+	})
+	return nil
+}
+
+func (s *MemoryStore) MarkDeletionPurged(_ context.Context, requestID string, now time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	value, ok := s.deletionRequests[requestID]
+	if !ok {
+		return apperror.New("deletion_request_not_found", "deletion request was not found", 404, false)
+	}
+	for _, target := range value.Request.Targets {
+		if target.ResourceType == "message" {
+			for key, message := range s.messages {
+				if message.ID != target.ResourceID {
+					continue
+				}
+				message.LifecycleStatus = "purged"
+				message.Content = ""
+				message.ContentHash = ""
+				message.ContentPurgedAt = &now
+				s.messages[key] = message
+			}
+		}
+		if target.KnowledgeItemID != "" {
+			if item, exists := s.knowledgeItems[target.KnowledgeItemID]; exists {
+				item.LifecycleStatus = "purged"
+				item.ContentPurgedAt = &now
+				item.UpdatedAt = now
+				s.knowledgeItems[target.KnowledgeItemID] = item
+			}
+		}
+		for index := range value.Request.Targets {
+			if value.Request.Targets[index].ID == target.ID {
+				value.Request.Targets[index].ObjectState = "deleted"
+				value.Request.Targets[index].UpdatedAt = now
+			}
+		}
+	}
+	s.reconcileDeletionCompletionLocked(&value, now)
+	s.deletionRequests[requestID] = value
+	return nil
+}
+
+func (s *MemoryStore) reconcileDeletionCompletionLocked(value *deletionRequestRecord, now time.Time) {
+	if value == nil || (value.Request.Status != "approved" && value.Request.Status != "executing") {
+		return
+	}
+	if len(value.Request.Targets) == 0 {
+		return
+	}
+	for _, target := range value.Request.Targets {
+		if target.VectorState != "deleted" && target.VectorState != "not_required" {
+			return
+		}
+		if target.ObjectState != "deleted" && target.ObjectState != "skipped" {
+			return
+		}
+		if target.AuthState != "revoked" {
+			return
+		}
+	}
+	value.Request.Status = "completed"
+	value.Request.CompletedAt = &now
+	value.Request.UpdatedAt = now
+}
+
 func (s *MemoryStore) GetKnowledgeItem(_ context.Context, id string) (*domain.KnowledgeItem, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -3323,10 +4105,10 @@ func (s *MemoryStore) ApplyRAGResult(_ context.Context, id string, input RAGResu
 	if status == "" {
 		status = "pending"
 	}
-	if input.ContentVersion < item.ContentVersion || input.ACLVersion < item.ACLVersion || input.ContentVersion < item.RAGContentVersion || (input.ContentVersion == item.RAGContentVersion && input.ACLVersion < item.RAGACLVersion) {
+	if input.Status != "deleted" && (input.ContentVersion < item.ContentVersion || input.ACLVersion < item.ACLVersion || input.ContentVersion < item.RAGContentVersion || (input.ContentVersion == item.RAGContentVersion && input.ACLVersion < item.RAGACLVersion)) {
 		return &RAGResultApply{Applied: false, Status: status, Reason: "stale_version"}, nil
 	}
-	if input.ContentVersion != item.ContentVersion || input.ACLVersion != item.ACLVersion {
+	if input.Status != "deleted" && (input.ContentVersion != item.ContentVersion || input.ACLVersion != item.ACLVersion) {
 		return nil, apperror.New("rag_version_mismatch", "RAG result version does not match knowledge item", 409, false)
 	}
 	if item.RAGSourceEventID == input.SourceEventID && item.RAGJobID == input.RAGJobID && status == input.Status {
@@ -3362,14 +4144,44 @@ func (s *MemoryStore) ApplyRAGResult(_ context.Context, id string, input RAGResu
 	messageStatus := "processing"
 	if input.Status == "ready" || input.Status == "metadata_only" {
 		messageStatus = "ready"
+	} else if input.Status == "deleted" {
+		messageStatus = "deleted"
 	} else if input.Status == "failed" {
 		messageStatus = "failed"
 	}
 	for key, message := range s.messages {
 		if message.ID == item.SourceMessageID {
 			message.VectorStatus = messageStatus
+			if input.Status == "deleted" {
+				message.VectorDeleteStatus = "deleted"
+			}
 			s.messages[key] = message
 			break
+		}
+	}
+	if input.Status == "deleted" {
+		item.LifecycleStatus = "deleted"
+		item.VectorDeleteStatus = "deleted"
+		deletedAt := input.OccurredAt
+		if deletedAt.IsZero() {
+			deletedAt = time.Now().UTC()
+		}
+		item.DeletedAt = &deletedAt
+		for requestID, value := range s.deletionRequests {
+			changed := false
+			for index := range value.Request.Targets {
+				target := &value.Request.Targets[index]
+				if target.KnowledgeItemID != id {
+					continue
+				}
+				target.VectorState = "deleted"
+				target.UpdatedAt = input.OccurredAt
+				changed = true
+			}
+			if changed {
+				s.reconcileDeletionCompletionLocked(&value, input.OccurredAt)
+				s.deletionRequests[requestID] = value
+			}
 		}
 	}
 	item.UpdatedAt = time.Now().UTC()
@@ -4319,7 +5131,7 @@ func (s *MemoryStore) GetOutbox(_ context.Context, limit int) ([]domain.OutboxEv
 	defer s.mu.RUnlock()
 	out := []domain.OutboxEvent{}
 	for _, e := range s.outbox {
-		if e.EventType == "knowledge.ready" && e.PublishedAt == nil && (e.AvailableAt.IsZero() || !e.AvailableAt.After(time.Now().UTC())) {
+		if (e.EventType == "knowledge.ready" || e.EventType == "knowledge.deletion.requested") && e.PublishedAt == nil && (e.AvailableAt.IsZero() || !e.AvailableAt.After(time.Now().UTC())) {
 			out = append(out, cloneEvent(e))
 		}
 	}

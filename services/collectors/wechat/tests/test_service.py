@@ -16,6 +16,34 @@ class FakeDB:
         return [{"local_id": 7, "sort_seq": 7, "type": 3, "content": "image", "create_time": 1_700_000_000}]
 
 
+class DeviceCredentialRetentionTests(unittest.TestCase):
+    @staticmethod
+    def http_error(code: int, payload: dict):
+        return urllib.error.HTTPError(
+            "http://knowledge.local",
+            code,
+            "test error",
+            {},
+            io.BytesIO(json.dumps(payload).encode("utf-8")),
+        )
+
+    def test_terminal_device_error_clears_pairing(self):
+        error = self.http_error(401, {"code": "agent_device_expired"})
+        self.assertTrue(service.should_clear_device_credentials(error))
+
+    def test_transient_authentication_errors_retain_pairing(self):
+        for code in ("agent_signature_invalid", "agent_timestamp_invalid", "agent_replay_detected"):
+            error = self.http_error(401, {"code": code})
+            self.assertFalse(service.should_clear_device_credentials(error))
+
+    def test_default_state_path_is_absolute(self):
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("WECHAT_COLLECTOR_STATE_FILE", None)
+            path = service.state_path()
+        self.assertTrue(path.is_absolute())
+        self.assertEqual(path.name, "wechat-collector.json")
+
+
 class HistoricalDB:
     def get_messages(self, _chat_id, limit=1000, offset=0):
         return [
@@ -165,6 +193,61 @@ class CollectorServiceTest(unittest.TestCase):
         self.assertFalse(
             any(call[0].endswith("/internal/wechat/contacts") for call in self.calls)
         )
+
+    def test_heartbeat_stop_command_updates_local_state_and_acknowledges(self):
+        service.apply_heartbeat_response(
+            {
+                "desired_state": {
+                    "desired_status": "stopped",
+                    "enabled": True,
+                    "selected_conversations": ["chat"],
+                    "listen_mode": "whitelist",
+                    "config_version": 3,
+                },
+                "commands": [
+                    {
+                        "command_id": "command-1",
+                        "command_type": "wechat.collector.stop",
+                        "payload": {
+                            "desired_status": "stopped",
+                            "enabled": True,
+                            "selected_conversations": ["chat"],
+                            "listen_mode": "whitelist",
+                            "config_version": 3,
+                        },
+                    }
+                ],
+            }
+        )
+        self.assertEqual(service.binding["status"], "stopped")
+        self.assertEqual(service.config["config_version"], 3)
+        self.assertTrue(
+            any(
+                path.endswith("/commands/command-1/ack")
+                and payload.get("status") == "acknowledged"
+                for path, method, payload in self.calls
+                if method == "POST"
+            )
+        )
+
+    def test_contacts_snapshot_uses_device_uplink(self):
+        original_db = service.db
+        try:
+            service.db = ContactDB()
+            result = service.upload_wechat_snapshot(
+                "contacts", service.local_contact_items()
+            )
+        finally:
+            service.db = original_db
+        self.assertEqual(result, {})
+        snapshot = next(
+            payload
+            for path, method, payload in self.calls
+            if path.endswith("/wechat/snapshot") and method == "POST"
+        )
+        self.assertEqual(snapshot["snapshot_type"], "contacts")
+        self.assertEqual(len(snapshot["items"]), 3)
+        self.assertEqual(snapshot["items"][0]["username"], "notifymessage")
 
     def test_local_account_scan_uses_configured_roots(self):
         with tempfile.TemporaryDirectory() as directory:

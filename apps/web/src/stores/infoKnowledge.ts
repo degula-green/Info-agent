@@ -162,6 +162,7 @@ function mapMessage(value: MessageDTO, attachments: AttachmentDTO[], senderNames
     vectorStatus: value.vector_status,
     sensitive: value.sensitive,
     classificationStatus: value.classification_status,
+    contentVersion: value.content_version,
     attachments: related.map((item) => ({ id: item.id, name: item.file_name, type: item.mime_type?.startsWith('image/') ? 'image' : 'file' })),
   }
 }
@@ -306,9 +307,11 @@ export const useInfoKnowledgeStore = defineStore('infoKnowledge', () => {
   const loadError = ref<string | null>(null)
   const libraries = ref<KnowledgeLibraryDTO[]>([])
   const librariesLoadedAt = ref(0)
+  const librariesLoading = ref(false)
   const discoveries = new Map<SourceKey, DiscoveryDTO>()
   const typedDiscoveries = new Map<string, DiscoveryDTO>()
   let pendingLoad: Promise<InfoSource[]> | null = null
+  let pendingLibrariesLoad: Promise<KnowledgeLibraryDTO[]> | null = null
 
   function findSource(key?: SourceKey | string | null) { return sources.value.find((source) => source.key === normalizeSourceKey(key)) }
   function findConversation(platform: SourceKey | string, id: string | number) {
@@ -375,10 +378,21 @@ export const useInfoKnowledgeStore = defineStore('infoKnowledge', () => {
 
   async function ensureLibraries() {
     if (libraries.value.length && Date.now() - librariesLoadedAt.value < 15_000) return libraries.value
-    const next = await getKnowledgeLibraries()
-    libraries.value = next
-    librariesLoadedAt.value = Date.now()
-    return next
+    if (pendingLibrariesLoad) return pendingLibrariesLoad
+    librariesLoading.value = true
+    pendingLibrariesLoad = getKnowledgeLibraries().then((next) => {
+      libraries.value = next
+      librariesLoadedAt.value = Date.now()
+      loadError.value = null
+      return next
+    }).catch((error: any) => {
+      loadError.value = displayKnowledgeError(error, '知识库目录暂不可用')
+      throw error
+    }).finally(() => {
+      librariesLoading.value = false
+      pendingLibrariesLoad = null
+    })
+    return pendingLibrariesLoad
   }
 
   async function refreshLibraries() {
@@ -550,7 +564,15 @@ export const useInfoKnowledgeStore = defineStore('infoKnowledge', () => {
     if (!key) return undefined
     let chat = findConversation(key, id)
     if (!chat) {
-      await ensureSources(true)
+      // Private-library deep links and freshly attached conversations may not
+      // be present in the directory snapshot yet. The detail API is keyed by
+      // the conversation id, so hydrate the directory best-effort and continue
+      // even if that refresh is temporarily unavailable.
+      try {
+        await ensureSources(true)
+      } catch {
+        // The detail request below is still authoritative for this route.
+      }
       chat = findConversation(key, id)
     }
     // The source directory intentionally contains group conversations only.
@@ -626,5 +648,5 @@ export const useInfoKnowledgeStore = defineStore('infoKnowledge', () => {
     )]
   }
 
-  return { sources, allChats, loading, loadedAt, loadError, libraries, librariesLoadedAt, findSource, findConversation, ensureSources, refreshSources, ensureLibraries, refreshLibraries, refreshAvailableSessions, refreshTypedSessions, accessSession, accessTypedSession, pauseConversation, resumeConversation, removeCollector, loadConversation, loadOlderConversation, search, updateMessage, updateFile, collectKnowledgeBaseIds }
+  return { sources, allChats, loading, loadedAt, loadError, libraries, librariesLoadedAt, librariesLoading, findSource, findConversation, ensureSources, refreshSources, ensureLibraries, refreshLibraries, refreshAvailableSessions, refreshTypedSessions, accessSession, accessTypedSession, pauseConversation, resumeConversation, removeCollector, loadConversation, loadOlderConversation, search, updateMessage, updateFile, collectKnowledgeBaseIds }
 })

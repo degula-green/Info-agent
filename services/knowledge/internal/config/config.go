@@ -2,11 +2,21 @@ package config
 
 import (
 	"bufio"
+	"fmt"
 	"os"
 	"strconv"
 	"strings"
 	"time"
 )
+
+func (c Config) Validate() error {
+	switch strings.ToLower(strings.TrimSpace(c.CollectorMode)) {
+	case "", "server", "desktop":
+		return nil
+	default:
+		return fmt.Errorf("unsupported KNOWLEDGE_COLLECTOR_MODE: %s", c.CollectorMode)
+	}
+}
 
 // Config contains only service-local settings. Core and RAG configuration is
 // deliberately kept out of this package so the knowledge service cannot
@@ -42,6 +52,7 @@ type Config struct {
 	FeishuClientID                string
 	FeishuClientSecret            string
 	FeishuRedirectURI             string
+	DesktopOAuthReturnURI         string
 	FeishuAuthURL                 string
 	FeishuAPIURL                  string
 	FeishuScopes                  string
@@ -55,8 +66,10 @@ type Config struct {
 	FrontendURL                   string
 	EncryptionKeyVersion          string
 	EncryptionKeys                string
+	CollectorMode                 string
 	WechatCollectorURL            string
 	CollectorInternalToken        string
+	CollectorCommandTTL           time.Duration
 	FixtureReplayEnabled          bool
 }
 
@@ -93,8 +106,12 @@ func Load() Config {
 		FeishuClientID:     env("KNOWLEDGE_FEISHU_CLIENT_ID", ""),
 		FeishuClientSecret: env("KNOWLEDGE_FEISHU_CLIENT_SECRET", ""),
 		FeishuRedirectURI:  env("KNOWLEDGE_FEISHU_REDIRECT_URI", ""),
-		FeishuAuthURL:      env("KNOWLEDGE_FEISHU_AUTH_URL", "https://accounts.feishu.cn/open-apis/authen/v1/authorize"),
-		FeishuAPIURL:       env("KNOWLEDGE_FEISHU_API_URL", "https://open.feishu.cn"),
+		DesktopOAuthReturnURI: env(
+			"KNOWLEDGE_DESKTOP_OAUTH_RETURN_URI",
+			"infoagent://oauth/callback",
+		),
+		FeishuAuthURL: env("KNOWLEDGE_FEISHU_AUTH_URL", "https://accounts.feishu.cn/open-apis/authen/v1/authorize"),
+		FeishuAPIURL:  env("KNOWLEDGE_FEISHU_API_URL", "https://open.feishu.cn"),
 		// Private conversations are read with the OAuth user's identity. Feishu
 		// requires the dedicated p2p scope in addition to the base message scope;
 		// without it the API only exposes messages sent by the app itself.
@@ -112,8 +129,10 @@ func Load() Config {
 		FrontendURL:                   env("KNOWLEDGE_FRONTEND_URL", ""),
 		EncryptionKeyVersion:          env("KNOWLEDGE_ENCRYPTION_KEY_VERSION", "v1"),
 		EncryptionKeys:                env("KNOWLEDGE_ENCRYPTION_KEYS", env("KNOWLEDGE_ENCRYPTION_KEY", "")),
+		CollectorMode:                 strings.ToLower(env("KNOWLEDGE_COLLECTOR_MODE", "server")),
 		WechatCollectorURL:            env("KNOWLEDGE_WECHAT_COLLECTOR_URL", "http://127.0.0.1:8091"),
 		CollectorInternalToken:        env("KNOWLEDGE_COLLECTOR_INTERNAL_TOKEN", "local-development-only"),
+		CollectorCommandTTL:           envDuration("KNOWLEDGE_COLLECTOR_COMMAND_TTL", 10*time.Minute),
 		FixtureReplayEnabled:          envBool("KNOWLEDGE_FIXTURE_REPLAY_ENABLED", false),
 	}
 }

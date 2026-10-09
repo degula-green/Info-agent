@@ -88,14 +88,14 @@ type OrganizationCapabilities struct {
 }
 
 type OrganizationEvent struct {
-	ID             string
-	EventType      string
-	OrganizationID string
-	UserID         string
-	MembershipID   string
-	Status         string
-	Reason         string
-	CreatedAt      time.Time
+	ID             string    `json:"event_id"`
+	EventType      string    `json:"event_type"`
+	OrganizationID string    `json:"organization_id"`
+	UserID         string    `json:"user_id"`
+	MembershipID   string    `json:"membership_id"`
+	Status         string    `json:"status"`
+	Reason         string    `json:"reason"`
+	CreatedAt      time.Time `json:"created_at"`
 }
 
 type OrganizationExitPreflight struct {

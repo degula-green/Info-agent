@@ -62,11 +62,14 @@ func newRouter(authentication Authentication, cookies RefreshCookieConfig, logge
 		inv := router.Group("/organization-invitations", RequireAuthentication(authentication, logger))
 		inv.POST("/:token/accept", orgHandler.AcceptInvitation)
 		if authorization != nil {
-			internalOrganizationHandler := NewInternalOrganizationHandler(organization, authorization.KnowledgeToken)
+			internalOrganizationHandler := NewInternalOrganizationHandler(organization, authorization.Token, authorization.KnowledgeToken)
 			router.GET("/internal/organizations/:organization_id/members/:user_id/check", internalOrganizationHandler.CheckMember)
 		}
 	}
 	if authorization != nil && authorization.Provider != nil {
+		if authorization.UserLookup != nil {
+			router.GET("/internal/users", NewInternalUserHandler(authorization.UserLookup, authorization.KnowledgeToken).List)
+		}
 		authzHandler := NewAuthorizationHandler(authorization.Provider, authorization.Token, organization, authorization.KnowledgeToken)
 		authz := router.Group("/internal/v1/authorization")
 		authz.POST("/search-scope", authzHandler.Scope)
@@ -74,6 +77,7 @@ func newRouter(authentication Authentication, cookies RefreshCookieConfig, logge
 		if authorization.PermissionSync != nil {
 			permissionHandler := NewPermissionSyncHandler(authorization.PermissionSync, authorization.KnowledgeToken)
 			authz.POST("/resource-relations/sync", permissionHandler.Sync)
+			authz.POST("/resource-relations/revoke", permissionHandler.Revoke)
 		}
 	}
 	if len(accessRequests) > 0 && accessRequests[0] != nil {
@@ -92,6 +96,7 @@ type AuthorizationConfig struct {
 	Token          string
 	KnowledgeToken string
 	PermissionSync PermissionSyncApplication
+	UserLookup     UserLookup
 }
 
 func firstOrganization(values []OrganizationApplication) OrganizationApplication {

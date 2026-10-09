@@ -79,6 +79,25 @@ class RagChunkIndex:
             raise ElasticsearchUnavailable(f"bulk indexing failed for {len(failures)} chunk(s)")
         return len(chunks)
 
+    def delete_resource(self, *, resource_id: str) -> int:
+        total = 0
+        for alias in (
+            settings.elasticsearch_index,
+            settings.elasticsearch_protected_read_index,
+        ):
+            try:
+                response = self.client.delete_by_query(
+                    index=alias,
+                    conflicts="proceed",
+                    query={"term": {"resource_id": resource_id}},
+                )
+            except Exception as exc:
+                if _not_found(exc):
+                    continue
+                raise
+            if isinstance(response, dict):
+                total += int(response.get("deleted") or 0)
+        return total
     def delete_older_versions(self, *, resource_id: str, content_version: int) -> int:
         total = 0
         for alias in (

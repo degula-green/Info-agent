@@ -37,6 +37,7 @@ type OrganizationService struct {
 	repo          repository.OrganizationRepository
 	rbac          repository.RBACRepository
 	exitPreflight OrganizationExitPreflightChecker
+	roleWriter    RoleRelationWriter
 	now           func() time.Time
 }
 
@@ -65,6 +66,64 @@ func (s *OrganizationService) SetExitPreflightChecker(checker OrganizationExitPr
 	s.exitPreflight = checker
 }
 
+func (s *OrganizationService) SetRoleRelationWriter(writer RoleRelationWriter) {
+	s.roleWriter = writer
+}
+
+func (s *OrganizationService) syncRoleRelation(ctx context.Context, organizationID, userID, role string, granted bool) error {
+	if s.roleWriter == nil || (role != domain.RoleOwner && role != domain.RoleInformationAdmin) {
+		return nil
+	}
+	return s.roleWriter.SyncOrganizationRole(ctx, organizationID, userID, role, granted)
+}
+
+func (s *OrganizationService) syncCurrentPrivilegedRole(ctx context.Context, organizationID, userID string) error {
+	if s.roleWriter == nil {
+		return nil
+	}
+	membership, roles, err := s.repo.GetMembership(ctx, userID, organizationID)
+	if errors.Is(err, repository.ErrMembershipNotFound) {
+		return s.syncRoleRelation(ctx, organizationID, userID, domain.RoleInformationAdmin, false)
+	}
+	if err != nil {
+		return err
+	}
+	granted := membership.IsActive()
+	if granted {
+		granted = false
+		for _, role := range roles {
+			if role.RoleCode == domain.RoleOwner || role.RoleCode == domain.RoleInformationAdmin {
+				granted = true
+				break
+			}
+		}
+	}
+	return s.syncRoleRelation(ctx, organizationID, userID, domain.RoleInformationAdmin, granted)
+}
+
+// SyncExistingRoleRelations repairs OpenFGA tuples for roles that predate
+// live role synchronization. It is safe to run repeatedly.
+func (s *OrganizationService) SyncExistingRoleRelations(ctx context.Context) error {
+	if s.roleWriter == nil {
+		return nil
+	}
+	reader, ok := s.repo.(repository.OrganizationRoleAssignmentReader)
+	if !ok {
+		return nil
+	}
+	assignments, err := reader.ListActiveRoleAssignments(ctx)
+	if err != nil {
+		return err
+	}
+	for _, assignment := range assignments {
+		granted := assignment.RoleCode == domain.RoleOwner || assignment.RoleCode == domain.RoleInformationAdmin
+		if err := s.syncRoleRelation(ctx, assignment.OrganizationID, assignment.UserID, domain.RoleInformationAdmin, granted); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (s *OrganizationService) CreateOrganization(ctx context.Context, userID, name string) (domain.Organization, domain.OrganizationMember, error) {
 	name = strings.TrimSpace(name)
 	if name == "" || len(name) > 200 {
@@ -79,6 +138,9 @@ func (s *OrganizationService) CreateOrganization(ctx context.Context, userID, na
 		slug := "org-" + uuid.NewString()[:8]
 		o, m, err := s.repo.CreateOrganization(ctx, userID, name, slug)
 		if err == nil {
+			if syncErr := s.syncRoleRelation(ctx, o.ID, userID, domain.RoleOwner, true); syncErr != nil {
+				return domain.Organization{}, domain.OrganizationMember{}, syncErr
+			}
 			return o, m, nil
 		}
 		if !isUniqueViolation(err) {
@@ -217,6 +279,11 @@ func (s *OrganizationService) GrantRole(ctx context.Context, actorID, organizati
 	if errors.Is(err, repository.ErrRoleNotFound) {
 		return ErrInvalidRole
 	}
+	if err == nil {
+		if syncErr := s.syncRoleRelation(ctx, organizationID, userID, role, true); syncErr != nil {
+			return syncErr
+		}
+	}
 	return err
 }
 
@@ -237,6 +304,11 @@ func (s *OrganizationService) RevokeRole(ctx context.Context, actorID, organizat
 	if errors.Is(err, repository.ErrRoleNotFound) {
 		return ErrInvalidRole
 	}
+	if err == nil {
+		if syncErr := s.syncCurrentPrivilegedRole(ctx, organizationID, userID); syncErr != nil {
+			return syncErr
+		}
+	}
 	return err
 }
 
@@ -256,7 +328,10 @@ func (s *OrganizationService) SuspendMember(ctx context.Context, actorID, organi
 		Status: domain.MembershipStatusSuspended, AuditAction: "organization.member_suspended",
 		Reason: reason, Now: s.now().UTC(),
 	})
-	return s.mapMembershipError(err)
+	if mapped := s.mapMembershipError(err); mapped != nil {
+		return mapped
+	}
+	return s.syncCurrentPrivilegedRole(ctx, organizationID, userID)
 }
 
 func (s *OrganizationService) ReactivateMember(ctx context.Context, actorID, organizationID, userID string) error {
@@ -271,7 +346,10 @@ func (s *OrganizationService) ReactivateMember(ctx context.Context, actorID, org
 		Status: domain.MembershipStatusActive, AuditAction: "organization.member_reactivated",
 		Now: s.now().UTC(),
 	})
-	return s.mapMembershipError(err)
+	if mapped := s.mapMembershipError(err); mapped != nil {
+		return mapped
+	}
+	return s.syncCurrentPrivilegedRole(ctx, organizationID, userID)
 }
 
 func (s *OrganizationService) RemoveMember(ctx context.Context, actorID, organizationID, userID, reason string) error {
@@ -290,7 +368,10 @@ func (s *OrganizationService) RemoveMember(ctx context.Context, actorID, organiz
 		Status: domain.MembershipStatusLeft, AuditAction: "organization.member_removed",
 		Reason: reason, Now: s.now().UTC(),
 	})
-	return s.mapMembershipError(err)
+	if mapped := s.mapMembershipError(err); mapped != nil {
+		return mapped
+	}
+	return s.syncCurrentPrivilegedRole(ctx, organizationID, userID)
 }
 
 func (s *OrganizationService) LeaveOrganization(ctx context.Context, userID, organizationID, reason string) error {
@@ -331,7 +412,10 @@ func (s *OrganizationService) LeaveOrganization(ctx context.Context, userID, org
 		Status: domain.MembershipStatusLeft, AuditAction: "organization.member_left",
 		Reason: reason, Now: s.now().UTC(),
 	})
-	return s.mapMembershipError(err)
+	if mapped := s.mapMembershipError(err); mapped != nil {
+		return mapped
+	}
+	return s.syncCurrentPrivilegedRole(ctx, organizationID, userID)
 }
 
 func (s *OrganizationService) ExitPreflight(ctx context.Context, userID, organizationID string) (domain.OrganizationExitPreflight, error) {
@@ -383,7 +467,13 @@ func (s *OrganizationService) TransferOwner(ctx context.Context, actorID, organi
 		return err
 	}
 	err := s.repo.TransferOwner(ctx, actorID, organizationID, targetUserID, s.now().UTC())
-	return s.mapMembershipError(err)
+	if mapped := s.mapMembershipError(err); mapped != nil {
+		return mapped
+	}
+	if err := s.syncCurrentPrivilegedRole(ctx, organizationID, actorID); err != nil {
+		return err
+	}
+	return s.syncCurrentPrivilegedRole(ctx, organizationID, targetUserID)
 }
 
 func (s *OrganizationService) Capabilities(ctx context.Context, userID, organizationID string) (domain.OrganizationCapabilities, error) {

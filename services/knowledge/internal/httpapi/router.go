@@ -344,7 +344,9 @@ func registerUserRoutes(r *gin.Engine, app *App, prefix string) {
 	// user's browser Authorization header. The one-time state is the only
 	// authenticated context for this endpoint.
 	g.GET("/connectors/feishu/callback", func(c *gin.Context) {
-		out, err := app.Service.CompleteFeishuOAuth(c, c.Query("state"), c.Query("code"), c.Query("error"))
+		state := c.Query("state")
+		stateData, _ := app.Service.PeekOAuthState(c, state)
+		out, err := app.Service.CompleteFeishuOAuth(c, state, c.Query("code"), c.Query("error"))
 		if err != nil {
 			appErr := apperror.From(err)
 			slog.Default().ErrorContext(c.Request.Context(), "feishu oauth callback failed",
@@ -353,15 +355,15 @@ func registerUserRoutes(r *gin.Engine, app *App, prefix string) {
 				"retryable", appErr.Retryable,
 				"provider_error", c.Query("error"),
 			)
-			if app.Config.FrontendURL != "" {
-				c.Redirect(http.StatusFound, app.Config.FrontendURL+"?connector=feishu&error="+urlQuery(apperror.From(err).Code))
+			if target := oauthRedirectTarget(app.Config, stateData.ClientMode); target != "" {
+				c.Redirect(http.StatusFound, oauthRedirectURL(target, state, "error", apperror.From(err).Code, strings.EqualFold(stateData.ClientMode, "desktop")))
 				return
 			}
 			writeError(c, err)
 			return
 		}
-		if app.Config.FrontendURL != "" {
-			c.Redirect(http.StatusFound, app.Config.FrontendURL+"?connector=feishu&status=active")
+		if target := oauthRedirectTarget(app.Config, stateData.ClientMode); target != "" {
+			c.Redirect(http.StatusFound, oauthRedirectURL(target, state, "active", "", strings.EqualFold(stateData.ClientMode, "desktop")))
 			return
 		}
 		c.JSON(http.StatusOK, gin.H{"connector": publicConnectorFromAccount(out)})
@@ -395,6 +397,84 @@ func registerUserRoutes(r *gin.Engine, app *App, prefix string) {
 			out = append(out, publicKnowledgeLibraryItemFromDomain(item))
 		}
 		c.JSON(http.StatusOK, gin.H{"items": out})
+	})
+	g.GET("/knowledge/messages/:message_id/deletion-permission", func(c *gin.Context) {
+		p := principal(c)
+		allowed, err := app.Service.CanDeleteMessage(c, p.UserID, c.Param("message_id"))
+		if err != nil {
+			writeError(c, err)
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"can_delete": allowed})
+	})
+	g.POST("/deletion-requests", func(c *gin.Context) {
+		p := principal(c)
+		var body struct {
+			ScopeType      string `json:"scope_type"`
+			ScopeID        string `json:"scope_id"`
+			Reason         string `json:"reason"`
+			IdempotencyKey string `json:"idempotency_key"`
+		}
+		if err := c.ShouldBindJSON(&body); err != nil {
+			writeError(c, apperror.New("invalid_request", "invalid deletion request", 400, false))
+			return
+		}
+		out, err := app.Service.CreateDeletionRequest(c, p.UserID, p.OrganizationID, repository.DeletionRequestInput{
+			ScopeType: body.ScopeType, ScopeID: body.ScopeID, Reason: body.Reason, IdempotencyKey: body.IdempotencyKey,
+		})
+		if err != nil {
+			writeError(c, err)
+			return
+		}
+		c.JSON(http.StatusAccepted, publicDeletionRequest(*out))
+	})
+	g.GET("/deletion-requests", func(c *gin.Context) {
+		p := principal(c)
+		out, err := app.Service.ListDeletionRequests(c, p.UserID, p.OrganizationID, c.Query("scope"), c.Query("view"), c.Query("status"))
+		if err != nil {
+			writeError(c, err)
+			return
+		}
+		items := make([]publicDeletionRequestDTO, 0, len(out))
+		for _, item := range out {
+			items = append(items, publicDeletionRequest(item))
+		}
+		c.JSON(http.StatusOK, gin.H{"items": items})
+	})
+	g.GET("/deletion-requests/:request_id", func(c *gin.Context) {
+		p := principal(c)
+		out, err := app.Service.GetDeletionRequest(c, p.UserID, c.Param("request_id"))
+		if err != nil {
+			writeError(c, err)
+			return
+		}
+		c.JSON(http.StatusOK, publicDeletionRequest(*out))
+	})
+	g.POST("/deletion-requests/:request_id/approve", func(c *gin.Context) {
+		p := principal(c)
+		var body struct {
+			Reason string `json:"reason"`
+		}
+		_ = c.ShouldBindJSON(&body)
+		out, err := app.Service.ReviewDeletionRequest(c, p.UserID, p.OrganizationID, c.Param("request_id"), "approved", body.Reason)
+		if err != nil {
+			writeError(c, err)
+			return
+		}
+		c.JSON(http.StatusOK, publicDeletionRequest(*out))
+	})
+	g.POST("/deletion-requests/:request_id/reject", func(c *gin.Context) {
+		p := principal(c)
+		var body struct {
+			Reason string `json:"reason"`
+		}
+		_ = c.ShouldBindJSON(&body)
+		out, err := app.Service.ReviewDeletionRequest(c, p.UserID, p.OrganizationID, c.Param("request_id"), "rejected", body.Reason)
+		if err != nil {
+			writeError(c, err)
+			return
+		}
+		c.JSON(http.StatusOK, publicDeletionRequest(*out))
 	})
 	g.GET("/knowledge/items/:knowledge_item_id/original", func(c *gin.Context) {
 		p := principal(c)
@@ -583,6 +663,7 @@ func registerUserRoutes(r *gin.Engine, app *App, prefix string) {
 	g.POST("/connectors/feishu/authorize", func(c *gin.Context) {
 		var body struct {
 			Intent string `json:"intent"`
+			Client string `json:"client"`
 		}
 		if err := c.ShouldBindJSON(&body); err != nil && err != io.EOF {
 			writeError(c, apperror.New("invalid_request", "invalid authorize request", 400, false))
@@ -594,7 +675,7 @@ func registerUserRoutes(r *gin.Engine, app *App, prefix string) {
 			writeError(c, err)
 			return
 		}
-		out, err := app.Service.StartFeishuOAuth(c, p.UserID, body.Intent, organizationID)
+		out, err := app.Service.StartFeishuOAuthForClient(c, p.UserID, body.Intent, body.Client, organizationID)
 		if err != nil {
 			writeError(c, err)
 			return
@@ -641,7 +722,7 @@ func registerUserRoutes(r *gin.Engine, app *App, prefix string) {
 		c.JSON(http.StatusOK, gin.H{"status": "stopped"})
 	})
 	g.GET("/connectors/wechat/local-conversations", func(c *gin.Context) {
-		out, err := app.Service.WechatConversations(c)
+		out, err := app.Service.WechatConversations(c, principal(c).UserID)
 		if err != nil {
 			writeError(c, err)
 			return
@@ -994,6 +1075,13 @@ func registerUserRoutes(r *gin.Engine, app *App, prefix string) {
 			writeError(c, err)
 			return
 		}
+		visibleMessages := make([]domain.Message, 0, len(out))
+		for _, message := range out {
+			if message.LifecycleStatus == "active" || message.LifecycleStatus == "ready" {
+				visibleMessages = append(visibleMessages, message)
+			}
+		}
+		out = visibleMessages
 		if strings.TrimSpace(c.Query("scope")) == "shared" {
 			view, viewErr := app.Service.ResolveSharedPrivateView(c, p.UserID, conversationID, c.GetHeader("X-Organization-ID"), c.GetHeader("Authorization"))
 			if viewErr != nil {
@@ -1044,6 +1132,14 @@ func registerUserRoutes(r *gin.Engine, app *App, prefix string) {
 			writeError(c, err)
 			return
 		}
+		visibleTimeline := make([]domain.ConversationTimelineItem, 0, len(out))
+		for _, item := range out {
+			if item.Message != nil && item.Message.LifecycleStatus != "active" && item.Message.LifecycleStatus != "ready" {
+				continue
+			}
+			visibleTimeline = append(visibleTimeline, item)
+		}
+		out = visibleTimeline
 		if strings.TrimSpace(c.Query("scope")) == "shared" {
 			view, viewErr := app.Service.ResolveSharedPrivateView(c, p.UserID, conversationID, c.GetHeader("X-Organization-ID"), c.GetHeader("Authorization"))
 			if viewErr != nil {
@@ -1495,6 +1591,52 @@ func registerInternalRoutes(r *gin.Engine, app *App, prefix string) {
 		}
 		c.JSON(http.StatusOK, gin.H{"items": items})
 	})
+	g.GET("/devices/active", func(c *gin.Context) {
+		if !serviceAuthorized(c) {
+			writeError(c, apperror.Clone(apperror.ErrUnauthorized))
+			return
+		}
+		device, err := app.Service.ActiveDeviceForOwner(c, strings.TrimSpace(c.Query("owner_user_id")))
+		if err != nil {
+			writeError(c, err)
+			return
+		}
+		c.JSON(http.StatusOK, device)
+	})
+	g.POST("/devices/:device_id/verify-request", func(c *gin.Context) {
+		if !serviceAuthorized(c) {
+			writeError(c, apperror.Clone(apperror.ErrUnauthorized))
+			return
+		}
+		var body struct {
+			Method      string `json:"original_method"`
+			Path        string `json:"original_path"`
+			PayloadHash string `json:"payload_hash"`
+		}
+		if err := c.ShouldBindJSON(&body); err != nil {
+			writeError(c, apperror.New("invalid_request", "invalid device verification payload", 400, false))
+			return
+		}
+		device, err := app.Service.VerifyDeviceRequest(c, c.Param("device_id"), service.DeviceRequestVerification{
+			DeviceKey:   c.GetHeader("X-Agent-Device-Key"),
+			Timestamp:   c.GetHeader("X-Agent-Timestamp"),
+			PayloadHash: body.PayloadHash,
+			Signature:   c.GetHeader("X-Agent-Signature"),
+			Method:      body.Method,
+			Path:        body.Path,
+		})
+		if err != nil {
+			writeError(c, err)
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{
+			"valid":         true,
+			"device_id":     device.ID,
+			"owner_user_id": device.OwnerUserID,
+			"connector_id":  device.ConnectorID,
+			"expires_at":    device.ExpiresAt,
+		})
+	})
 	g.POST("/devices/:device_id/heartbeat", func(c *gin.Context) {
 		device := agentDevice(c)
 		if device == nil || device.ID != c.Param("device_id") {
@@ -1502,13 +1644,89 @@ func registerInternalRoutes(r *gin.Engine, app *App, prefix string) {
 			return
 		}
 		var body struct {
-			AgentVersion string `json:"agent_version"`
+			AgentVersion    string `json:"agent_version"`
+			CollectorStatus string `json:"collector_status"`
 		}
 		if err := c.ShouldBindJSON(&body); err != nil && err != io.EOF {
 			writeError(c, apperror.New("invalid_request", "invalid heartbeat payload", 400, false))
 			return
 		}
-		if err := app.Service.HeartbeatDevice(c, device, body.AgentVersion); err != nil {
+		out, err := app.Service.HeartbeatDevice(c, device, body.AgentVersion, body.CollectorStatus)
+		if err != nil {
+			writeError(c, err)
+			return
+		}
+		c.JSON(http.StatusOK, out)
+	})
+	g.POST("/devices/:device_id/wechat/state", func(c *gin.Context) {
+		device := agentDevice(c)
+		if device == nil || device.ID != c.Param("device_id") {
+			writeError(c, apperror.Clone(apperror.ErrForbidden))
+			return
+		}
+		var body struct {
+			Status    string `json:"status"`
+			LastError string `json:"last_error"`
+		}
+		if err := c.ShouldBindJSON(&body); err != nil {
+			writeError(c, apperror.New("invalid_request", "invalid collector state payload", 400, false))
+			return
+		}
+		if err := app.Service.ReportWechatState(c, device, body.Status, body.LastError); err != nil {
+			writeError(c, err)
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"status": "ok"})
+	})
+	g.POST("/devices/:device_id/wechat/snapshot", func(c *gin.Context) {
+		device := agentDevice(c)
+		if device == nil || device.ID != c.Param("device_id") {
+			writeError(c, apperror.Clone(apperror.ErrForbidden))
+			return
+		}
+		var body struct {
+			SnapshotType string           `json:"snapshot_type"`
+			Version      int64            `json:"version"`
+			Items        []map[string]any `json:"items"`
+			CapturedAt   string           `json:"captured_at"`
+		}
+		if err := c.ShouldBindJSON(&body); err != nil {
+			writeError(c, apperror.New("invalid_request", "invalid wechat snapshot payload", 400, false))
+			return
+		}
+		capturedAt, err := parseTime(body.CapturedAt)
+		if err != nil {
+			writeError(c, apperror.New("invalid_request", "captured_at must be RFC3339", 400, false))
+			return
+		}
+		value := time.Time{}
+		if capturedAt != nil {
+			value = *capturedAt
+		}
+		out, err := app.Service.ReportWechatSnapshot(c, device, body.SnapshotType, body.Version, body.Items, value)
+		if err != nil {
+			writeError(c, err)
+			return
+		}
+		c.JSON(http.StatusOK, out)
+	})
+	g.POST("/devices/:device_id/commands/:command_id/ack", func(c *gin.Context) {
+		device := agentDevice(c)
+		if device == nil || device.ID != c.Param("device_id") {
+			writeError(c, apperror.Clone(apperror.ErrForbidden))
+			return
+		}
+		var body struct {
+			Status       string         `json:"status"`
+			Result       map[string]any `json:"result"`
+			ErrorCode    string         `json:"error_code"`
+			ErrorMessage string         `json:"error_message"`
+		}
+		if err := c.ShouldBindJSON(&body); err != nil && err != io.EOF {
+			writeError(c, apperror.New("invalid_request", "invalid command acknowledgement payload", 400, false))
+			return
+		}
+		if err := app.Service.AckWechatCommand(c, device, c.Param("command_id"), body.Status, body.ErrorCode, body.ErrorMessage, body.Result); err != nil {
 			writeError(c, err)
 			return
 		}
@@ -2197,6 +2415,9 @@ func serviceTokenPathAllowed(path string) bool {
 	if strings.Contains(path, "/internal/knowledge/") || strings.Contains(path, "/internal/attachments/") || strings.Contains(path, "/internal/agent/") {
 		return true
 	}
+	if strings.HasSuffix(path, "/devices/active") || strings.HasSuffix(path, "/verify-request") {
+		return true
+	}
 	if strings.HasSuffix(path, "/internal/worker/publish") || strings.HasSuffix(path, "/internal/fixtures/replay") || strings.HasSuffix(path, "/internal/wechat/assignments") || strings.HasSuffix(path, "/internal/wechat/bootstrap") || strings.HasSuffix(path, "/internal/wechat/discovery") || strings.HasSuffix(path, "/internal/wechat/contacts") || strings.HasSuffix(path, "/internal/feishu/discovery") {
 		return true
 	}
@@ -2361,6 +2582,32 @@ func validFingerprint(value string) bool {
 func urlQuery(value string) string {
 	return strings.NewReplacer("%", "%25", " ", "%20", "?", "%3F", "&", "%26", "=", "%3D").Replace(value)
 }
+
+func oauthRedirectTarget(cfg config.Config, clientMode string) string {
+	if strings.EqualFold(strings.TrimSpace(clientMode), "desktop") && strings.TrimSpace(cfg.DesktopOAuthReturnURI) != "" {
+		return strings.TrimSpace(cfg.DesktopOAuthReturnURI)
+	}
+	return strings.TrimSpace(cfg.FrontendURL)
+}
+
+func oauthRedirectURL(target, state, status, errorCode string, desktop bool) string {
+	if !desktop {
+		if errorCode != "" {
+			return target + "?connector=feishu&error=" + urlQuery(errorCode)
+		}
+		return target + "?connector=feishu&status=" + urlQuery(status)
+	}
+	separator := "?"
+	if strings.Contains(target, "?") {
+		separator = "&"
+	}
+	value := target + separator + "provider=feishu&state=" + urlQuery(state) + "&status=" + urlQuery(status)
+	if errorCode != "" {
+		value += "&error_code=" + urlQuery(errorCode)
+	}
+	return value
+}
+
 func safeHeaderName(value string) string {
 	value = strings.ReplaceAll(strings.ReplaceAll(value, `"`, ""), "\r", "")
 	value = strings.ReplaceAll(value, "\n", "")

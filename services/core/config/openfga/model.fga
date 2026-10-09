@@ -6,6 +6,7 @@ type user
 type organization
   relations
     define member: [user]
+    define information_admin: [user]
 
 type conversation_group
   relations
@@ -18,15 +19,18 @@ type knowledge_item
     define owner: [user]
     define organization: [organization]
     define conversation_group: [conversation_group]
-    define view: owner or member from organization or member from conversation_group
-    define download: owner or member from organization or member from conversation_group
+    define moderator: information_admin from organization
+    define original_viewer: owner or moderator or member from conversation_group
+    define view: owner or moderator or member from organization or member from conversation_group
+    define download: owner or moderator or member from organization or member from conversation_group
+    define delete: owner or moderator
 
 type knowledge_original
   relations
     define parent: [knowledge_item]
     define owner: [user]
     define viewer: [user]
-    define eligible_viewer: owner or viewer
+    define eligible_viewer: owner or viewer or original_viewer from parent
     define view: eligible_viewer and view from parent
 
 type attachment_meta

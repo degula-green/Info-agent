@@ -208,6 +208,30 @@ func (r *OrganizationRepository) ListMembers(ctx context.Context, orgID string) 
 	return out, rows.Err()
 }
 
+func (r *OrganizationRepository) ListActiveRoleAssignments(ctx context.Context) ([]repository.OrganizationRoleAssignment, error) {
+	rows, err := r.pool.Query(ctx, `
+		SELECT m.organization_id::text,m.user_id::text,COALESCE(mr.role_code,'')
+		FROM iam.organization_memberships m
+		LEFT JOIN iam.membership_roles mr ON mr.membership_id=m.id
+		  AND mr.revoked_at IS NULL
+		  AND mr.role_code IN ('owner','information_admin')
+		WHERE m.status='active'
+		ORDER BY m.organization_id,m.user_id,mr.role_code`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	assignments := make([]repository.OrganizationRoleAssignment, 0)
+	for rows.Next() {
+		var assignment repository.OrganizationRoleAssignment
+		if err := rows.Scan(&assignment.OrganizationID, &assignment.UserID, &assignment.RoleCode); err != nil {
+			return nil, err
+		}
+		assignments = append(assignments, assignment)
+	}
+	return assignments, rows.Err()
+}
+
 func (r *OrganizationRepository) GrantRole(ctx context.Context, actorID, orgID, userID, role string) error {
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {

@@ -58,6 +58,8 @@ type WechatCollectionConfig struct {
 	HistoryStartAt        *time.Time `json:"history_start_at,omitempty"`
 	Enabled               bool       `json:"enabled"`
 	ListenMode            string     `json:"listen_mode"`
+	DesiredStatus         string     `json:"desired_status"`
+	ConfigVersion         int64      `json:"config_version"`
 	UpdatedAt             time.Time  `json:"updated_at"`
 }
 
@@ -69,6 +71,38 @@ type WechatCollectorRuntime struct {
 	LastError       string     `json:"last_error,omitempty"`
 	StoppedAt       *time.Time `json:"stopped_at,omitempty"`
 	UpdatedAt       time.Time  `json:"updated_at"`
+}
+
+type WechatCommand struct {
+	CommandID      string         `json:"command_id"`
+	ConnectorID    string         `json:"connector_id"`
+	DeviceID       string         `json:"device_id,omitempty"`
+	CommandType    string         `json:"command_type"`
+	Payload        map[string]any `json:"payload"`
+	Result         map[string]any `json:"result,omitempty"`
+	IdempotencyKey string         `json:"idempotency_key"`
+	Status         string         `json:"status"`
+	Attempt        int            `json:"attempt"`
+	Deadline       time.Time      `json:"deadline"`
+	DeliveredAt    *time.Time     `json:"delivered_at,omitempty"`
+	StartedAt      *time.Time     `json:"started_at,omitempty"`
+	CompletedAt    *time.Time     `json:"completed_at,omitempty"`
+	ErrorCode      string         `json:"error_code,omitempty"`
+	ErrorMessage   string         `json:"error_message,omitempty"`
+	CreatedAt      time.Time      `json:"created_at"`
+	UpdatedAt      time.Time      `json:"updated_at"`
+}
+
+type WechatSnapshot struct {
+	ConnectorID  string           `json:"connector_id"`
+	SnapshotType string           `json:"snapshot_type"`
+	DeviceID     string           `json:"device_id,omitempty"`
+	Version      int64            `json:"version"`
+	Items        []map[string]any `json:"items"`
+	CapturedAt   time.Time        `json:"captured_at"`
+	ExpiresAt    time.Time        `json:"expires_at"`
+	CreatedAt    time.Time        `json:"created_at,omitempty"`
+	UpdatedAt    time.Time        `json:"updated_at,omitempty"`
 }
 
 type ConnectorView struct {
@@ -355,6 +389,13 @@ type Message struct {
 	CollectedAt          time.Time    `json:"collected_at"`
 	LifecycleStatus      string       `json:"lifecycle_status"`
 	VectorStatus         string       `json:"vector_status,omitempty"`
+	DeletedAt            *time.Time   `json:"deleted_at,omitempty"`
+	DeletedByUserID      string       `json:"deleted_by_user_id,omitempty"`
+	DeleteReason         string       `json:"delete_reason,omitempty"`
+	DeleteRequestID      string       `json:"delete_request_id,omitempty"`
+	PurgeAfter           *time.Time   `json:"purge_after,omitempty"`
+	ContentPurgedAt      *time.Time   `json:"content_purged_at,omitempty"`
+	VectorDeleteStatus   string       `json:"vector_delete_status,omitempty"`
 	Attachments          []Attachment `json:"attachments,omitempty"`
 	CreatedAt            time.Time    `json:"created_at"`
 }
@@ -459,6 +500,13 @@ type KnowledgeItem struct {
 	ACLSyncStatus          string         `json:"acl_sync_status"`
 	ProcessingStatus       string         `json:"processing_status"`
 	LifecycleStatus        string         `json:"lifecycle_status"`
+	DeletedAt              *time.Time     `json:"deleted_at,omitempty"`
+	DeletedByUserID        string         `json:"deleted_by_user_id,omitempty"`
+	DeleteReason           string         `json:"delete_reason,omitempty"`
+	DeleteRequestID        string         `json:"delete_request_id,omitempty"`
+	PurgeAfter             *time.Time     `json:"purge_after,omitempty"`
+	ContentPurgedAt        *time.Time     `json:"content_purged_at,omitempty"`
+	VectorDeleteStatus     string         `json:"vector_delete_status,omitempty"`
 	ContentAccessRequired  bool           `json:"content_access_required"`
 	LastError              string         `json:"last_error,omitempty"`
 	RAGStatus              string         `json:"rag_status"`
@@ -670,6 +718,8 @@ type Attachment struct {
 	MIMEType              string        `json:"mime_type"`
 	SizeBytes             int64         `json:"size_bytes"`
 	ObjectRef             string        `json:"object_ref,omitempty"`
+	ExtractedOriginalRef  string        `json:"-" `
+	ExtractedDisplayRef   string        `json:"-" `
 	ContentHash           string        `json:"content_hash,omitempty"`
 	ContentVersion        int           `json:"content_version"`
 	ContentStatus         string        `json:"content_status"`

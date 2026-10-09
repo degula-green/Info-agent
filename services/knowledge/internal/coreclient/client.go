@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -170,6 +171,65 @@ type AuthorizationDecision struct {
 	Allowed bool   `json:"allowed"`
 }
 
+type UserSummary struct {
+	ID       string `json:"id"`
+	Nickname string `json:"nickname"`
+	Email    string `json:"email"`
+}
+
+func (c *Client) FindUsersByIDs(ctx context.Context, userIDs []string) (map[string]UserSummary, error) {
+	if c == nil || c.BaseURL == "" || c.ServiceToken == "" {
+		return nil, errors.New("core user lookup service is not configured")
+	}
+	ids := make([]string, 0, len(userIDs))
+	seen := map[string]struct{}{}
+	for _, userID := range userIDs {
+		userID = strings.TrimSpace(userID)
+		if userID == "" {
+			continue
+		}
+		if _, ok := seen[userID]; ok {
+			continue
+		}
+		seen[userID] = struct{}{}
+		ids = append(ids, userID)
+	}
+	if len(ids) == 0 {
+		return map[string]UserSummary{}, nil
+	}
+	query := url.Values{}
+	query.Set("ids", strings.Join(ids, ","))
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, c.BaseURL+"/internal/users?"+query.Encode(), nil)
+	if err != nil {
+		return nil, err
+	}
+	request.Header.Set("Authorization", "Bearer "+c.ServiceToken)
+	request.Header.Set("X-Caller-Service", "knowledge")
+	propagateTraceHeaders(ctx, request)
+	response, err := c.HTTP.Do(request)
+	if err != nil {
+		return nil, err
+	}
+	defer response.Body.Close()
+	if response.StatusCode >= 400 {
+		return nil, fmt.Errorf("core user lookup failed: status %d", response.StatusCode)
+	}
+	var body struct {
+		Items []UserSummary `json:"items"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&body); err != nil {
+		return nil, err
+	}
+	out := make(map[string]UserSummary, len(body.Items))
+	for _, user := range body.Items {
+		if strings.TrimSpace(user.ID) == "" {
+			continue
+		}
+		out[user.ID] = user
+	}
+	return out, nil
+}
+
 // CheckBatch asks Core to evaluate a bounded set of resource permissions.
 // Decisions are returned in the same order as the requested checks.
 func (c *Client) CheckBatch(ctx context.Context, userID, organizationID string, checks []AuthorizationCheck) ([]AuthorizationDecision, error) {
@@ -266,7 +326,11 @@ func (c *Client) SyncKnowledgePermissions(ctx context.Context, item domain.Knowl
 	if c == nil || c.BaseURL == "" || c.ServiceToken == "" {
 		return PermissionSyncResult{}, errors.New("core permission service is not configured")
 	}
-	originalViewers := append([]string(nil), participantUserIDs...)
+	// Original access is derived from the conversation participant relation
+	// AND active organization membership. Writing each participant as an
+	// explicit viewer would bypass the membership half of that rule and would
+	// also keep access after the user leaves the organization.
+	var originalViewers []string
 	var contentViewers []string
 	if item.SourceAttachmentID != "" && item.ContentAccessRequired {
 		contentViewers = append([]string(nil), participantUserIDs...)
@@ -316,6 +380,33 @@ func (c *Client) SyncKnowledgePermissions(ctx context.Context, item domain.Knowl
 		return PermissionSyncResult{}, errors.New("core permission synchronization response is incomplete")
 	}
 	return result, nil
+}
+
+func (c *Client) RevokeKnowledgeRelations(ctx context.Context, knowledgeItemID, attachmentID string) error {
+	if c == nil || c.BaseURL == "" || c.ServiceToken == "" {
+		return errors.New("core permission service is not configured")
+	}
+	body, err := json.Marshal(map[string]string{"knowledge_item_id": strings.TrimSpace(knowledgeItemID), "attachment_id": strings.TrimSpace(attachmentID)})
+	if err != nil {
+		return err
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, c.BaseURL+"/internal/v1/authorization/resource-relations/revoke", bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Authorization", "Bearer "+c.ServiceToken)
+	request.Header.Set("X-Caller-Service", "knowledge")
+	propagateTraceHeaders(ctx, request)
+	response, err := c.HTTP.Do(request)
+	if err != nil {
+		return err
+	}
+	defer response.Body.Close()
+	if response.StatusCode >= 400 {
+		return fmt.Errorf("core relation revoke failed: status %d", response.StatusCode)
+	}
+	return nil
 }
 
 func propagateTraceHeaders(ctx context.Context, request *http.Request) {

@@ -38,6 +38,10 @@ def validate_envelope(value: dict[str, Any]) -> dict[str, Any]:
         )
         if any(name not in value["payload"] for name in payload_fields):
             raise ValueError("knowledge.ready payload is missing required fields")
+    if value["event_type"] == "knowledge.deletion.requested":
+        for name in ("deletion_request_id", "deletion_target_id", "resource_type", "resource_id"):
+            if not value["payload"].get(name):
+                raise ValueError("knowledge.deletion.requested payload is missing required fields")
     return value
 
 

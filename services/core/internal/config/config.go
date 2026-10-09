@@ -138,6 +138,10 @@ func (c Config) Validate() error {
 		return errors.New("CORE_REFRESH_COOKIE_SAME_SITE must be lax, strict, or none")
 	case c.RefreshCookieSameSite == "none" && !c.RefreshCookieSecure:
 		return errors.New("SameSite=None refresh cookies must be Secure")
+	case strings.TrimSpace(c.OpenFGAStoreID) == "":
+		return errors.New("CORE_OPENFGA_STORE_ID is required")
+	case strings.TrimSpace(c.OpenFGAModelID) == "":
+		return errors.New("CORE_OPENFGA_MODEL_ID is required")
 	}
 	return nil
 }

@@ -7,45 +7,58 @@ The application and the worker never execute DDL. Run this module (or the
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
 from dotenv import load_dotenv
 
 SERVICE_ROOT = Path(__file__).resolve().parents[3]
-REPO_ROOT = SERVICE_ROOT.parents[1]
+REPO_ROOT = (
+    SERVICE_ROOT.parents[1]
+    if len(SERVICE_ROOT.parents) > 1
+    else SERVICE_ROOT
+)
+MIGRATIONS_DIR = Path(
+    os.getenv(
+        "AGENT_MIGRATIONS_DIR",
+        str(REPO_ROOT / "db" / "migrations"),
+    )
+)
 
 load_dotenv(SERVICE_ROOT / ".env", override=False)
 
 from app.config import settings  # noqa: E402
 
 BOOTSTRAP_MIGRATIONS = [
-    REPO_ROOT / "db" / "migrations" / "20260925_agent_runtime_rebuild.sql",
-    REPO_ROOT / "db" / "migrations" / "20260927_agent_dynamic_plan.sql",
-    REPO_ROOT / "db" / "migrations" / "20260927_agent_approval_binding.sql",
-    REPO_ROOT / "db" / "migrations" / "20260927_agent_todo_ledger.sql",
-    REPO_ROOT / "db" / "migrations" / "20261002_agent_conversation_history.up.sql",
-    REPO_ROOT / "db" / "migrations" / "20261003_agent_conversation_memory_phase1.up.sql",
-    REPO_ROOT / "db" / "migrations" / "20261003_agent_conversation_memory_phase2.up.sql",
-    REPO_ROOT / "db" / "migrations" / "20261004_agent_plan_step_dependencies.up.sql",
-    REPO_ROOT / "db" / "migrations" / "20261008_agent_person_fact_snapshots.up.sql",
+    MIGRATIONS_DIR / "20260925_agent_runtime_rebuild.sql",
+    MIGRATIONS_DIR / "20260927_agent_dynamic_plan.sql",
+    MIGRATIONS_DIR / "20260927_agent_approval_binding.sql",
+    MIGRATIONS_DIR / "20260927_agent_todo_ledger.sql",
+    MIGRATIONS_DIR / "20261002_agent_conversation_history.up.sql",
+    MIGRATIONS_DIR / "20261003_agent_conversation_memory_phase1.up.sql",
+    MIGRATIONS_DIR / "20261003_agent_conversation_memory_phase2.up.sql",
+    MIGRATIONS_DIR / "20261004_agent_plan_step_dependencies.up.sql",
+    MIGRATIONS_DIR / "20261007_agent_desktop_tasks.up.sql",
+    MIGRATIONS_DIR / "20261008_agent_person_fact_snapshots.up.sql",
 ]
 BOOTSTRAP_ROLLBACKS = [
-    REPO_ROOT / "db" / "migrations" / "20261008_agent_person_fact_snapshots.down.sql",
-    REPO_ROOT / "db" / "migrations" / "20261004_agent_plan_step_dependencies.down.sql",
-    REPO_ROOT / "db" / "migrations" / "20261003_agent_conversation_memory_phase2.down.sql",
-    REPO_ROOT / "db" / "migrations" / "20261003_agent_conversation_memory_phase1.down.sql",
-    REPO_ROOT / "db" / "migrations" / "20261002_agent_conversation_history.down.sql",
-    REPO_ROOT / "db" / "migrations" / "20260927_agent_todo_ledger.down.sql",
-    REPO_ROOT / "db" / "migrations" / "20260927_agent_approval_binding.down.sql",
-    REPO_ROOT / "db" / "migrations" / "20260927_agent_dynamic_plan.down.sql",
-    REPO_ROOT / "db" / "migrations" / "20260925_agent_runtime_rebuild.down.sql",
+    MIGRATIONS_DIR / "20261008_agent_person_fact_snapshots.down.sql",
+    MIGRATIONS_DIR / "20261007_agent_desktop_tasks.down.sql",
+    MIGRATIONS_DIR / "20261004_agent_plan_step_dependencies.down.sql",
+    MIGRATIONS_DIR / "20261003_agent_conversation_memory_phase2.down.sql",
+    MIGRATIONS_DIR / "20261003_agent_conversation_memory_phase1.down.sql",
+    MIGRATIONS_DIR / "20261002_agent_conversation_history.down.sql",
+    MIGRATIONS_DIR / "20260927_agent_todo_ledger.down.sql",
+    MIGRATIONS_DIR / "20260927_agent_approval_binding.down.sql",
+    MIGRATIONS_DIR / "20260927_agent_dynamic_plan.down.sql",
+    MIGRATIONS_DIR / "20260925_agent_runtime_rebuild.down.sql",
 ]
 DEFAULT_MIGRATION = (
-    REPO_ROOT / "db" / "migrations" / "20261004_agent_plan_step_dependencies.up.sql"
+    MIGRATIONS_DIR / "20261008_agent_person_fact_snapshots.up.sql"
 )
 DEFAULT_ROLLBACK = (
-    REPO_ROOT / "db" / "migrations" / "20261004_agent_plan_step_dependencies.down.sql"
+    MIGRATIONS_DIR / "20261008_agent_person_fact_snapshots.down.sql"
 )
 
 

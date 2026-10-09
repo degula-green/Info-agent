@@ -455,6 +455,7 @@ class RAGRetrievalService:
         values: list[SearchResult],
         scope: AuthorizationScope,
     ) -> list[SearchResult]:
+        values = [item for item in values if str(item.source.get("lifecycle_status") or "active") == "active"]
         checks = [_access_check(item) for item in values]
         if not checks:
             return []

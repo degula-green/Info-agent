@@ -6,7 +6,7 @@
         <h1>知识库</h1>
         <p class="knowledge-home__intro">按归属查看团队资料与个人采集内容。也可在此跨库检索消息与附件。</p>
       </div>
-      <t-button variant="outline" :loading="store.loading" @click="refresh">
+      <t-button variant="outline" :loading="store.librariesLoading" @click="refresh">
         <template #icon><t-icon name="refresh" /></template>
         刷新目录
       </t-button>
@@ -51,7 +51,7 @@
       <div v-else class="library-empty">{{ searchEmptyText }}</div>
     </div>
 
-    <div v-if="store.loading && !store.libraries.length" class="knowledge-loading"><t-loading text="正在加载知识库目录..." /></div>
+    <div v-if="store.librariesLoading && !store.libraries.length" class="knowledge-loading"><t-loading text="正在加载知识库目录..." /></div>
 
     <template v-else>
       <section class="library-section">
@@ -70,7 +70,7 @@
               <small>{{ description(library) }}</small>
               <span class="library-card__metrics">
                 <span>{{ metricLabel(library) }}</span>
-                <span v-if="library.file_count">{{ library.file_count }} 个文件</span>
+                <span v-if="secondaryMetricLabel(library)">{{ secondaryMetricLabel(library) }}</span>
               </span>
             </span>
             <t-icon name="chevron-right" class="library-card__arrow" />
@@ -95,7 +95,7 @@
               <small>{{ description(library) }}</small>
               <span class="library-card__metrics">
                 <span>{{ metricLabel(library) }}</span>
-                <span v-if="library.file_count">{{ library.file_count }} 个文件</span>
+                <span v-if="secondaryMetricLabel(library)">{{ secondaryMetricLabel(library) }}</span>
               </span>
             </span>
             <t-icon name="chevron-right" class="library-card__arrow" />
@@ -168,6 +168,11 @@ function description(library: KnowledgeLibraryDTO) {
 function metricLabel(library: KnowledgeLibraryDTO) {
   if (library.base_type === 'organization_files' || library.base_type === 'private_local') return `${library.file_count} 个文件`
   return `${library.conversation_count} 个会话`
+}
+
+function secondaryMetricLabel(library: KnowledgeLibraryDTO) {
+  if (library.base_type === 'organization_files' || library.base_type === 'private_local') return ''
+  return library.file_count ? `${library.file_count} 个文件` : ''
 }
 
 function iconKey(library: KnowledgeLibraryDTO) {

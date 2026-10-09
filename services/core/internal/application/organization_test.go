@@ -80,6 +80,23 @@ type exitPreflightCheckerStub struct {
 	result domain.OrganizationExitPreflight
 }
 
+type roleRelationWriterStub struct {
+	organizationID string
+	userID         string
+	role           string
+	granted        bool
+	calls          int
+}
+
+func (w *roleRelationWriterStub) SyncOrganizationRole(_ context.Context, organizationID, userID, role string, granted bool) error {
+	w.organizationID = organizationID
+	w.userID = userID
+	w.role = role
+	w.granted = granted
+	w.calls++
+	return nil
+}
+
 func (s exitPreflightCheckerStub) OrganizationExitPreflight(context.Context, string, string) (domain.OrganizationExitPreflight, error) {
 	return s.result, nil
 }
@@ -151,6 +168,26 @@ func TestMemberRoleCannotBeGranted(t *testing.T) {
 	}
 	if repo.grantCalls != 0 {
 		t.Fatalf("grant calls = %d", repo.grantCalls)
+	}
+}
+
+func TestGrantPrivilegedRoleSynchronizesOpenFGARelation(t *testing.T) {
+	repo := &rbacRepositoryStub{
+		organizationRepositoryStub: &organizationRepositoryStub{
+			membership: domain.Membership{Status: domain.MembershipStatusActive},
+			roles:      []domain.MembershipRole{{RoleCode: domain.RoleOwner}},
+		},
+		permissions: map[string]struct{}{domain.PermissionOrganizationRoleManage: {}},
+	}
+	writer := &roleRelationWriterStub{}
+	service := NewOrganizationService(repo, nil)
+	service.SetRoleRelationWriter(writer)
+
+	if err := service.GrantRole(context.Background(), "owner", "org-1", "admin", domain.RoleInformationAdmin); err != nil {
+		t.Fatal(err)
+	}
+	if writer.calls != 1 || writer.organizationID != "org-1" || writer.userID != "admin" || writer.role != domain.RoleInformationAdmin || !writer.granted {
+		t.Fatalf("unexpected OpenFGA role synchronization: %+v", writer)
 	}
 }
 

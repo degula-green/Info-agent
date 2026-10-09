@@ -21,8 +21,15 @@ from app.auth import (  # noqa: E402
 )
 from app.config import settings  # noqa: E402
 from app.container import build_container  # noqa: E402
-from app.routers import health, tasks, attachments, conversations, memories  # noqa: E402
-from app.routers import reports  # noqa: E402
+from app.routers import (  # noqa: E402
+    attachments,
+    conversations,
+    desktop_tasks,
+    health,
+    memories,
+    reports,
+    tasks,
+)
 from app.routers import todos  # noqa: E402
 
 logger = logging.getLogger("agent.main")
@@ -38,6 +45,7 @@ async def lifespan(application: FastAPI):
     conversations.set_container(container)
     memories.set_container(container)
     reports.set_container(container)
+    desktop_tasks.set_container(container)
     logger.info("agent api started with %s store", type(container.store).__name__)
     try:
         yield
@@ -55,3 +63,4 @@ app.include_router(attachments.router)
 app.include_router(conversations.router)
 app.include_router(memories.router)
 app.include_router(reports.router)
+app.include_router(desktop_tasks.router)

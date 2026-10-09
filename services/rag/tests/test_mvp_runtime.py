@@ -70,6 +70,7 @@ class _ArtifactStore:
 class _Indexer:
     def __init__(self):
         self.chunks: list[Chunk] = []
+        self.deleted_resources: list[str] = []
 
     def delete_older_versions(self, **kwargs):
         return 0
@@ -77,6 +78,10 @@ class _Indexer:
     def index_chunks(self, chunks):
         self.chunks.extend(chunks)
         return len(chunks)
+
+    def delete_resource(self, *, resource_id: str) -> int:
+        self.deleted_resources.append(resource_id)
+        return 1
 
 
 class _Publisher:
@@ -227,6 +232,48 @@ class RuntimeTests(unittest.TestCase):
         self.assertTrue(all(chunk.embedding_status == "ready" for chunk in indexer.chunks))
         self.assertTrue(any(event["event_type"] == "knowledge.rag.ready" for event in repository.outbox))
         self.assertTrue(publisher.payloads)
+
+    def test_dispatch_deletion_emits_knowledge_callback(self) -> None:
+        repository = InMemoryRagMVPRepository()
+        indexer = _Indexer()
+        publisher = _Publisher()
+        callback = CallbackLane(repository=repository, publisher=publisher)
+        runtime = MVPWorkerRuntime(
+            repository=repository,
+            parse_service=MVPParseService(
+                knowledge=_Knowledge(),
+                artifact_store=_ArtifactStore(),
+            ),
+            index_service=MVPIndexService(
+                repository=repository,
+                indexer=indexer,
+                embedding=HashEmbeddingProvider(dimensions=1536),
+            ),
+            memory_service=MemoryCandidateService(repository=repository),
+            callback_lane=callback,
+        )
+        runtime.handle({
+            "event_id": "00000000-0000-0000-0000-000000000011",
+            "event_type": "knowledge.deletion.requested",
+            "schema_version": 1,
+            "occurred_at": "2026-10-06T00:00:00Z",
+            "trace_id": "00000000-0000-0000-0000-000000000012",
+            "organization_id": SCOPE_ID,
+            "producer": "module-2",
+            "payload": {
+                "deletion_request_id": "00000000-0000-0000-0000-000000000012",
+                "deletion_target_id": "00000000-0000-0000-0000-000000000013",
+                "knowledge_item_id": KNOWLEDGE_ITEM,
+                "resource_type": "message",
+                "resource_id": RESOURCE_ID,
+                "content_version": 1,
+                "acl_version": 1,
+                "scope_type": "organization",
+                "scope_id": SCOPE_ID,
+            },
+        })
+        self.assertEqual(indexer.deleted_resources, [RESOURCE_ID])
+        self.assertTrue(any(payload.get("status") == "deleted" for payload in publisher.payloads))
 
 
 if __name__ == "__main__":

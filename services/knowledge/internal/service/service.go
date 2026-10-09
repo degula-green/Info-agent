@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -14,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -59,26 +61,92 @@ func (s *Service) WechatCollector() *wechatclient.Client {
 	return wechatclient.New(s.Config.WechatCollectorURL, s.Config.CollectorInternalToken)
 }
 
+func (s *Service) desktopCollectorMode() bool {
+	return strings.EqualFold(strings.TrimSpace(s.Config.CollectorMode), "desktop")
+}
+
+func (s *Service) collectorCommandDeadline() time.Time {
+	ttl := s.Config.CollectorCommandTTL
+	if ttl <= 0 {
+		ttl = 10 * time.Minute
+	}
+	return s.Now().UTC().Add(ttl)
+}
+
+func (s *Service) wechatDesiredState(c domain.WechatCollectionConfig) map[string]any {
+	return map[string]any{
+		"desired_status":         c.DesiredStatus,
+		"enabled":                c.Enabled,
+		"selected_conversations": c.SelectedConversations,
+		"history_start_at":       c.HistoryStartAt,
+		"listen_mode":            c.ListenMode,
+		"config_version":         c.ConfigVersion,
+	}
+}
+
+func (s *Service) enqueueWechatCommand(ctx context.Context, connectorID string, commandType string, configValue domain.WechatCollectionConfig) (*domain.WechatCommand, error) {
+	return s.Repo.CreateWechatCommand(ctx, domain.WechatCommand{
+		CommandID:      uuid.NewString(),
+		ConnectorID:    connectorID,
+		CommandType:    commandType,
+		Payload:        s.wechatDesiredState(configValue),
+		IdempotencyKey: fmt.Sprintf("%s:%s:%d", connectorID, commandType, configValue.ConfigVersion),
+		Status:         "pending",
+		Deadline:       s.collectorCommandDeadline(),
+	})
+}
+
 func (s *Service) WechatStatus(ctx context.Context, userID string) (map[string]any, error) {
 	account, err := s.Repo.GetConnector(ctx, userID, domain.PlatformWechat)
 	if err != nil {
 		return map[string]any{"status": "stopped"}, nil
 	}
+	configValue, err := s.Repo.GetWechatConfig(ctx, account.ID)
+	if err != nil {
+		return nil, err
+	}
 	runtime, err := s.Repo.GetWechatRuntime(ctx, account.ID)
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{"connector_id": account.ID, "wxid": account.ExternalAccountID, "status": runtime.Status, "last_error": runtime.LastError, "last_heartbeat_at": runtime.LastHeartbeatAt, "last_collected_at": runtime.LastCollectedAt}, nil
+	return map[string]any{
+		"connector_id":      account.ID,
+		"wxid":              account.ExternalAccountID,
+		"status":            runtime.Status,
+		"desired_state":     s.wechatDesiredState(*configValue),
+		"last_error":        runtime.LastError,
+		"last_heartbeat_at": runtime.LastHeartbeatAt,
+		"last_collected_at": runtime.LastCollectedAt,
+		"collector_mode":    s.Config.CollectorMode,
+	}, nil
 }
 func (s *Service) StopWechat(ctx context.Context, userID string) error {
 	account, err := s.Repo.GetConnector(ctx, userID, domain.PlatformWechat)
 	if err != nil {
 		return err
 	}
+	configValue, err := s.Repo.GetWechatConfig(ctx, account.ID)
+	if err != nil {
+		return err
+	}
+	configValue.DesiredStatus = "stopped"
+	saved, err := s.Repo.SaveWechatConfig(ctx, *configValue)
+	if err != nil {
+		return err
+	}
+	if _, err := s.enqueueWechatCommand(ctx, account.ID, "wechat.collector.stop", *saved); err != nil {
+		return err
+	}
 	_ = s.Repo.UpdateWechatRuntime(ctx, account.ID, "stopped", "", nil, nil)
-	return s.WechatCollector().Stop(ctx)
+	if !s.desktopCollectorMode() {
+		return s.WechatCollector().Stop(ctx)
+	}
+	return nil
 }
-func (s *Service) WechatConversations(ctx context.Context) (map[string]any, error) {
+func (s *Service) WechatConversations(ctx context.Context, userID string) (map[string]any, error) {
+	if s.desktopCollectorMode() {
+		return s.wechatConversationSnapshot(ctx, userID)
+	}
 	out, err := s.WechatCollector().Conversations(ctx)
 	if err != nil {
 		return nil, apperror.Wrap("wechat_collector_unavailable", "wechat conversations unavailable", 503, true, err)
@@ -94,7 +162,15 @@ func (s *Service) WechatConfig(ctx context.Context, userID string) (map[string]a
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{"connector_id": a.ID, "selected_conversations": c.SelectedConversations, "history_start_at": c.HistoryStartAt, "enabled": c.Enabled, "listen_mode": c.ListenMode}, nil
+	return map[string]any{
+		"connector_id":           a.ID,
+		"selected_conversations": c.SelectedConversations,
+		"history_start_at":       c.HistoryStartAt,
+		"enabled":                c.Enabled,
+		"listen_mode":            c.ListenMode,
+		"desired_status":         c.DesiredStatus,
+		"config_version":         c.ConfigVersion,
+	}, nil
 }
 func (s *Service) SaveWechatConfig(ctx context.Context, userID string, value any) (map[string]any, error) {
 	a, err := s.Repo.GetConnector(ctx, userID, domain.PlatformWechat)
@@ -126,6 +202,23 @@ func (s *Service) SaveWechatConfig(ctx context.Context, userID string, value any
 	}
 	if v, ok := raw["enabled"].(bool); ok {
 		c.Enabled = v
+		if v {
+			c.DesiredStatus = "running"
+		} else {
+			c.DesiredStatus = "stopped"
+		}
+	}
+	if value, present := raw["desired_status"]; present {
+		text, ok := value.(string)
+		if !ok {
+			return nil, apperror.New("invalid_request", "desired_status must be a string", 400, false)
+		}
+		switch strings.ToLower(strings.TrimSpace(text)) {
+		case "stopped", "running", "paused":
+			c.DesiredStatus = strings.ToLower(strings.TrimSpace(text))
+		default:
+			return nil, apperror.New("invalid_request", "desired_status must be stopped, running or paused", 400, false)
+		}
 	}
 	if v, ok := raw["listen_mode"].(string); ok {
 		c.ListenMode = v
@@ -158,8 +251,32 @@ func (s *Service) SaveWechatConfig(ctx context.Context, userID string, value any
 	if err != nil {
 		return nil, err
 	}
-	_, _ = s.WechatCollector().SaveConfig(ctx, map[string]any{"connector_id": a.ID, "selected_conversations": saved.SelectedConversations, "enabled": saved.Enabled, "listen_mode": saved.ListenMode})
-	return map[string]any{"connector_id": a.ID, "selected_conversations": saved.SelectedConversations, "history_start_at": saved.HistoryStartAt, "enabled": saved.Enabled, "listen_mode": saved.ListenMode}, nil
+	commandType := "wechat.collector.apply_config"
+	if saved.DesiredStatus == "stopped" {
+		commandType = "wechat.collector.stop"
+	}
+	if _, err := s.enqueueWechatCommand(ctx, a.ID, commandType, *saved); err != nil {
+		return nil, err
+	}
+	if !s.desktopCollectorMode() {
+		_, _ = s.WechatCollector().SaveConfig(ctx, map[string]any{
+			"connector_id":           a.ID,
+			"selected_conversations": saved.SelectedConversations,
+			"enabled":                saved.Enabled,
+			"listen_mode":            saved.ListenMode,
+			"desired_status":         saved.DesiredStatus,
+			"config_version":         saved.ConfigVersion,
+		})
+	}
+	return map[string]any{
+		"connector_id":           a.ID,
+		"selected_conversations": saved.SelectedConversations,
+		"history_start_at":       saved.HistoryStartAt,
+		"enabled":                saved.Enabled,
+		"listen_mode":            saved.ListenMode,
+		"desired_status":         saved.DesiredStatus,
+		"config_version":         saved.ConfigVersion,
+	}, nil
 }
 
 // WechatAssignments returns the active conversation collectors owned by the
@@ -297,6 +414,7 @@ type StateData struct {
 	Platform       string    `json:"platform"`
 	Intent         string    `json:"intent"`
 	OrganizationID string    `json:"organization_id,omitempty"`
+	ClientMode     string    `json:"client_mode,omitempty"`
 	OperationID    string    `json:"operation_id"`
 	CreatedAt      time.Time `json:"created_at"`
 }
@@ -359,8 +477,20 @@ func (s *Service) ResolveCurrentOrganization(ctx context.Context, userID, claime
 }
 
 func (s *Service) StartFeishuOAuth(ctx context.Context, userID, intent string, organizationID ...string) (OAuthStart, error) {
+	return s.startFeishuOAuth(ctx, userID, intent, "web", organizationID...)
+}
+
+func (s *Service) StartFeishuOAuthForClient(ctx context.Context, userID, intent, clientMode string, organizationID ...string) (OAuthStart, error) {
+	return s.startFeishuOAuth(ctx, userID, intent, clientMode, organizationID...)
+}
+
+func (s *Service) startFeishuOAuth(ctx context.Context, userID, intent, clientMode string, organizationID ...string) (OAuthStart, error) {
 	if intent != "bind" && intent != "rebind" {
 		intent = "bind"
+	}
+	clientMode = strings.ToLower(strings.TrimSpace(clientMode))
+	if clientMode != "desktop" {
+		clientMode = "web"
 	}
 	if s.Feishu == nil {
 		return OAuthStart{}, apperror.New("feishu_not_configured", "feishu oauth requires client id, client secret, and redirect uri", 503, false)
@@ -374,7 +504,7 @@ func (s *Service) StartFeishuOAuth(ctx context.Context, userID, intent string, o
 	if len(organizationID) > 0 {
 		org = strings.TrimSpace(organizationID[0])
 	}
-	data := StateData{UserID: userID, Platform: domain.PlatformFeishu, Intent: intent, OrganizationID: org, OperationID: randomToken(12), CreatedAt: s.Now()}
+	data := StateData{UserID: userID, Platform: domain.PlatformFeishu, Intent: intent, OrganizationID: org, ClientMode: clientMode, OperationID: randomToken(12), CreatedAt: s.Now()}
 	if err := s.KV.Set(ctx, key, data, s.Config.OAuthStateTTL); err != nil {
 		return OAuthStart{}, apperror.Wrap("state_store_failed", "cannot store oauth state", 503, true, err)
 	}
@@ -384,6 +514,22 @@ func (s *Service) StartFeishuOAuth(ctx context.Context, userID, intent string, o
 		return OAuthStart{}, apperror.Wrap("oauth_provider_error", "cannot create authorization url", 502, true, err)
 	}
 	return OAuthStart{URL: urlValue, StateID: state, ExpiresAt: s.Now().Add(s.Config.OAuthStateTTL)}, nil
+}
+
+func (s *Service) PeekOAuthState(ctx context.Context, state string) (StateData, error) {
+	state = strings.TrimSpace(state)
+	if state == "" || s.KV == nil {
+		return StateData{}, apperror.New("invalid_oauth_state", "oauth state is invalid or expired", 400, false)
+	}
+	var data StateData
+	ok, err := s.KV.Get(ctx, oauthStateKey(state), &data)
+	if err != nil {
+		return StateData{}, apperror.Wrap("state_store_failed", "cannot read oauth state", 503, true, err)
+	}
+	if !ok || data.UserID == "" || data.Platform == "" {
+		return StateData{}, apperror.New("invalid_oauth_state", "oauth state is invalid or expired", 400, false)
+	}
+	return data, nil
 }
 
 func (s *Service) CompleteFeishuOAuth(ctx context.Context, state, code, providerError string) (*domain.ConnectorAccount, error) {
@@ -663,7 +809,9 @@ func (s *Service) RevokeConnector(ctx context.Context, userID, platformName stri
 		// request. The legacy server-managed collector is stopped best-effort
 		// only; a stale optional sidecar must not block the owner from freeing
 		// the wxid globally.
-		_ = s.WechatCollector().Stop(ctx)
+		if !s.desktopCollectorMode() {
+			_ = s.WechatCollector().Stop(ctx)
+		}
 	}
 	if err := s.Repo.RevokeConnector(ctx, userID, platformName); err != nil {
 		return err
@@ -835,17 +983,23 @@ func (s *Service) Discover(ctx context.Context, userID, platformName string) (do
 			conversations, err = s.Feishu.Discover(ctx, refreshed)
 		}
 	} else if platformName == domain.PlatformWechat {
-		// The managed collector owns the local WeChat database. Read its current
-		// session list synchronously so a freshly bound account is discoverable
-		// before its background snapshot/report loop has run.
-		managed, discoverErr := s.WechatCollector().Conversations(ctx)
-		if discoverErr == nil {
-			if raw, ok := managed["conversations"].([]any); ok {
-				for _, value := range raw {
-					if item, ok := value.(map[string]any); ok {
-						conversation := domain.AvailableConversation{ExternalID: strings.TrimSpace(fmt.Sprint(item["external_id"])), Name: strings.TrimSpace(fmt.Sprint(item["name"])), ConversationType: strings.TrimSpace(fmt.Sprint(item["conversation_type"]))}
-						if conversation.ExternalID != "" && (conversation.ConversationType == "group" || conversation.ConversationType == "private") {
-							conversations = append(conversations, conversation)
+		if s.desktopCollectorMode() {
+			snapshotConversations, snapshotErr := s.snapshotConversations(ctx, account.ID)
+			if snapshotErr == nil {
+				conversations = append(conversations, snapshotConversations...)
+			}
+		} else {
+			// The managed collector owns the local WeChat database. Read its
+			// current session list synchronously in server mode only.
+			managed, discoverErr := s.WechatCollector().Conversations(ctx)
+			if discoverErr == nil {
+				if raw, ok := managed["conversations"].([]any); ok {
+					for _, value := range raw {
+						if item, ok := value.(map[string]any); ok {
+							conversation := domain.AvailableConversation{ExternalID: strings.TrimSpace(fmt.Sprint(item["external_id"])), Name: strings.TrimSpace(fmt.Sprint(item["name"])), ConversationType: strings.TrimSpace(fmt.Sprint(item["conversation_type"]))}
+							if conversation.ExternalID != "" && (conversation.ConversationType == "group" || conversation.ConversationType == "private") {
+								conversations = append(conversations, conversation)
+							}
 						}
 					}
 				}
@@ -1009,7 +1163,132 @@ func (s *Service) ListDeviceCollectors(ctx context.Context, device *domain.Agent
 	return out, nil
 }
 
-func (s *Service) HeartbeatDevice(ctx context.Context, device *domain.AgentDevice, agentVersion string) error {
+func (s *Service) HeartbeatDevice(ctx context.Context, device *domain.AgentDevice, agentVersion, collectorStatus string) (map[string]any, error) {
+	if device == nil || strings.TrimSpace(device.ID) == "" {
+		return nil, apperror.New("agent_device_invalid", "agent device is invalid", 401, false)
+	}
+	assignment, err := s.Repo.GetActiveDeviceAssignment(ctx, device.ID)
+	if err != nil {
+		return nil, err
+	}
+	now := s.Now().UTC()
+	if err := s.Repo.TouchDevice(ctx, device.ID, strings.TrimSpace(agentVersion), now); err != nil {
+		return nil, err
+	}
+	configValue, err := s.Repo.GetWechatConfig(ctx, assignment.ConnectorID)
+	if err != nil {
+		return nil, err
+	}
+	status := strings.ToLower(strings.TrimSpace(collectorStatus))
+	switch status {
+	case "stopped", "starting", "running", "paused", "error":
+	default:
+		status = "running"
+	}
+	if err := s.Repo.UpdateWechatRuntime(ctx, assignment.ConnectorID, status, "", &now, nil); err != nil {
+		return nil, err
+	}
+	commands, err := s.Repo.ClaimWechatCommands(ctx, assignment.ConnectorID, device.ID, now, 20)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{
+		"status":        "ok",
+		"desired_state": s.wechatDesiredState(*configValue),
+		"commands":      commands,
+	}, nil
+}
+
+func (s *Service) AckWechatCommand(ctx context.Context, device *domain.AgentDevice, commandID, status, errorCode, errorMessage string, result map[string]any) error {
+	if device == nil || strings.TrimSpace(device.ID) == "" {
+		return apperror.New("agent_device_invalid", "agent device is invalid", 401, false)
+	}
+	if strings.TrimSpace(commandID) == "" {
+		return apperror.New("invalid_request", "command_id is required", 400, false)
+	}
+	switch strings.TrimSpace(status) {
+	case "", "running", "acknowledged", "failed":
+	default:
+		return apperror.New("invalid_request", "command status is invalid", 400, false)
+	}
+	return s.Repo.AcknowledgeWechatCommand(ctx, commandID, device.ID, status, errorCode, errorMessage, result, s.Now().UTC())
+}
+
+type DeviceRequestVerification struct {
+	DeviceKey   string
+	Timestamp   string
+	PayloadHash string
+	Signature   string
+	Method      string
+	Path        string
+}
+
+func (s *Service) VerifyDeviceRequest(ctx context.Context, deviceID string, input DeviceRequestVerification) (*domain.AgentDevice, error) {
+	deviceID = strings.TrimSpace(deviceID)
+	key := strings.TrimSpace(input.DeviceKey)
+	if deviceID == "" || key == "" {
+		return nil, apperror.New("agent_device_invalid", "agent device is invalid", 401, false)
+	}
+	device, err := s.Repo.GetDeviceByHash(ctx, hash(key))
+	if err != nil {
+		return nil, err
+	}
+	if device.ID != deviceID || device.RevokedAt != nil || device.ExpiresAt.Before(s.Now().UTC()) {
+		return nil, apperror.New("agent_device_expired", "agent device is expired or revoked", 401, false)
+	}
+	stamp := strings.TrimSpace(input.Timestamp)
+	seconds, err := strconv.ParseInt(stamp, 10, 64)
+	if err != nil {
+		return nil, apperror.New("agent_timestamp_invalid", "agent timestamp is invalid", 401, false)
+	}
+	delta := s.Now().UTC().Unix() - seconds
+	if delta < 0 {
+		delta = -delta
+	}
+	skew := s.Config.AgentClockSkew
+	if skew <= 0 {
+		skew = 2 * time.Minute
+	}
+	if time.Duration(delta)*time.Second > skew {
+		return nil, apperror.New("agent_timestamp_invalid", "agent timestamp is invalid", 401, false)
+	}
+	payloadHash := strings.ToLower(strings.TrimSpace(input.PayloadHash))
+	if _, err := hex.DecodeString(payloadHash); err != nil || len(payloadHash) != sha256.Size*2 {
+		return nil, apperror.New("agent_payload_hash_invalid", "request payload hash is invalid", 400, false)
+	}
+	method := strings.ToUpper(strings.TrimSpace(input.Method))
+	requestPath := strings.TrimSpace(input.Path)
+	if method == "" || !strings.HasPrefix(requestPath, "/") {
+		return nil, apperror.New("agent_signature_invalid", "agent signature scope is invalid", 401, false)
+	}
+	signed := stamp + "\n" + method + "\n" + requestPath + "\n" + payloadHash
+	mac := hmac.New(sha256.New, []byte(key))
+	_, _ = mac.Write([]byte(signed))
+	expected := hex.EncodeToString(mac.Sum(nil))
+	if !hmac.Equal([]byte(strings.ToLower(strings.TrimSpace(input.Signature))), []byte(expected)) {
+		return nil, apperror.New("agent_signature_invalid", "agent signature is invalid", 401, false)
+	}
+	if s.KV != nil {
+		replayKey := "knowledge:agent:replay:" + hash(input.Signature+"|"+stamp+"|"+method+"|"+requestPath+"|"+payloadHash)
+		accepted, replayErr := s.KV.Acquire(ctx, replayKey, "used", skew*2)
+		if replayErr != nil {
+			return nil, apperror.New("agent_replay_check_failed", "agent replay protection is unavailable", 503, true)
+		}
+		if !accepted {
+			return nil, apperror.New("agent_replay_detected", "agent request has already been used", 401, false)
+		}
+	}
+	return device, nil
+}
+
+func (s *Service) ActiveDeviceForOwner(ctx context.Context, ownerUserID string) (*domain.AgentDevice, error) {
+	if strings.TrimSpace(ownerUserID) == "" {
+		return nil, apperror.New("invalid_request", "owner_user_id is required", 400, false)
+	}
+	return s.Repo.GetActiveDeviceByOwner(ctx, strings.TrimSpace(ownerUserID))
+}
+
+func (s *Service) ReportWechatState(ctx context.Context, device *domain.AgentDevice, status, lastError string) error {
 	if device == nil || strings.TrimSpace(device.ID) == "" {
 		return apperror.New("agent_device_invalid", "agent device is invalid", 401, false)
 	}
@@ -1017,11 +1296,104 @@ func (s *Service) HeartbeatDevice(ctx context.Context, device *domain.AgentDevic
 	if err != nil {
 		return err
 	}
-	now := s.Now().UTC()
-	if err := s.Repo.TouchDevice(ctx, device.ID, strings.TrimSpace(agentVersion), now); err != nil {
-		return err
+	status = strings.ToLower(strings.TrimSpace(status))
+	switch status {
+	case "stopped", "starting", "running", "paused", "error":
+	default:
+		return apperror.New("invalid_request", "collector status is invalid", 400, false)
 	}
-	return s.Repo.UpdateWechatRuntime(ctx, assignment.ConnectorID, "running", "", &now, nil)
+	return s.Repo.UpdateWechatRuntime(ctx, assignment.ConnectorID, status, lastError, nil, nil)
+}
+
+func (s *Service) ReportWechatSnapshot(ctx context.Context, device *domain.AgentDevice, snapshotType string, version int64, items []map[string]any, capturedAt time.Time) (*domain.WechatSnapshot, error) {
+	if device == nil || strings.TrimSpace(device.ID) == "" {
+		return nil, apperror.New("agent_device_invalid", "agent device is invalid", 401, false)
+	}
+	assignment, err := s.Repo.GetActiveDeviceAssignment(ctx, device.ID)
+	if err != nil {
+		return nil, err
+	}
+	snapshotType = strings.ToLower(strings.TrimSpace(snapshotType))
+	if snapshotType != "conversations" && snapshotType != "contacts" {
+		return nil, apperror.New("invalid_request", "snapshot_type must be conversations or contacts", 400, false)
+	}
+	if capturedAt.IsZero() {
+		capturedAt = s.Now().UTC()
+	} else {
+		capturedAt = capturedAt.UTC()
+	}
+	return s.Repo.UpsertWechatSnapshot(ctx, domain.WechatSnapshot{
+		ConnectorID:  assignment.ConnectorID,
+		SnapshotType: snapshotType,
+		DeviceID:     device.ID,
+		Version:      version,
+		Items:        items,
+		CapturedAt:   capturedAt,
+		ExpiresAt:    capturedAt.Add(10 * time.Minute),
+	})
+}
+
+func (s *Service) snapshotConversations(ctx context.Context, connectorID string) ([]domain.AvailableConversation, error) {
+	snapshot, err := s.Repo.GetWechatSnapshot(ctx, connectorID, "conversations")
+	if err != nil {
+		return nil, err
+	}
+	out := make([]domain.AvailableConversation, 0, len(snapshot.Items))
+	for _, item := range snapshot.Items {
+		externalID := strings.TrimSpace(fmt.Sprint(item["external_id"]))
+		conversationType := strings.TrimSpace(fmt.Sprint(item["conversation_type"]))
+		if externalID == "" || externalID == "<nil>" || (conversationType != "group" && conversationType != "private") {
+			continue
+		}
+		out = append(out, domain.AvailableConversation{
+			ExternalID:       externalID,
+			Name:             firstNonEmptyString(strings.TrimSpace(fmt.Sprint(item["name"])), externalID),
+			ConversationType: conversationType,
+		})
+	}
+	return dedupeConversations(out), nil
+}
+
+func (s *Service) snapshotContacts(ctx context.Context, connectorID, keyword string) ([]domain.AvailableContact, error) {
+	snapshot, err := s.Repo.GetWechatSnapshot(ctx, connectorID, "contacts")
+	if err != nil {
+		return nil, err
+	}
+	needle := strings.ToLower(strings.TrimSpace(keyword))
+	out := make([]domain.AvailableContact, 0, len(snapshot.Items))
+	seen := map[string]struct{}{}
+	for _, item := range snapshot.Items {
+		externalID := firstNonEmptyString(strings.TrimSpace(fmt.Sprint(item["external_user_id"])), strings.TrimSpace(fmt.Sprint(item["username"])))
+		if externalID == "" || externalID == "<nil>" {
+			continue
+		}
+		displayName := firstNonEmptyString(strings.TrimSpace(fmt.Sprint(item["display_name"])), strings.TrimSpace(fmt.Sprint(item["remark"])), strings.TrimSpace(fmt.Sprint(item["nick_name"])), externalID)
+		if needle != "" && !strings.Contains(strings.ToLower(externalID), needle) && !strings.Contains(strings.ToLower(displayName), needle) {
+			continue
+		}
+		if _, exists := seen[externalID]; exists {
+			continue
+		}
+		seen[externalID] = struct{}{}
+		out = append(out, domain.AvailableContact{ExternalUserID: externalID, DisplayName: displayName})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].DisplayName < out[j].DisplayName })
+	return out, nil
+}
+
+func (s *Service) wechatConversationSnapshot(ctx context.Context, userID string) (map[string]any, error) {
+	account, err := s.Repo.GetConnector(ctx, userID, domain.PlatformWechat)
+	if err != nil {
+		return nil, err
+	}
+	conversations, err := s.snapshotConversations(ctx, account.ID)
+	if err != nil {
+		if apperror.From(err).Code == "wechat_snapshot_not_found" {
+			return map[string]any{"conversations": []domain.AvailableConversation{}, "total": 0}, nil
+		}
+		return nil, err
+	}
+	return map[string]any{"conversations": conversations, "total": len(conversations)}, nil
 }
 
 func (s *Service) Attach(ctx context.Context, input repository.AttachInput, authorization ...string) (*domain.ConversationIngestion, error) {
@@ -1505,6 +1877,16 @@ func (s *Service) DiscoverContacts(ctx context.Context, userID, platformName, ke
 	}
 	keyword = strings.TrimSpace(keyword)
 	if platformName == domain.PlatformWechat {
+		if s.desktopCollectorMode() {
+			contacts, snapshotErr := s.snapshotContacts(ctx, account.ID, keyword)
+			if snapshotErr == nil {
+				return contacts, nil
+			}
+			if apperror.From(snapshotErr).Code != "wechat_snapshot_not_found" {
+				return nil, snapshotErr
+			}
+			return []domain.AvailableContact{}, nil
+		}
 		out, err := s.WechatCollector().Contacts(ctx, keyword)
 		if err != nil {
 			return nil, apperror.Wrap("wechat_collector_unavailable", "wechat contacts unavailable", 503, true, err)
@@ -2729,6 +3111,11 @@ func (s *Service) OpenAttachmentWithAction(ctx context.Context, userID, id, acti
 	if err != nil {
 		return nil, nil, err
 	}
+	if attachment.MessageID != "" {
+		if message, messageErr := s.Repo.GetKnowledgeItemByMessage(ctx, attachment.MessageID); messageErr == nil && message != nil && message.LifecycleStatus != "active" {
+			return nil, nil, apperror.New("knowledge_not_found", "attachment content is not available", 404, false)
+		}
+	}
 	if attachment.UploadDestination != "" {
 		if attachment.UploadDestination == "private_local_library" {
 			if attachment.UploadedByUserID != userID {
@@ -3502,6 +3889,481 @@ func (s *Service) GetKnowledgeOriginal(ctx context.Context, userID, knowledgeIte
 	return content, nil
 }
 
+func (s *Service) CreateDeletionRequest(ctx context.Context, userID, organizationID string, input repository.DeletionRequestInput) (*repository.DeletionRequest, error) {
+	userID = strings.TrimSpace(userID)
+	if userID == "" {
+		return nil, apperror.New("invalid_request", "user is required", 400, false)
+	}
+	input.RequesterUserID = userID
+	input.OrganizationID = strings.TrimSpace(organizationID)
+	if input.PurgeAfter.IsZero() {
+		input.PurgeAfter = s.Now().UTC().Add(7 * 24 * time.Hour)
+	}
+	item, itemErr := s.Repo.GetKnowledgeItemByMessage(ctx, input.ScopeID)
+	if itemErr != nil {
+		return nil, itemErr
+	}
+	allowed, checkErr := s.canDeleteKnowledge(ctx, userID, item)
+	if checkErr != nil {
+		return nil, checkErr
+	}
+	if !allowed {
+		input.Status = "pending"
+	}
+	request, err := s.Repo.CreateDeletionRequest(ctx, input)
+	if err != nil {
+		return nil, err
+	}
+	if input.Status != "pending" {
+		if err := s.revokeDeletionAuthorization(ctx, request); err != nil {
+			return nil, err
+		}
+		if _, err := s.Repo.HideDeletionTargets(ctx, request.ID); err != nil {
+			return nil, err
+		}
+		if err := s.Repo.RecordDeletionAudit(ctx, repository.DeletionAuditInput{
+			DeletionRequestID: request.ID, ActorUserID: userID, Action: "deletion.hidden",
+		}); err != nil {
+			return nil, err
+		}
+	} else if err := s.Repo.RecordDeletionAudit(ctx, repository.DeletionAuditInput{
+		DeletionRequestID: request.ID, ActorUserID: userID, Action: "deletion.requested",
+	}); err != nil {
+		return nil, err
+	}
+	return s.Repo.GetDeletionRequest(ctx, request.ID)
+}
+
+func (s *Service) CanDeleteMessage(ctx context.Context, userID, messageID string) (bool, error) {
+	item, err := s.Repo.GetKnowledgeItemByMessage(ctx, strings.TrimSpace(messageID))
+	if err != nil {
+		return false, err
+	}
+	return s.canDeleteKnowledge(ctx, userID, item)
+}
+func (s *Service) canDeleteKnowledge(ctx context.Context, userID string, item *domain.KnowledgeItem) (bool, error) {
+	if item == nil {
+		return false, nil
+	}
+	if item.KnowledgeScope == "private" && item.OwnerUserID == userID {
+		return true, nil
+	}
+	if item.KnowledgeScope != "organization" {
+		return false, nil
+	}
+	if s.Core == nil {
+		return false, apperror.New("core_dependency_unavailable", "authorization service is unavailable", 503, true)
+	}
+	decisions, err := s.Core.CheckBatch(ctx, userID, item.OrganizationID, []coreclient.AuthorizationCheck{{
+		ResourceType: "knowledge_item", ResourcePart: "delete", ResourceID: item.ID, Action: "delete",
+	}})
+	if err != nil {
+		return false, err
+	}
+	return len(decisions) == 1 && decisions[0].Allowed, nil
+}
+
+func (s *Service) ReviewDeletionRequest(ctx context.Context, userID, organizationID, requestID, status, reason string) (*repository.DeletionRequest, error) {
+	userID = strings.TrimSpace(userID)
+	requestID = strings.TrimSpace(requestID)
+	status = strings.TrimSpace(status)
+	if userID == "" || requestID == "" {
+		return nil, apperror.New("invalid_request", "user and request are required", 400, false)
+	}
+	if status != "approved" && status != "rejected" {
+		return nil, apperror.New("invalid_request", "status must be approved or rejected", 400, false)
+	}
+	request, err := s.Repo.GetDeletionRequest(ctx, requestID)
+	if err != nil {
+		return nil, err
+	}
+	if request.Status == "pending" {
+		allowed, checkErr := s.canReviewDeletion(ctx, userID, organizationID, request)
+		if checkErr != nil {
+			return nil, checkErr
+		}
+		if !allowed {
+			return nil, apperror.Clone(apperror.ErrForbidden)
+		}
+	} else if request.RequesterUserID != userID && request.ReviewerUserID != userID {
+		return nil, apperror.Clone(apperror.ErrForbidden)
+	}
+	reviewed, err := s.Repo.ReviewDeletionRequest(ctx, requestID, userID, status, reason, s.Now().UTC())
+	if err != nil {
+		return nil, err
+	}
+	if status == "approved" && reviewed.Status == "approved" {
+		if err := s.revokeDeletionAuthorization(ctx, reviewed); err != nil {
+			return nil, err
+		}
+		if _, err := s.Repo.HideDeletionTargets(ctx, requestID); err != nil {
+			return nil, err
+		}
+		if err := s.Repo.RecordDeletionAudit(ctx, repository.DeletionAuditInput{
+			DeletionRequestID: requestID, ActorUserID: userID, Action: "deletion.hidden",
+			Detail: map[string]any{"approved": true},
+		}); err != nil {
+			return nil, err
+		}
+	}
+	return s.Repo.GetDeletionRequest(ctx, requestID)
+}
+
+func (s *Service) revokeDeletionAuthorization(ctx context.Context, request *repository.DeletionRequest) error {
+	if request == nil {
+		return apperror.New("invalid_request", "deletion request is required", 400, false)
+	}
+	for _, target := range request.Targets {
+		if strings.TrimSpace(target.KnowledgeItemID) == "" {
+			continue
+		}
+		if s.Core == nil {
+			return apperror.New("core_dependency_unavailable", "authorization service is unavailable", 503, true)
+		}
+		if err := s.Core.RevokeKnowledgeRelations(ctx, target.KnowledgeItemID, ""); err != nil {
+			return apperror.Wrap("core_dependency_unavailable", "authorization revoke failed", 503, true, err)
+		}
+	}
+	return s.Repo.MarkDeletionAuthorizationRevoked(ctx, request.ID, s.Now().UTC())
+}
+
+func (s *Service) canReviewDeletion(ctx context.Context, userID, organizationID string, request *repository.DeletionRequest) (bool, error) {
+	if request == nil {
+		return false, nil
+	}
+	organizationID = strings.TrimSpace(organizationID)
+	if organizationID == "" {
+		organizationID = strings.TrimSpace(request.OrganizationID)
+	}
+	if organizationID == "" {
+		return false, nil
+	}
+	if s.Core == nil {
+		return false, apperror.New("core_dependency_unavailable", "authorization service is unavailable", 503, true)
+	}
+	decisions, err := s.Core.CheckBatch(ctx, userID, organizationID, []coreclient.AuthorizationCheck{{
+		ResourceType: "knowledge_item", ResourcePart: "delete", ResourceID: request.ScopeID, Action: "delete",
+	}})
+	if err != nil {
+		return false, err
+	}
+	return len(decisions) == 1 && decisions[0].Allowed, nil
+}
+
+func (s *Service) PurgeDeletionRequests(ctx context.Context) error {
+	due, err := s.Repo.ListDueDeletionTargets(ctx, s.Now().UTC(), 50)
+	if err != nil {
+		return err
+	}
+	var firstErr error
+	for _, request := range due {
+		refs, refErr := s.Repo.DeletionObjectRefs(ctx, request.ID)
+		if refErr != nil {
+			if firstErr == nil {
+				firstErr = refErr
+			}
+			continue
+		}
+		failedTargets := map[string]struct{}{}
+		if s.Objects != nil {
+			for _, ref := range refs {
+				for _, key := range []string{ref.ObjectRef, ref.OriginalRef, ref.ExtractedOriginalRef, ref.ExtractedDisplayRef, ref.NormalizedRef} {
+					if strings.TrimSpace(key) == "" {
+						continue
+					}
+					if err := s.Objects.Delete(ctx, key); err != nil {
+						_ = s.Repo.MarkDeletionObjectState(ctx, ref.TargetID, "failed", err.Error())
+						failedTargets[ref.TargetID] = struct{}{}
+						if firstErr == nil {
+							firstErr = err
+						}
+						break
+					}
+				}
+			}
+		}
+		for _, target := range request.Targets {
+			if _, failed := failedTargets[target.ID]; failed {
+				continue
+			}
+			state := "deleted"
+			if s.Objects == nil {
+				state = "skipped"
+			}
+			if err := s.Repo.MarkDeletionObjectState(ctx, target.ID, state, ""); err != nil && firstErr == nil {
+				firstErr = err
+			}
+		}
+		if len(failedTargets) > 0 {
+			continue
+		}
+		if err := s.Repo.MarkDeletionPurged(ctx, request.ID, s.Now().UTC()); err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		_ = s.Repo.RecordDeletionAudit(ctx, repository.DeletionAuditInput{DeletionRequestID: request.ID, Action: "deletion.purged"})
+	}
+	return firstErr
+}
+
+func (s *Service) ProcessDeletionAuthorizationRevocations(ctx context.Context) error {
+	work, err := s.Repo.ListDeletionRequestsPendingAuthorization(ctx, 50)
+	if err != nil {
+		return err
+	}
+	var firstErr error
+	for index := range work {
+		if err := s.revokeDeletionAuthorization(ctx, &work[index]); err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+		}
+	}
+	return firstErr
+}
+
+func (s *Service) RepairStaleDeletionRequests(ctx context.Context) error {
+	work, err := s.Repo.ListStalePendingDeletionRequests(ctx, 50)
+	if err != nil {
+		return err
+	}
+	var firstErr error
+	for index := range work {
+		request := &work[index]
+		if err := s.revokeDeletionAuthorization(ctx, request); err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		if err := s.Repo.RepairStalePendingDeletionRequest(ctx, request.ID, s.Now().UTC()); err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+		}
+	}
+	return firstErr
+}
+
+func (s *Service) GetDeletionRequest(ctx context.Context, userID, id string) (*repository.DeletionRequest, error) {
+	request, err := s.Repo.GetDeletionRequest(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if request.RequesterUserID != strings.TrimSpace(userID) {
+		return nil, apperror.Clone(apperror.ErrForbidden)
+	}
+	return request, nil
+}
+
+func (s *Service) ListDeletionRequests(ctx context.Context, userID, organizationID, scope, view, status string) ([]repository.DeletionRequest, error) {
+	userID = strings.TrimSpace(userID)
+	organizationID = strings.TrimSpace(organizationID)
+	scope = strings.TrimSpace(scope)
+	view = strings.TrimSpace(view)
+	status = strings.TrimSpace(status)
+	if view == "" {
+		view = "active"
+	}
+	if view != "active" && view != "history" && view != "all" {
+		return nil, apperror.New("invalid_deletion_view", "view must be active, history, or all", 400, false)
+	}
+	if scope == "" || scope == "mine" {
+		requests, err := s.Repo.ListDeletionRequests(ctx, userID, "", 100)
+		if err != nil {
+			return nil, err
+		}
+		filtered := make([]repository.DeletionRequest, 0, len(requests))
+		for _, request := range requests {
+			if status != "" && request.Status != status {
+				continue
+			}
+			if status == "" && !deletionRequestMatchesView(request.Status, view) {
+				continue
+			}
+			filtered = append(filtered, request)
+		}
+		return s.enrichDeletionRequests(ctx, userID, false, filtered), nil
+	}
+	if scope != "inbox" {
+		return nil, apperror.New("invalid_deletion_scope", "scope must be mine or inbox", 400, false)
+	}
+	if organizationID == "" {
+		return nil, apperror.New("organization_required", "organization is required for deletion review", 400, false)
+	}
+	requests, err := s.Repo.ListDeletionRequestsByOrganization(ctx, organizationID, "pending", 100)
+	if err != nil {
+		return nil, err
+	}
+	allowed := make([]repository.DeletionRequest, 0, len(requests))
+	for _, request := range requests {
+		if request.OrganizationID != organizationID {
+			continue
+		}
+		canReview, checkErr := s.canReviewDeletion(ctx, userID, organizationID, &request)
+		if checkErr != nil {
+			return nil, checkErr
+		}
+		if canReview {
+			allowed = append(allowed, request)
+		}
+	}
+	return s.enrichDeletionRequests(ctx, userID, true, allowed), nil
+}
+
+func deletionRequestMatchesView(status, view string) bool {
+	switch view {
+	case "active":
+		return status == "pending" || status == "approved" || status == "executing"
+	case "history":
+		return status == "cancelled" || status == "completed" || status == "failed" ||
+			status == "rejected" || status == "superseded" || status == "expired" || status == "revoked"
+	default:
+		return true
+	}
+}
+
+func (s *Service) enrichDeletionRequests(ctx context.Context, userID string, canReview bool, requests []repository.DeletionRequest) []repository.DeletionRequest {
+	requesterIDs := make([]string, 0, len(requests))
+	for _, request := range requests {
+		if strings.TrimSpace(request.RequesterUserID) != "" {
+			requesterIDs = append(requesterIDs, request.RequesterUserID)
+		}
+	}
+	users := map[string]coreclient.UserSummary{}
+	if s.Core != nil && len(requesterIDs) > 0 {
+		loaded, err := s.Core.FindUsersByIDs(ctx, requesterIDs)
+		if err != nil {
+			slog.WarnContext(ctx, "deletion requester lookup failed", "error", err)
+		} else {
+			users = loaded
+		}
+	}
+	for index := range requests {
+		request := &requests[index]
+		if user, ok := users[request.RequesterUserID]; ok {
+			request.RequesterDisplayName = strings.TrimSpace(user.Nickname)
+			request.RequesterEmail = strings.TrimSpace(user.Email)
+		}
+		request.StatusLabel = deletionStatusLabel(request.Status)
+		request.CanReview = canReview && request.Status == "pending"
+		request.CanCancel = request.RequesterUserID == userID && request.Status == "pending"
+		request.TargetSummary = s.deletionTargetSummary(ctx, *request)
+		request.StageSummary = deletionStageSummary(*request)
+	}
+	return requests
+}
+
+func (s *Service) deletionTargetSummary(ctx context.Context, request repository.DeletionRequest) string {
+	item, err := s.Repo.GetKnowledgeItemByMessage(ctx, request.ScopeID)
+	if err != nil || item == nil {
+		return "消息 " + shortDisplayID(request.ScopeID)
+	}
+	parts := make([]string, 0, 4)
+	if item.Message != nil {
+		if sender := strings.TrimSpace(item.Message.SenderDisplayName); sender != "" {
+			parts = append(parts, "发送人 "+sender)
+		}
+		if excerpt := compactDisplayText(item.Message.Content, 42); excerpt != "" {
+			parts = append(parts, excerpt)
+		}
+	}
+	if conversationID := strings.TrimSpace(item.ConversationID); conversationID != "" {
+		parts = append(parts, "会话 "+shortDisplayID(conversationID))
+	}
+	if len(parts) == 0 {
+		return "消息 " + shortDisplayID(request.ScopeID)
+	}
+	return strings.Join(parts, " · ")
+}
+
+func deletionStageSummary(request repository.DeletionRequest) string {
+	switch request.Status {
+	case "pending":
+		return "等待审批"
+	case "rejected":
+		return "审批已拒绝"
+	case "cancelled":
+		return "申请已关闭"
+	case "superseded":
+		return "已合并到规范申请"
+	case "completed":
+		return "全部清理已完成"
+	case "failed":
+		return "清理阶段失败"
+	}
+	if len(request.Targets) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, 4)
+	target := request.Targets[0]
+	if target.VisibilityState == "hidden" {
+		parts = append(parts, "已隐藏")
+	}
+	switch target.VectorState {
+	case "deleted":
+		parts = append(parts, "向量已清理")
+	case "not_required":
+		parts = append(parts, "无需清理向量")
+	case "failed":
+		parts = append(parts, "向量清理失败")
+	}
+	if target.AuthState == "revoked" {
+		parts = append(parts, "权限已撤销")
+	}
+	switch target.ObjectState {
+	case "deleted":
+		parts = append(parts, "对象已清理")
+	case "skipped":
+		parts = append(parts, "无需清理对象")
+	case "failed":
+		parts = append(parts, "对象清理失败")
+	default:
+		parts = append(parts, "对象保留中")
+	}
+	return strings.Join(parts, " · ")
+}
+
+func deletionStatusLabel(status string) string {
+	labels := map[string]string{
+		"pending":    "待审批",
+		"approved":   "已通过",
+		"executing":  "处理中",
+		"completed":  "已完成",
+		"rejected":   "已拒绝",
+		"failed":     "执行失败",
+		"cancelled":  "已关闭",
+		"superseded": "已合并",
+		"expired":    "已过期",
+		"revoked":    "已撤销",
+	}
+	if label := labels[status]; label != "" {
+		return label
+	}
+	return status
+}
+
+func shortDisplayID(value string) string {
+	value = strings.TrimSpace(value)
+	if len(value) <= 8 {
+		return value
+	}
+	return value[:8] + "…"
+}
+
+func compactDisplayText(value string, maxRunes int) string {
+	value = strings.Join(strings.Fields(value), " ")
+	if value == "" || maxRunes <= 0 {
+		return value
+	}
+	runes := []rune(value)
+	if len(runes) <= maxRunes {
+		return value
+	}
+	return string(runes[:maxRunes]) + "…"
+}
 func (s *Service) GetKnowledgeOriginalByMessage(ctx context.Context, userID, messageID string) (*domain.KnowledgeContent, error) {
 	item, err := s.Repo.GetKnowledgeItemByMessage(ctx, strings.TrimSpace(messageID))
 	if err != nil {
@@ -3542,8 +4404,8 @@ func (s *Service) ApplyRAGResult(ctx context.Context, id string, input repositor
 	if _, err := uuid.Parse(strings.TrimSpace(id)); err != nil {
 		return nil, apperror.New("invalid_rag_result", "knowledge_item_id must be a UUID", 400, false)
 	}
-	if input.Status != "processing" && input.Status != "ready" && input.Status != "metadata_only" && input.Status != "failed" {
-		return nil, apperror.New("invalid_rag_status", "status must be processing, ready, metadata_only, or failed", 400, false)
+	if input.Status != "processing" && input.Status != "ready" && input.Status != "metadata_only" && input.Status != "failed" && input.Status != "deleted" {
+		return nil, apperror.New("invalid_rag_status", "status must be processing, ready, metadata_only, failed, or deleted", 400, false)
 	}
 	if strings.TrimSpace(input.SourceEventID) == "" || strings.TrimSpace(input.RAGJobID) == "" {
 		return nil, apperror.New("invalid_rag_result", "source_event_id and rag_job_id are required", 400, false)

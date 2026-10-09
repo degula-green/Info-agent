@@ -1,0 +1,15 @@
+{
+  "apiBaseUrl": "http://39.97.235.59",
+  "knowledgeBaseUrl": "http://39.97.235.59",
+  "webBaseUrl": "http://39.97.235.59",
+  "invitationBaseUrl": "http://39.97.235.59/invite",
+  "collectorCommand": "",
+  "collectorArgs": [],
+  "collectorUrl": "http://127.0.0.1:8091",
+  "collectorToken": "",
+  "formBrowserCommand": "",
+  "formBrowserArgs": [],
+  "formBrowserUrl": "http://127.0.0.1:8500",
+  "formBrowserToken": "",
+  "formBrowserHeadless": true
+}

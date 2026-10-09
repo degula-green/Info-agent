@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Info Agent 邀请</title>
+    <style>
+      :root {
+        color-scheme: light;
+        font-family: "Microsoft YaHei", "PingFang SC", sans-serif;
+        background: #f4f6f8;
+        color: #1f2937;
+      }
+      body {
+        min-height: 100vh;
+        margin: 0;
+        display: grid;
+        place-items: center;
+      }
+      main {
+        width: min(520px, calc(100vw - 40px));
+        padding: 40px;
+        border: 1px solid #e5e7eb;
+        border-radius: 8px;
+        background: #fff;
+        box-sizing: border-box;
+        box-shadow: 0 16px 48px rgb(15 23 42 / 8%);
+      }
+      h1 {
+        margin: 0 0 12px;
+        font-size: 24px;
+      }
+      p {
+        margin: 0 0 24px;
+        line-height: 1.7;
+        color: #4b5563;
+      }
+      button {
+        width: 100%;
+        min-height: 44px;
+        border: 1px solid #315efb;
+        border-radius: 6px;
+        background: #315efb;
+        color: #fff;
+        font-size: 15px;
+        cursor: pointer;
+      }
+      #status {
+        min-height: 24px;
+        margin-top: 16px;
+        font-size: 13px;
+        color: #6b7280;
+      }
+      #status.error {
+        color: #b42318;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>打开桌面应用</h1>
+      <p>点击下方按钮，在 Info Agent 桌面端接受组织邀请。尚未安装时，请联系管理员获取安装包。</p>
+      <button id="open" type="button">打开 Info Agent</button>
+      <div id="status" role="status"></div>
+    </main>
+    <script>
+      (() => {
+        const params = new URLSearchParams(
+          window.location.hash.replace(/^#/, ""),
+        );
+        const token = String(params.get("token") || "").trim();
+        const button = document.getElementById("open");
+        const status = document.getElementById("status");
+
+        function setStatus(message, error = false) {
+          status.textContent = message;
+          status.classList.toggle("error", error);
+        }
+
+        function openDesktopApp() {
+          if (!token) {
+            setStatus("邀请链接缺少 token，请重新获取邀请。", true);
+            return;
+          }
+          setStatus("正在尝试打开 Info Agent…");
+          window.location.href = `infoagent://organization-invitation?token=${encodeURIComponent(token)}`;
+        }
+
+        button.addEventListener("click", openDesktopApp);
+        if (token) {
+          window.setTimeout(openDesktopApp, 250);
+        } else {
+          setStatus("邀请链接缺少 token，请重新获取邀请。", true);
+        }
+      })();
+    </script>
+  </body>
+</html>

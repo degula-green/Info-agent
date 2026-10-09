@@ -1,3 +1,50 @@
+x-agent-environment: &agent-environment
+  AGENT_HTTP_HOST: 0.0.0.0
+  AGENT_HTTP_PORT: 8080
+  AGENT_LOG_LEVEL: ${AGENT_LOG_LEVEL:-INFO}
+  AGENT_DATABASE_URL: ${AGENT_DATABASE_URL:-postgresql://postgres:postgres@postgres:5432/info_agent}
+  AGENT_DATABASE_SCHEMA: ${AGENT_DATABASE_SCHEMA:-agent}
+  AGENT_REDIS_URL: ${AGENT_REDIS_URL:-redis://redis:6379/1}
+  AGENT_REDIS_INBOUND_STREAM: ${AGENT_REDIS_INBOUND_STREAM:-agent:tasks}
+  AGENT_KNOWLEDGE_BASE_URL: ${AGENT_KNOWLEDGE_BASE_URL:-http://knowledge-service:8090}
+  AGENT_KNOWLEDGE_SERVICE_TOKEN: ${KNOWLEDGE_INTERNAL_SERVICE_TOKEN:-local-development-only}
+  AGENT_KNOWLEDGE_READY_STREAM: ${KNOWLEDGE_REDIS_OUTBOUND_STREAM:-knowledge:ready}
+  AGENT_CORE_BASE_URL: ${AGENT_CORE_BASE_URL:-http://core-service:8080}
+  AGENT_RAG_BASE_URL: ${AGENT_RAG_BASE_URL:-http://rag-service:8000}
+  AGENT_RAG_SERVICE_TOKEN: ${RAG_INTERNAL_TOKEN:-local-development-only}
+  AGENT_RAG_AGENT_TOOLS_ENABLED: ${AGENT_RAG_AGENT_TOOLS_ENABLED:-true}
+  AGENT_FORM_BROWSER_MODE: ${AGENT_FORM_BROWSER_MODE:-server}
+  AGENT_FORM_BROWSER_URL: ${AGENT_FORM_BROWSER_URL:-http://form-browser:8500}
+  AGENT_FORM_BROWSER_TOKEN: ${FORM_BROWSER_API_TOKEN:-local-development-only}
+  AGENT_DESKTOP_TASK_TTL_SECONDS: ${AGENT_DESKTOP_TASK_TTL_SECONDS:-300}
+  AGENT_DESKTOP_TASK_LEASE_SECONDS: ${AGENT_DESKTOP_TASK_LEASE_SECONDS:-60}
+  AGENT_DESKTOP_TASK_POLL_SECONDS: ${AGENT_DESKTOP_TASK_POLL_SECONDS:-1}
+  AGENT_PLANNER_PROVIDER: ${AGENT_PLANNER_PROVIDER:-routing}
+  AGENT_UNDERSTANDING_MODE: ${AGENT_UNDERSTANDING_MODE:-off}
+  AGENT_UNDERSTANDING_PROVIDER: ${AGENT_UNDERSTANDING_PROVIDER:-jev}
+  AGENT_UNDERSTANDING_PRIMARY: ${AGENT_UNDERSTANDING_PRIMARY:-jev}
+  AGENT_JEV_BASE_URL: ${AGENT_JEV_BASE_URL:-https://aihubmix.com/v1}
+  AGENT_JEV_API_KEY: ${AGENT_JEV_API_KEY:-}
+  AGENT_JEV_MODEL: ${AGENT_JEV_MODEL:-jev-1.13}
+  AGENT_LLM_BASE_URL: ${AGENT_LLM_BASE_URL:-}
+  AGENT_LLM_API_KEY: ${AGENT_LLM_API_KEY:-}
+  AGENT_LLM_MODEL: ${AGENT_LLM_MODEL:-}
+  AGENT_SEARXNG_BASE_URL: ${AGENT_SEARXNG_BASE_URL:-http://searxng:8080}
+  AGENT_CRAWL4AI_BASE_URL: ${AGENT_CRAWL4AI_BASE_URL:-http://crawl4ai:11235}
+  AGENT_CRAWL4AI_API_TOKEN: ${CRAWL4AI_API_TOKEN:-local-development-only}
+  # Person, weekly-report and multimodal attachment features added on the
+  # agent branch. These are defaults; a deployment can override them.
+  AGENT_ATTACHMENT_MINIO_BUCKET: ${AGENT_ATTACHMENT_MINIO_BUCKET:-agent-temp}
+  AGENT_ATTACHMENT_TTL_HOURS: ${AGENT_ATTACHMENT_TTL_HOURS:-24}
+  AGENT_ATTACHMENT_MAX_SIZE_BYTES: ${AGENT_ATTACHMENT_MAX_SIZE_BYTES:-20971520}
+  AGENT_MINIO_ENDPOINT: ${AGENT_MINIO_ENDPOINT:-minio:9000}
+  AGENT_MINIO_ACCESS_KEY: ${AGENT_MINIO_ACCESS_KEY:-minioadmin}
+  AGENT_MINIO_SECRET_KEY: ${AGENT_MINIO_SECRET_KEY:-minioadmin}
+  AGENT_PERSON_QUERY_TIMEOUT_SECONDS: ${AGENT_PERSON_QUERY_TIMEOUT_SECONDS:-180}
+  AGENT_REPORT_TIMEOUT_SECONDS: ${AGENT_REPORT_TIMEOUT_SECONDS:-180}
+  AGENT_REPORT_MAX_OUTPUT_TOKENS: ${AGENT_REPORT_MAX_OUTPUT_TOKENS:-4000}
+  AGENT_ANSWER_STREAMING_ENABLED: ${AGENT_ANSWER_STREAMING_ENABLED:-true}
+
 services:
   web:
     build: ../apps/web
@@ -59,7 +106,9 @@ services:
       KNOWLEDGE_FEISHU_CLIENT_ID: ${KNOWLEDGE_FEISHU_CLIENT_ID:-}
       KNOWLEDGE_FEISHU_CLIENT_SECRET: ${KNOWLEDGE_FEISHU_CLIENT_SECRET:-}
       KNOWLEDGE_FEISHU_REDIRECT_URI: ${KNOWLEDGE_FEISHU_REDIRECT_URI:-}
+      KNOWLEDGE_DESKTOP_OAUTH_RETURN_URI: ${KNOWLEDGE_DESKTOP_OAUTH_RETURN_URI:-infoagent://oauth/callback}
       KNOWLEDGE_FRONTEND_URL: ${KNOWLEDGE_FRONTEND_URL:-http://localhost/profile}
+      KNOWLEDGE_COLLECTOR_MODE: ${KNOWLEDGE_COLLECTOR_MODE:-server}
       KNOWLEDGE_WECHAT_COLLECTOR_URL: ${KNOWLEDGE_WECHAT_COLLECTOR_URL:-http://wechat-collector:8091}
       KNOWLEDGE_COLLECTOR_INTERNAL_TOKEN: ${COLLECTOR_INTERNAL_TOKEN:-local-development-only}
     depends_on:
@@ -85,6 +134,58 @@ services:
       WECHAT_COLLECTOR_PORT: 8091
     expose:
       - "8091"
+
+  agent-migrate:
+    build: ../services/agent
+    command: ["python", "-m", "app.infrastructure.postgres.migrate", "--bootstrap"]
+    environment:
+      <<: *agent-environment
+      AGENT_MIGRATIONS_DIR: /migrations
+    volumes:
+      - ../db/migrations:/migrations:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  agent-service:
+    build: ../services/agent
+    environment: *agent-environment
+    depends_on:
+      agent-migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_started
+      knowledge-service:
+        condition: service_started
+      core-service:
+        condition: service_started
+    expose:
+      - "8080"
+
+  agent-task-worker:
+    build: ../services/agent
+    command: ["python", "worker_supervisor.py"]
+    environment: *agent-environment
+    depends_on:
+      agent-migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_started
+      knowledge-service:
+        condition: service_started
+
+  agent-knowledge-worker:
+    build: ../services/agent
+    command: ["python", "knowledge_worker.py"]
+    environment: *agent-environment
+    depends_on:
+      agent-migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_started
+      knowledge-service:
+        condition: service_started
 
   rag-service:
     build: ../services/rag
@@ -204,6 +305,7 @@ services:
         psql --dbname="$${KNOWLEDGE_DATABASE_URL}" --set=ON_ERROR_STOP=1 --file=/migrations/20260927_knowledge_rag_mvp_status.sql &&
         psql --dbname="$${KNOWLEDGE_DATABASE_URL}" --set=ON_ERROR_STOP=1 --file=/migrations/20260925_contact_profiles.sql &&
         psql --dbname="$${KNOWLEDGE_DATABASE_URL}" --set=ON_ERROR_STOP=1 --file=/migrations/20261004_wechat_device_assignments.up.sql &&
+        psql --dbname="$${KNOWLEDGE_DATABASE_URL}" --set=ON_ERROR_STOP=1 --file=/migrations/20261007_wechat_control_flow.up.sql &&
         psql --dbname="$${KNOWLEDGE_DATABASE_URL}" --set=ON_ERROR_STOP=1 --file=/migrations/20261007_contact_name_core.up.sql &&
         psql --dbname="$${KNOWLEDGE_DATABASE_URL}" --set=ON_ERROR_STOP=1 --file=/migrations/20261009_wechat_contact_book.up.sql
     depends_on:
@@ -232,6 +334,8 @@ services:
       - ../db/migrations/20260925_contact_profiles.sql:/migrations/20260925_contact_profiles.sql:ro
       - ../db/migrations/20261004_wechat_device_assignments.up.sql:/migrations/20261004_wechat_device_assignments.up.sql:ro
       - ../db/migrations/20261004_wechat_device_assignments.down.sql:/migrations/20261004_wechat_device_assignments.down.sql:ro
+      - ../db/migrations/20261007_wechat_control_flow.up.sql:/migrations/20261007_wechat_control_flow.up.sql:ro
+      - ../db/migrations/20261007_wechat_control_flow.down.sql:/migrations/20261007_wechat_control_flow.down.sql:ro
       - ../db/migrations/20261007_contact_name_core.up.sql:/migrations/20261007_contact_name_core.up.sql:ro
       - ../db/migrations/20261007_contact_name_core.down.sql:/migrations/20261007_contact_name_core.down.sql:ro
       - ../db/migrations/20261009_wechat_contact_book.up.sql:/migrations/20261009_wechat_contact_book.up.sql:ro
@@ -273,6 +377,7 @@ services:
       - core-service
       - knowledge-service
       - rag-service
+      - agent-service
 
   elasticsearch:
     build:
