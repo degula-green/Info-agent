@@ -111,6 +111,15 @@ class RAGRetrievalService:
         retrieval_request = request
         if locate is not None and locate.scope.residual_query:
             retrieval_request = replace(request, query=locate.scope.residual_query)
+        if locate is not None and locate.scope.min_mount_confidence:
+            # The locator resolves the effective threshold (request value, else
+            # configuration). Hand that downstream instead of the raw request
+            # field, otherwise a caller who left it unset would get every mount
+            # regardless of confidence.
+            retrieval_request = replace(
+                retrieval_request,
+                min_mount_confidence=locate.scope.min_mount_confidence,
+            )
         query_vector: list[float] | None = None
         degraded: list[str] = []
         if request.entry not in {"knowledge", "sources"}:

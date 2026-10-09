@@ -463,7 +463,34 @@ def _filters(
         # Flat terms over the synchronised mount list. Time filtering stays in
         # occurred_after/occurred_before above; it is no longer encoded into the
         # mount key.
-        output.append({"terms": {"entity_ids": list(entity_ids)}})
+        threshold = request.min_mount_confidence
+        if threshold is None:
+            output.append({"terms": {"entity_ids": list(entity_ids)}})
+        else:
+            # A flat keyword list cannot say "this entity *and* at least this
+            # confidence", so ask the nested mount documents. The threshold has
+            # travelled in the request contract since Phase 1; it only became
+            # meaningful once window_batch mounts carried less than 1.0
+            # confidence, which is why the filter lands here.
+            output.append({
+                "nested": {
+                    "path": "entity_mounts",
+                    "query": {
+                        "bool": {
+                            "filter": [
+                                {"terms": {"entity_mounts.entity_id": list(entity_ids)}},
+                                {
+                                    "range": {
+                                        "entity_mounts.confidence": {
+                                            "gte": float(threshold)
+                                        }
+                                    }
+                                },
+                            ]
+                        }
+                    },
+                }
+            })
     if protected_object_keys:
         output.append({"terms": {"auth_object_key": list(protected_object_keys)}})
     return output

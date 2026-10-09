@@ -45,11 +45,13 @@ class _Authorization:
 class _Indexer:
     def __init__(self, *, bm25_results=None, knn_results=None, neighbors=None):
         self.calls = []
+        self.requests = []
         self.bm25_results = bm25_results
         self.knn_results = knn_results or []
         self.neighbors = neighbors or []
 
     def search_bm25(self, request, **kwargs):
+        self.requests.append(request)
         self.calls.append(("bm25", kwargs))
         if self.bm25_results is not None:
             return list(self.bm25_results)
@@ -67,6 +69,7 @@ class _Indexer:
         )]
 
     def search_knn(self, request, vector, **kwargs):
+        self.requests.append(request)
         self.calls.append(("knn", kwargs))
         return list(self.knn_results)
 
@@ -242,6 +245,46 @@ class RetrievalTests(unittest.TestCase):
             untouched.diagnostics["effective_execution_path"], "tree_shadow"
         )
 
+    def test_the_effective_mount_threshold_reaches_the_indexer(self) -> None:
+        # The caller left min_mount_confidence unset, so the locator's default
+        # (0.65) is the effective value. Passing the raw request field through
+        # would leave the ES filter with None and let every mount in,
+        # regardless of confidence.
+        repository = InMemoryRagMVPRepository()
+        repository.upsert_entity(
+            entity_id="entity-1",
+            scope_type="organization",
+            scope_id="org-1",
+            domain="project",
+            canonical_name="青云项目",
+            normalized_key="青云项目",
+            registry_version=1,
+        )
+        indexer = _Indexer()
+        original = settings.tree_mode
+        object.__setattr__(settings, "tree_mode", "tree")
+        try:
+            service = RAGRetrievalService(
+                repository=repository,
+                indexer=indexer,
+                embedding=_Embedding(),
+                authorization=_Authorization(),
+            )
+            service.search(SearchRequest(
+                query="青云项目进展",
+                user_id="user-1",
+                scope_type="organization",
+                scope_id="org-1",
+                knowledge_base_ids=("kb-1",),
+            ))
+        finally:
+            object.__setattr__(settings, "tree_mode", original)
+
+        self.assertTrue(indexer.requests)
+        self.assertEqual(
+            {request.min_mount_confidence for request in indexer.requests}, {0.65}
+        )
+
     def test_logical_dedupe_prefers_protected(self) -> None:
         display = SearchResult("d", "display", score=1.0, source={"logical_position_key": "x", "content_variant": "display"})
         protected = SearchResult("p", "protected", score=0.1, source={"logical_position_key": "x", "content_variant": "protected"})
@@ -339,6 +382,42 @@ class RetrievalTests(unittest.TestCase):
         query = _bm25_query("", filters)
         self.assertNotIn("must", query)
         self.assertEqual(query["bool"]["filter"], filters)
+
+    def test_scoped_filters_stay_a_flat_list_without_a_threshold(self) -> None:
+        request = SearchRequest(
+            query="青云项目", user_id="user-1",
+            scope_type="organization", scope_id="org-1",
+        )
+
+        filters = _filters(request, entity_ids=("e1",))
+
+        self.assertIn({"terms": {"entity_ids": ["e1"]}}, filters)
+        self.assertFalse([item for item in filters if "nested" in item])
+
+    def test_a_mount_threshold_switches_to_a_nested_filter(self) -> None:
+        # A flat keyword list cannot express "this entity *and* at least this
+        # confidence", so the threshold has to be asked of the mount documents.
+        request = SearchRequest(
+            query="青云项目", user_id="user-1",
+            scope_type="organization", scope_id="org-1",
+            min_mount_confidence=0.85,
+        )
+
+        filters = _filters(request, entity_ids=("e1", "e2"))
+
+        nested = [item for item in filters if "nested" in item]
+        self.assertEqual(len(nested), 1)
+        self.assertEqual(nested[0]["nested"]["path"], "entity_mounts")
+        clauses = nested[0]["nested"]["query"]["bool"]["filter"]
+        self.assertIn(
+            {"terms": {"entity_mounts.entity_id": ["e1", "e2"]}}, clauses
+        )
+        self.assertIn(
+            {"range": {"entity_mounts.confidence": {"gte": 0.85}}}, clauses
+        )
+        # The flat list is replaced, not kept alongside: the nested filter
+        # already requires the entity and adds the confidence bound.
+        self.assertNotIn({"terms": {"entity_ids": ["e1", "e2"]}}, filters)
 
     def test_qa_conversation_id_does_not_filter_source_conversation(self) -> None:
         qa_request = SearchRequest(
