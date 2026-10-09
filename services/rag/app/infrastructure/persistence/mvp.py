@@ -8,7 +8,7 @@ import uuid
 from collections import defaultdict
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
-from typing import Any, Iterator
+from typing import Any, Iterator, Mapping
 
 from app.config import settings
 from app.domain.rag import (
@@ -56,6 +56,19 @@ def _uuid_or_none(value: Any) -> str | None:
     if value is None or not str(value).strip():
         return None
     return str(value)
+
+
+def _review_approval_rate(actions: Mapping[str, int]) -> float:
+    """Share of *decided* reviews that accepted the candidate.
+
+    ``defer`` says "later", not "no", so it stays out of both sides of the
+    ratio - counting it as a rejection would make the rate dip whenever a
+    reviewer chose to be careful.
+    """
+    approve = int(actions.get("promote", 0)) + int(actions.get("merge", 0))
+    reject = int(actions.get("ignore", 0))
+    decided = approve + reject
+    return round(approve / decided, 4) if decided else 0.0
 
 
 def _vector_literal(values: list[float]) -> str:
@@ -1069,6 +1082,19 @@ class PostgresRagMVPRepository:
                 metrics["relations_by_type"] = {
                     str(item[0]): int(item[1]) for item in cursor.fetchall()
                 }
+                cursor.execute(
+                    f"""SELECT r.action,COUNT(*)
+                          FROM {self.schema}.entity_review_requests r
+                          JOIN {self.schema}.entity_candidates c
+                            ON c.id = r.candidate_id
+                         WHERE c.scope_type=%s AND c.scope_id=%s::uuid
+                         GROUP BY r.action ORDER BY r.action""",
+                    scope_params,
+                )
+                actions = {str(item[0]): int(item[1]) for item in cursor.fetchall()}
+                metrics["review_actions"] = actions
+                metrics["review_count"] = sum(actions.values())
+                metrics["review_approval_rate"] = _review_approval_rate(actions)
                 return metrics
 
     def list_active_scopes(self, *, limit: int = 50) -> list[dict[str, Any]]:
@@ -3938,6 +3964,7 @@ class InMemoryRagMVPRepository:
         for value in relations.values():
             key = str(value["relation_type"])
             relation_types[key] = relation_types.get(key, 0) + 1
+        actions = self._review_actions_for(scope_type, scope_id)
         return {
             "message_count": len(messages),
             "mounted_chunk_count": mounted,
@@ -3962,7 +3989,24 @@ class InMemoryRagMVPRepository:
             },
             "entities_by_domain": domains,
             "relations_by_type": relation_types,
+            "review_actions": actions,
+            "review_count": sum(actions.values()),
+            "review_approval_rate": _review_approval_rate(actions),
         }
+
+    def _review_actions_for(self, scope_type: str, scope_id: str) -> dict[str, int]:
+        actions: dict[str, int] = {}
+        for review in self.reviews:
+            candidate = self.candidates.get(str(review.get("candidate_id") or ""))
+            if not candidate:
+                continue
+            if candidate.get("scope_type") != scope_type:
+                continue
+            if candidate.get("scope_id") != scope_id:
+                continue
+            action = str(review.get("action") or "")
+            actions[action] = actions.get(action, 0) + 1
+        return actions
 
     def list_active_scopes(self, *, limit: int = 50) -> list[dict[str, Any]]:
         seen: dict[tuple[str, str], None] = {}

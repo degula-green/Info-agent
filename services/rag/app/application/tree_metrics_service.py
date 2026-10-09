@@ -43,6 +43,8 @@ _METRIC_HELP = {
     "mount_coverage": "mounted_chunk_count / message_count",
     "pending_candidate_count": "Candidates waiting for review",
     "relation_count": "Entity-to-entity relations",
+    "review_count": "Candidate review decisions recorded in the scope",
+    "review_approval_rate": "Share of decided reviews that accepted the candidate",
     "entities_missing_embedding": "Active entities without a usable vector",
     "alert_count": "Number of quality guard-rail alerts currently firing",
     "search_query_count": "Retrievals in the metric window",
@@ -110,6 +112,10 @@ def flatten_metrics(snapshot: dict[str, Any]) -> dict[str, float]:
         f"{PROMETHEUS_PREFIX}_mount_coverage": snapshot.get("mount_coverage") or 0.0,
         f"{PROMETHEUS_PREFIX}_pending_candidate_count": snapshot.get("pending_candidate_count") or 0,
         f"{PROMETHEUS_PREFIX}_relation_count": snapshot.get("relation_count") or 0,
+        f"{PROMETHEUS_PREFIX}_review_count": snapshot.get("review_count") or 0,
+        f"{PROMETHEUS_PREFIX}_review_approval_rate": (
+            snapshot.get("review_approval_rate") or 0.0
+        ),
         f"{PROMETHEUS_PREFIX}_entities_missing_embedding": (
             snapshot.get("entities_missing_embedding") or 0
         ),

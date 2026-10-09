@@ -269,6 +269,85 @@ class TestSearchMetrics:
         assert snapshot["search"]["resolved_entity_rate"] == 1.0
 
 
+class TestReviewMetrics:
+    """审核吞吐：批准率与拒绝率从审核记录直接推出，不需要新的埋点表。"""
+
+    def _reviewed_candidates(self):
+        repo = InMemoryRagMVPRepository()
+        chunk = _chunk(1)
+        repo.upsert_chunks([chunk])
+        candidate_ids = [
+            repo.upsert_candidate_mention(
+                scope_type=SCOPE["scope_type"], scope_id=SCOPE["scope_id"],
+                candidate_name=f"{name}", normalized_key=f"{name}",
+                domain="project", chunk=chunk, context_excerpt=chunk.content,
+                confidence=0.85, method="llm",
+            )
+            for name in ("A项目", "B项目", "C项目")
+        ]
+        return repo, candidate_ids
+
+    def _review(self, repo, candidate_id, action, index, **extra):
+        repo.review_candidate(
+            scope_type=SCOPE["scope_type"],
+            scope_id=SCOPE["scope_id"],
+            candidate_id=candidate_id,
+            reviewer_id="00000000-0000-0000-0000-000000000099",
+            review_request_id=f"00000000-0000-0000-0000-00000000010{index}",
+            action=action,
+            expected_status="new",
+            canonical_name=f"实体{index}",
+            domain="project",
+            **extra,
+        )
+
+    def test_defer_is_not_counted_as_a_rejection(self):
+        repo, (first, second, third) = self._reviewed_candidates()
+        self._review(repo, first, "promote", 1)
+        self._review(repo, second, "ignore", 2)
+        self._review(repo, third, "defer", 3)
+
+        metrics = repo.tree_metrics(**SCOPE)
+
+        assert metrics["review_actions"] == {"promote": 1, "ignore": 1, "defer": 1}
+        assert metrics["review_count"] == 3
+        # One approval, one rejection, one "later": 1/2, not 1/3.
+        assert metrics["review_approval_rate"] == 0.5
+
+    def test_no_reviews_reports_zero_without_dividing_by_zero(self):
+        repo, _ = self._reviewed_candidates()
+
+        metrics = repo.tree_metrics(**SCOPE)
+
+        assert metrics["review_count"] == 0
+        assert metrics["review_approval_rate"] == 0.0
+
+    def test_merge_counts_as_an_approval(self):
+        repo, (first, second, _) = self._reviewed_candidates()
+        target = repo.upsert_entity(
+            scope_type=SCOPE["scope_type"],
+            scope_id=SCOPE["scope_id"],
+            domain="project",
+            canonical_name="既有实体",
+            normalized_key="既有实体",
+        )["id"]
+        self._review(repo, first, "merge", 4, target_entity_id=target)
+        self._review(repo, second, "ignore", 5)
+
+        metrics = repo.tree_metrics(**SCOPE)
+
+        assert metrics["review_approval_rate"] == 0.5
+
+    def test_the_snapshot_carries_review_metrics(self):
+        repo, (first, _, _) = self._reviewed_candidates()
+        self._review(repo, first, "promote", 6)
+
+        snapshot = TreeMetricsService(repository=repo).snapshot(**SCOPE)
+
+        assert snapshot["review_count"] == 1
+        assert snapshot["review_approval_rate"] == 1.0
+
+
 class TestScanMetrics:
     def test_empty_history_reports_zeros(self):
         summary = summarize_scan_runs([])
@@ -325,7 +404,8 @@ class TestPrometheusRendering:
         values = flatten_metrics({
             "entity_count": 4, "message_count": 100, "mounted_chunk_count": 25,
             "mount_count": 30, "mount_coverage": 0.25, "pending_candidate_count": 7,
-            "relation_count": 3, "entities_missing_embedding": 1,
+            "relation_count": 3, "review_count": 5, "review_approval_rate": 0.6,
+            "entities_missing_embedding": 1,
             "alerts": ["no_mounts"],
             "search": {"query_count": 10, "retrieval_query_count": 8,
                        "shadow_skipped_count": 2,
@@ -340,6 +420,8 @@ class TestPrometheusRendering:
         assert values["rag_tree_entity_count"] == 4
         assert values["rag_tree_mount_coverage"] == 0.25
         assert values["rag_tree_alert_count"] == 1
+        assert values["rag_tree_review_count"] == 5
+        assert values["rag_tree_review_approval_rate"] == 0.6
         assert values["rag_tree_search_query_count"] == 10
         assert values["rag_tree_search_retrieval_query_count"] == 8
         assert values["rag_tree_search_shadow_skipped_count"] == 2
