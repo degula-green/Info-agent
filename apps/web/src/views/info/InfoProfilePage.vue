@@ -461,7 +461,18 @@ async function retryGovernance(request: DeletionRequestDTO) {
 }
 
 function deletionStatusLabel(status: string) {
-  return ({ pending: '待审批', approved: '已通过', rejected: '已拒绝', executing: '执行中', completed: '已完成', failed: '失败' } as Record<string, string>)[status] || status
+  return ({
+    pending: '待审批',
+    approved: '已通过',
+    rejected: '已拒绝',
+    executing: '执行中',
+    completed: '已完成',
+    failed: '失败',
+    cancelled: '已关闭',
+    superseded: '已合并',
+    expired: '已过期',
+    revoked: '已撤销',
+  } as Record<string, string>)[status] || status
 }
 
 function deletionStatusTheme(status: string) {
