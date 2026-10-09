@@ -202,6 +202,14 @@ class Settings:
     # an error, so this must stay generous.
     extract_max_tokens: int = _int("RAG_EXTRACT_MAX_TOKENS", 4000)
     extract_max_retries: int = _int("RAG_EXTRACT_MAX_RETRIES", 2)
+    # A failed sweep re-runs whole conversations (the watermark only advances
+    # when every window succeeds), so the same window is extracted again. The
+    # cache turns those repeats into a dictionary hit.
+    extract_cache_enabled: bool = _bool("RAG_EXTRACT_CACHE_ENABLED", True)
+    extract_cache_size: int = _int("RAG_EXTRACT_CACHE_SIZE", 512)
+    # Minimum spacing between call starts; 0 disables. Concurrency bounds calls
+    # in flight, this bounds call starts per second.
+    extract_min_interval_ms: int = _int("RAG_EXTRACT_MIN_INTERVAL_MS", 0)
     # Concurrency is for the window scan worker, not for a single request.
     extract_concurrency: int = _int("RAG_EXTRACT_CONCURRENCY", 8)
     # Sliding window over a conversation. 20 messages keeps a topic in view;

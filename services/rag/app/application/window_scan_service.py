@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from typing import Any, Iterable, Sequence
 
 from app.application.entity_service import EntityMatcher, match_chunk_mounts
+from app.application.extraction_cache import CallRateLimiter, ExtractionCache
 from app.config import settings
 from app.domain.rag import Chunk, Entity, EntityAlias, EntityMount, normalized_text
 from app.infrastructure.extraction.client import EntityExtractionClient, ExtractionError
@@ -127,6 +128,8 @@ class EntityWindowScanWorker:
         window_step: int | None = None,
         max_chunks_per_conversation: int = 500,
         concurrency: int | None = None,
+        cache: ExtractionCache | None = None,
+        rate_limiter: CallRateLimiter | None = None,
     ) -> None:
         self.repository = repository
         self.extractor = extractor
@@ -136,6 +139,15 @@ class EntityWindowScanWorker:
         # Only one conversation at a time, but its windows are independent IO
         # waits, so they overlap up to this bound.
         self.concurrency = max(1, int(concurrency or settings.extract_concurrency))
+        if cache is not None:
+            self.cache = cache
+        elif settings.extract_cache_enabled:
+            self.cache = ExtractionCache(max_entries=settings.extract_cache_size)
+        else:
+            self.cache = None
+        self.rate_limiter = rate_limiter or CallRateLimiter(
+            min_interval_seconds=settings.extract_min_interval_ms / 1000.0
+        )
 
     def run_once(self, *, conversation_limit: int = 5) -> WindowScanOutcome:
         outcome = WindowScanOutcome()
@@ -155,7 +167,29 @@ class EntityWindowScanWorker:
         for (scope_type, scope_id), scoped in per_scope.items():
             merge_outcome(outcome, scoped)
             self._record_scan_run(scope_type, scope_id, scoped)
+        if self.cache is not None:
+            stats = self.cache.stats()
+            if stats["hits"]:
+                # Only worth a line when it actually saved calls.
+                logger.info(
+                    "window scan reused %s extraction(s): %s",
+                    stats["hits"], stats,
+                )
         return outcome
+
+    def _extract(self, prompt: str) -> dict[str, Any]:
+        """One model call: cached when repeated, spaced when rate limited."""
+        if self.cache is not None:
+            cached = self.cache.get(prompt)
+            if cached is not None:
+                return cached
+        self.rate_limiter.wait()
+        payload = self.extractor.extract(prompt)
+        # Only successful calls reach here; a raise must never be cached as if
+        # the model had answered.
+        if self.cache is not None:
+            self.cache.put(prompt, payload)
+        return payload
 
     def _record_scan_run(
         self, scope_type: str, scope_id: str, scoped: WindowScanOutcome
@@ -270,7 +304,7 @@ class EntityWindowScanWorker:
     ) -> WindowResult:
         result = WindowResult()
         prompt = build_extraction_prompt(window)
-        payload = self.extractor.extract(prompt)
+        payload = self._extract(prompt)
         extracted = clean_entities(payload.get("entities"))
         result.entities = len(extracted)
         relations = clean_relations(payload.get("relations"))

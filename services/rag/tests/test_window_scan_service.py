@@ -182,6 +182,50 @@ def test_successful_scan_advances_the_watermark_and_is_not_rescanned():
     ) == "2026-10-01T00:04:00Z"
 
 
+class FlakyExtractor:
+    """Fails on one specific call, then behaves."""
+
+    def __init__(self, *, fail_on_call):
+        self.fail_on_call = fail_on_call
+        self.calls = 0
+        self.prompts = []
+
+    def extract(self, prompt):
+        self.calls += 1
+        self.prompts.append(prompt)
+        if self.calls == self.fail_on_call:
+            raise ExtractionError("boom", retryable=True)
+        return {"entities": [], "relations": []}
+
+
+def test_a_retried_sweep_only_pays_for_the_window_that_failed():
+    # The watermark only advances when every window succeeds, so a single failed
+    # window sends the whole conversation back through extraction. The cache is
+    # what stops the already-successful windows from being paid for twice.
+    repo = _repository_with_messages(4)
+    extractor = FlakyExtractor(fail_on_call=3)
+    worker = EntityWindowScanWorker(
+        repository=repo,
+        extractor=extractor,
+        window_size=2,
+        window_step=1,
+        concurrency=1,
+    )
+
+    first = worker.run_once()
+
+    # 4 messages / size 2 / step 1 -> 3 windows, all attempted.
+    assert first.failed_conversations == 1
+    assert extractor.calls == 3
+
+    second = worker.run_once()
+
+    assert second.failed_conversations == 0
+    assert second.windows == 3
+    # Two windows came from the cache; only the one that failed was re-called.
+    assert extractor.calls == 4
+
+
 def test_relations_need_both_endpoints_to_resolve():
     repo = _repository_with_messages(3)
     for name, domain in (("张三", "person"), ("A项目", "project")):
@@ -281,6 +325,21 @@ def test_prompt_carries_no_known_entity_list():
     assert "existing_entity_id" not in prompt
     # The registry id must not leak into the prompt either.
     assert entity_id not in prompt
+
+
+def test_the_prompt_is_deterministic_so_the_cache_can_actually_hit():
+    # The cache keys on the prompt. If anything time-dependent or unordered
+    # leaked into it, every retry would miss and the cache would be dead weight
+    # that looked like it was working.
+    repo = _repository_with_messages(4)
+    chunks = repo.list_conversation_chunks(
+        scope_type=SCOPE["scope_type"],
+        scope_id=SCOPE["scope_id"],
+        conversation_id=CONVERSATION,
+    )
+    window = build_windows(chunks, 2, 1)[1]
+
+    assert build_extraction_prompt(window) == build_extraction_prompt(list(window))
 
 
 def test_windows_run_concurrently_and_totals_still_add_up():
