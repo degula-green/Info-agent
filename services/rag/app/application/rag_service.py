@@ -236,6 +236,14 @@ class RAGRetrievalService:
                 "unresolved": list(locate.scope.unresolved) if locate else [],
             },
             "locate": locate.diagnostics if locate else None,
+            # Lifted out of the per-mention trace so the plan's "常规路径定位
+            # p95 <= 80ms" gate can be read as a number instead of eyeballed.
+            "locate_ms": float((locate.diagnostics or {}).get("locate_ms") or 0.0)
+            if locate
+            else 0.0,
+            "locate_layer_ms": (locate.diagnostics or {}).get("layer_ms")
+            if locate
+            else None,
             # Lifted out of the per-mention trace so the L4 call rate is a single
             # queryable flag rather than nested JSON.
             "locate_llm_invoked": bool(

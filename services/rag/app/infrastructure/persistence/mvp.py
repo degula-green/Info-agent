@@ -2400,6 +2400,7 @@ class PostgresRagMVPRepository:
                                COALESCE(diagnostics->>'degraded_reason',''),
                                COALESCE((diagnostics->>'locate_llm_invoked')::boolean,false),
                                COALESCE((diagnostics->>'resolved_entity_count')::int,0),
+                               COALESCE((diagnostics->>'locate_ms')::double precision,0),
                                COALESCE(duration_ms,0)
                         FROM {self.schema}.search_history
                         WHERE scope_type=%s AND scope_id=%s::uuid
@@ -2417,7 +2418,8 @@ class PostgresRagMVPRepository:
                         "degraded_reason": row[2] or "",
                         "llm_invoked": bool(row[3]),
                         "resolved_entity_count": int(row[4] or 0),
-                        "duration_ms": int(row[5] or 0),
+                        "locate_ms": float(row[5] or 0.0),
+                        "duration_ms": int(row[6] or 0),
                     }
                     for row in cursor.fetchall()
                 ]
@@ -4022,6 +4024,7 @@ class InMemoryRagMVPRepository:
                 "degraded_reason": str(diagnostics.get("degraded_reason") or ""),
                 "llm_invoked": bool(diagnostics.get("locate_llm_invoked")),
                 "resolved_entity_count": int(diagnostics.get("resolved_entity_count") or 0),
+                "locate_ms": float(diagnostics.get("locate_ms") or 0.0),
                 "duration_ms": int(item.get("duration_ms") or 0),
             })
             if len(output) >= max(1, int(limit)):

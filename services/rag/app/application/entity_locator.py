@@ -14,6 +14,7 @@ Design constraints that shape this module:
 
 from __future__ import annotations
 
+import time
 from typing import Any, Callable, Sequence
 
 from app.application.entity_service import discover_candidate_names
@@ -41,6 +42,31 @@ _DEICTIC_PHRASES = (
 _LLM_GATE_SCORE = 0.85
 # Top-1/top-2 gap below which the semantic layer cannot separate candidates.
 _LLM_GATE_GAP = 0.08
+
+
+def _ms(started: float) -> float:
+    """Elapsed milliseconds, rounded to microsecond precision."""
+    return round((time.perf_counter() - started) * 1000, 3)
+
+
+def _layer_totals(
+    traces: Sequence[dict[str, Any]], stage_ms: dict[str, float]
+) -> dict[str, float]:
+    """Sum per-mention layer times into one figure per layer.
+
+    Location runs once per mention, so a two-mention query performs two L1
+    lookups. The budget is per query, so layers are summed, not averaged.
+    """
+    totals = {layer: round(float(value), 3) for layer, value in stage_ms.items()}
+    for trace in traces:
+        for entry in trace.get("layer_trace") or []:
+            layer = str(entry.get("layer") or "")
+            if not layer:
+                continue
+            totals[layer] = round(
+                totals.get(layer, 0.0) + float(entry.get("elapsed_ms") or 0.0), 3
+            )
+    return totals
 
 
 class MentionVerifierLike:
@@ -73,12 +99,20 @@ class EntityLocator:
         self.max_entities = max_entities or settings.tree_max_entities
 
     def locate(self, request: LocateRequest) -> LocateResult:
+        started = time.perf_counter()
+        # L0 covers the registry read and mention extraction together: both are
+        # pure in-process work that runs before any candidate lookup, and the
+        # plan's 80ms budget is about this whole locating stage.
+        l0_started = time.perf_counter()
         entities, aliases, version = self.repository.load_entity_registry(
             scope_type=request.scope_type, scope_id=request.scope_id
         )
         mentions = extract_mentions(request.query, entities, aliases)
+        stage_ms: dict[str, float] = {"L0": _ms(l0_started)}
         if not mentions:
-            return self._empty_result(request, version, mentions)
+            return self._empty_result(
+                request, version, mentions, stage_ms=stage_ms, total_ms=_ms(started)
+            )
 
         located: list[LocatedEntity] = []
         unresolved: list[str] = []
@@ -91,7 +125,13 @@ class EntityLocator:
             else:
                 located.extend(resolutions)
 
-        return self._summarize(request, mentions, located, unresolved, traces, version)
+        l5_started = time.perf_counter()
+        result = self._summarize(
+            request, mentions, located, unresolved, traces, version,
+            stage_ms=stage_ms, total_ms=_ms(started),
+        )
+        result.diagnostics["layer_ms"]["L5"] = _ms(l5_started)
+        return result
 
     # ------------------------------------------------------------------ L1-L4
 
@@ -110,31 +150,43 @@ class EntityLocator:
         }
 
         # L1: exact canonical name or alias, all matches kept.
+        l1_started = time.perf_counter()
         exact = self.repository.locate_entities_exact(
             scope_type=request.scope_type,
             scope_id=request.scope_id,
             normalized=mention.normalized_form,
         )
-        trace["layer_trace"].append({"layer": "L1", "method": "exact", "candidate_count": len(exact)})
+        trace["layer_trace"].append({
+            "layer": "L1", "method": "exact",
+            "candidate_count": len(exact), "elapsed_ms": _ms(l1_started),
+        })
         candidates = [self._candidate(item) for item in exact]
 
         # L2: trigram / edit distance / containment. Containment results are
         # carried forward but not trusted on their own.
         if not candidates:
+            l2_started = time.perf_counter()
             fuzzy = self.repository.locate_entities_fuzzy(
                 scope_type=request.scope_type,
                 scope_id=request.scope_id,
                 normalized=mention.normalized_form,
             )
-            trace["layer_trace"].append({"layer": "L2", "method": "fuzzy", "candidate_count": len(fuzzy)})
+            trace["layer_trace"].append({
+                "layer": "L2", "method": "fuzzy",
+                "candidate_count": len(fuzzy), "elapsed_ms": _ms(l2_started),
+            })
             candidates = [self._candidate(item) for item in fuzzy]
 
         # L3: semantic. Runs when the lexical layers produced nothing *or* only
         # produced weak matches: a containment hit at 0.70 must not short-circuit
         # the layer that exists to resolve abbreviations ("aims").
         if (not candidates or max(item.match_score for item in candidates) < _LLM_GATE_SCORE) and self.embedding is not None:
+            l3_started = time.perf_counter()
             semantic = self._semantic_candidates(request, mention)
-            trace["layer_trace"].append({"layer": "L3", "method": "semantic", "candidate_count": len(semantic)})
+            trace["layer_trace"].append({
+                "layer": "L3", "method": "semantic",
+                "candidate_count": len(semantic), "elapsed_ms": _ms(l3_started),
+            })
             if semantic:
                 merged = {item.entity_id: item for item in candidates}
                 for item in semantic:
@@ -153,8 +205,13 @@ class EntityLocator:
         chosen = candidates[0]
         accepted: list[EntityCandidate]
         if self._needs_verification(mention, candidates, exact) and request.allow_llm and self.verifier is not None:
+            l4_started = time.perf_counter()
             verified = self._verify(request, mention, candidates)
             trace["llm_invoked"] = True
+            trace["layer_trace"].append({
+                "layer": "L4", "method": "llm",
+                "candidate_count": len(candidates), "elapsed_ms": _ms(l4_started),
+            })
             accepted = [verified] if verified is not None else []
         elif exact:
             # An exact name may legitimately exist in two domains; keep every
@@ -297,11 +354,15 @@ class EntityLocator:
         unresolved: Sequence[str],
         traces: Sequence[dict[str, Any]],
         version: int,
+        *,
+        stage_ms: dict[str, float],
+        total_ms: float,
     ) -> LocateResult:
         entity_ids = tuple(dict.fromkeys(item.entity_id for item in located))
         entity_ids = entity_ids[: self.max_entities]
         keep = set(entity_ids)
         located = tuple(item for item in located if item.entity_id in keep)
+        layer_ms = _layer_totals(traces, stage_ms)
         return LocateResult(
             entities=located,
             scope=EntityScope(
@@ -317,11 +378,19 @@ class EntityLocator:
                 "located_count": len(located),
                 "unresolved_count": len(unresolved),
                 "mentions": list(traces),
+                "locate_ms": total_ms,
+                "layer_ms": layer_ms,
             },
         )
 
     def _empty_result(
-        self, request: LocateRequest, version: int, mentions: Sequence[EntityMention]
+        self,
+        request: LocateRequest,
+        version: int,
+        mentions: Sequence[EntityMention],
+        *,
+        stage_ms: dict[str, float] | None = None,
+        total_ms: float = 0.0,
     ) -> LocateResult:
         return LocateResult(
             entities=(),
@@ -338,6 +407,8 @@ class EntityLocator:
                 "located_count": 0,
                 "unresolved_count": len(mentions),
                 "mentions": [],
+                "locate_ms": total_ms,
+                "layer_ms": _layer_totals((), stage_ms or {}),
             },
         )
 

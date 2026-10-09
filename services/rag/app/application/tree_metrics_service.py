@@ -52,6 +52,10 @@ _METRIC_HELP = {
     "search_l4_invocation_rate": "Share of retrievals that escalated to L4",
     "search_latency_p50_ms": "Retrieval latency p50 in milliseconds",
     "search_latency_p95_ms": "Retrieval latency p95 in milliseconds",
+    "search_locate_p50_ms": "Entity location latency p50 in milliseconds (L4 excluded)",
+    "search_locate_p95_ms": "Entity location latency p95 in milliseconds (L4 excluded)",
+    "search_locate_sample_count": "Retrievals that ran location without escalating to L4",
+    "search_locate_escalated_p95_ms": "Entity location latency p95 for L4-escalated retrievals",
     "scan_window_count": "Windows processed by recent scans",
     "scan_empty_window_ratio": "Share of scanned windows the model returned empty for",
     "scan_mount_count": "Mounts written by recent scans",
@@ -95,6 +99,8 @@ def flatten_metrics(snapshot: dict[str, Any]) -> dict[str, float]:
     search = snapshot.get("search") or {}
     scan = snapshot.get("scan") or {}
     latency = search.get("latency_ms") or {}
+    locate = search.get("locate_latency_ms") or {}
+    escalated = search.get("locate_escalated_ms") or {}
     return {
         f"{PROMETHEUS_PREFIX}_entity_count": snapshot.get("entity_count") or 0,
         f"{PROMETHEUS_PREFIX}_message_count": snapshot.get("message_count") or 0,
@@ -122,6 +128,14 @@ def flatten_metrics(snapshot: dict[str, Any]) -> dict[str, float]:
         ),
         f"{PROMETHEUS_PREFIX}_search_latency_p50_ms": latency.get("p50") or 0,
         f"{PROMETHEUS_PREFIX}_search_latency_p95_ms": latency.get("p95") or 0,
+        f"{PROMETHEUS_PREFIX}_search_locate_p50_ms": locate.get("p50") or 0,
+        f"{PROMETHEUS_PREFIX}_search_locate_p95_ms": locate.get("p95") or 0,
+        f"{PROMETHEUS_PREFIX}_search_locate_sample_count": (
+            locate.get("sample_count") or 0
+        ),
+        f"{PROMETHEUS_PREFIX}_search_locate_escalated_p95_ms": (
+            escalated.get("p95") or 0
+        ),
         f"{PROMETHEUS_PREFIX}_scan_window_count": scan.get("windows") or 0,
         f"{PROMETHEUS_PREFIX}_scan_empty_window_ratio": (
             scan.get("empty_window_ratio") or 0.0
@@ -202,6 +216,8 @@ def summarize_search(
     fallbacks: dict[str, int] = {}
     degraded: dict[str, int] = {}
     durations: list[int] = []
+    locate_durations: list[int] = []
+    escalated_durations: list[int] = []
     llm_invoked = 0
     resolved = 0
     unmatched = 0
@@ -217,20 +233,36 @@ def summarize_search(
                 degraded[value] = degraded.get(value, 0) + 1
     for row in attempts:
         durations.append(int(row.get("duration_ms") or 0))
-        if row.get("llm_invoked"):
+        invoked = bool(row.get("llm_invoked"))
+        # The plan keeps the escalated (L4) path out of the normal percentile:
+        # one LLM round trip would otherwise define the "常规路径" number.
+        locate_ms = int(float(row.get("locate_ms") or 0.0))
+        if locate_ms > 0:
+            (escalated_durations if invoked else locate_durations).append(locate_ms)
+        if invoked:
             llm_invoked += 1
         if int(row.get("resolved_entity_count") or 0) > 0:
             resolved += 1
         if str(row.get("fallback_reason") or "").strip() == "no_entity_match":
             unmatched += 1
     durations.sort()
+    locate_durations.sort()
+    escalated_durations.sort()
     attempted = len(attempts)
 
-    def percentile(fraction: float) -> int:
-        if not durations:
+    def percentile(values: list[int], fraction: float) -> int:
+        if not values:
             return 0
-        index = min(len(durations) - 1, int(len(durations) * fraction))
-        return durations[index]
+        index = min(len(values) - 1, int(len(values) * fraction))
+        return values[index]
+
+    def distribution(values: list[int]) -> dict[str, int]:
+        return {
+            "p50": percentile(values, 0.5),
+            "p95": percentile(values, 0.95),
+            "max": values[-1] if values else 0,
+            "sample_count": len(values),
+        }
 
     return {
         "window_hours": int(window_hours),
@@ -242,11 +274,9 @@ def summarize_search(
         "resolved_entity_rate": round(resolved / attempted, 4) if attempted else 0.0,
         "no_entity_match_rate": round(unmatched / attempted, 4) if attempted else 0.0,
         "l4_invocation_rate": round(llm_invoked / attempted, 4) if attempted else 0.0,
-        "latency_ms": {
-            "p50": percentile(0.5),
-            "p95": percentile(0.95),
-            "max": durations[-1] if durations else 0,
-        },
+        "latency_ms": distribution(durations),
+        "locate_latency_ms": distribution(locate_durations),
+        "locate_escalated_ms": distribution(escalated_durations),
     }
 
 

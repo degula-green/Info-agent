@@ -194,3 +194,40 @@ def test_semantic_layer_runs_when_lexical_layers_miss():
     assert embedding.calls == 1
     assert result.scope.entity_ids == (entity_id,)
     assert result.entities[0].match_method == "semantic"
+
+
+def test_location_reports_a_number_for_every_layer_it_ran():
+    repo = InMemoryRagMVPRepository()
+    _entity(repo, "青云飞鹏")
+
+    result = _locate(repo, "青云飞鹏的服务器配置")
+
+    layers = result.diagnostics["layer_ms"]
+    # L0 covers the registry read plus mention extraction, so it always runs.
+    assert layers["L0"] >= 0.0
+    assert layers["L1"] >= 0.0
+    assert result.diagnostics["locate_ms"] >= layers["L0"]
+    trace = result.diagnostics["mentions"][0]["layer_trace"]
+    assert [entry["layer"] for entry in trace] == ["L1"]
+    assert trace[0]["elapsed_ms"] >= 0.0
+
+
+def test_layer_time_sums_across_mentions():
+    # Location is per mention, so a two-mention query does two L1 lookups. The
+    # reported figure has to be the query's cost, not one mention's.
+    repo = InMemoryRagMVPRepository()
+    _entity(repo, "张三", domain="person")
+    _entity(repo, "A项目")
+
+    result = _locate(repo, "张三在A项目")
+
+    entries = [
+        entry
+        for trace in result.diagnostics["mentions"]
+        for entry in trace["layer_trace"]
+        if entry["layer"] == "L1"
+    ]
+    assert len(entries) == 2
+    assert result.diagnostics["layer_ms"]["L1"] == round(
+        sum(entry["elapsed_ms"] for entry in entries), 3
+    )

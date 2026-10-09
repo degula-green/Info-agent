@@ -120,7 +120,9 @@ class TestSearchMetrics:
         assert summary["query_count"] == 0
         assert summary["no_entity_match_rate"] == 0.0
         assert summary["l4_invocation_rate"] == 0.0
-        assert summary["latency_ms"] == {"p50": 0, "p95": 0, "max": 0}
+        assert summary["latency_ms"] == {"p50": 0, "p95": 0, "max": 0, "sample_count": 0}
+        assert summary["locate_latency_ms"]["sample_count"] == 0
+        assert summary["locate_escalated_ms"]["sample_count"] == 0
 
     def test_rates_and_reason_buckets(self):
         rows = [
@@ -175,7 +177,32 @@ class TestSearchMetrics:
         assert summary["no_entity_match_rate"] == 1.0
         assert summary["resolved_entity_rate"] == 0.0
         # The slow exports no longer set the retrieval latency percentiles.
-        assert summary["latency_ms"] == {"p50": 60, "p95": 60, "max": 60}
+        assert summary["latency_ms"] == {"p50": 60, "p95": 60, "max": 60, "sample_count": 10}
+
+    def test_locate_percentile_keeps_the_l4_path_out(self):
+        rows = [
+            {"execution_path": "tree", "fallback_reason": "", "degraded_reason": "",
+             "llm_invoked": False, "resolved_entity_count": 1,
+             "locate_ms": ms, "duration_ms": 40}
+            for ms in (10.0, 20.0, 30.0, 40.0)
+        ] + [
+            {"execution_path": "tree", "fallback_reason": "", "degraded_reason": "",
+             "llm_invoked": True, "resolved_entity_count": 1,
+             "locate_ms": 4800.0, "duration_ms": 5200},
+        ]
+
+        summary = summarize_search(rows)
+
+        # A query that escalated to L4 is counted separately: one LLM round trip
+        # would otherwise become the "常规路径" percentile.
+        assert summary["locate_latency_ms"] == {
+            "p50": 30, "p95": 40, "max": 40, "sample_count": 4,
+        }
+        assert summary["locate_escalated_ms"] == {
+            "p50": 4800, "p95": 4800, "max": 4800, "sample_count": 1,
+        }
+        # The whole-retrieval percentile still covers every attempt.
+        assert summary["latency_ms"]["sample_count"] == 5
 
     def test_export_only_window_raises_no_alert(self):
         rows = [
@@ -277,7 +304,9 @@ class TestPrometheusRendering:
             "search": {"query_count": 10, "retrieval_query_count": 8,
                        "no_entity_match_rate": 0.2,
                        "resolved_entity_rate": 0.8, "l4_invocation_rate": 0.1,
-                       "latency_ms": {"p50": 120, "p95": 900}},
+                       "latency_ms": {"p50": 120, "p95": 900},
+                       "locate_latency_ms": {"p50": 18, "p95": 42, "sample_count": 7},
+                       "locate_escalated_ms": {"p95": 4100, "sample_count": 1}},
             "scan": {"windows": 20, "empty_window_ratio": 0.15, "mounts": 5, "candidates": 9},
         })
 
@@ -287,6 +316,9 @@ class TestPrometheusRendering:
         assert values["rag_tree_search_query_count"] == 10
         assert values["rag_tree_search_retrieval_query_count"] == 8
         assert values["rag_tree_search_latency_p95_ms"] == 900
+        assert values["rag_tree_search_locate_p95_ms"] == 42
+        assert values["rag_tree_search_locate_sample_count"] == 7
+        assert values["rag_tree_search_locate_escalated_p95_ms"] == 4100
         assert values["rag_tree_scan_empty_window_ratio"] == 0.15
 
     def test_flattening_a_bare_scope_yields_zeros(self):

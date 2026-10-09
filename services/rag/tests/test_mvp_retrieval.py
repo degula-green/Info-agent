@@ -187,6 +187,10 @@ class RetrievalTests(unittest.TestCase):
         self.assertTrue(any(not call[1].get("entity_ids") for call in indexer.calls))
         self.assertEqual(response.diagnostics["effective_execution_path"], "tree")
         self.assertEqual(response.diagnostics["authorization_candidate_count"], 1)
+        # The 80ms location gate reads these two fields, so a tree-mode search
+        # has to carry them out of the request.
+        self.assertGreater(response.diagnostics["locate_ms"], 0)
+        self.assertIn("L1", response.diagnostics["locate_layer_ms"])
         self.assertEqual(service.authorization.batch_sizes, [1])
 
     def test_logical_dedupe_prefers_protected(self) -> None:
