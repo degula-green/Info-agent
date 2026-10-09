@@ -86,6 +86,7 @@ class _RAG:
         self.content_calls: list[dict[str, Any]] = []
         self.tree_calls: list[dict[str, Any]] = []
         self.tree_empty = False
+        self.content_has_more = False
 
     @staticmethod
     def _source(resource_id: str, score: float, name: str) -> dict[str, Any]:
@@ -162,7 +163,7 @@ class _RAG:
             ],
             "returned_source_count": 1,
             "returned_chunk_count": 1,
-            "has_more": False,
+            "has_more": self.content_has_more,
             "diagnostics": {"metadata_coverage": "complete"},
         }
 
@@ -316,6 +317,7 @@ def test_tree_capability_returns_entity_scoped_results() -> None:
 def test_tree_capability_falls_back_to_traditional_content() -> None:
     client = _RAG()
     client.tree_empty = True
+    client.content_has_more = True
     content = KnowledgeSearchContentCapability(client)
     capability = KnowledgeSearchTreeCapability(client, content)
     with bind_execution_context(context()):
@@ -325,6 +327,7 @@ def test_tree_capability_falls_back_to_traditional_content() -> None:
 
     assert output["retrieval_path"] == "traditional_fallback"
     assert output["fallback_reason"] == "no_entity_match"
+    assert output["has_more"] is True
     assert output["returned_source_count"] == 1
     assert output["evidence"][0]["quote"] == "预算内容"
     assert len(client.tree_calls) == 1

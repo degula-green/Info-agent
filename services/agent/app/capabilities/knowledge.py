@@ -483,6 +483,10 @@ class KnowledgeSearchTreeCapability:
             responses=responses,
             diagnostics=tree,
             retrieval_path="traditional_fallback",
+            has_more=bool(fallback.get("has_more")),
+            metadata_coverage=str(
+                fallback.get("metadata_coverage") or tree["metadata_coverage"]
+            ),
             summary=(
                 f"树检索未命中（{tree.get('fallback_reason') or 'empty_scope'}），"
                 "已回退传统检索"
@@ -914,6 +918,8 @@ def _tree_output(
     responses: list[dict[str, Any]],
     diagnostics: dict[str, Any],
     retrieval_path: str,
+    has_more: bool | None = None,
+    metadata_coverage: str | None = None,
     summary: str,
 ) -> SearchTreeOutput:
     return SearchTreeOutput(
@@ -921,9 +927,13 @@ def _tree_output(
         evidence=_answer_evidence(results),
         returned_source_count=len(results),
         returned_chunk_count=sum(len(item.chunks) for item in results),
-        has_more=any(bool(item.get("has_more")) for item in responses),
+        has_more=(
+            any(bool(item.get("has_more")) for item in responses)
+            if has_more is None
+            else has_more
+        ),
         summary=summary,
-        metadata_coverage=diagnostics["metadata_coverage"],
+        metadata_coverage=metadata_coverage or diagnostics["metadata_coverage"],
         retrieval_path=retrieval_path,
         tree_mode=diagnostics["tree_mode"],
         fallback_reason=diagnostics["fallback_reason"],
