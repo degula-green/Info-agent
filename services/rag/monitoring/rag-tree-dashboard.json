@@ -1,0 +1,249 @@
+{
+  "title": "树形 RAG",
+  "uid": "rag-tree",
+  "tags": ["rag", "tree"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "refresh": "1m",
+  "time": { "from": "now-6h", "to": "now" },
+  "templating": {
+    "list": [
+      {
+        "name": "datasource",
+        "label": "数据源",
+        "type": "datasource",
+        "query": "prometheus",
+        "current": {}
+      },
+      {
+        "name": "scope",
+        "label": "Scope",
+        "type": "query",
+        "datasource": { "type": "prometheus", "uid": "${datasource}" },
+        "query": "label_values(rag_tree_entity_count, scope)",
+        "includeAll": true,
+        "multi": true,
+        "current": { "text": "All", "value": "$__all" }
+      }
+    ]
+  },
+  "panels": [
+    {
+      "type": "row",
+      "title": "树规模与覆盖",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 }
+    },
+    {
+      "type": "timeseries",
+      "title": "实体 / 消息 / 已挂载 chunk",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 1 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "rag_tree_entity_count{scope=~\"$scope\"}",
+          "legendFormat": "实体 {{scope}}"
+        },
+        {
+          "refId": "B",
+          "expr": "rag_tree_message_count{scope=~\"$scope\"}",
+          "legendFormat": "消息 {{scope}}"
+        },
+        {
+          "refId": "C",
+          "expr": "rag_tree_mounted_chunk_count{scope=~\"$scope\"}",
+          "legendFormat": "已挂载 {{scope}}"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "挂载覆盖率",
+      "description": "mounted_chunk_count / message_count。冷启动时为 0，此时下游质量指标没有意义。",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 6, "x": 12, "y": 1 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "rag_tree_mount_coverage{scope=~\"$scope\"}",
+          "legendFormat": "{{scope}}"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "质量护栏触发数",
+      "description": "服务内 evaluate_alerts 的结果条数：无挂载 / 候选积压 / 缺向量 / 无关系 / 定位命中率过低 / 空窗口率过高。",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 6, "x": 18, "y": 1 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "rag_tree_alert_count{scope=~\"$scope\"}",
+          "legendFormat": "{{scope}}"
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "定位与检索",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 9 }
+    },
+    {
+      "type": "timeseries",
+      "title": "定位命中率",
+      "description": "分母是真正做了定位的检索数（scope_export 与被采样跳过的 shadow 请求都不计入）。",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 10 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "1 - rag_tree_search_no_entity_match_rate{scope=~\"$scope\"}",
+          "legendFormat": "命中率 {{scope}}"
+        },
+        {
+          "refId": "B",
+          "expr": "rag_tree_search_l4_invocation_rate{scope=~\"$scope\"}",
+          "legendFormat": "L4 调用率 {{scope}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "检索延迟（ms）",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 10 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "rag_tree_search_latency_p50_ms{scope=~\"$scope\"}",
+          "legendFormat": "检索 p50 {{scope}}"
+        },
+        {
+          "refId": "B",
+          "expr": "rag_tree_search_latency_p95_ms{scope=~\"$scope\"}",
+          "legendFormat": "检索 p95 {{scope}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "定位延迟（ms，L4 单列）",
+      "description": "常规路径与升级路径分开看：L4 触发一次就是数百毫秒到数秒，混进常规分位会让这条线失去意义。",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 18 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "rag_tree_search_locate_p50_ms{scope=~\"$scope\"}",
+          "legendFormat": "定位 p50 {{scope}}"
+        },
+        {
+          "refId": "B",
+          "expr": "rag_tree_search_locate_p95_ms{scope=~\"$scope\"}",
+          "legendFormat": "定位 p95 {{scope}}"
+        },
+        {
+          "refId": "C",
+          "expr": "rag_tree_search_locate_escalated_p95_ms{scope=~\"$scope\"}",
+          "legendFormat": "L4 升级 p95 {{scope}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "检索量与被采样跳过的 shadow",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 18 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "rag_tree_search_query_count{scope=~\"$scope\"}",
+          "legendFormat": "总行数 {{scope}}"
+        },
+        {
+          "refId": "B",
+          "expr": "rag_tree_search_retrieval_query_count{scope=~\"$scope\"}",
+          "legendFormat": "实际定位 {{scope}}"
+        },
+        {
+          "refId": "C",
+          "expr": "rag_tree_search_shadow_skipped_count{scope=~\"$scope\"}",
+          "legendFormat": "采样跳过 {{scope}}"
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "窗口扫描与审核",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 26 }
+    },
+    {
+      "type": "timeseries",
+      "title": "窗口扫描",
+      "description": "空窗口率是这里的核心数字：它区分『这段对话本来就没有实体』和『模型跳过了这个窗口』。",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 27 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "rag_tree_scan_window_count{scope=~\"$scope\"}",
+          "legendFormat": "窗口数 {{scope}}"
+        },
+        {
+          "refId": "B",
+          "expr": "rag_tree_scan_empty_window_ratio{scope=~\"$scope\"}",
+          "legendFormat": "空窗口率 {{scope}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "审核吞吐",
+      "description": "批准率的分母只含 promote/merge/ignore；defer 是『稍后』不是『否』。",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 27 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "rag_tree_review_count{scope=~\"$scope\"}",
+          "legendFormat": "审核数 {{scope}}"
+        },
+        {
+          "refId": "B",
+          "expr": "rag_tree_review_approval_rate{scope=~\"$scope\"}",
+          "legendFormat": "批准率 {{scope}}"
+        },
+        {
+          "refId": "C",
+          "expr": "rag_tree_review_duration_avg_seconds{scope=~\"$scope\"}",
+          "legendFormat": "平均停留(秒) {{scope}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "候选积压与关系",
+      "description": "待审候选长期居高说明审核跟不上扫描，树无法增长，下游质量指标会一直是空的。",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 35 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "rag_tree_pending_candidate_count{scope=~\"$scope\"}",
+          "legendFormat": "待审候选 {{scope}}"
+        },
+        {
+          "refId": "B",
+          "expr": "rag_tree_relation_count{scope=~\"$scope\"}",
+          "legendFormat": "关系数 {{scope}}"
+        },
+        {
+          "refId": "C",
+          "expr": "rag_tree_entities_missing_embedding{scope=~\"$scope\"}",
+          "legendFormat": "缺向量实体 {{scope}}"
+        }
+      ]
+    }
+  ]
+}

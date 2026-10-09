@@ -3,7 +3,7 @@
 - **阶段**: Phase 2 补齐（Week 8 Day 3-4「指标与看板」——抓取与告警部分）
 - **分支**: `codex/tree-rag-v2`
 - **完成日期**: 2026-10-09
-- **状态**: 抓取配置与告警规则完成并校验；**Grafana 面板与监控栈本身未部署**（见第 5 节）
+- **状态**: 抓取配置、告警规则、Grafana 面板定义完成并校验；**监控栈本身未部署**（见第 5 节）
 - **关联文档**: 树形RAG实施计划.md (v2.5 §4.2.3)、树形RAG-指标暴露与口径修正-交付文档.md
 
 ## 1. 起点：端点有了，抓取合同还没有
@@ -69,6 +69,22 @@ Token 走 `credentials_file` 而不是内联，避免它出现在配置和配置
 
 两条比率型告警都带最小样本量，避免冷启动时被 0 值误报。
 
+### 3.3 Grafana 面板（`monitoring/rag-tree-dashboard.json`）
+
+看板定义写成与数据源无关的 JSON，因此**不需要先引入监控栈就能交付**。之前不愿先写
+面板的理由是"硬编码数据源 uid 会变成导入即报错的产物"，用模板变量把这个理由消掉了：
+
+```text
+数据源      `${datasource}` 模板变量，不硬编码 uid
+Scope 变量  label_values(rag_tree_entity_count, scope)，支持多选与 All
+面板分组    树规模与覆盖 / 定位与检索 / 窗口扫描与审核
+刷新        1m，与 60s 抓取间隔对齐（抓取本身约 10s，不要设更密）
+```
+
+两条"容易被读错"的口径直接写在面板描述里，因为写在看板上比写在文档里更容易被看到：
+挂载覆盖率冷启动为 0 时下游指标没有意义；定位命中率的分母是**真正做了定位**的检索数
+（`scope_export` 与被采样跳过的 shadow 请求都不计入）。
+
 ## 4. 验收证据
 
 ```text
@@ -97,7 +113,7 @@ Bearer（错误 token）        status=403
 | 项 | 说明 |
 |---|---|
 | **监控栈本身** | 没有部署。`docker` 在本机不可用，且引入 Prometheus + Grafana 属于新增部署组件，按之前的约定需要先确认；这两个文件是 opt-in 的配置片段，不接进 compose 就不会生效 |
-| Grafana 面板 JSON | 没写。面板文件绑定数据源 uid 与 schema 版本，栈还没定时写出来只能靠猜，容易变成"看起来能用但导入报错"的产物。栈定下来后按实际版本生成并不复杂 |
+| 面板能否在目标 Grafana 上导入 | 没有实测（本机没有 Grafana）。JSON 结构、数据源模板变量、PromQL 引用的序列都做了机械校验（含与告警文件同一套"序列必须真实存在"的交叉校验），但 schemaVersion 与具体版本的兼容性要在真实实例上导入一次才算数 |
 | 告警路由 | 只有规则，没有 Alertmanager 配置与通知渠道。这属于运维环境信息，不是本仓库能决定的事 |
 | 服务内护栏与告警的重复 | 两处都定义了阈值（服务内 `evaluate_alerts` 与告警文件）。保留重复是有意的：前者在没有监控栈的环境里靠 `alert_count` 序列可见，后者提供触发历史与静默能力；交叉校验测试保证序列名不会漂移 |
 
@@ -106,8 +122,9 @@ Bearer（错误 token）        status=403
 ```text
 services/rag/monitoring/prometheus-scrape.example.yml   抓取配置（新增）
 services/rag/monitoring/rag-tree-alerts.yml             告警规则（新增）
+services/rag/monitoring/rag-tree-dashboard.json         Grafana 面板定义（新增）
 services/rag/app/routers/health.py                      /metrics 接受 Bearer + 常量时间比较
-services/rag/tests/test_monitoring_config.py            配置与序列交叉校验（新增 4 例）
+services/rag/tests/test_monitoring_config.py            配置与序列交叉校验（7 例，含看板）
 services/rag/tests/test_metrics_auth.py                 token 提取（新增 7 例）
 services/rag/docs/树形RAG实施计划.md                    拆分"指标与看板"完成项与未完成项
 ```
