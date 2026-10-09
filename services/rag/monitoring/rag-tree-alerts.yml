@@ -1,0 +1,94 @@
+# Alerting rules for the tree-RAG metrics.
+#
+# Thresholds mirror the guard rails the service already evaluates in
+# `tree_metrics_service.evaluate_alerts`, so the same state shows up both in the
+# `rag_tree_alert_count` series and as a Prometheus alert with a firing history.
+# Keep this file and that function in step: `tests/test_monitoring_config.py`
+# fails if a rule references a series the service does not expose.
+groups:
+  - name: rag-tree
+    rules:
+      - alert: RagTreeGuardRailFiring
+        expr: rag_tree_alert_count > 0
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "树质量护栏触发（scope {{ $labels.scope }}）"
+          description: >-
+            服务内的质量护栏报出了至少一条问题（无挂载 / 候选积压 / 缺向量 /
+            无关系 / 定位命中率过低 / 空窗口率过高）。看该 scope 的
+            tree-metrics JSON 拿具体条目。
+
+      - alert: RagTreeCandidateBacklog
+        expr: rag_tree_pending_candidate_count > 100
+        for: 1h
+        labels:
+          severity: warning
+        annotations:
+          summary: "待审候选超过 100（scope {{ $labels.scope }}）"
+          description: >-
+            审核跟不上窗口扫描，树无法增长，下游的质量指标也一直是空的。
+
+      - alert: RagTreeNoMounts
+        expr: >-
+          rag_tree_message_count > 0
+          and rag_tree_entity_count > 0
+          and rag_tree_mount_count == 0
+        for: 30m
+        labels:
+          severity: critical
+        annotations:
+          summary: "有实体但没有任何挂载（scope {{ $labels.scope }}）"
+          description: >-
+            注册表里有实体，却没有任何 chunk 能通过实体到达：要么扫描没跑，
+            要么挂载全部失败。
+
+      - alert: RagTreeEntitiesMissingEmbedding
+        expr: >-
+          rag_tree_entity_count > 0
+          and (rag_tree_entities_missing_embedding / rag_tree_entity_count) > 0.2
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "超过 20% 的实体没有向量（scope {{ $labels.scope }}）"
+          description: >-
+            L3 语义匹配对没有向量的实体无能为力，定位会退回到词法层。
+
+      - alert: RagTreeHighNoEntityMatch
+        expr: >-
+          rag_tree_search_retrieval_query_count > 20
+          and rag_tree_search_no_entity_match_rate > 0.5
+        for: 2h
+        labels:
+          severity: warning
+        annotations:
+          summary: "过半检索定位不到实体（scope {{ $labels.scope }}）"
+          description: >-
+            树基本只增加了一次往返而没有收窄范围。注意分母是实际做了定位的
+            检索数，被采样跳过的 shadow 请求不计入。
+
+      - alert: RagTreeHighEmptyWindowRate
+        expr: >-
+          rag_tree_scan_window_count > 10
+          and rag_tree_scan_empty_window_ratio > 0.5
+        for: 2h
+        labels:
+          severity: warning
+        annotations:
+          summary: "过半窗口抽取为空（scope {{ $labels.scope }}）"
+          description: >-
+            抽取模型在花钱却产不出挂载。先确认窗口本身是不是真的没有实体，
+            再查 prompt 或模型参数。
+
+      - alert: RagTreeMetricsUnreachable
+        expr: up{job="rag"} == 0
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: "RAG /metrics 抓取失败"
+          description: >-
+            抓不到指标本身也是一种故障：鉴权头、token 文件或抓取超时都可能
+            是原因（该端点约 10s 完成一次抓取）。

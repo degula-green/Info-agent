@@ -1,0 +1,25 @@
+# Scrape config for the tree-RAG metrics endpoint.
+#
+# Copy the job below into the scrape_configs of the Prometheus that should watch
+# this service. Nothing in this repository deploys Prometheus itself.
+#
+# Two details are not arbitrary:
+#
+# * authorization, not a custom header. Prometheus scrape configs have no
+#   free-form header field, so /metrics also accepts `Authorization: Bearer`.
+#   Put the token in a file (mode 0600) rather than inline so it stays out of
+#   the config and out of any config dump.
+# * 60s interval / 30s timeout. A scrape re-runs a snapshot per active scope
+#   (several queries each) and measured ~9-10s with 15 scopes. A 15s interval
+#   would overlap itself and a 10s timeout would abort the scrape just as it
+#   finished.
+scrape_configs:
+  - job_name: rag
+    scrape_interval: 60s
+    scrape_timeout: 30s
+    metrics_path: /metrics
+    authorization:
+      type: Bearer
+      credentials_file: /etc/prometheus/rag-internal-token
+    static_configs:
+      - targets: ["rag:8000"]
