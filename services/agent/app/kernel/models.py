@@ -81,6 +81,9 @@ class CapabilityInputBinding(BaseModel):
     planner_argument: str
     runtime_argument: str
     source_capability: str
+    # Alternative sources for the same runtime argument. Empty means the
+    # binding accepts only ``source_capability``.
+    source_capabilities: list[str] = Field(default_factory=list)
     source_output: str
     # A comparison or synthesis step often consumes evidence from more than one
     # earlier source. The planner sees an array and the runtime receives a

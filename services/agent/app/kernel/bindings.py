@@ -71,10 +71,14 @@ def bind_plan_references(
                         f"{step.step_id}.{binding.planner_argument} must reference an earlier step"
                     )
                     continue
-                if target.capability != binding.source_capability:
+                accepted_sources = binding.source_capabilities or [
+                    binding.source_capability
+                ]
+                if target.capability not in accepted_sources:
+                    expected = " or ".join(accepted_sources)
                     errors.append(
                         f"{step.step_id}.{binding.planner_argument} references "
-                        f"{target.capability}, expected {binding.source_capability}"
+                        f"{target.capability}, expected {expected}"
                     )
                     continue
                 if reference.output != binding.source_output:
