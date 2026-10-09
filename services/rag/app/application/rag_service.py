@@ -48,6 +48,25 @@ class RetrievalResponse:
     diagnostics: dict[str, Any]
 
 
+# Which retrieval channels an entry point is allowed to use.
+#
+# The split is by entry, not by a deployment-wide switch. The global search box
+# and the agent's content search must stay plain hybrid retrieval (bm25 + knn
+# over the whole scope); the tree is a surface the caller opts into by calling
+# /search/tree. Because a request resolves to exactly one policy, the unscoped
+# and entity-scoped channels never share a fusion step - that is what "keep the
+# tree separate from traditional RAG" means in code.
+#
+# Falling back is deliberately NOT done here: when the tree has nothing to
+# offer, /search/tree returns nothing and a reason. Deciding to ask for
+# traditional retrieval next belongs to the caller (the agent's tool loop).
+TREE_CHANNEL_POLICY = "tree"
+DEFAULT_CHANNEL_POLICY = "hybrid"
+
+
+def channel_policy_for(entry: str) -> str:
+    return TREE_CHANNEL_POLICY if str(entry or "") == "tree" else DEFAULT_CHANNEL_POLICY
+
 class RAGRetrievalService:
     def __init__(
         self,
@@ -88,8 +107,9 @@ class RAGRetrievalService:
         if not scope.available:
             request = replace(request, include_protected=False)
             protected_keys = ()
-        # Rollout control: the deployment default plus the per-scope whitelist
-        # decide the mode, and shadow work is only paid for on sampled queries.
+        # Channel policy for this entry, then the rollout state of the tree
+        # surface. Traditional entries never call the locator at all.
+        policy = channel_policy_for(request.entry)
         tree_mode = resolve_tree_mode(
             default=settings.tree_mode,
             scope_type=request.scope_type,
@@ -97,15 +117,35 @@ class RAGRetrievalService:
             rollout_scopes=parse_rollout_scopes(settings.tree_rollout_scopes),
         )
         shadow_sample = True
-        if tree_mode == "shadow":
-            shadow_sample = shadow_sampled(
-                scope_type=request.scope_type,
-                scope_id=request.scope_id,
-                query=request.query,
-                sample_rate=settings.tree_shadow_sample_rate,
-            )
-        locate = self._locate(request, tree_mode=tree_mode, shadow_sample=shadow_sample)
-        entity_ids = locate.scope.entity_ids if locate is not None else ()
+        tree_reason: str | None = None
+        locate = None
+        entity_ids: tuple[str, ...] = ()
+        if policy == TREE_CHANNEL_POLICY:
+            if tree_mode == "off":
+                tree_reason = "tree_disabled"
+            else:
+                if tree_mode == "shadow":
+                    shadow_sample = shadow_sampled(
+                        scope_type=request.scope_type,
+                        scope_id=request.scope_id,
+                        query=request.query,
+                        sample_rate=settings.tree_shadow_sample_rate,
+                    )
+                if tree_mode == "shadow" and not shadow_sample:
+                    tree_reason = "shadow_not_sampled"
+                else:
+                    locate = self._locate(request, tree_mode=tree_mode, shadow_sample=True)
+                    entity_ids = locate.scope.entity_ids if locate is not None else ()
+                    if not entity_ids:
+                        tree_reason = "no_entity_match"
+        # The unscoped channels run for traditional entries, and for the shadow
+        # phase where the tree is measured but its result is not adopted yet.
+        run_unscoped = policy != TREE_CHANNEL_POLICY or tree_mode == "shadow"
+        run_tree_channels = (
+            policy == TREE_CHANNEL_POLICY
+            and tree_mode in {"shadow", "tree"}
+            and bool(entity_ids)
+        )
         # Strip resolved entity names out of the retrieval text: once the entity
         # is known, the name only biases BM25 towards chunks that repeat it.
         retrieval_request = request
@@ -129,27 +169,31 @@ class RAGRetrievalService:
             except Exception:
                 degraded.append("embedding_failed")
         global_branches: dict[str, list[SearchResult]] = {}
-        try:
-            global_branches["bm25"] = _annotate_branch(
-                "bm25",
-                self.indexer.search_bm25(
-                    retrieval_request,
-                    protected_object_keys=protected_keys,
-                ),
-            )
-            if query_vector is not None:
-                global_branches["knn"] = _annotate_branch(
-                    "knn",
-                    self.indexer.search_knn(
+        # Only the tree entry in tree mode skips this: the whole point of the
+        # split is that a tree request does not pay for an unscoped query it is
+        # not going to use.
+        if run_unscoped:
+            try:
+                global_branches["bm25"] = _annotate_branch(
+                    "bm25",
+                    self.indexer.search_bm25(
                         retrieval_request,
-                        query_vector,
                         protected_object_keys=protected_keys,
                     ),
                 )
-        except Exception as exc:
-            raise SearchUnavailable("Elasticsearch retrieval failed") from exc
+                if query_vector is not None:
+                    global_branches["knn"] = _annotate_branch(
+                        "knn",
+                        self.indexer.search_knn(
+                            retrieval_request,
+                            query_vector,
+                            protected_object_keys=protected_keys,
+                        ),
+                    )
+            except Exception as exc:
+                raise SearchUnavailable("Elasticsearch retrieval failed") from exc
         scoped_branches: dict[str, list[SearchResult]] = {}
-        if tree_mode != "off" and entity_ids:
+        if run_tree_channels:
             try:
                 scoped_branches["branch_bm25"] = _annotate_branch(
                     "bm25",
@@ -172,25 +216,31 @@ class RAGRetrievalService:
             except Exception:
                 degraded.append("branch_failed")
                 scoped_branches = {}
-        effective, execution_path, fallback_reason = select_tree_channels(
+        effective, execution_path, fallback_reason = select_retrieval_channels(
+            policy=policy,
             tree_mode=tree_mode,
             global_branches=global_branches,
             scoped_branches=scoped_branches,
-            resolved_entity_count=len(entity_ids),
+            tree_reason=tree_reason,
             degraded=degraded,
         )
-        related_branches, related_entities = self._expand_relations(
-            request=request,
-            retrieval_request=retrieval_request,
-            entity_ids=entity_ids,
-            scoped_branches=scoped_branches,
-            query_vector=query_vector,
-            protected_keys=protected_keys,
-            degraded=degraded,
-            tree_mode=tree_mode,
-        )
-        if related_branches:
-            effective.update(related_branches)
+        related_branches: dict[str, list[SearchResult]] = {}
+        related_entities: list[dict[str, Any]] = []
+        if run_tree_channels:
+            # Lateral move between nodes: still the tree surface, never a way
+            # back into the unscoped corpus.
+            related_branches, related_entities = self._expand_relations(
+                request=request,
+                retrieval_request=retrieval_request,
+                entity_ids=entity_ids,
+                scoped_branches=scoped_branches,
+                query_vector=query_vector,
+                protected_keys=protected_keys,
+                degraded=degraded,
+                tree_mode=tree_mode,
+            )
+            if related_branches:
+                effective.update(related_branches)
         raw_global_candidate_count = sum(len(value) for value in global_branches.values())
         raw_branch_candidate_count = sum(len(value) for value in scoped_branches.values())
         raw_related_candidate_count = sum(len(value) for value in related_branches.values())
@@ -255,6 +305,9 @@ class RAGRetrievalService:
             max_per_resource=final_max_per_resource,
         )
         diagnostics = {
+            # Which surface this request used. Recorded next to tree_mode so a
+            # "the tree changed my search box" report can be answered from data.
+            "channel_policy": policy,
             "tree_mode": tree_mode,
             # Kept alongside the resolved mode so a rollout can be audited later:
             # "why did this scope run tree?" has to be answerable after the fact.
@@ -634,36 +687,41 @@ def _annotate_branch(branch: str, results: list[SearchResult]) -> list[SearchRes
     return results
 
 
-def select_tree_channels(
+def select_retrieval_channels(
     *,
+    policy: str,
     tree_mode: str,
     global_branches: dict[str, list[SearchResult]],
     scoped_branches: dict[str, list[SearchResult]],
-    resolved_entity_count: int,
+    tree_reason: str | None,
     degraded: list[str],
 ) -> tuple[dict[str, list[SearchResult]], str, str | None]:
-    """Pick the retrieval channels that feed fusion, plus the reason for it.
+    """Pick the channels for one request. Never both at once.
 
-    In `tree` mode the entity-scoped channels lead but the global ones stay in
-    the mix as a low-weight backstop: a wrong entity match should cost ranking
-    quality, not hide every relevant chunk. `shadow` performs the same location
-    work but returns the traditional result, so the two can be compared.
+    Traditional entries return the unscoped result. The tree entry returns the
+    entity-scoped result, or nothing plus a reason - it does **not** substitute
+    the unscoped result, because "should I fall back?" belongs to the caller
+    (the agent's tool loop), not to the retrieval service.
+
+    This replaces the earlier tree-first fusion, which put the entity-scoped and
+    the unscoped channels into one RRF pass. That made the search box's result
+    depend on the tree, which is exactly what the entry split removes.
+
+    `shadow` is the validation phase in between: the tree runs and its
+    diagnostics are recorded, but the result stays the traditional one, so
+    nothing depends on the tree being good yet.
     """
-    if tree_mode == "off":
+    if policy != TREE_CHANNEL_POLICY:
         return dict(global_branches), "traditional", None
     if tree_mode == "shadow":
-        reason = None if resolved_entity_count else "no_entity_match"
-        return dict(global_branches), "tree_shadow", reason
-    if not resolved_entity_count:
-        return dict(global_branches), "traditional", "no_entity_match"
+        return dict(global_branches), "tree_shadow", tree_reason
+    if tree_reason:
+        return {}, "tree", tree_reason
     if "branch_failed" in degraded:
-        return dict(global_branches), "traditional", "branch_failed"
+        return {}, "tree", "branch_failed"
     if not scoped_branches:
-        return dict(global_branches), "traditional", "empty_scope"
-    effective = dict(scoped_branches)
-    for name, values in global_branches.items():
-        effective.setdefault(name, values)
-    return effective, "tree", None
+        return {}, "tree", "empty_scope"
+    return dict(scoped_branches), "tree", None
 
 
 def filter_qa_anchor_candidates(

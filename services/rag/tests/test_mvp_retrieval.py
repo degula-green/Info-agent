@@ -102,60 +102,62 @@ class _RecordingElasticsearch:
 
 
 class RetrievalTests(unittest.TestCase):
-    def test_tree_mode_selects_channels_and_reports_fallbacks(self) -> None:
-        from app.application.rag_service import select_tree_channels
+    def test_channel_selection_never_mixes_the_two_surfaces(self) -> None:
+        from app.application.rag_service import select_retrieval_channels
 
         global_branches = {"bm25": ["g"]}
         scoped = {"branch_bm25": ["s"]}
 
-        effective, path, reason = select_tree_channels(
-            tree_mode="off", global_branches=global_branches,
-            scoped_branches=scoped, resolved_entity_count=1, degraded=[],
+        # A traditional entry always gets the unscoped result, whatever the
+        # tree's rollout state is.
+        effective, path, reason = select_retrieval_channels(
+            policy="hybrid", tree_mode="tree", global_branches=global_branches,
+            scoped_branches=scoped, tree_reason=None, degraded=[],
         )
-        self.assertEqual(path, "traditional")
-        self.assertIsNone(reason)
+        self.assertEqual((path, reason), ("traditional", None))
         self.assertEqual(effective, global_branches)
 
-        # shadow does the location work but returns the traditional result.
-        effective, path, reason = select_tree_channels(
-            tree_mode="shadow", global_branches=global_branches,
-            scoped_branches=scoped, resolved_entity_count=1, degraded=[],
+        # A tree entry gets the scoped channels - and only those. The unscoped
+        # channels must not be borrowed to raise recall.
+        effective, path, reason = select_retrieval_channels(
+            policy="tree", tree_mode="tree", global_branches=global_branches,
+            scoped_branches=scoped, tree_reason=None, degraded=[],
+        )
+        self.assertEqual((path, reason), ("tree", None))
+        self.assertEqual(set(effective), {"branch_bm25"})
+        self.assertNotIn("bm25", effective)
+
+        # shadow still returns the traditional result: validation phase.
+        effective, path, reason = select_retrieval_channels(
+            policy="tree", tree_mode="shadow", global_branches=global_branches,
+            scoped_branches=scoped, tree_reason=None, degraded=[],
         )
         self.assertEqual(path, "tree_shadow")
-        self.assertIsNone(reason)
         self.assertEqual(effective, global_branches)
 
-        # tree leads with the scoped channels and keeps global as a backstop.
-        effective, path, reason = select_tree_channels(
-            tree_mode="tree", global_branches=global_branches,
-            scoped_branches=scoped, resolved_entity_count=1, degraded=[],
+        # The tree surface reports why it cannot answer instead of substituting.
+        for reason_in in ("tree_disabled", "no_entity_match", "shadow_not_sampled"):
+            with self.subTest(reason=reason_in):
+                effective, path, reason = select_retrieval_channels(
+                    policy="tree", tree_mode="tree", global_branches=global_branches,
+                    scoped_branches={}, tree_reason=reason_in, degraded=[],
+                )
+                self.assertEqual((path, reason), ("tree", reason_in))
+                self.assertEqual(effective, {})
+
+        # An empty scope and a failed branch are derived here, same treatment.
+        _, path, reason = select_retrieval_channels(
+            policy="tree", tree_mode="tree", global_branches=global_branches,
+            scoped_branches={}, tree_reason=None, degraded=[],
         )
-        self.assertEqual(path, "tree")
-        self.assertIsNone(reason)
-        self.assertEqual(set(effective), {"branch_bm25", "bm25"})
-
-        for tree_mode, entities, scoped_branches, expected in (
-            ("tree", 0, scoped, "no_entity_match"),
-            ("tree", 1, {}, "empty_scope"),
-            ("shadow", 0, {}, "no_entity_match"),
-        ):
-            _, path, reason = select_tree_channels(
-                tree_mode=tree_mode, global_branches=global_branches,
-                scoped_branches=scoped_branches, resolved_entity_count=entities,
-                degraded=[],
-            )
-            self.assertEqual(reason, expected)
-            self.assertEqual(path, "tree_shadow" if tree_mode == "shadow" else "traditional")
-
-        # A failed scoped query must not hide the global result.
-        _, path, reason = select_tree_channels(
-            tree_mode="tree", global_branches=global_branches,
-            scoped_branches=scoped, resolved_entity_count=1,
-            degraded=["branch_failed"],
+        self.assertEqual((path, reason), ("tree", "empty_scope"))
+        _, path, reason = select_retrieval_channels(
+            policy="tree", tree_mode="tree", global_branches=global_branches,
+            scoped_branches=scoped, tree_reason=None, degraded=["branch_failed"],
         )
-        self.assertEqual((path, reason), ("traditional", "branch_failed"))
+        self.assertEqual((path, reason), ("tree", "branch_failed"))
 
-    def test_tree_mode_keeps_global_and_scoped_channels(self) -> None:
+    def test_the_tree_entry_returns_only_the_scoped_channels(self) -> None:
         repository = InMemoryRagMVPRepository()
         repository.upsert_entity(
             entity_id="entity-1",
@@ -182,12 +184,17 @@ class RetrievalTests(unittest.TestCase):
                 scope_type="organization",
                 scope_id="org-1",
                 knowledge_base_ids=("kb-1",),
+                entry="tree",
             ))
         finally:
             object.__setattr__(settings, "tree_mode", original)
         self.assertEqual(len(response.results), 1)
+        # Scoped channels were used...
         self.assertTrue(any(call[1].get("entity_ids") for call in indexer.calls))
-        self.assertTrue(any(not call[1].get("entity_ids") for call in indexer.calls))
+        # ...and the unscoped ones were never queried: the tree entry does not
+        # borrow the global result to raise recall.
+        self.assertFalse(any(not call[1].get("entity_ids") for call in indexer.calls))
+        self.assertEqual(response.diagnostics["channel_policy"], "tree")
         self.assertEqual(response.diagnostics["effective_execution_path"], "tree")
         self.assertEqual(response.diagnostics["authorization_candidate_count"], 1)
         # The 80ms location gate reads these two fields, so a tree-mode search
@@ -224,6 +231,7 @@ class RetrievalTests(unittest.TestCase):
                 scope_type="organization",
                 scope_id="org-1",
                 knowledge_base_ids=("kb-1",),
+                entry="tree",
             ))
             untouched = service.search(SearchRequest(
                 query="青云项目进展",
@@ -231,6 +239,7 @@ class RetrievalTests(unittest.TestCase):
                 scope_type="organization",
                 scope_id="org-2",
                 knowledge_base_ids=("kb-1",),
+                entry="tree",
             ))
         finally:
             object.__setattr__(settings, "tree_mode", original_mode)
@@ -244,6 +253,88 @@ class RetrievalTests(unittest.TestCase):
         self.assertEqual(
             untouched.diagnostics["effective_execution_path"], "tree_shadow"
         )
+
+    def test_traditional_entries_never_locate_even_with_an_entity_present(self) -> None:
+        # The search box and the agent's content search share the traditional
+        # surface. An entity exists in the scope, so a tree-aware request would
+        # locate - these entries must not, in any tree_mode.
+        repository = InMemoryRagMVPRepository()
+        repository.upsert_entity(
+            entity_id="entity-1",
+            scope_type="organization",
+            scope_id="org-1",
+            domain="project",
+            canonical_name="青云项目",
+            normalized_key="青云项目",
+            registry_version=1,
+        )
+        original = settings.tree_mode
+        object.__setattr__(settings, "tree_mode", "tree")
+        try:
+            for entry in ("global", "knowledge", "content"):
+                with self.subTest(entry=entry):
+                    indexer = _Indexer()
+                    service = RAGRetrievalService(
+                        repository=repository,
+                        indexer=indexer,
+                        embedding=_Embedding(),
+                        authorization=_Authorization(),
+                    )
+                    response = service.search(SearchRequest(
+                        query="青云项目进展",
+                        user_id="user-1",
+                        scope_type="organization",
+                        scope_id="org-1",
+                        knowledge_base_ids=("kb-1",),
+                        entry=entry,
+                    ))
+
+                    self.assertEqual(response.diagnostics["channel_policy"], "hybrid")
+                    self.assertEqual(
+                        response.diagnostics["effective_execution_path"],
+                        "traditional",
+                    )
+                    self.assertEqual(response.diagnostics["locate_ms"], 0)
+                    self.assertEqual(response.diagnostics["resolved_entity_count"], 0)
+                    self.assertFalse(
+                        any(call[1].get("entity_ids") for call in indexer.calls)
+                    )
+        finally:
+            object.__setattr__(settings, "tree_mode", original)
+
+    def test_the_tree_entry_reports_no_match_instead_of_falling_back(self) -> None:
+        # Empty registry: the tree surface has nothing to narrow to. It says so
+        # and returns nothing - the caller decides whether to ask for
+        # traditional retrieval next.
+        repository = InMemoryRagMVPRepository()
+        indexer = _Indexer()
+        original = settings.tree_mode
+        object.__setattr__(settings, "tree_mode", "tree")
+        try:
+            service = RAGRetrievalService(
+                repository=repository,
+                indexer=indexer,
+                embedding=_Embedding(),
+                authorization=_Authorization(),
+            )
+            response = service.search(SearchRequest(
+                query="青云项目进展",
+                user_id="user-1",
+                scope_type="organization",
+                scope_id="org-1",
+                knowledge_base_ids=("kb-1",),
+                entry="tree",
+            ))
+        finally:
+            object.__setattr__(settings, "tree_mode", original)
+
+        self.assertEqual(list(response.results), [])
+        self.assertEqual(response.diagnostics["channel_policy"], "tree")
+        self.assertEqual(response.diagnostics["effective_execution_path"], "tree")
+        self.assertEqual(response.diagnostics["fallback_reason"], "no_entity_match")
+        # Not one search was issued: there is no scope to search in, and the
+        # unscoped fallback is not this surface's job.
+        self.assertEqual(indexer.calls, [])
 
     def test_the_effective_mount_threshold_reaches_the_indexer(self) -> None:
         # The caller left min_mount_confidence unset, so the locator's default
@@ -276,6 +367,7 @@ class RetrievalTests(unittest.TestCase):
                 scope_type="organization",
                 scope_id="org-1",
                 knowledge_base_ids=("kb-1",),
+                entry="tree",
             ))
         finally:
             object.__setattr__(settings, "tree_mode", original)

@@ -1,9 +1,19 @@
-"""Rollback drill for plan 3.6, encoded so it can be re-run instead of retold.
+"""Rollback drill for plan 3.6, re-cut for the entry split.
 
-The plan's rollback is two steps - `tree_mode` to shadow, then to off - with the
-promise that retrieval results stop depending on the tree and nothing is
-deleted. Each step is asserted here against a scoped indexer that answers
-differently depending on whether entity filters were passed.
+The earlier version of this file asserted the *fusion* design: in `tree` mode
+the scoped and the unscoped channels both entered the RRF pass, so "rollback"
+meant "the tree's contribution goes away". That design changed on 2026-10-09 -
+traditional and tree retrieval are now separate surfaces - so what has to be
+proven is different:
+
+  * the global search box is unaffected by `tree_mode` at all (that is what
+    decoupling means in practice, and it is the property the rollback protects)
+  * the tree entry returns only the entity-scoped channels
+  * when the tree cannot answer it reports that instead of quietly substituting
+    the unscoped result - deciding to fall back belongs to the caller
+
+Run against a scoped indexer that answers differently depending on whether an
+entity filter was passed.
 """
 
 import unittest
@@ -87,18 +97,19 @@ def _repository_with_one_entity():
     return repository
 
 
-def _search(service, *, query="青云项目进展"):
+def _search(service, *, query="青云项目进展", entry="tree"):
     return service.search(SearchRequest(
         query=query,
         user_id="user-1",
         scope_type="organization",
         scope_id=SCOPE_ID,
         knowledge_base_ids=("kb-1",),
+        entry=entry,
     ))
 
 
 class RollbackDrill(unittest.TestCase):
-    def _run_mode(self, mode, *, sample_rate=1.0):
+    def _run(self, *, mode, entry="tree", sample_rate=1.0):
         repository = _repository_with_one_entity()
         indexer = _ScopedIndexer()
         original_mode = settings.tree_mode
@@ -112,81 +123,84 @@ class RollbackDrill(unittest.TestCase):
                 embedding=_Embedding(),
                 authorization=_Authorization(),
             )
-            response = _search(service)
+            response = _search(service, entry=entry)
         finally:
             object.__setattr__(settings, "tree_mode", original_mode)
             object.__setattr__(settings, "tree_shadow_sample_rate", original_sample)
         return repository, indexer, response
 
-    def test_step_0_before_rollback_the_tree_narrows_the_result(self):
-        _, indexer, response = self._run_mode("tree")
+    def test_the_global_search_box_is_untouched_by_every_tree_mode(self):
+        # The property the rollback exists to protect: the search box does not
+        # depend on the tree, in either direction. It never locates, never asks
+        # for scoped channels, and costs no locating latency.
+        for mode in ("off", "shadow", "tree"):
+            with self.subTest(mode=mode):
+                repository, indexer, response = self._run(mode=mode, entry="global")
 
-        # Tree-first, not tree-only: the scoped branch is added and the global
-        # branch stays as a backstop so a wrong entity match cannot hide the
-        # answer. Both are present; only the tree path produces the scoped one.
+                self.assertEqual(
+                    [item.chunk_id for item in response.results], ["global-chunk"]
+                )
+                self.assertEqual(
+                    response.diagnostics["effective_execution_path"], "traditional"
+                )
+                self.assertEqual(response.diagnostics["channel_policy"], "hybrid")
+                self.assertEqual(response.diagnostics["locate_ms"], 0)
+                self.assertEqual(response.diagnostics["resolved_entity_count"], 0)
+                self.assertEqual(indexer.scoped_calls, 0)
+
+    def test_the_tree_entry_returns_only_the_scoped_channels(self):
+        _, indexer, response = self._run(mode="tree")
+
+        # No global chunk in the result: the tree does not borrow the unscoped
+        # result to raise recall.
         self.assertEqual(
-            {item.chunk_id for item in response.results},
-            {"scoped-chunk", "global-chunk"},
+            [item.chunk_id for item in response.results], ["scoped-chunk"]
         )
+        self.assertEqual(response.diagnostics["channel_policy"], "tree")
         self.assertEqual(response.diagnostics["effective_execution_path"], "tree")
         self.assertGreater(indexer.scoped_calls, 0)
-        # Location really ran, so the diagnostics are the thing being rolled
-        # back to a safe state, not a broken pipeline.
         self.assertGreater(response.diagnostics["locate_ms"], 0)
 
-    def test_step_1_shadow_returns_the_unscoped_result_but_keeps_diagnostics(self):
-        repository, _, response = self._run_mode("shadow")
+    def test_shadow_runs_the_tree_but_returns_the_traditional_result(self):
+        _, _, response = self._run(mode="shadow")
 
-        # Results no longer depend on the tree...
-        self.assertEqual([item.chunk_id for item in response.results], ["global-chunk"])
+        # Validation phase: the tree is measured, nothing depends on it.
+        self.assertEqual(
+            [item.chunk_id for item in response.results], ["global-chunk"]
+        )
         self.assertEqual(
             response.diagnostics["effective_execution_path"], "tree_shadow"
         )
-        # ...but the location work still runs, so the failure can be diagnosed.
         self.assertGreater(response.diagnostics["locate_ms"], 0)
-        self.assertEqual(
-            [row["execution_path"] for row in repository.searches], ["tree_shadow"]
-        )
 
-    def test_step_2_off_stops_locating_entirely(self):
-        repository, indexer, response = self._run_mode("off")
+    def test_off_reports_the_tree_as_disabled_instead_of_substituting(self):
+        repository, indexer, response = self._run(mode="off")
 
-        self.assertEqual([item.chunk_id for item in response.results], ["global-chunk"])
-        self.assertEqual(response.diagnostics["effective_execution_path"], "traditional")
-        # No location means no registry read, no embedding, no L4.
+        # Nothing is returned and nothing is substituted: the caller decides
+        # whether to ask for traditional retrieval next.
+        self.assertEqual(list(response.results), [])
+        self.assertEqual(response.diagnostics["effective_execution_path"], "tree")
+        self.assertEqual(response.diagnostics["fallback_reason"], "tree_disabled")
         self.assertEqual(response.diagnostics["locate_ms"], 0)
-        self.assertEqual(response.diagnostics["resolved_entity_count"], 0)
         self.assertEqual(indexer.scoped_calls, 0)
-        self.assertEqual([row["execution_path"] for row in repository.searches], [
-            "traditional"
-        ])
-
-    def test_shadow_and_off_agree_on_results(self):
-        # The rollback promise: turning the tree off must not change what the
-        # caller sees, only which path produced it.
-        _, _, shadow = self._run_mode("shadow")
-        _, _, off = self._run_mode("off")
-
         self.assertEqual(
-            [item.chunk_id for item in shadow.results],
-            [item.chunk_id for item in off.results],
+            [row["execution_path"] for row in repository.searches], ["tree"]
         )
 
-    def test_rollback_deletes_nothing(self):
-        repository, _, _ = self._run_mode("off")
+    def test_sampling_zero_stops_paying_for_shadow_but_still_records_it(self):
+        repository, _, response = self._run(mode="shadow", sample_rate=0.0)
 
-        # Rollback disables, it does not clean up: entity, mounts and vectors
-        # stay put so the tree can be switched back on.
+        self.assertEqual(
+            [item.chunk_id for item in response.results], ["global-chunk"]
+        )
+        self.assertIs(response.diagnostics["tree_shadow_sampled"], False)
+        self.assertEqual(response.diagnostics["fallback_reason"], "shadow_not_sampled")
+        self.assertEqual(response.diagnostics["locate_ms"], 0)
+        self.assertEqual(len(repository.searches), 1)
+
+    def test_turning_the_tree_off_deletes_nothing(self):
+        repository, _, _ = self._run(mode="off")
+
         entities = repository.entities
         self.assertEqual(len(entities), 1)
         self.assertEqual(entities[0]["status"], "active")
-
-    def test_sampled_out_shadow_is_recorded_as_not_sampled(self):
-        # Sampling at 0 is the cheapest form of "stop paying for shadow": the
-        # request still lands in history, flagged, instead of vanishing.
-        repository, _, response = self._run_mode("shadow", sample_rate=0.0)
-
-        self.assertEqual([item.chunk_id for item in response.results], ["global-chunk"])
-        self.assertIs(response.diagnostics["tree_shadow_sampled"], False)
-        self.assertEqual(response.diagnostics["locate_ms"], 0)
-        self.assertEqual(len(repository.searches), 1)

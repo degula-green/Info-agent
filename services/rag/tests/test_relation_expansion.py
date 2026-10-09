@@ -97,7 +97,7 @@ class RelationExpansionTests(unittest.TestCase):
                 authorization=_Authorization(),
             )
             return service.search(SearchRequest(
-                query="A项目的服务器", user_id="user-1", **SCOPE,
+                query="A项目的服务器", user_id="user-1", entry="tree", **SCOPE,
             ))
         finally:
             object.__setattr__(settings, "tree_mode", original)
