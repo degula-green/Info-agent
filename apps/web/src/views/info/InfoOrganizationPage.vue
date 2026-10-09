@@ -10,6 +10,10 @@
           <template #icon><t-icon name="logout" /></template>
           退出组织
         </t-button>
+        <t-button variant="outline" @click="router.push('/organization/entity-review')">
+          <template #icon><t-icon name="check-circle" /></template>
+          候选实体审核
+        </t-button>
         <t-button v-if="canInvite" theme="primary" :loading="pageLoading" @click="openInvitationDialog">
           <template #icon><t-icon name="user-add" /></template>
           生成邀请链接

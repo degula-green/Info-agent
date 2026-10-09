@@ -34,7 +34,13 @@ services:
       - -ec
       - |
         for migration in \
-          20261007_wechat_control_flow.up.sql; do
+          20261007_wechat_control_flow.up.sql \
+          20261009_tree_rag_v2_schema.up.sql \
+          20261010_tree_rag_scan_watermarks.up.sql \
+          20261011_tree_rag_eval.up.sql \
+          20261011_tree_rag_search_history_tree_mode.up.sql \
+          20261012_tree_rag_scan_runs.up.sql \
+          20261013_tree_rag_review_duration.up.sql; do
           psql "$${KNOWLEDGE_DATABASE_URL}" --set=ON_ERROR_STOP=1 --file="/migrations/$${migration}";
         done
     volumes:

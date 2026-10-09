@@ -56,7 +56,6 @@ class Settings:
     http_host: str = _text("RAG_HTTP_HOST", "0.0.0.0")
     http_port: int = _int("RAG_HTTP_PORT", 8000)
     log_level: str = _text("RAG_LOG_LEVEL", "INFO")
-    internal_auth_token: str = _text("RAG_INTERNAL_AUTH_TOKEN")
     rag_internal_token: str = _text("RAG_INTERNAL_TOKEN", "local-development-only")
 
     # RAG-owned PostgreSQL state (jobs, index records, search history, QA and
@@ -87,12 +86,6 @@ class Settings:
     elasticsearch_password: str = _text("ELASTICSEARCH_PASSWORD")
     elasticsearch_api_key: str = _text("ELASTICSEARCH_API_KEY")
     elasticsearch_ca_cert_path: str = _text("ELASTICSEARCH_CA_CERT_PATH")
-    elasticsearch_display_index: str = _text(
-        "ELASTICSEARCH_DISPLAY_INDEX", "rag_chunks_display_write"
-    )
-    elasticsearch_protected_index: str = _text(
-        "ELASTICSEARCH_PROTECTED_INDEX", "rag_chunks_protected_write"
-    )
     elasticsearch_display_read_index: str = _text(
         "ELASTICSEARCH_DISPLAY_READ_INDEX", "rag_chunks_display_read"
     )
@@ -211,8 +204,28 @@ class Settings:
     # an error, so this must stay generous.
     extract_max_tokens: int = _int("RAG_EXTRACT_MAX_TOKENS", 4000)
     extract_max_retries: int = _int("RAG_EXTRACT_MAX_RETRIES", 2)
+    # A failed sweep re-runs whole conversations (the watermark only advances
+    # when every window succeeds), so the same window is extracted again. The
+    # cache turns those repeats into a dictionary hit.
+    extract_cache_enabled: bool = _bool("RAG_EXTRACT_CACHE_ENABLED", True)
+    extract_cache_size: int = _int("RAG_EXTRACT_CACHE_SIZE", 512)
+    # Minimum spacing between call starts; 0 disables. Concurrency bounds calls
+    # in flight, this bounds call starts per second.
+    extract_min_interval_ms: int = _int("RAG_EXTRACT_MIN_INTERVAL_MS", 0)
+    # Phase 1 kept regex discovery as the transitional candidate source; Phase 2
+    # made the window scan the real one. The regex patterns match any 2-40 chars
+    # ending in 公司/项目/系统/合同/制度, so leaving it on floods the review queue
+    # with 0.55-confidence rows next to the model's 0.85 ones.
+    memory_regex_candidates_enabled: bool = _bool(
+        "RAG_MEMORY_REGEX_CANDIDATES_ENABLED", False
+    )
     # Concurrency is for the window scan worker, not for a single request.
     extract_concurrency: int = _int("RAG_EXTRACT_CONCURRENCY", 8)
+    # Sliding window over a conversation. 20 messages keeps a topic in view;
+    # step 10 gives 50% overlap so a boundary message is never the only
+    # mention of its subject.
+    extract_window_size: int = _int("RAG_EXTRACT_WINDOW_SIZE", 20)
+    extract_window_step: int = _int("RAG_EXTRACT_WINDOW_STEP", 10)
 
     # MinIO source and derived artifacts.
     minio_endpoint: str = _text("RAG_MINIO_ENDPOINT")
@@ -351,10 +364,36 @@ class Settings:
     # express "prefer the navigated branch" without ever excluding branch G, so
     # a navigation miss cannot drop the answer.
     tree_mode: str = _text("RAG_TREE_MODE", "shadow").lower()
+    # Scopes promoted to `tree` while every other scope keeps RAG_TREE_MODE.
+    # Format: `user:<id>,organization:<id>`. `RAG_TREE_MODE=off` still wins, so
+    # the documented rollback (shadow -> off) keeps working.
+    tree_rollout_scopes: str = _text("RAG_TREE_ROLLOUT_SCOPES")
     tree_shadow_sample_rate: float = _float("RAG_TREE_SHADOW_SAMPLE_RATE", 1.0)
-    tree_branch_weight: float = _float("RAG_TREE_BRANCH_WEIGHT", 0.5)
-    tree_max_branches: int = _int("RAG_TREE_MAX_BRANCHES", 8)
-    tree_max_branch_keys_per_chunk: int = _int("RAG_TREE_MAX_BRANCH_KEYS_PER_CHUNK", 8)
+    tree_mount_weight: float = _float("RAG_TREE_MOUNT_WEIGHT", 0.5)
+    tree_max_entities: int = _int("RAG_TREE_MAX_ENTITIES", 8)
+    tree_max_mounts_per_chunk: int = _int("RAG_TREE_MAX_MOUNTS_PER_CHUNK", 8)
+    # L4 escalation. Off by default: it puts a model round trip on the query
+    # path, so it stays opt-in until the call rate and latency are measured.
+    # Base URL / key / model fall back to the extraction model when unset.
+    locate_llm_enabled: bool = _bool("RAG_LOCATE_LLM_ENABLED", False)
+    locate_llm_base_url: str = _text("RAG_LOCATE_LLM_BASE_URL")
+    locate_llm_api_key: str = _text("RAG_LOCATE_LLM_API_KEY")
+    locate_llm_model: str = _text("RAG_LOCATE_LLM_MODEL")
+    # Measured 2026-10-09: a 643-char verdict prompt returning ~40 tokens took
+    # 6.4-7.5s on the configured extraction gateway, so anything near the draft's
+    # 800ms budget only produces timeouts and wasted calls. 8s lets the call
+    # actually finish; whether that is affordable is a deployment decision.
+    locate_llm_timeout_seconds: float = _float("RAG_LOCATE_LLM_TIMEOUT_SECONDS", 8.0)
+    locate_llm_min_confidence: float = _float("RAG_LOCATE_LLM_MIN_CONFIDENCE", 0.7)
+    locate_llm_max_candidates: int = _int("RAG_LOCATE_LLM_MAX_CANDIDATES", 10)
+    locate_llm_context_messages: int = _int("RAG_LOCATE_LLM_CONTEXT_MESSAGES", 10)
+    # Relation expansion: when the located entity's own node is thin, widen to
+    # one hop of neighbours instead of falling straight back to full-corpus
+    # search. Depth stays at one hop and the fan-out is bounded.
+    tree_relation_expansion_enabled: bool = _bool("RAG_TREE_RELATION_EXPANSION_ENABLED", True)
+    tree_relation_min_confidence: float = _float("RAG_TREE_RELATION_MIN_CONFIDENCE", 0.7)
+    tree_relation_max_entities: int = _int("RAG_TREE_RELATION_MAX_ENTITIES", 3)
+    tree_relation_weight: float = _float("RAG_TREE_RELATION_WEIGHT", 0.3)
     query_rewrite_enabled: bool = _bool("RAG_QUERY_REWRITE_ENABLED", False)
     query_rewrite_max: int = _int("RAG_QUERY_REWRITE_MAX", 1)
     highlight_final_only: bool = _bool("RAG_HIGHLIGHT_FINAL_ONLY", True)
@@ -371,6 +410,13 @@ class Settings:
     worker_prefetch: int = _int("RAG_WORKER_PREFETCH", 10)
     lane_queue_size: int = _int("RAG_LANE_QUEUE_SIZE", 256)
     lane_poll_interval_seconds: float = _float("RAG_LANE_POLL_INTERVAL_SECONDS", 0.5)
+
+    # Window-scan pacing. The scan runs behind ingestion: a slow sweep only
+    # delays how fresh the tree is, and the traditional retrieval path keeps
+    # answering meanwhile, so this must never share the ingestion lanes.
+    window_scan_enabled: bool = _bool("RAG_WINDOW_SCAN_ENABLED", True)
+    window_scan_interval_seconds: int = _int("RAG_WINDOW_SCAN_INTERVAL_SECONDS", 300)
+    window_scan_conversation_limit: int = _int("RAG_WINDOW_SCAN_CONVERSATION_LIMIT", 5)
     task_lease_seconds: int = _int("RAG_TASK_LEASE_SECONDS", 300)
     task_heartbeat_seconds: int = _int("RAG_TASK_HEARTBEAT_SECONDS", 60)
     task_max_retries: int = _int("RAG_TASK_MAX_RETRIES", 8)
@@ -426,8 +472,8 @@ class Settings:
         ):
             if not name.startswith("rag_chunks_"):
                 raise RuntimeError(f"Elasticsearch alias must use rag_chunks_*: {name}")
-        if self.tree_mode not in {"off", "shadow", "boost"}:
-            raise RuntimeError("RAG_TREE_MODE must be off, shadow, or boost")
+        if self.tree_mode not in {"off", "shadow", "tree"}:
+            raise RuntimeError("RAG_TREE_MODE must be off, shadow, or tree")
         if not self.development_like:
             if not self.authz_base_url:
                 raise RuntimeError(

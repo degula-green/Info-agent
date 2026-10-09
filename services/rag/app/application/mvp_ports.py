@@ -5,10 +5,10 @@ from typing import Any, Protocol
 from app.domain.rag import (
     AccessCheck,
     AuthorizationScope,
-    BranchMatch,
     Chunk,
     Entity,
     EntityAlias,
+    EntityMount,
     ResourceContext,
     SearchRequest,
     SearchResult,
@@ -122,6 +122,129 @@ class OutboxRepository(Protocol):
 
 class EntityRegistryRepository(Protocol):
     def load_entity_registry(self, *, scope_type: str, scope_id: str) -> tuple[list[Entity], list[EntityAlias], int]: ...
+    def locate_entities_exact(self, *, scope_type: str, scope_id: str, normalized: str) -> list[dict[str, Any]]: ...
+    def locate_entities_fuzzy(
+        self, *, scope_type: str, scope_id: str, normalized: str, limit: int = 10
+    ) -> list[dict[str, Any]]: ...
+    def locate_entities_semantic(
+        self, *, scope_type: str, scope_id: str, embedding: list[float], limit: int = 10
+    ) -> list[dict[str, Any]]: ...
+    def list_entities_pending_embedding(self, *, limit: int = 50) -> list[dict[str, Any]]: ...
+    def list_scan_conversations(self, *, limit: int = 20) -> list[dict[str, Any]]: ...
+    def list_active_conversations(self, *, limit: int = 20) -> list[dict[str, Any]]: ...
+    def get_scan_watermark(
+        self, *, scope_type: str, scope_id: str, conversation_id: str
+    ) -> str | None: ...
+    def list_conversation_chunks(
+        self,
+        *,
+        scope_type: str,
+        scope_id: str,
+        conversation_id: str,
+        after_sent_at: str | None = None,
+        limit: int = 500,
+    ) -> list[Chunk]: ...
+    def set_scan_watermark(
+        self,
+        *,
+        scope_type: str,
+        scope_id: str,
+        conversation_id: str,
+        last_sent_at: str,
+        last_chunk_id: str | None = None,
+        window_count: int = 0,
+    ) -> None: ...
+    def record_scan_run(
+        self,
+        *,
+        scope_type: str,
+        scope_id: str,
+        conversations: int = 0,
+        windows: int = 0,
+        empty_windows: int = 0,
+        mounts: int = 0,
+        candidates: int = 0,
+        relations: int = 0,
+        failed_conversations: int = 0,
+    ) -> str: ...
+    def list_scan_runs(
+        self, *, scope_type: str, scope_id: str, limit: int = 50
+    ) -> list[dict[str, Any]]: ...
+    def find_entities_by_normalized(
+        self, *, scope_type: str, scope_id: str, normalized_keys: list[str]
+    ) -> dict[str, dict[str, Any]]: ...
+    def upsert_entity_relation(
+        self,
+        *,
+        scope_type: str,
+        scope_id: str,
+        source_entity_id: str,
+        target_entity_id: str,
+        relation_type: str,
+        confidence: float,
+        evidence_chunk_ids: list[str] | None = None,
+    ) -> None: ...
+    def find_related_entities(
+        self,
+        *,
+        scope_type: str,
+        scope_id: str,
+        entity_ids: list[str],
+        relation_types: list[str] | None = None,
+        direction: str = "both",
+        min_confidence: float = 0.7,
+        limit: int = 3,
+    ) -> list[dict[str, Any]]: ...
+    def upsert_eval_case(
+        self,
+        *,
+        scope_type: str,
+        scope_id: str,
+        suite: str,
+        dataset_version: int,
+        query: str,
+        labels: dict[str, Any],
+        notes: str | None = None,
+        created_by: str | None = None,
+    ) -> str: ...
+    def list_eval_cases(
+        self,
+        *,
+        scope_type: str,
+        scope_id: str,
+        suite: str,
+        dataset_version: int | None = None,
+        status: str | None = "active",
+    ) -> list[dict[str, Any]]: ...
+    def record_eval_run(
+        self,
+        *,
+        scope_type: str,
+        scope_id: str,
+        suite: str,
+        dataset_version: int,
+        case_count: int,
+        passed_count: int,
+        metrics: dict[str, Any],
+        label: str | None = None,
+    ) -> str: ...
+    def list_eval_runs(
+        self,
+        *,
+        scope_type: str,
+        scope_id: str,
+        suite: str | None = None,
+        limit: int = 20,
+    ) -> list[dict[str, Any]]: ...
+    def update_entity_embedding(
+        self,
+        *,
+        entity_id: str,
+        embedding: list[float],
+        model: str,
+        dimensions: int,
+        status: str = "ready",
+    ) -> None: ...
     def upsert_candidate_mention(self, **values: Any) -> str: ...
     def list_candidates(self, **filters: Any) -> tuple[list[dict[str, Any]], int]: ...
     def get_candidate(self, **filters: Any) -> dict[str, Any] | None: ...
@@ -129,13 +252,23 @@ class EntityRegistryRepository(Protocol):
 
 
 class BranchRepository(Protocol):
-    def ensure_tree_branch(self, **values: Any) -> str: ...
-    def replace_chunk_branches(self, chunk: Chunk, branches: list[BranchMatch]) -> None: ...
+    def replace_chunk_mounts(self, chunk: Chunk, mounts: list[EntityMount]) -> None: ...
+    def merge_chunk_mounts(self, chunk: Chunk, mounts: list[EntityMount]) -> None: ...
     def get_tree(self, *, scope_type: str, scope_id: str) -> dict[str, Any]: ...
+    def tree_metrics(self, *, scope_type: str, scope_id: str) -> dict[str, Any]: ...
+    def list_active_scopes(self, *, limit: int = 50) -> list[dict[str, Any]]: ...
 
 
 class SearchHistoryRepository(Protocol):
     def record_search(self, **values: Any) -> None: ...
+    def list_search_diagnostics(
+        self,
+        *,
+        scope_type: str,
+        scope_id: str,
+        window_hours: int = 24,
+        limit: int = 2000,
+    ) -> list[dict[str, Any]]: ...
 
 
 class QAHistoryRepository(Protocol):
@@ -193,7 +326,7 @@ class SearchIndexer(Protocol):
         self,
         request: SearchRequest,
         *,
-        branch_keys: tuple[str, ...] = (),
+        entity_ids: tuple[str, ...] = (),
         protected_object_keys: tuple[str, ...] = (),
         size: int | None = None,
     ) -> list[SearchResult]: ...
@@ -202,7 +335,7 @@ class SearchIndexer(Protocol):
         request: SearchRequest,
         query_vector: list[float],
         *,
-        branch_keys: tuple[str, ...] = (),
+        entity_ids: tuple[str, ...] = (),
         protected_object_keys: tuple[str, ...] = (),
         size: int | None = None,
     ) -> list[SearchResult]: ...

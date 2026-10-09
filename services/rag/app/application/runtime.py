@@ -4,6 +4,7 @@ import logging
 import queue
 import random
 import threading
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -38,6 +39,7 @@ class MVPWorkerRuntime:
         memory_service: MemoryCandidateService,
         callback_lane: CallbackLane,
         branch_refresh_service: Any | None = None,
+        window_scan_service: Any | None = None,
         deletion_service: DeletionService | None = None,
     ) -> None:
         self.repository = repository or (
@@ -50,6 +52,9 @@ class MVPWorkerRuntime:
         self.memory_service = memory_service
         self.callback_lane = callback_lane
         self.branch_refresh_service = branch_refresh_service
+        self.window_scan_service = window_scan_service
+        self._last_window_scan = 0.0
+        self._window_scan_thread: threading.Thread | None = None
         self.deletion_service = deletion_service
         self.queues = {
             lane: queue.Queue(maxsize=max(1, settings.lane_queue_size))
@@ -504,7 +509,43 @@ class MVPWorkerRuntime:
                     self.branch_refresh_service.run_pending()
                 except Exception:
                     logger.exception("branch refresh lane failed")
+            self._maybe_scan_windows()
             self.stop_event.wait(settings.lane_poll_interval_seconds)
+
+    def _maybe_scan_windows(self) -> None:
+        """Run the window scan on its own interval, never in the ingest lanes.
+
+        The scan is deliberately slow and rate-limited, so it is paced here
+        rather than tied to the poll interval. A failure is contained: the
+        conversation keeps its watermark and the next tick retries it.
+        """
+        if self.window_scan_service is None or not settings.window_scan_enabled:
+            return
+        interval = max(30, int(settings.window_scan_interval_seconds))
+        now = time.monotonic()
+        if now - self._last_window_scan < interval:
+            return
+        # A sweep handles several conversations and can take minutes. Running it
+        # inline would stall the callback lane for that whole time, delaying
+        # knowledge result callbacks, so it gets its own thread and only one
+        # sweep may be in flight.
+        if self._window_scan_thread is not None and self._window_scan_thread.is_alive():
+            return
+        self._last_window_scan = now
+        self._window_scan_thread = threading.Thread(
+            target=self._run_window_scan, name="rag-window-scan", daemon=True
+        )
+        self._window_scan_thread.start()
+
+    def _run_window_scan(self) -> None:
+        try:
+            self.window_scan_service.run_once(
+                conversation_limit=max(1, int(settings.window_scan_conversation_limit))
+            )
+        except Exception:
+            # The watermark stays where it was, so nothing is lost and the next
+            # sweep retries the same conversation.
+            logger.exception("window scan failed")
 
 
 def _event_payload_from_job(job: dict[str, Any]) -> dict[str, Any]:

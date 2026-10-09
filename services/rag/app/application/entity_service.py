@@ -6,12 +6,11 @@ from typing import Any, Iterable
 
 from app.config import settings
 from app.domain.rag import (
-    BranchMatch,
     Chunk,
     Entity,
     EntityAlias,
+    EntityMount,
     normalized_text,
-    time_bucket,
 )
 
 
@@ -75,15 +74,21 @@ class EntityMatcher:
                 match_score=1.0 if method == "exact" else 0.95,
             )
             consumed.append((start, end))
-            if len(matches) >= settings.tree_max_branches:
+            if len(matches) >= settings.tree_max_entities:
                 break
         return list(matches.values())
 
 
-def match_chunk_branches(
+def match_chunk_mounts(
     chunk: Chunk,
     matcher: EntityMatcher | None,
-) -> list[BranchMatch]:
+) -> list[EntityMount]:
+    """Resolve which entities a chunk explicitly mentions.
+
+    Time is deliberately not encoded into the mount any more: the search path
+    filters on occurred_after/occurred_before metadata instead of a monthly
+    branch key.
+    """
     if matcher is None:
         return []
     haystack = "\n".join(
@@ -94,20 +99,16 @@ def match_chunk_branches(
             chunk.content,
         ) if value
     )
-    bucket = time_bucket(chunk.sent_at)
-    output: list[BranchMatch] = []
+    output: list[EntityMount] = []
     for match in matcher.match_text(haystack):
-        base = f"entity:{match.domain}:{match.entity_id}"
-        branch_key = f"{base}:{bucket}" if bucket else base
-        output.append(BranchMatch(
-            branch_key=branch_key,
+        output.append(EntityMount(
             entity_id=match.entity_id,
             domain=match.domain,
             registry_version=matcher.registry_version,
-            match_method=match.match_method,
-            match_score=match.match_score,
+            mount_method="explicit",
+            confidence=match.match_score,
         ))
-    return output[: settings.tree_max_branch_keys_per_chunk]
+    return output[: settings.tree_max_mounts_per_chunk]
 
 
 _CANDIDATE_PATTERNS = (

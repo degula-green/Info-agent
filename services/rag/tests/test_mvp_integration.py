@@ -19,6 +19,29 @@ from app.infrastructure.service1.rag_authorization import AllowAllAuthorizationG
 
 @unittest.skipUnless(os.getenv("RAG_MVP_INTEGRATION") == "1", "external integration disabled")
 class MVPEndToEndIntegrationTests(unittest.TestCase):
+    def _claim(self, repository, lane, job_id):
+        """Claim a job, or fail with the reason this suite is usually flaky.
+
+        These tests own a job's whole lifecycle, which only holds when nothing
+        else polls `processing_jobs`. The shared development database has
+        another deployment's worker (and ad-hoc sessions) attached, and that
+        worker picks fresh jobs up within milliseconds, retries them, and holds
+        them in `retry_wait` with a future `next_retry_at` - so the claim here
+        comes back empty and the old code raised a bare IndexError.
+
+        Without an isolated database the suite cannot be trusted either way:
+        it may also disturb whatever else is consuming the same rows.
+        """
+        claimed = repository.claim_jobs(lane, limit=1, job_id=job_id)
+        self.assertTrue(
+            claimed,
+            f"job {job_id} 无法被本测试领取（lane={lane}）。"
+            "最常见原因：这个库还有别的消费者在轮询 processing_jobs——"
+            "另一个部署的 rag worker 会在毫秒级抢走新 job 并置为 retry_wait，"
+            "于是本地领取为空。请改用隔离库/隔离 schema 后再跑该用例。",
+        )
+        return claimed
+
     def test_postgres_and_elasticsearch_round_trip(self) -> None:
         repository = PostgresRagMVPRepository()
         index = RagChunkIndex()
@@ -70,23 +93,15 @@ class MVPEndToEndIntegrationTests(unittest.TestCase):
             )
             runtime.handle(event)
             job = repository.get_job(source_event_id=identifiers["event"])
-            claimed = repository.claim_jobs(
-                "parse",
-                limit=1,
-                job_id=job["id"],
-            )[0]
+            claimed = self._claim(repository, "parse", job["id"])[0]
             runtime._run_parse(claimed)
             job = repository.get_job(job["id"])
-            claimed = repository.claim_jobs(
-                "index",
-                limit=1,
-                job_id=job["id"],
-            )[0]
+            claimed = self._claim(repository, "index", job["id"])[0]
             runtime._run_index(claimed)
             chunks = repository.list_chunks(scope_type="organization", scope_id=identifiers["scope"])
             self.assertEqual(len(chunks), 1)
             self.assertEqual(chunks[0].embedding_status, "ready")
-            self.assertTrue(chunks[0].branch_keys)
+            self.assertTrue(chunks[0].entity_ids)
             service = RAGRetrievalService(
                 repository=repository,
                 indexer=index,
@@ -296,11 +311,7 @@ class MVPEndToEndIntegrationTests(unittest.TestCase):
                     },
                 }
             )
-            first = repository.claim_jobs(
-                "parse",
-                limit=1,
-                job_id=job["id"],
-            )[0]
+            first = self._claim(repository, "parse", job["id"])[0]
             with repository._connection() as connection:
                 with connection.cursor() as cursor:
                     cursor.execute(
@@ -309,11 +320,7 @@ class MVPEndToEndIntegrationTests(unittest.TestCase):
                            WHERE id=%s::uuid""",
                         (job["id"],),
                     )
-            second = repository.claim_jobs(
-                "parse",
-                limit=1,
-                job_id=job["id"],
-            )[0]
+            second = self._claim(repository, "parse", job["id"])[0]
             self.assertGreater(second["lease_epoch"], first["lease_epoch"])
             self.assertFalse(
                 repository.update_job_if_owned(

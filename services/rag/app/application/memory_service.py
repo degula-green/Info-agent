@@ -7,7 +7,16 @@ from app.config import settings
 
 
 class MemoryCandidateService:
-    """MVP Memory Lane: candidate discovery only, never official tree mutation."""
+    """MVP Memory Lane: candidate discovery only, never official tree mutation.
+
+    Candidate discovery moved to the window scan in Phase 2. This lane stays
+    wired because the mount/candidate split it sits next to is still part of
+    ingestion, but it no longer writes regex candidates unless
+    ``RAG_MEMORY_REGEX_CANDIDATES_ENABLED`` is turned back on: the patterns match
+    anything ending in 公司/项目/系统/合同, and mixing 0.55-confidence regex rows
+    into the same review queue as the model's 0.85 rows is exactly what Phase 2
+    set out to stop.
+    """
 
     def __init__(self, repository: object | None = None) -> None:
         self.repository = repository or (
@@ -15,6 +24,8 @@ class MemoryCandidateService:
         )
 
     def process(self, job: dict) -> dict[str, int]:
+        if not settings.memory_regex_candidates_enabled:
+            return {"candidate_count": 0, "mention_count": 0, "skipped": 1}
         chunks = self.repository.list_chunks(embedding_status="ready")
         chunks = [
             chunk for chunk in chunks

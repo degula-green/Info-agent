@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import re
 import time
 import uuid
@@ -9,14 +10,23 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
-from app.application.entity_service import EntityMatcher
+from app.application.entity_locator import EntityLocator
+from app.application.tree_rollout import (
+    parse_rollout_scopes,
+    resolve_tree_mode,
+    shadow_sampled,
+)
 from app.application.mvp_ports import (
     AuthorizationGateway,
     EmbeddingProvider,
     SearchIndexer,
 )
 from app.config import settings
-from app.domain.rag import AccessCheck, AuthorizationScope, SearchRequest, SearchResult, time_bucket
+from app.domain.rag import AccessCheck, AuthorizationScope, SearchRequest, SearchResult
+from app.domain.location import EntityScope, LocateRequest, LocateResult
+
+
+logger = logging.getLogger("rag.retrieval")
 
 
 class SearchUnavailable(RuntimeError):
@@ -38,6 +48,25 @@ class RetrievalResponse:
     diagnostics: dict[str, Any]
 
 
+# Which retrieval channels an entry point is allowed to use.
+#
+# The split is by entry, not by a deployment-wide switch. The global search box
+# and the agent's content search must stay plain hybrid retrieval (bm25 + knn
+# over the whole scope); the tree is a surface the caller opts into by calling
+# /search/tree. Because a request resolves to exactly one policy, the unscoped
+# and entity-scoped channels never share a fusion step - that is what "keep the
+# tree separate from traditional RAG" means in code.
+#
+# Falling back is deliberately NOT done here: when the tree has nothing to
+# offer, /search/tree returns nothing and a reason. Deciding to ask for
+# traditional retrieval next belongs to the caller (the agent's tool loop).
+TREE_CHANNEL_POLICY = "tree"
+DEFAULT_CHANNEL_POLICY = "hybrid"
+
+
+def channel_policy_for(entry: str) -> str:
+    return TREE_CHANNEL_POLICY if str(entry or "") == "tree" else DEFAULT_CHANNEL_POLICY
+
 class RAGRetrievalService:
     def __init__(
         self,
@@ -47,12 +76,18 @@ class RAGRetrievalService:
         embedding: EmbeddingProvider,
         authorization: AuthorizationGateway,
         answer_provider: Any | None = None,
+        verifier: Any | None = None,
     ) -> None:
         self.repository = repository
         self.indexer = indexer
         self.embedding = embedding
         self.authorization = authorization
         self.answer_provider = answer_provider
+        # L4 is optional: without a verifier the locator simply never escalates,
+        # which keeps retrieval working when no LLM is configured.
+        self.locator = EntityLocator(
+            repository=repository, embedding=embedding, verifier=verifier
+        )
 
     def search(self, request: SearchRequest) -> RetrievalResponse:
         started = time.perf_counter()
@@ -72,64 +107,143 @@ class RAGRetrievalService:
         if not scope.available:
             request = replace(request, include_protected=False)
             protected_keys = ()
-        branch_keys, entity_matches = self._resolve_branches(request)
+        # Channel policy for this entry, then the rollout state of the tree
+        # surface. Traditional entries never call the locator at all.
+        policy = channel_policy_for(request.entry)
+        tree_mode = resolve_tree_mode(
+            default=settings.tree_mode,
+            scope_type=request.scope_type,
+            scope_id=request.scope_id,
+            rollout_scopes=parse_rollout_scopes(settings.tree_rollout_scopes),
+        )
+        shadow_sample = True
+        tree_reason: str | None = None
+        locate = None
+        entity_ids: tuple[str, ...] = ()
+        if policy == TREE_CHANNEL_POLICY:
+            if tree_mode == "off":
+                tree_reason = "tree_disabled"
+            else:
+                if tree_mode == "shadow":
+                    shadow_sample = shadow_sampled(
+                        scope_type=request.scope_type,
+                        scope_id=request.scope_id,
+                        query=request.query,
+                        sample_rate=settings.tree_shadow_sample_rate,
+                    )
+                if tree_mode == "shadow" and not shadow_sample:
+                    tree_reason = "shadow_not_sampled"
+                else:
+                    locate = self._locate(request, tree_mode=tree_mode, shadow_sample=True)
+                    entity_ids = locate.scope.entity_ids if locate is not None else ()
+                    if not entity_ids:
+                        tree_reason = "no_entity_match"
+        # The unscoped channels run for traditional entries, and for the shadow
+        # phase where the tree is measured but its result is not adopted yet.
+        run_unscoped = policy != TREE_CHANNEL_POLICY or tree_mode == "shadow"
+        run_tree_channels = (
+            policy == TREE_CHANNEL_POLICY
+            and tree_mode in {"shadow", "tree"}
+            and bool(entity_ids)
+        )
+        # Strip resolved entity names out of the retrieval text: once the entity
+        # is known, the name only biases BM25 towards chunks that repeat it.
+        retrieval_request = request
+        if locate is not None and locate.scope.residual_query:
+            retrieval_request = replace(request, query=locate.scope.residual_query)
+        if locate is not None and locate.scope.min_mount_confidence:
+            # The locator resolves the effective threshold (request value, else
+            # configuration). Hand that downstream instead of the raw request
+            # field, otherwise a caller who left it unset would get every mount
+            # regardless of confidence.
+            retrieval_request = replace(
+                retrieval_request,
+                min_mount_confidence=locate.scope.min_mount_confidence,
+            )
         query_vector: list[float] | None = None
         degraded: list[str] = []
         if request.entry not in {"knowledge", "sources"}:
             try:
-                vectors = self.embedding.embed([request.query])
+                vectors = self.embedding.embed([retrieval_request.query])
                 query_vector = vectors[0] if vectors else None
             except Exception:
                 degraded.append("embedding_failed")
         global_branches: dict[str, list[SearchResult]] = {}
-        try:
-            global_branches["bm25"] = _annotate_branch(
-                "bm25",
-                self.indexer.search_bm25(
-                    request,
-                    protected_object_keys=protected_keys,
-                ),
-            )
-            if query_vector is not None:
-                global_branches["knn"] = _annotate_branch(
-                    "knn",
-                    self.indexer.search_knn(
-                        request,
-                        query_vector,
-                        protected_object_keys=protected_keys,
-                    ),
-                )
-        except Exception as exc:
-            raise SearchUnavailable("Elasticsearch retrieval failed") from exc
-        branch_branches: dict[str, list[SearchResult]] = {}
-        if settings.tree_mode != "off" and branch_keys:
+        # Only the tree entry in tree mode skips this: the whole point of the
+        # split is that a tree request does not pay for an unscoped query it is
+        # not going to use.
+        if run_unscoped:
             try:
-                branch_branches["branch_bm25"] = _annotate_branch(
+                global_branches["bm25"] = _annotate_branch(
                     "bm25",
                     self.indexer.search_bm25(
-                        request,
-                        branch_keys=branch_keys,
+                        retrieval_request,
                         protected_object_keys=protected_keys,
                     ),
                 )
                 if query_vector is not None:
-                    branch_branches["branch_knn"] = _annotate_branch(
+                    global_branches["knn"] = _annotate_branch(
                         "knn",
                         self.indexer.search_knn(
-                            request,
+                            retrieval_request,
                             query_vector,
-                            branch_keys=branch_keys,
+                            protected_object_keys=protected_keys,
+                        ),
+                    )
+            except Exception as exc:
+                raise SearchUnavailable("Elasticsearch retrieval failed") from exc
+        scoped_branches: dict[str, list[SearchResult]] = {}
+        if run_tree_channels:
+            try:
+                scoped_branches["branch_bm25"] = _annotate_branch(
+                    "bm25",
+                    self.indexer.search_bm25(
+                        retrieval_request,
+                        entity_ids=entity_ids,
+                        protected_object_keys=protected_keys,
+                    ),
+                )
+                if query_vector is not None:
+                    scoped_branches["branch_knn"] = _annotate_branch(
+                        "knn",
+                        self.indexer.search_knn(
+                            retrieval_request,
+                            query_vector,
+                            entity_ids=entity_ids,
                             protected_object_keys=protected_keys,
                         ),
                     )
             except Exception:
                 degraded.append("branch_failed")
-                branch_branches = {}
-        effective = dict(global_branches)
-        if settings.tree_mode == "boost":
-            effective.update(branch_branches)
+                scoped_branches = {}
+        effective, execution_path, fallback_reason = select_retrieval_channels(
+            policy=policy,
+            tree_mode=tree_mode,
+            global_branches=global_branches,
+            scoped_branches=scoped_branches,
+            tree_reason=tree_reason,
+            degraded=degraded,
+        )
+        related_branches: dict[str, list[SearchResult]] = {}
+        related_entities: list[dict[str, Any]] = []
+        if run_tree_channels:
+            # Lateral move between nodes: still the tree surface, never a way
+            # back into the unscoped corpus.
+            related_branches, related_entities = self._expand_relations(
+                request=request,
+                retrieval_request=retrieval_request,
+                entity_ids=entity_ids,
+                scoped_branches=scoped_branches,
+                query_vector=query_vector,
+                protected_keys=protected_keys,
+                degraded=degraded,
+                tree_mode=tree_mode,
+            )
+            if related_branches:
+                effective.update(related_branches)
         raw_global_candidate_count = sum(len(value) for value in global_branches.values())
-        raw_branch_candidate_count = sum(len(value) for value in branch_branches.values())
+        raw_branch_candidate_count = sum(len(value) for value in scoped_branches.values())
+        raw_related_candidate_count = sum(len(value) for value in related_branches.values())
         gate_dropped = 0
         if request.entry == "ai":
             effective, gate_dropped = filter_qa_anchor_candidates(
@@ -143,8 +257,10 @@ class RAGRetrievalService:
             weights={
                 "bm25": settings.rrf_keyword_weight,
                 "knn": settings.rrf_vector_weight,
-                "branch_bm25": settings.tree_branch_weight,
-                "branch_knn": settings.tree_branch_weight,
+                "branch_bm25": settings.tree_mount_weight,
+                "branch_knn": settings.tree_mount_weight,
+                "related_bm25": settings.tree_relation_weight,
+                "related_knn": settings.tree_relation_weight,
             },
         )
         fused = dedupe_logical_positions(fused)
@@ -189,13 +305,57 @@ class RAGRetrievalService:
             max_per_resource=final_max_per_resource,
         )
         diagnostics = {
-            "tree_mode": settings.tree_mode,
+            # Which surface this request used. Recorded next to tree_mode so a
+            # "the tree changed my search box" report can be answered from data.
+            "channel_policy": policy,
+            "tree_mode": tree_mode,
+            # Kept alongside the resolved mode so a rollout can be audited later:
+            # "why did this scope run tree?" has to be answerable after the fact.
+            "tree_mode_default": settings.tree_mode,
+            "tree_shadow_sampled": shadow_sample,
             "authorization_snapshot_id": scope.snapshot_id,
             "authorized_protected_object_count": len(protected_keys),
             "scope_truncated": scope.truncated,
-            "resolved_entity_count": len(entity_matches),
-            "resolved_branch_count": len(branch_keys),
+            "resolved_entity_count": len(entity_ids),
+            "entity_scope": {
+                "entity_ids": list(entity_ids),
+                "composition": locate.scope.composition if locate else None,
+                "residual_query": retrieval_request.query if locate else None,
+                "unresolved": list(locate.scope.unresolved) if locate else [],
+            },
+            "locate": locate.diagnostics if locate else None,
+            # Lifted out of the per-mention trace so the plan's "常规路径定位
+            # p95 <= 80ms" gate can be read as a number instead of eyeballed.
+            "locate_ms": float((locate.diagnostics or {}).get("locate_ms") or 0.0)
+            if locate
+            else 0.0,
+            "locate_layer_ms": (locate.diagnostics or {}).get("layer_ms")
+            if locate
+            else None,
+            # Lifted out of the per-mention trace so the L4 call rate is a single
+            # queryable flag rather than nested JSON.
+            "locate_llm_invoked": bool(
+                locate
+                and any(
+                    item.get("llm_invoked")
+                    for item in (locate.diagnostics.get("mentions") or [])
+                )
+            ),
             "branch_candidate_count": raw_branch_candidate_count,
+            "related_entity_count": len(related_entities),
+            "related_candidate_count": raw_related_candidate_count,
+            "related_entities": [
+                {
+                    "entity_id": item["entity_id"],
+                    "relation_type": item["relation_type"],
+                    "confidence": item["confidence"],
+                    # Bounded: the full chain can grow across many windows and
+                    # this blob is written to search_history on every query. A
+                    # truncated list still answers "was the model alone here?".
+                    "evidence_chunk_ids": list(item.get("evidence_chunk_ids") or [])[:5],
+                }
+                for item in related_entities
+            ],
             "global_candidate_count": raw_global_candidate_count,
             "score_gate_dropped_count": gate_dropped,
             "anchor_candidate_count": len(anchor_candidates),
@@ -212,17 +372,9 @@ class RAGRetrievalService:
                 "knn_top_k": settings.knn_top_k,
             },
             "effective_execution_path": (
-                "metadata_filter" if request.entry == "sources"
-                else "tree_boost" if settings.tree_mode == "boost" and branch_branches
-                else "tree_shadow" if settings.tree_mode == "shadow"
-                else "traditional"
+                "metadata_filter" if request.entry == "sources" else execution_path
             ),
-            "fallback_reason": (
-                None if request.entry == "sources"
-                else "no_entity_match" if settings.tree_mode != "off" and not branch_keys
-                else "branch_failed" if "branch_failed" in degraded
-                else None
-            ),
+            "fallback_reason": None if request.entry == "sources" else fallback_reason,
             "degraded_reason": ",".join(degraded) if degraded else None,
         }
         try:
@@ -236,7 +388,7 @@ class RAGRetrievalService:
                     "entry": request.entry,
                     "knowledge_base_ids": list(request.knowledge_base_ids),
                 },
-                tree_mode=settings.tree_mode,
+                tree_mode=tree_mode,
                 execution_path=diagnostics["effective_execution_path"],
                 diagnostics=diagnostics,
                 result_count=len(results),
@@ -244,7 +396,10 @@ class RAGRetrievalService:
                 request_id=request_id,
             )
         except Exception:
-            pass
+            # Search must not fail because history could not be written, but a
+            # silent pass hid a check-constraint mismatch that dropped every
+            # tree-mode row for a whole release. Log it so it is visible.
+            logger.warning("search history was not recorded", exc_info=True)
         return RetrievalResponse(request_id=request_id, results=results, diagnostics=diagnostics)
 
     def context_scope(
@@ -419,21 +574,129 @@ class RAGRetrievalService:
             "execution_path": response.diagnostics["effective_execution_path"],
         }
 
-    def _resolve_branches(self, request: SearchRequest) -> tuple[tuple[str, ...], list[Any]]:
-        if settings.tree_mode == "off" or request.entry == "sources":
-            return (), []
-        entities, aliases, version = self.repository.load_entity_registry(
-            scope_type=request.scope_type,
-            scope_id=request.scope_id,
+    def _expand_relations(
+        self,
+        *,
+        request: SearchRequest,
+        retrieval_request: SearchRequest,
+        entity_ids: tuple[str, ...],
+        scoped_branches: dict[str, list[SearchResult]],
+        query_vector: list[float] | None,
+        protected_keys: tuple[str, ...],
+        degraded: list[str],
+        tree_mode: str | None = None,
+    ) -> tuple[dict[str, list[SearchResult]], list[dict[str, Any]]]:
+        """Widen to one hop of neighbours when the entity's own node is thin.
+
+        Falling straight back to full-corpus search throws away the fact that we
+        know which entity the user meant; one hop keeps that context while still
+        reaching "张三参与的项目" style questions.
+        """
+        if not settings.tree_relation_expansion_enabled:
+            return {}, []
+        if (tree_mode or settings.tree_mode) != "tree":
+            return {}, []
+        if not entity_ids or not scoped_branches:
+            return {}, []
+        scoped_count = sum(len(values) for values in scoped_branches.values())
+        if scoped_count >= max(1, int(request.top_k * 0.5)):
+            return {}, []
+        try:
+            related = self.repository.find_related_entities(
+                scope_type=request.scope_type,
+                scope_id=request.scope_id,
+                entity_ids=list(entity_ids),
+                direction="both",
+                min_confidence=settings.tree_relation_min_confidence,
+                limit=settings.tree_relation_max_entities,
+            )
+        except Exception:
+            degraded.append("relation_lookup_failed")
+            return {}, []
+        related_ids = tuple(dict.fromkeys(item["entity_id"] for item in related))
+        if not related_ids:
+            return {}, []
+        branches: dict[str, list[SearchResult]] = {}
+        try:
+            branches["related_bm25"] = _annotate_branch(
+                "bm25",
+                self.indexer.search_bm25(
+                    retrieval_request,
+                    entity_ids=related_ids,
+                    protected_object_keys=protected_keys,
+                ),
+            )
+            if query_vector is not None:
+                branches["related_knn"] = _annotate_branch(
+                    "knn",
+                    self.indexer.search_knn(
+                        retrieval_request,
+                        query_vector,
+                        entity_ids=related_ids,
+                        protected_object_keys=protected_keys,
+                    ),
+                )
+        except Exception:
+            degraded.append("relation_search_failed")
+            return {}, []
+        for values in branches.values():
+            for result in values:
+                result.source["retrieval_origin"] = "related"
+        return branches, related
+
+    def _locate(
+        self,
+        request: SearchRequest,
+        *,
+        tree_mode: str | None = None,
+        shadow_sample: bool = True,
+    ) -> LocateResult | None:
+        """Resolve the request's entities, or None when the tree does not apply.
+
+        The `sources` entry point addresses a specific knowledge item rather
+        than an entity, so it deliberately skips location. `tree_mode` is the
+        resolved per-request mode; it defaults to the deployment setting for
+        callers that bypass the rollout control.
+        """
+        mode = tree_mode or settings.tree_mode
+        if mode == "off" or request.entry == "sources":
+            return None
+        if mode == "shadow" and not shadow_sample:
+            # Sampling exists to keep shadow mode affordable. This request was
+            # not picked, so it skips the locate call entirely; the diagnostics
+            # flag it so the quality rates do not count a deliberate skip as a
+            # location miss.
+            return None
+        if request.entity_ids:
+            # The Agent already resolved entities while planning; reusing them
+            # keeps multi-step plans consistent and skips L0-L4 entirely.
+            return LocateResult(
+                entities=(),
+                scope=EntityScope(
+                    entity_ids=tuple(request.entity_ids)[: settings.tree_max_entities],
+                    composition=request.entity_composition or "and",
+                    min_mount_confidence=(
+                        request.min_mount_confidence
+                        if request.min_mount_confidence is not None
+                        else 0.65
+                    ),
+                    residual_query=request.query,
+                ),
+                diagnostics={"source": "request"},
+            )
+        return self.locator.locate(
+            LocateRequest(
+                scope_type=request.scope_type,
+                scope_id=request.scope_id,
+                query=request.query,
+                conversation_id=request.conversation_id,
+                occurred_after=request.occurred_after,
+                occurred_before=request.occurred_before,
+                top_k=request.top_k,
+                min_mount_confidence=request.min_mount_confidence,
+                allow_llm=request.locate_allow_llm,
+            )
         )
-        matcher = EntityMatcher(entities, aliases, registry_version=version)
-        matches = matcher.match_text(request.query)
-        bucket = time_bucket(request.occurred_after) or time_bucket(request.occurred_before)
-        values = []
-        for match in matches:
-            base = f"entity:{match.domain}:{match.entity_id}"
-            values.append(f"{base}:{bucket}" if bucket else base)
-        return tuple(values[: settings.tree_max_branches]), matches
 
     def _authorize_branches(
         self,
@@ -574,6 +837,43 @@ def _annotate_branch(branch: str, results: list[SearchResult]) -> list[SearchRes
         matched.add(branch)
         result.source["matched_by"] = sorted(matched)
     return results
+
+
+def select_retrieval_channels(
+    *,
+    policy: str,
+    tree_mode: str,
+    global_branches: dict[str, list[SearchResult]],
+    scoped_branches: dict[str, list[SearchResult]],
+    tree_reason: str | None,
+    degraded: list[str],
+) -> tuple[dict[str, list[SearchResult]], str, str | None]:
+    """Pick the channels for one request. Never both at once.
+
+    Traditional entries return the unscoped result. The tree entry returns the
+    entity-scoped result, or nothing plus a reason - it does **not** substitute
+    the unscoped result, because "should I fall back?" belongs to the caller
+    (the agent's tool loop), not to the retrieval service.
+
+    This replaces the earlier tree-first fusion, which put the entity-scoped and
+    the unscoped channels into one RRF pass. That made the search box's result
+    depend on the tree, which is exactly what the entry split removes.
+
+    `shadow` is the validation phase in between: the tree runs and its
+    diagnostics are recorded, but the result stays the traditional one, so
+    nothing depends on the tree being good yet.
+    """
+    if policy != TREE_CHANNEL_POLICY:
+        return dict(global_branches), "traditional", None
+    if tree_mode == "shadow":
+        return dict(global_branches), "tree_shadow", tree_reason
+    if tree_reason:
+        return {}, "tree", tree_reason
+    if "branch_failed" in degraded:
+        return {}, "tree", "branch_failed"
+    if not scoped_branches:
+        return {}, "tree", "empty_scope"
+    return dict(scoped_branches), "tree", None
 
 
 def filter_qa_anchor_candidates(

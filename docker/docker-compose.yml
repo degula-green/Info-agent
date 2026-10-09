@@ -193,8 +193,6 @@ services:
       ELASTICSEARCH_URL: ${ELASTICSEARCH_URL:-http://elasticsearch:9200}
       ELASTICSEARCH_USERNAME: ${ELASTICSEARCH_USERNAME:-}
       ELASTICSEARCH_PASSWORD: ${ELASTICSEARCH_PASSWORD:-}
-      ELASTICSEARCH_DISPLAY_INDEX: ${ELASTICSEARCH_DISPLAY_INDEX:-rag_chunks_display_write}
-      ELASTICSEARCH_PROTECTED_INDEX: ${ELASTICSEARCH_PROTECTED_INDEX:-rag_chunks_protected_write}
       ELASTICSEARCH_DISPLAY_READ_INDEX: ${ELASTICSEARCH_DISPLAY_READ_INDEX:-rag_chunks_display_read}
       ELASTICSEARCH_DISPLAY_WRITE_INDEX: ${ELASTICSEARCH_DISPLAY_WRITE_INDEX:-rag_chunks_display_write}
       ELASTICSEARCH_PROTECTED_READ_INDEX: ${ELASTICSEARCH_PROTECTED_READ_INDEX:-rag_chunks_protected_read}
@@ -234,8 +232,6 @@ services:
       ELASTICSEARCH_URL: ${ELASTICSEARCH_URL:-http://elasticsearch:9200}
       ELASTICSEARCH_USERNAME: ${ELASTICSEARCH_USERNAME:-}
       ELASTICSEARCH_PASSWORD: ${ELASTICSEARCH_PASSWORD:-}
-      ELASTICSEARCH_DISPLAY_INDEX: ${ELASTICSEARCH_DISPLAY_INDEX:-rag_chunks_display_write}
-      ELASTICSEARCH_PROTECTED_INDEX: ${ELASTICSEARCH_PROTECTED_INDEX:-rag_chunks_protected_write}
       ELASTICSEARCH_DISPLAY_READ_INDEX: ${ELASTICSEARCH_DISPLAY_READ_INDEX:-rag_chunks_display_read}
       ELASTICSEARCH_DISPLAY_WRITE_INDEX: ${ELASTICSEARCH_DISPLAY_WRITE_INDEX:-rag_chunks_display_write}
       ELASTICSEARCH_PROTECTED_READ_INDEX: ${ELASTICSEARCH_PROTECTED_READ_INDEX:-rag_chunks_protected_read}
@@ -307,7 +303,13 @@ services:
         psql --dbname="$${KNOWLEDGE_DATABASE_URL}" --set=ON_ERROR_STOP=1 --file=/migrations/20261004_wechat_device_assignments.up.sql &&
         psql --dbname="$${KNOWLEDGE_DATABASE_URL}" --set=ON_ERROR_STOP=1 --file=/migrations/20261007_wechat_control_flow.up.sql &&
         psql --dbname="$${KNOWLEDGE_DATABASE_URL}" --set=ON_ERROR_STOP=1 --file=/migrations/20261007_contact_name_core.up.sql &&
-        psql --dbname="$${KNOWLEDGE_DATABASE_URL}" --set=ON_ERROR_STOP=1 --file=/migrations/20261009_wechat_contact_book.up.sql
+        psql --dbname="$${KNOWLEDGE_DATABASE_URL}" --set=ON_ERROR_STOP=1 --file=/migrations/20261009_tree_rag_v2_schema.up.sql &&
+        psql --dbname="$${KNOWLEDGE_DATABASE_URL}" --set=ON_ERROR_STOP=1 --file=/migrations/20261009_wechat_contact_book.up.sql &&
+        psql --dbname="$${KNOWLEDGE_DATABASE_URL}" --set=ON_ERROR_STOP=1 --file=/migrations/20261010_tree_rag_scan_watermarks.up.sql &&
+        psql --dbname="$${KNOWLEDGE_DATABASE_URL}" --set=ON_ERROR_STOP=1 --file=/migrations/20261011_tree_rag_eval.up.sql &&
+        psql --dbname="$${KNOWLEDGE_DATABASE_URL}" --set=ON_ERROR_STOP=1 --file=/migrations/20261011_tree_rag_search_history_tree_mode.up.sql &&
+        psql --dbname="$${KNOWLEDGE_DATABASE_URL}" --set=ON_ERROR_STOP=1 --file=/migrations/20261012_tree_rag_scan_runs.up.sql &&
+        psql --dbname="$${KNOWLEDGE_DATABASE_URL}" --set=ON_ERROR_STOP=1 --file=/migrations/20261013_tree_rag_review_duration.up.sql
     depends_on:
       postgres:
         condition: service_healthy
@@ -338,8 +340,20 @@ services:
       - ../db/migrations/20261007_wechat_control_flow.down.sql:/migrations/20261007_wechat_control_flow.down.sql:ro
       - ../db/migrations/20261007_contact_name_core.up.sql:/migrations/20261007_contact_name_core.up.sql:ro
       - ../db/migrations/20261007_contact_name_core.down.sql:/migrations/20261007_contact_name_core.down.sql:ro
+      - ../db/migrations/20261009_tree_rag_v2_schema.up.sql:/migrations/20261009_tree_rag_v2_schema.up.sql:ro
+      - ../db/migrations/20261009_tree_rag_v2_schema.down.sql:/migrations/20261009_tree_rag_v2_schema.down.sql:ro
       - ../db/migrations/20261009_wechat_contact_book.up.sql:/migrations/20261009_wechat_contact_book.up.sql:ro
       - ../db/migrations/20261009_wechat_contact_book.down.sql:/migrations/20261009_wechat_contact_book.down.sql:ro
+      - ../db/migrations/20261010_tree_rag_scan_watermarks.up.sql:/migrations/20261010_tree_rag_scan_watermarks.up.sql:ro
+      - ../db/migrations/20261010_tree_rag_scan_watermarks.down.sql:/migrations/20261010_tree_rag_scan_watermarks.down.sql:ro
+      - ../db/migrations/20261011_tree_rag_eval.up.sql:/migrations/20261011_tree_rag_eval.up.sql:ro
+      - ../db/migrations/20261011_tree_rag_eval.down.sql:/migrations/20261011_tree_rag_eval.down.sql:ro
+      - ../db/migrations/20261011_tree_rag_search_history_tree_mode.up.sql:/migrations/20261011_tree_rag_search_history_tree_mode.up.sql:ro
+      - ../db/migrations/20261011_tree_rag_search_history_tree_mode.down.sql:/migrations/20261011_tree_rag_search_history_tree_mode.down.sql:ro
+      - ../db/migrations/20261012_tree_rag_scan_runs.up.sql:/migrations/20261012_tree_rag_scan_runs.up.sql:ro
+      - ../db/migrations/20261012_tree_rag_scan_runs.down.sql:/migrations/20261012_tree_rag_scan_runs.down.sql:ro
+      - ../db/migrations/20261013_tree_rag_review_duration.up.sql:/migrations/20261013_tree_rag_review_duration.up.sql:ro
+      - ../db/migrations/20261013_tree_rag_review_duration.down.sql:/migrations/20261013_tree_rag_review_duration.down.sql:ro
     restart: "no"
 
   redis:
