@@ -129,3 +129,147 @@ export async function askQaStream(input: { query: string; conversationId?: strin
   while (true) { const chunk = await reader.read(); if (chunk.done) break; buffer += decoder.decode(chunk.value, { stream: true }); const parts = buffer.split(/\r?\n\r?\n/); buffer = parts.pop() || ''; for (const part of parts) dispatch(part) }
   if (buffer.trim()) dispatch(buffer)
 }
+
+// --- 候选实体审核（管理端） -------------------------------------------------
+// 这些接口要求组织级 entity:review 能力，服务端会调用 Core 做校验，因此必须
+// 同时带上 X-User-ID 与 X-Organization-Id。
+
+export type EntityCandidate = {
+  candidate_id: string
+  candidate_name: string
+  candidate_domain: string
+  normalized_key: string
+  score: number
+  status: string
+  mention_count: number
+  distinct_chunk_count: number
+  distinct_source_count: number
+  distinct_conversation_count: number
+  suggested_entity_id?: string | null
+  resolved_entity_id?: string | null
+  first_seen_at?: string | null
+  last_seen_at?: string | null
+}
+
+export type EntityCandidateMention = {
+  mention_id: string
+  chunk_id: string
+  surface_form: string
+  candidate_domain?: string
+  context_excerpt?: string | null
+  confidence: number
+  extraction_method: string
+  created_at?: string | null
+}
+
+export type EntityCandidateDetail = EntityCandidate & {
+  review_note?: string | null
+  mentions: EntityCandidateMention[]
+}
+
+export type EntityReviewAction = 'promote' | 'merge' | 'ignore' | 'defer'
+
+export type EntityReviewResult = {
+  candidate_id: string
+  status: string
+  resolved_entity_id?: string | null
+  registry_version?: number | null
+  branch_refresh_job_id?: string | null
+}
+
+async function adminHeaders(organizationId: string) {
+  const value = await headers()
+  const scope = String(organizationId || '').trim()
+  if (scope) value.set('X-Organization-Id', scope)
+  return value
+}
+
+async function adminRequest<T>(path: string, organizationId: string, init: RequestInit = {}): Promise<T> {
+  const response = await authenticatedFetch(`${baseURL}${path}`, { ...init, headers: await adminHeaders(organizationId) })
+  const raw = await response.text()
+  let body: any = null
+  try { body = raw ? JSON.parse(raw) : null } catch { body = raw }
+  if (!response.ok) {
+    if (response.status === 403) throw new Error('没有实体审核权限，请联系组织管理员')
+    throw new Error(body?.detail || body?.message || `RAG admin request failed (${response.status})`)
+  }
+  return body as T
+}
+
+export function listEntityCandidates(input: {
+  organizationId: string
+  status?: string
+  domain?: string
+  query?: string
+  minScore?: number
+  page?: number
+  pageSize?: number
+}) {
+  const params = new URLSearchParams()
+  params.set('scope_type', 'organization')
+  params.set('page', String(input.page ?? 1))
+  params.set('page_size', String(input.pageSize ?? 20))
+  if (input.status) params.set('status', input.status)
+  if (input.domain) params.set('domain', input.domain)
+  if (input.query) params.set('query', input.query)
+  if (input.minScore) params.set('min_score', String(input.minScore))
+  return adminRequest<{ items: EntityCandidate[]; page: number; page_size: number; total: number }>(
+    `/admin/entity-candidates?${params.toString()}`, input.organizationId,
+  )
+}
+
+export function getEntityCandidate(candidateId: string, organizationId: string) {
+  return adminRequest<EntityCandidateDetail>(
+    `/admin/entity-candidates/${encodeURIComponent(candidateId)}?scope_type=organization`,
+    organizationId,
+  )
+}
+
+export type AdminEntity = {
+  entity_id: string
+  domain: string
+  canonical_name: string
+  normalized_key: string
+  status: string
+  registry_version: number
+}
+
+export function listAdminEntities(organizationId: string) {
+  return adminRequest<{ items: AdminEntity[] }>(
+    '/admin/entities?scope_type=organization', organizationId,
+  )
+}
+
+export function reviewEntityCandidate(input: {
+  candidateId: string
+  organizationId: string
+  action: EntityReviewAction
+  reviewRequestId: string
+  canonicalName?: string
+  domain?: string
+  targetEntityId?: string
+  note?: string
+  expectedStatus?: string
+  /** 审核停留时长（毫秒）；批量审核没有停留过程，不传。 */
+  durationMs?: number
+}) {
+  return adminRequest<EntityReviewResult>(
+    `/admin/entity-candidates/${encodeURIComponent(input.candidateId)}/review?scope_type=organization`,
+    input.organizationId,
+    {
+      method: 'POST',
+      // review_request_id 是幂等键：重试同一次审核不会重复创建实体。
+      headers: { 'Idempotency-Key': input.reviewRequestId },
+      body: JSON.stringify({
+        review_request_id: input.reviewRequestId,
+        action: input.action,
+        canonical_name: input.canonicalName || undefined,
+        domain: input.domain || undefined,
+        target_entity_id: input.targetEntityId || undefined,
+        note: input.note || undefined,
+        expected_status: input.expectedStatus || undefined,
+        duration_ms: input.durationMs ?? undefined,
+      }),
+    },
+  )
+}

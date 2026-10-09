@@ -285,7 +285,8 @@ class Chunk:
     rag_eligible: bool = True
     lifecycle_status: str = "active"
     embedding: list[float] | None = None
-    branch_keys: tuple[str, ...] = ()
+    entity_ids: tuple[str, ...] = ()
+    entity_mounts: tuple[dict[str, Any], ...] = ()
     registry_version: int = 0
     source_kind: str | None = None
 
@@ -436,7 +437,8 @@ class Chunk:
             "sent_at": self.sent_at,
             "context_header": self.context_header,
             "source_locator": self.source_locator,
-            "branch_keys": list(self.branch_keys),
+            "entity_ids": list(self.entity_ids),
+            "entity_mounts": [dict(mount) for mount in self.entity_mounts],
             "registry_version": self.registry_version,
             "embedding_model": self.embedding_model,
             "embedding_dimensions": self.embedding_dimensions,
@@ -472,7 +474,12 @@ class SearchRequest:
     file_extensions: tuple[str, ...] = ()
     message_types: tuple[str, ...] = ()
     group_by_source: bool = False
-    branch_keys: tuple[str, ...] = ()
+    entity_ids: tuple[str, ...] = ()
+    # Pre-resolved scope handed down by the Agent's plan, plus the knobs for the
+    # location pipeline. See 实体定位五层管线接口草案 §9.2.
+    entity_composition: str = "and"
+    min_mount_confidence: float | None = None
+    locate_allow_llm: bool = True
 
     @property
     def scope_key(self) -> str:
@@ -512,8 +519,8 @@ class SearchResult:
         return str(value) if value else None
 
     @property
-    def branch_keys(self) -> tuple[str, ...]:
-        values = self.source.get("branch_keys") or ()
+    def entity_ids(self) -> tuple[str, ...]:
+        values = self.source.get("entity_ids") or ()
         return tuple(str(value) for value in values if value)
 
     def safe_dict(self) -> dict[str, Any]:
@@ -560,13 +567,23 @@ class EntityAlias:
 
 
 @dataclass(frozen=True)
-class BranchMatch:
-    branch_key: str
+class EntityMount:
+    """One (chunk, entity) edge: which entity a chunk belongs to, how strongly,
+    and which channel produced the link."""
+
     entity_id: str
     domain: str
     registry_version: int
-    match_method: str = "exact"
-    match_score: float = 1.0
+    mount_method: str = "explicit"
+    confidence: float = 1.0
+
+    def es_document(self) -> dict[str, Any]:
+        return {
+            "entity_id": self.entity_id,
+            "domain": self.domain,
+            "confidence": self.confidence,
+            "method": self.mount_method,
+        }
 
 
 @dataclass
