@@ -136,7 +136,7 @@ ES mapping          检索接入 + 灰度       审核页 + 看板       关系�
 | Phase 0 地基改造 | Week 1-2 | ✅ 交付 | 树形RAG-Phase0-地基改造 | 迁移正向+回滚演练、脏数据清理、ES entity_ids/entity_mounts、实库应用 |
 | Phase 1 定位管线 | Week 3 | ✅ 交付 | 树形RAG-Phase1 | L0-L5 管线、L4 门控与验证器、定位单测 |
 | Phase 1 | Week 4 | ✅ 交付 | 树形RAG-Phase1 | pgvector 回填、ES 过滤、tree_mode 三态、residual_query |
-| Phase 1 | Week 5 | ⚠️ 部分 | 树形RAG-Phase1、定位分层耗时、灰度白名单 | 灰度开关 + 白名单 + 采样就绪；"常规路径 p95 ≤ 80ms"实测 1330ms 未达标（中间件在远端）；回滚演练未做 |
+| Phase 1 | Week 5 | ⚠️ 部分 | 树形RAG-Phase1、定位分层耗时、灰度白名单、回滚演练 | 任务清单全部完成（灰度白名单 + 采样 + 两步回滚演练均通过）；**唯一未达标项**是"常规路径 p95 ≤ 80ms"，实测 1330ms，根因是中间件在远端 |
 | Phase 1（前端） | Week 5 | ✅ 交付 | 树形RAG-Phase1 §2.6 | 审核页列表 / 详情 / 四动作接真实接口 |
 | Phase 2 窗口挂载 | Week 6 | ✅ 交付 | 树形RAG-Phase2、窗口扫描性能实测 | 窗口扫描、水位线、8 类关系枚举校验、挂载写入、并发定档 |
 | Phase 2 | Week 7 | ✅ 交付 | 树形RAG-Phase2 | 置信度分级、候选链路、审核闭环（候选 → promote → 检索命中） |
@@ -408,38 +408,38 @@ DROP TABLE IF EXISTS rag_mvp.tree_nodes;
 
 #### Week 1: 迁移与数据处置
 
-- [ ] **Day 1-2**: 编写并评审迁移脚本
-  - [ ] `20261008_tree_rag_v2_schema.up.sql` / `.down.sql`
-  - [ ] domain 收窄前的脏数据清理
-  - [ ] `chunk_branches` 主键与字段改造
-  - [ ] `entity_relations` 建表
-  - [ ] 删除 `tree_nodes`
-- [ ] **Day 3**: 本地与测试环境演练
-  - [ ] 正向迁移
-  - [ ] 回滚迁移
-  - [ ] 校验无残留外键
-- [ ] **Day 4**: 数据处置
-  - [ ] 导出可选种子实体
-  - [ ] 清空树侧表
-  - [ ] 确认 chunks 与 ES 数据完好
-- [ ] **Day 5**: ES mapping 变更
-  - [ ] 更新 index mapping 配置
-  - [ ] 验证新增字段可写
+- [x] **Day 1-2**: 编写并评审迁移脚本
+  - [x] `20261009_tree_rag_v2_schema.up.sql` / `.down.sql`（计划原写的 20261008 与实际文件名不符，已改正）
+  - [x] domain 收窄前的脏数据清理
+  - [x] `chunk_branches` 主键与字段改造
+  - [x] `entity_relations` 建表
+  - [x] 删除 `tree_nodes`
+- [x] **Day 3**: 本地与测试环境演练
+  - [x] 正向迁移
+  - [x] 回滚迁移
+  - [x] 校验无残留外键
+- [x] **Day 4**: 数据处置
+  - [x] 导出可选种子实体（实测无人工作成果，未执行导出）
+  - [x] 清空树侧表
+  - [x] 确认 chunks 与 ES 数据完好
+- [x] **Day 5**: ES mapping 变更
+  - [x] 更新 index mapping 配置
+  - [x] 验证新增字段可写
 
 #### Week 2: 重建与验证
 
-- [ ] **Day 1-2**: mount 回填
-  - [ ] 改造 `BranchRefreshService` 输出 `entity_ids` / `entity_mounts`
-  - [ ] 分批回填，避免一次全量
-- [ ] **Day 3**: 检索回归
-  - [ ] 传统全库检索结果与迁移前一致
-  - [ ] tree_mode=off 下无异常
-- [ ] **Day 4**: 管理端接口适配
-  - [ ] entity-tree 改为派生实现
-  - [ ] entity-candidates 审核链路可用
-- [ ] **Day 5**: 阶段验收与文档
-  - [ ] 更新 Schema 文档
-  - [ ] 更新部署说明（pgvector 依赖）
+- [x] **Day 1-2**: mount 回填
+  - [x] 改造 `BranchRefreshService` 输出 `entity_ids` / `entity_mounts`
+  - [x] 分批回填，避免一次全量
+- [x] **Day 3**: 检索回归
+  - [x] 传统全库检索结果与迁移前一致
+  - [x] tree_mode=off 下无异常（另见 树形RAG-回滚演练-交付文档.md）
+- [x] **Day 4**: 管理端接口适配
+  - [x] entity-tree 改为派生实现
+  - [x] entity-candidates 审核链路可用
+- [x] **Day 5**: 阶段验收与文档
+  - [x] 更新 Schema 文档
+  - [x] 更新部署说明（pgvector 依赖）
 
 ### 2.4 验收标准
 
@@ -624,7 +624,7 @@ branch_refresh_jobs                             审核后增量刷新
   - [x] L4 调用率统计
 - [ ] **Day 3**: 灰度准备
   - [x] 灰度开关与用户白名单（见 树形RAG-灰度白名单-交付文档.md）
-  - [ ] 回滚预案演练（预案已成文，未做演练）
+  - [x] 回滚预案演练（见 树形RAG-回滚演练-交付文档.md）
 - [x] **Day 4-5**: 灰度观察
   - [x] shadow 模式对照
   - [x] 指标分析
