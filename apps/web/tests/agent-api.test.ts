@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { afterEach, test } from 'node:test'
+import { afterEach, mock, test } from 'node:test'
 import {
   agentTodoSourceInitial,
   agentTodoSourceLabel,
@@ -962,6 +962,51 @@ test('Agent SSE reports a request failure as reconnect, not waiting', async () =
 
   assert.deepEqual(waiting, [])
   assert.deepEqual(reconnects, [1])
+})
+
+test('Agent SSE is not cut off by the generic authenticated request timeout', async () => {
+  installStorage()
+  const controller = new AbortController()
+  const reconnects: number[] = []
+  let streamStarted = false
+
+  globalThis.fetch = async (input, init = {}) => {
+    const url = String(input)
+    if (url.endsWith('/auth/me')) return json({ id: USER_ID, email: 'user@example.com', nickname: 'user', status: 'active' })
+    streamStarted = true
+    return new Promise<Response>((_resolve, reject) => {
+      init.signal?.addEventListener('abort', () => {
+        const error = new Error('aborted')
+        error.name = 'AbortError'
+        reject(error)
+      }, { once: true })
+    })
+  }
+
+  mock.timers.enable({ apis: ['setTimeout'] })
+  try {
+    const pending = streamAgentTaskEvents(
+      'task-1',
+      {
+        onEvent: () => true,
+        onReconnect: (attempt) => reconnects.push(attempt),
+      },
+      { timeoutSeconds: 30, maxReconnects: 1, signal: controller.signal },
+    )
+
+    await Promise.resolve()
+    await Promise.resolve()
+    assert.equal(streamStarted, true)
+
+    mock.timers.tick(8_500)
+    await Promise.resolve()
+    assert.deepEqual(reconnects, [])
+
+    controller.abort()
+    await pending
+  } finally {
+    mock.timers.reset()
+  }
 })
 
 test('Agent SSE tracks the answer cursor separately from the task cursor', async () => {

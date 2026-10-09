@@ -234,6 +234,7 @@ export async function streamAgentTaskEvents(
       const response = await authenticatedFetch(
         `${baseURL}/tasks/${encodeURIComponent(taskID)}/events?after=${cursor}&answer_id=${encodeURIComponent(answerId)}&answer_after=${answerAfter}&timeout_seconds=${timeoutSeconds}`,
         { headers: agentHeaders(), signal },
+        { timeoutMs: (timeoutSeconds + 5) * 1000 },
       )
       if (!response.ok || !response.body) {
         throw new AgentApiError(

@@ -20,13 +20,14 @@ function boundedSignal(signal: AbortSignal | null | undefined, timeoutMs: number
 export async function authenticatedFetch(
   input: RequestInfo | URL,
   init: RequestInit = {},
-  options: { retryUnauthorized?: boolean } = {},
+  options: { retryUnauthorized?: boolean; timeoutMs?: number } = {},
 ): Promise<Response> {
   const retryUnauthorized = options.retryUnauthorized !== false
+  const requestTimeoutMs = Math.max(1, Number(options.timeoutMs || authenticatedRequestTimeoutMs))
   const run = async (token: string) => {
     const headers = new Headers(init.headers)
     if (token) headers.set('Authorization', `Bearer ${token}`)
-    const bounded = boundedSignal(init.signal, authenticatedRequestTimeoutMs)
+    const bounded = boundedSignal(init.signal, requestTimeoutMs)
     try {
       return await fetch(input, {
         ...init,
