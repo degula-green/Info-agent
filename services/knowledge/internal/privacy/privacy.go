@@ -8,7 +8,7 @@ import (
 	"golang.org/x/text/unicode/norm"
 )
 
-const PolicyVersion = "privacy-v2"
+const PolicyVersion = "privacy-v3"
 
 type Span struct {
 	Start      int     `json:"start"`
@@ -46,6 +46,10 @@ var detectionRules = []detectionRule{
 	{
 		name: "secret_assignment", kind: "secret", confidence: 1.0, placeholder: "[密钥已脱敏]",
 		re: regexp.MustCompile(`(?i)(?:secret|token|api[_-]?key|access[_-]?key|private[_-]?key)\s*(?:=|:|：|是|为)\s*\S+`),
+	},
+	{
+		name: "known_secret_prefix", kind: "secret", confidence: 1.0, placeholder: "[密钥已脱敏]",
+		re: regexp.MustCompile(`\b(?:sk-(?:proj-|ant-)?[a-z0-9_-]{12,}|(?:gh[pousr]_|github_pat_|glpat-|hf_|npm_)[a-z0-9_-]{12,}|xox[a-z]-[a-z0-9_-]{12,}|(?:akia|asia)[a-z0-9]{12,}|aiza[a-z0-9_-]{20,}|sg\.[a-z0-9_-]{12,})\b`),
 	},
 	{
 		name: "account", kind: "account", confidence: 0.92, placeholder: "[账号已脱敏]",
@@ -91,6 +95,11 @@ var detectionRules = []detectionRule{
 
 var sensitiveAttachmentName = regexp.MustCompile(`(?i)(password|passwd|secret|token|credential|private[-_ ]?key|id[-_ ]?card|身份证|密钥|密码|账号|授权|数据库|数据库配置|连接串|阿里云|rds|mysql|postgres|redis)`)
 
+var (
+	contextSecretCandidate = regexp.MustCompile(`\b[a-z0-9][a-z0-9_-]{19,}\b`)
+	secretContextHint      = regexp.MustCompile(`(?i)(?:api[-_ ]?key|apikey|access[-_ ]?key|app[-_ ]?secret|client[-_ ]?secret|secret|token|密钥|私钥|口令)`)
+)
+
 // Analyze applies the versioned privacy policy and returns both the decision
 // metadata and a deterministic redacted display value.
 func Analyze(content string) Decision {
@@ -121,6 +130,7 @@ func Analyze(content string) Decision {
 			})
 		}
 	}
+	matches = append(matches, detectContextualSecrets(normalized, indexMap, content)...)
 	if len(matches) == 0 {
 		return decision
 	}
@@ -231,6 +241,50 @@ func redactSpans(content string, spans []Span) string {
 		out = out[:span.Start] + placeholderFor(span.Type) + out[span.End:]
 	}
 	return out
+}
+
+// detectContextualSecrets catches credentials whose label follows the value,
+// such as "sk-... this is the api-key", without weakening prefix rules.
+func detectContextualSecrets(normalized string, indexMap []int, original string) []Span {
+	const contextWindow = 64
+	out := make([]Span, 0)
+	for _, loc := range contextSecretCandidate.FindAllStringIndex(normalized, -1) {
+		start := loc[0] - contextWindow
+		if start < 0 {
+			start = 0
+		}
+		end := loc[1] + contextWindow
+		if end > len(normalized) {
+			end = len(normalized)
+		}
+		if !secretContextHint.MatchString(normalized[start:end]) {
+			continue
+		}
+		originalStart := mapNormalizedOffset(indexMap, loc[0], len(original))
+		originalEnd := mapNormalizedOffset(indexMap, loc[1], len(original))
+		if originalStart >= originalEnd || !looksHighEntropy(original[originalStart:originalEnd]) {
+			continue
+		}
+		out = append(out, Span{Start: originalStart, End: originalEnd, Type: "secret:contextual", Source: "context", Confidence: 0.95})
+	}
+	return out
+}
+
+// looksHighEntropy requires letters in both cases and digits; callers also
+// require nearby credential wording before treating a candidate as sensitive.
+func looksHighEntropy(candidate string) bool {
+	hasLower, hasUpper, hasDigit := false, false, false
+	for _, value := range candidate {
+		switch {
+		case value >= 'a' && value <= 'z':
+			hasLower = true
+		case value >= 'A' && value <= 'Z':
+			hasUpper = true
+		case value >= '0' && value <= '9':
+			hasDigit = true
+		}
+	}
+	return hasLower && hasUpper && hasDigit
 }
 
 func placeholderFor(spanType string) string {

@@ -57,6 +57,8 @@ func TestAnalyzeCredentialVariants(t *testing.T) {
 		"pwd 123456",
 		"账号：root 密码：123456",
 		"mysql://root:secret@db.example.com:3306/app",
+		"sk-FBBzYASR1TFsP09C46f72574b49CdAa6f43B0Fe529062这是api-key，张三你可以用这个去开发",
+		"请使用 token: ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
 	}
 	for _, content := range tests {
 		t.Run(content, func(t *testing.T) {
@@ -65,6 +67,23 @@ func TestAnalyzeCredentialVariants(t *testing.T) {
 				t.Fatalf("variant was not redacted: %+v", decision)
 			}
 		})
+	}
+}
+
+func TestAnalyzeDoesNotRedactHighEntropyTextWithoutSecretContext(t *testing.T) {
+	content := "设备序列号 ABCDEFGHIJKLMNOPQRSTUVWX1234567890 已登记"
+	decision := Analyze(content)
+	if decision.Sensitive || decision.Redacted != content {
+		t.Fatalf("high-entropy text without credential context was redacted: %+v", decision)
+	}
+}
+
+func TestAnalyzeScreenshotAPIKeyRegression(t *testing.T) {
+	content := "sk-FBBzYASR1TFsP09C46f72574b49CdAa6f43B0Fe529062这是api-key，张三你可以用这个去开发"
+	decision := Analyze(content)
+	want := "[密钥已脱敏]这是api-key，张三你可以用这个去开发"
+	if !decision.Sensitive || decision.Redacted != want {
+		t.Fatalf("screenshot regression: got sensitive=%v redacted=%q want %q", decision.Sensitive, decision.Redacted, want)
 	}
 }
 
