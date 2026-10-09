@@ -15,6 +15,7 @@ Design constraints that shape this module:
 from __future__ import annotations
 
 import time
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Sequence
 
 from app.application.entity_service import discover_candidate_names
@@ -46,6 +47,21 @@ _LLM_GATE_SCORE = 0.85
 _LLM_FALLBACK_SCORE = 0.85
 # Top-1/top-2 gap below which the semantic layer cannot separate candidates.
 _LLM_GATE_GAP = 0.08
+# The interface draft lists three soft signals and says they only reorder. Type
+# and recency are implemented; keywords is not (nothing writes the column yet).
+# Recency stays weaker than type, mirroring the draft's distance multipliers
+# (0.9 for type vs 0.95 for recency).
+_RECENT_WINDOW = timedelta(days=90)
+_RECENCY_BOOST = 1.03
+
+
+def _mentioned_recently(value: datetime | None, *, now: datetime | None = None) -> bool:
+    """True when the entity was mentioned inside the draft's 3-month window."""
+    if value is None:
+        return False
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return (now or datetime.now(timezone.utc)) - value <= _RECENT_WINDOW
 
 
 def _ms(started: float) -> float:
@@ -297,12 +313,18 @@ class EntityLocator:
 
         Type and recency only reorder; they never remove a candidate, because a
         wrong type label or an old-but-correct entity must still be reachable.
+        The interface draft's third signal (keywords) is not applied yet - the
+        column is read for embeddings but nothing writes it.
         """
         adjusted: list[EntityCandidate] = []
         for candidate in candidates:
             score = candidate.match_score
             if mention.type_hint and candidate.domain == mention.type_hint:
                 score = min(1.0, score * 1.05)
+            if _mentioned_recently(candidate.last_mentioned_at):
+                # Recently active entities win ties and near-ties, which is the
+                # case "the project we discussed last week" depends on.
+                score = min(1.0, score * _RECENCY_BOOST)
             adjusted.append(
                 EntityCandidate(
                     entity_id=candidate.entity_id,
@@ -312,6 +334,7 @@ class EntityLocator:
                     match_score=round(score, 4),
                     registry_version=candidate.registry_version,
                     evidence=dict(candidate.evidence),
+                    last_mentioned_at=candidate.last_mentioned_at,
                 )
             )
         adjusted.sort(key=lambda item: (-item.match_score, item.entity_id))
@@ -445,6 +468,7 @@ class EntityLocator:
             match_score=float(item.get("match_score") or 0.0),
             registry_version=int(item.get("registry_version") or 1),
             evidence=dict(item.get("evidence") or {}),
+            last_mentioned_at=item.get("last_mentioned_at"),
         )
 
 

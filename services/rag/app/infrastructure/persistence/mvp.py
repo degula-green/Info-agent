@@ -1630,12 +1630,14 @@ class PostgresRagMVPRepository:
         with self._connection() as connection:
             with connection.cursor() as cursor:
                 cursor.execute(
-                    f"""SELECT e.id::text,e.domain,e.canonical_name,e.registry_version,'exact'
+                    f"""SELECT e.id::text,e.domain,e.canonical_name,e.registry_version,'exact',
+                               e.last_mentioned_at
                         FROM {self.schema}.entity_registry e
                         WHERE e.scope_type=%s AND e.scope_id=%s::uuid AND e.status='active'
                           AND e.normalized_key=%s
                         UNION
-                        SELECT e.id::text,e.domain,e.canonical_name,e.registry_version,'alias'
+                        SELECT e.id::text,e.domain,e.canonical_name,e.registry_version,'alias',
+                               e.last_mentioned_at
                         FROM {self.schema}.entity_aliases a
                         JOIN {self.schema}.entity_registry e ON e.id=a.entity_id
                         WHERE a.scope_type=%s AND a.scope_id=%s::uuid AND a.status='active'
@@ -1647,6 +1649,7 @@ class PostgresRagMVPRepository:
                         "entity_id": row[0], "domain": row[1], "canonical_name": row[2],
                         "registry_version": int(row[3]), "match_method": row[4],
                         "match_score": 0.95 if row[4] == "exact" else 0.93,
+                        "last_mentioned_at": row[5],
                     }
                     for row in cursor.fetchall()
                 ]
@@ -1668,7 +1671,7 @@ class PostgresRagMVPRepository:
 
         def keep(
             entity_id: str, domain: str, name: str, version: int,
-            score: float, method: str = "fuzzy",
+            score: float, method: str = "fuzzy", last_mentioned_at: Any = None,
         ) -> None:
             current = found.get(entity_id)
             if current is None or score > current["match_score"]:
@@ -1676,6 +1679,7 @@ class PostgresRagMVPRepository:
                     "entity_id": entity_id, "domain": domain, "canonical_name": name,
                     "registry_version": version, "match_method": method,
                     "match_score": round(float(score), 4),
+                    "last_mentioned_at": last_mentioned_at,
                 }
 
         def fuzzy_score(raw: float) -> float:
@@ -1687,6 +1691,7 @@ class PostgresRagMVPRepository:
             with connection.cursor() as cursor:
                 cursor.execute(
                     f"""SELECT e.id::text,e.domain,e.canonical_name,e.registry_version,
+                               e.last_mentioned_at,
                                GREATEST(similarity(e.canonical_name,%s),
                                         similarity(e.normalized_key,%s))
                         FROM {self.schema}.entity_registry e
@@ -1696,12 +1701,14 @@ class PostgresRagMVPRepository:
                     (normalized, normalized, scope_type, scope_id, normalized, normalized, limit),
                 )
                 for row in cursor.fetchall():
-                    raw = float(row[4] or 0)
+                    raw = float(row[5] or 0)
                     if raw < 0.8:
                         continue
-                    keep(row[0], row[1], row[2], int(row[3]), fuzzy_score(raw))
+                    keep(row[0], row[1], row[2], int(row[3]), fuzzy_score(raw),
+                         last_mentioned_at=row[4])
                 cursor.execute(
                     f"""SELECT e.id::text,e.domain,e.canonical_name,e.registry_version,
+                               e.last_mentioned_at,
                                similarity(a.normalized_alias,%s)
                         FROM {self.schema}.entity_aliases a
                         JOIN {self.schema}.entity_registry e ON e.id=a.entity_id
@@ -1711,15 +1718,17 @@ class PostgresRagMVPRepository:
                     (normalized, scope_type, scope_id, normalized, limit),
                 )
                 for row in cursor.fetchall():
-                    raw = float(row[4] or 0)
+                    raw = float(row[5] or 0)
                     if raw < 0.8:
                         continue
-                    keep(row[0], row[1], row[2], int(row[3]), fuzzy_score(raw))
+                    keep(row[0], row[1], row[2], int(row[3]), fuzzy_score(raw),
+                         last_mentioned_at=row[4])
                 # Containment catches omitted qualifiers ("青云" -> "青云飞鹏项目")
                 # that a trigram score rates as too different to trust alone.
                 if len(normalized) >= 2:
                     cursor.execute(
-                        f"""SELECT e.id::text,e.domain,e.canonical_name,e.registry_version
+                        f"""SELECT e.id::text,e.domain,e.canonical_name,e.registry_version,
+                                   e.last_mentioned_at
                             FROM {self.schema}.entity_registry e
                             WHERE e.scope_type=%s AND e.scope_id=%s::uuid AND e.status='active'
                               AND e.normalized_key LIKE %s
@@ -1727,7 +1736,8 @@ class PostgresRagMVPRepository:
                         (scope_type, scope_id, f"%{normalized}%", limit),
                     )
                     for row in cursor.fetchall():
-                        keep(row[0], row[1], row[2], int(row[3]), 0.70, method="substring")
+                        keep(row[0], row[1], row[2], int(row[3]), 0.70, method="substring",
+                             last_mentioned_at=row[4])
         ranked = sorted(found.values(), key=lambda item: (-item["match_score"], item["entity_id"]))
         return ranked[:limit]
 
@@ -1753,6 +1763,7 @@ class PostgresRagMVPRepository:
             with connection.cursor() as cursor:
                 cursor.execute(
                     f"""SELECT e.id::text,e.domain,e.canonical_name,e.registry_version,
+                               e.last_mentioned_at,
                                1-(e.embedding <=> %s::vector) AS score
                         FROM {self.schema}.entity_registry e
                         WHERE e.scope_type=%s AND e.scope_id=%s::uuid AND e.status='active'
@@ -1765,7 +1776,8 @@ class PostgresRagMVPRepository:
                     {
                         "entity_id": row[0], "domain": row[1], "canonical_name": row[2],
                         "registry_version": int(row[3]), "match_method": "semantic",
-                        "match_score": round(float(row[4] or 0), 4),
+                        "match_score": round(float(row[5] or 0), 4),
+                        "last_mentioned_at": row[4],
                     }
                     for row in cursor.fetchall()
                 ][:limit]
@@ -1976,6 +1988,11 @@ class PostgresRagMVPRepository:
 
         Confidence only moves up and a stronger channel never gives way to a
         weaker one, which is what makes the 50%-overlap window scan idempotent.
+
+        A mount *is* a mention, so this is also where `last_mentioned_at` gets
+        maintained - the column the locator's recency soft signal reads. Both
+        mount paths funnel through here, so explicit and window mounts are
+        covered by one update.
         """
         for mount in mounts:
             cursor.execute(
@@ -2002,6 +2019,16 @@ class PostgresRagMVPRepository:
                     chunk.scope_id, mount.registry_version, mount.confidence,
                     mount.mount_method,
                 ),
+            )
+        entity_ids = [mount.entity_id for mount in mounts if mount.entity_id]
+        if entity_ids:
+            cursor.execute(
+                f"""UPDATE {self.schema}.entity_registry
+                       SET last_mentioned_at=CURRENT_TIMESTAMP
+                     WHERE id=ANY(%s::uuid[])
+                       AND (last_mentioned_at IS NULL
+                            OR last_mentioned_at<CURRENT_TIMESTAMP)""",
+                (entity_ids,),
             )
 
     def upsert_candidate_mention(
@@ -3525,6 +3552,7 @@ class InMemoryRagMVPRepository:
                 "canonical_name": item["canonical_name"],
                 "registry_version": int(item.get("registry_version") or 1),
                 "match_method": "exact", "match_score": 0.95,
+                "last_mentioned_at": item.get("last_mentioned_at"),
             }
         for alias in self.aliases:
             if alias.get("scope_type") != scope_type or alias.get("scope_id") != scope_id:
@@ -3541,6 +3569,7 @@ class InMemoryRagMVPRepository:
                 "canonical_name": entity["canonical_name"],
                 "registry_version": int(entity.get("registry_version") or 1),
                 "match_method": "alias", "match_score": 0.93,
+                "last_mentioned_at": entity.get("last_mentioned_at"),
             }
         return list(found.values())
 
@@ -3568,6 +3597,7 @@ class InMemoryRagMVPRepository:
                     "canonical_name": entity["canonical_name"],
                     "registry_version": int(entity.get("registry_version") or 1),
                     "match_method": method, "match_score": round(score, 4),
+                    "last_mentioned_at": entity.get("last_mentioned_at"),
                 }
 
         for item in self.entities:
@@ -3611,6 +3641,7 @@ class InMemoryRagMVPRepository:
                 "registry_version": int(item.get("registry_version") or 1),
                 "match_method": "semantic",
                 "match_score": round(_cosine_similarity(embedding, vector), 4),
+                "last_mentioned_at": item.get("last_mentioned_at"),
             })
         output.sort(key=lambda value: (-value["match_score"], value["entity_id"]))
         return output[: max(1, int(limit))]
@@ -3735,6 +3766,16 @@ class InMemoryRagMVPRepository:
                 current["mount_method"] = mount.mount_method
             current["registry_version"] = mount.registry_version
             current["status"] = "active"
+        # A mount is a mention: keep the locator's recency soft signal fed, the
+        # same way the Postgres path does in the same funnel.
+        mentioned_at = datetime.now(timezone.utc)
+        mentioned_ids = {mount.entity_id for mount in mounts if mount.entity_id}
+        for item in self.entities:
+            if item["id"] not in mentioned_ids:
+                continue
+            current = item.get("last_mentioned_at")
+            if current is None or current < mentioned_at:
+                item["last_mentioned_at"] = mentioned_at
 
     def upsert_candidate_mention(
         self,

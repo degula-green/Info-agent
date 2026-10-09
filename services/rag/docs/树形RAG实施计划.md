@@ -611,7 +611,7 @@ branch_refresh_jobs                             审核后增量刷新
   - [x] 单元测试（含同名跨 domain、多 mention）
 - [x] **Day 3-4**: L3 语义匹配
   - [x] pgvector 查询与 over-fetch
-  - [x] 软信号加权
+  - [x] 软信号加权（type + recency 已实现，见 树形RAG-L3软信号recency-交付文档.md；**keywords 未实现——该列被读但无人写**）
   - [x] 空向量容忍
 - [x] **Day 5**: L4 门控验证（见 树形RAG-L4门控验证-交付文档.md）
   - [x] 触发条件实现

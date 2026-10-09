@@ -9,6 +9,7 @@ match.
 
 from __future__ import annotations
 
+from datetime import datetime
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -34,6 +35,10 @@ class EntityCandidate:
     match_score: float
     registry_version: int = 1
     evidence: dict[str, Any] = field(default_factory=dict)
+    # Last time content mentioned this entity. Soft signal only: it reorders
+    # candidates, it never removes one, because an old-but-correct entity still
+    # has to stay reachable.
+    last_mentioned_at: datetime | None = None
 
 
 @dataclass(frozen=True)

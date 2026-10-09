@@ -1,8 +1,14 @@
 """Five-layer entity location."""
 
-from app.application.entity_locator import EntityLocator, extract_mentions
-from app.domain.location import LocateRequest
-from app.domain.rag import normalized_text
+from datetime import datetime, timedelta, timezone
+
+from app.application.entity_locator import (
+    EntityLocator,
+    _mentioned_recently,
+    extract_mentions,
+)
+from app.domain.location import EntityCandidate, EntityMention, LocateRequest
+from app.domain.rag import Chunk, EntityMount, normalized_text
 from app.infrastructure.persistence.mvp import InMemoryRagMVPRepository
 
 SCOPE = dict(scope_type="organization", scope_id="org-1")
@@ -304,3 +310,80 @@ def test_degraded_verification_drops_a_weak_lexical_match():
     # worse than not narrowing, because the tree would then hide the answer.
     assert result.scope.entity_ids == ()
     assert result.diagnostics["mentions"][0].get("llm_degraded") is None
+
+
+def test_the_recency_window_is_the_drafts_three_months():
+    now = datetime(2026, 10, 9, tzinfo=timezone.utc)
+
+    assert _mentioned_recently(now - timedelta(days=89), now=now) is True
+    assert _mentioned_recently(now - timedelta(days=91), now=now) is False
+    # Never mentioned is not the same as recently mentioned.
+    assert _mentioned_recently(None, now=now) is False
+
+
+def test_recency_reorders_candidates_and_never_drops_one():
+    # The interface draft lists recency as a soft signal: it may change which
+    # candidate wins, but an old-but-correct entity has to stay reachable.
+    now = datetime.now(timezone.utc)
+    locator = EntityLocator(repository=InMemoryRagMVPRepository())
+    mention = EntityMention(mention_id="m0", surface_form="青云", normalized_form="青云")
+    stale = EntityCandidate(
+        entity_id="e1", domain="project", canonical_name="老项目",
+        match_method="semantic", match_score=0.80,
+        last_mentioned_at=now - timedelta(days=120),
+    )
+    recent = EntityCandidate(
+        entity_id="e2", domain="project", canonical_name="新项目",
+        match_method="semantic", match_score=0.79,
+        last_mentioned_at=now - timedelta(days=3),
+    )
+
+    ranked = locator._rank(mention, [stale, recent])
+
+    assert [item.entity_id for item in ranked] == ["e2", "e1"]
+    assert len(ranked) == 2
+    # 0.79 * 1.03 beats 0.80, and the boost is capped so nothing exceeds 1.
+    assert ranked[0].match_score == 0.8137
+
+
+_CHUNK = dict(
+    resource_snapshot_id="00000000-0000-0000-0000-000000000001",
+    knowledge_item_id="00000000-0000-0000-0000-000000000002",
+    resource_type="message",
+    resource_id="00000000-0000-0000-0000-000000000009",
+    knowledge_base_id="00000000-0000-0000-0000-000000000003",
+    scope_type=SCOPE["scope_type"],
+    scope_id=SCOPE["scope_id"],
+    content_version=1,
+    processing_version="v1",
+    chunking_version="v1",
+    content_variant="display",
+    chunk_index=0,
+    chunk_count=1,
+    content="青云项目的服务器配置",
+    content_hash="0" * 64,
+    sent_at="2026-10-01T00:00:00Z",
+)
+
+
+def test_mounting_a_chunk_is_what_feeds_the_recency_signal():
+    # Nothing else writes last_mentioned_at: the column is maintained by the one
+    # funnel both mount paths share, so a promoted-but-never-mounted entity is
+    # correctly "never mentioned" rather than "just mentioned".
+    repo = InMemoryRagMVPRepository()
+    entity_id = _entity(repo, "青云项目")
+    chunk = Chunk(chunk_id="0" * 64, **_CHUNK)
+    repo.upsert_chunks([chunk])
+
+    before = repo.locate_entities_exact(**SCOPE, normalized=normalized_text("青云项目"))
+    assert before[0]["last_mentioned_at"] is None
+
+    repo.merge_chunk_mounts(chunk, [EntityMount(
+        entity_id=entity_id, domain="project", registry_version=1,
+        confidence=0.7, mount_method="window_batch",
+    )])
+
+    after = repo.locate_entities_exact(**SCOPE, normalized=normalized_text("青云项目"))
+    assert after[0]["last_mentioned_at"] is not None
+    # Same reachability, and the locator carries it into the candidate.
+    assert after[0]["entity_id"] == entity_id
