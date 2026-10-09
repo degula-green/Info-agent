@@ -28,6 +28,7 @@ from app.domain.state import (
 
 
 ZERO_UUID = "00000000-0000-0000-0000-000000000000"
+FINAL_CANDIDATE_STATUSES = frozenset({"promoted", "merged", "ignored"})
 
 
 class DatabaseUnavailable(RuntimeError):
@@ -853,6 +854,48 @@ class PostgresRagMVPRepository:
                     ),
                 )
                 return [self._chunk_row(row) for row in cursor.fetchall()]
+
+    def list_conversation_context(
+        self,
+        *,
+        scope_type: str,
+        scope_id: str,
+        conversation_id: str,
+        before_sent_at: str,
+        limit: int,
+    ) -> list[Chunk]:
+        """The chunks immediately before an incremental scan watermark.
+
+        Incremental windows must keep their left context: a message like
+        "the new app is in testing" is about the project named in the previous
+        message. Without that context the model has to invent a vague subject.
+        """
+        if not before_sent_at or int(limit) <= 0:
+            return []
+        with self._connection() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    f"""SELECT {self._chunk_select()}
+                        FROM {self.schema}.chunks
+                        WHERE scope_type=%s AND scope_id=%s::uuid
+                          AND source_conversation_id=%s::uuid
+                          AND resource_type='message'
+                          AND lifecycle_status='active'
+                          AND sent_at IS NOT NULL
+                          AND sent_at <= %s::timestamptz
+                        ORDER BY sent_at DESC, chunk_id DESC
+                        LIMIT %s""",
+                    (
+                        scope_type,
+                        scope_id,
+                        conversation_id,
+                        before_sent_at,
+                        max(1, int(limit)),
+                    ),
+                )
+                values = [self._chunk_row(row) for row in cursor.fetchall()]
+        values.reverse()
+        return values
 
     def set_scan_watermark(
         self,
@@ -2226,6 +2269,8 @@ class PostgresRagMVPRepository:
                 current_status = str(row[1])
                 if expected_status and current_status != expected_status:
                     raise ValueError("candidate status changed")
+                if current_status in FINAL_CANDIDATE_STATUSES:
+                    raise ValueError("candidate already reviewed")
                 resolved_entity_id = row[4]
                 candidate_normalized_key = row[5]
                 registry_version: int | None = None
@@ -3150,6 +3195,32 @@ class InMemoryRagMVPRepository:
         values.sort(key=lambda item: (item.sent_at or "", item.chunk_id))
         return values[: max(1, int(limit))]
 
+    def list_conversation_context(
+        self,
+        *,
+        scope_type: str,
+        scope_id: str,
+        conversation_id: str,
+        before_sent_at: str,
+        limit: int,
+    ) -> list[Chunk]:
+        if not before_sent_at or int(limit) <= 0:
+            return []
+        values = [
+            chunk for chunk in self.chunks.values()
+            if chunk.scope_type == scope_type
+            and chunk.scope_id == scope_id
+            and chunk.source_conversation_id == conversation_id
+            and chunk.resource_type == "message"
+            and chunk.lifecycle_status == "active"
+            and chunk.sent_at
+            and chunk.sent_at <= before_sent_at
+        ]
+        values.sort(key=lambda item: (item.sent_at or "", item.chunk_id), reverse=True)
+        values = values[: max(1, int(limit))]
+        values.reverse()
+        return values
+
     def set_scan_watermark(
         self,
         *,
@@ -3886,6 +3957,8 @@ class InMemoryRagMVPRepository:
             return {**existing, "idempotent": True}
         if value.get("expected_status") and candidate["status"] != value["expected_status"]:
             raise ValueError("candidate status changed")
+        if candidate["status"] in FINAL_CANDIDATE_STATUSES:
+            raise ValueError("candidate already reviewed")
         resolved = None
         version = None
         if value["action"] == "promote":

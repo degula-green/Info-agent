@@ -48,6 +48,11 @@ _CREDENTIAL_PATTERN = re.compile(
     re.IGNORECASE,
 )
 _LONG_DIGITS = re.compile(r"\d{8,}")
+_GENERIC_SUBJECT_PATTERN = re.compile(
+    r"^(?:(?:新|new|最新|新版|旧版|当前|现有|测试|正式|第一|第二|第三|第四|第五|mvp|beta|v\d+(?:\.\d+)*)\s*)?"
+    r"(?:版|版本|版?app|应用|系统|平台|模块|功能|文档|计划|方案|安装包|页面|服务)$",
+    re.IGNORECASE,
+)
 
 _WINDOW_PROMPT = """## 任务
 从对话中提取实体（公司、人名、项目、政策、合同），以及实体之间的关系。
@@ -60,7 +65,10 @@ _WINDOW_PROMPT = """## 任务
 2. 包括简称、昵称（如"aims"、"小张"）
 3. 给出你认为的规范名称
 4. 类型必须从 organization|person|project|policy|contract 中选一个；无法判断时丢弃
-5. 设备、服务器、数据库实例、云服务产品、账号、金额、时间、地址不作为实体提取
+5. 设备、服务器、数据库实例、云服务产品、账号、金额、时间、地址不作为实体提取；
+   泛化的版本、发布物、功能、模块、文档名称（如“MVP版本”“新版app”“第一版安装包”）
+   也不是实体。若上下文已经给出所属项目或组织，只提取该项目/组织，不要为它的版本、
+   发布物或功能另建实体
 6. 凭据类信息（账号、密码、token、密钥、验证码、身份证号、银行卡号）一律不要提取，
    也不要写进 evidence
 7. 关系类型必须从以下枚举选一个，不要自创：
@@ -130,9 +138,11 @@ class EntityWindowScanWorker:
         concurrency: int | None = None,
         cache: ExtractionCache | None = None,
         rate_limiter: CallRateLimiter | None = None,
+        indexer: Any | None = None,
     ) -> None:
         self.repository = repository
         self.extractor = extractor
+        self.indexer = indexer
         self.window_size = max(2, int(window_size or settings.extract_window_size))
         self.window_step = max(1, int(window_step or settings.extract_window_step))
         self.max_chunks_per_conversation = max(1, int(max_chunks_per_conversation))
@@ -239,7 +249,24 @@ class EntityWindowScanWorker:
         )
         if not chunks:
             return
-        windows = build_windows(chunks, self.window_size, self.window_step)
+        context: list[Chunk] = []
+        if watermark:
+            context_loader = getattr(self.repository, "list_conversation_context", None)
+            if callable(context_loader):
+                context = context_loader(
+                    scope_type=scope_type,
+                    scope_id=scope_id,
+                    conversation_id=conversation_id,
+                    before_sent_at=watermark,
+                    limit=max(0, self.window_size - 1),
+                )
+        prompt_chunks = _dedupe_chunks([*context, *chunks])
+        new_chunk_ids = {chunk.chunk_id for chunk in chunks}
+        windows = [
+            window
+            for window in build_windows(prompt_chunks, self.window_size, self.window_step)
+            if any(chunk.chunk_id in new_chunk_ids for chunk in window)
+        ]
         results = self._run_windows(
             scope_type=scope_type,
             scope_id=scope_id,
@@ -254,6 +281,20 @@ class EntityWindowScanWorker:
             outcome.mounts += result.mounts
             outcome.candidates += result.candidates
             outcome.relations += result.relations
+        if self.indexer is not None:
+            changed_ids = sorted({
+                chunk.chunk_id
+                for window in windows
+                for chunk in window
+            })
+            changed = self.repository.list_chunks(
+                scope_type=scope_type,
+                scope_id=scope_id,
+                chunk_ids=changed_ids,
+            ) if changed_ids else []
+            update = getattr(self.indexer, "update_chunk_mounts", None)
+            if callable(update):
+                update(changed)
         last = chunks[-1]
         self.repository.set_scan_watermark(
             scope_type=scope_type,
@@ -430,6 +471,17 @@ def build_windows(chunks: Sequence[Chunk], size: int, step: int) -> list[list[Ch
     return windows
 
 
+def _dedupe_chunks(chunks: Iterable[Chunk]) -> list[Chunk]:
+    seen: set[str] = set()
+    output: list[Chunk] = []
+    for chunk in chunks:
+        if chunk.chunk_id in seen:
+            continue
+        seen.add(chunk.chunk_id)
+        output.append(chunk)
+    return output
+
+
 def build_extraction_prompt(
     window: Sequence[Chunk],
 ) -> str:
@@ -468,6 +520,8 @@ def clean_entities(raw: Any) -> list[dict[str, Any]]:
             continue
         evidence = str(item.get("evidence") or "")
         if _looks_like_credential(name) or _looks_like_credential(evidence):
+            continue
+        if _GENERIC_SUBJECT_PATTERN.match(name):
             continue
         key = normalized_text(name)
         if not key or key in seen:

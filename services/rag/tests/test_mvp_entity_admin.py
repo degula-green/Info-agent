@@ -88,6 +88,32 @@ class EntityAdminTests(unittest.TestCase):
             scope_id=context.scope_id,
         )["nodes"])
 
+        replay = repository.review_candidate(
+            scope_type="organization",
+            scope_id=context.scope_id,
+            candidate_id=candidate_id,
+            reviewer_id="00000000-0000-0000-0000-000000000099",
+            review_request_id="00000000-0000-0000-0000-000000000098",
+            action="promote",
+            expected_status=None,
+            canonical_name="青云官网项目",
+            domain="project",
+        )
+        self.assertTrue(replay["idempotent"])
+
+        with self.assertRaisesRegex(ValueError, "already reviewed"):
+            repository.review_candidate(
+                scope_type="organization",
+                scope_id=context.scope_id,
+                candidate_id=candidate_id,
+                reviewer_id="00000000-0000-0000-0000-000000000099",
+                review_request_id="00000000-0000-0000-0000-000000000097",
+                action="promote",
+                expected_status=None,
+                canonical_name="青云官网项目",
+                domain="project",
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

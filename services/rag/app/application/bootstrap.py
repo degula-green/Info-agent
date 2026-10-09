@@ -127,6 +127,7 @@ def build_runtime() -> MVPWorkerRuntime:
         window_scan_service=EntityWindowScanWorker(
             repository=container.repository,
             extractor=EntityExtractionClient(),
+            indexer=container.indexer,
         ),
     )
     runtime.container = container
