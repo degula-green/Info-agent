@@ -113,6 +113,12 @@ class RelationExpansionTests(unittest.TestCase):
 
         self.assertEqual(response.diagnostics["related_entity_count"], 1)
         self.assertEqual(response.diagnostics["related_entities"][0]["entity_id"], related)
+        # The evidence chain has to survive the trip: it is what separates
+        # "the model said so once" from "several windows agreed".
+        self.assertEqual(
+            response.diagnostics["related_entities"][0]["evidence_chunk_ids"],
+            ["0" * 64],
+        )
         self.assertEqual(len(response.results), 1)
         self.assertEqual(response.results[0].source["retrieval_origin"], "related")
 
@@ -154,6 +160,7 @@ class RelatedEntityLookupTests(unittest.TestCase):
             entity_ids=[project], direction="both", min_confidence=0.7,
         )
         self.assertEqual([item["entity_id"] for item in both], [related])
+        self.assertEqual(both[0]["evidence_chunk_ids"], ["0" * 64])
 
         # The edge is 张三 -> A项目, so it is inbound from A项目 and outbound
         # from 张三.

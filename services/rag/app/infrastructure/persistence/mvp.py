@@ -1177,7 +1177,8 @@ class PostgresRagMVPRepository:
                 cursor.execute(
                     f"""SELECT e.id::text,e.domain,e.canonical_name,
                                r.relation_type,r.confidence,
-                               r.source_entity_id::text,r.target_entity_id::text
+                               r.source_entity_id::text,r.target_entity_id::text,
+                               r.evidence_chunk_ids
                         FROM {self.schema}.entity_relations r
                         JOIN {self.schema}.entity_registry e
                           ON e.id={neighbor_clause}
@@ -1195,6 +1196,10 @@ class PostgresRagMVPRepository:
                         "entity_id": row[0], "domain": row[1], "canonical_name": row[2],
                         "relation_type": row[3], "confidence": float(row[4] or 0),
                         "source_entity_id": row[5], "target_entity_id": row[6],
+                        # Written on every window that saw the edge; without it
+                        # the caller cannot tell "the model said so once" from
+                        # "three windows agreed".
+                        "evidence_chunk_ids": [str(value) for value in (row[7] or [])],
                     }
                     for row in cursor.fetchall()
                 ]
@@ -3243,6 +3248,7 @@ class InMemoryRagMVPRepository:
                 "relation_type": value["relation_type"],
                 "confidence": float(value["confidence"]),
                 "source_entity_id": source, "target_entity_id": target,
+                "evidence_chunk_ids": [str(item) for item in value.get("evidence_chunk_ids") or []],
             })
         output.sort(key=lambda item: (-item["confidence"], item["canonical_name"]))
         return output[: max(1, int(limit))]

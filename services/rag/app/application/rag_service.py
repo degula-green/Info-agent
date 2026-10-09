@@ -287,6 +287,10 @@ class RAGRetrievalService:
                     "entity_id": item["entity_id"],
                     "relation_type": item["relation_type"],
                     "confidence": item["confidence"],
+                    # Bounded: the full chain can grow across many windows and
+                    # this blob is written to search_history on every query. A
+                    # truncated list still answers "was the model alone here?".
+                    "evidence_chunk_ids": list(item.get("evidence_chunk_ids") or [])[:5],
                 }
                 for item in related_entities
             ],
