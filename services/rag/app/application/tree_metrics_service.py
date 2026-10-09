@@ -23,11 +23,15 @@ MAX_NO_ENTITY_MATCH_RATE = 0.5
 MAX_EMPTY_WINDOW_RATIO = 0.5
 SEARCH_WINDOW_HOURS = 24
 SCAN_RUN_WINDOW = 50
-# A scope export walks a scope's contents; it never runs entity location, so it
-# would dilute every retrieval rate below. Live data showed one export-only
-# build contributing 93% of the rows, which made the no-entity-match rate read
-# as 16.9% while the retrievals that did run never resolved anything.
-NON_RETRIEVAL_PATHS = frozenset({"scope_export"})
+# The retrieval rates only describe requests that actually ran entity location.
+#
+# This used to be a blacklist of non-retrieval paths (`scope_export`), which was
+# the wrong shape twice over: it needs every non-retrieval path to be known in
+# advance, and one build already writes those rows with a NULL path. Since the
+# entry split the label alone is not enough either - `traditional` now covers
+# both "located, then fell back" and "hybrid entry that never located at all".
+# So the gate is the thing being measured: did location run?
+RETRIEVAL_PATHS = frozenset({"tree", "tree_shadow", "traditional", "metadata_filter"})
 # A scrape re-runs the snapshot per scope, and each snapshot is several queries.
 # Keeping the fan-out small bounds scrape cost; the per-scope detail is still
 # available from the authorised admin endpoint.
@@ -230,7 +234,11 @@ def summarize_search(
     attempts = [
         row
         for row in rows
-        if str(row.get("execution_path") or "") not in NON_RETRIEVAL_PATHS
+        if str(row.get("execution_path") or "") in RETRIEVAL_PATHS
+        # Location ran. `locate_ms` is 0 both for bulk exports and for the
+        # hybrid entries that skip the locator entirely, and neither belongs in
+        # a rate about location quality.
+        and float(row.get("locate_ms") or 0) > 0
         # A shadow request skipped by sampling never ran location, so its empty
         # result is a budgeting decision, not a location miss.
         and row.get("shadow_sampled", True) is not False

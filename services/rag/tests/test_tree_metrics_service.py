@@ -127,16 +127,18 @@ class TestSearchMetrics:
     def test_rates_and_reason_buckets(self):
         rows = [
             {"execution_path": "tree", "fallback_reason": "", "degraded_reason": "",
-             "llm_invoked": False, "resolved_entity_count": 2, "duration_ms": 40},
+             "llm_invoked": False, "resolved_entity_count": 2,
+             "locate_ms": 90.0, "duration_ms": 40},
             {"execution_path": "tree", "fallback_reason": "", "degraded_reason": "",
-             "llm_invoked": True, "resolved_entity_count": 1, "duration_ms": 900},
+             "llm_invoked": True, "resolved_entity_count": 1,
+             "locate_ms": 700.0, "duration_ms": 900},
             # A query with no entity match degrades to the traditional path.
             {"execution_path": "traditional", "fallback_reason": "no_entity_match",
              "degraded_reason": "embedding_failed", "llm_invoked": False,
-             "resolved_entity_count": 0, "duration_ms": 120},
+             "resolved_entity_count": 0, "locate_ms": 120.0, "duration_ms": 120},
             {"execution_path": "traditional", "fallback_reason": "no_entity_match",
              "degraded_reason": "branch_failed,embedding_failed", "llm_invoked": False,
-             "resolved_entity_count": 0, "duration_ms": 200},
+             "resolved_entity_count": 0, "locate_ms": 150.0, "duration_ms": 200},
         ]
 
         summary = summarize_search(rows, window_hours=24)
@@ -165,7 +167,7 @@ class TestSearchMetrics:
         retrievals = [
             {"execution_path": "tree_shadow", "fallback_reason": "no_entity_match",
              "degraded_reason": "", "llm_invoked": False,
-             "resolved_entity_count": 0, "duration_ms": 60}
+             "resolved_entity_count": 0, "locate_ms": 500.0, "duration_ms": 60}
             for _ in range(10)
         ]
 
@@ -178,6 +180,36 @@ class TestSearchMetrics:
         assert summary["resolved_entity_rate"] == 0.0
         # The slow exports no longer set the retrieval latency percentiles.
         assert summary["latency_ms"] == {"p50": 60, "p95": 60, "max": 60, "sample_count": 10}
+
+    def test_only_requests_that_ran_location_count_towards_the_rates(self):
+        # After the entry split, `traditional` covers two very different rows: one
+        # that located and then fell back, and one from a hybrid entry that never
+        # located at all. The path label cannot separate them, so the gate is
+        # `locate_ms` - otherwise the search box's traffic would dilute the
+        # location rate exactly the way the exports used to.
+        rows = [
+            {"execution_path": "traditional", "fallback_reason": "no_entity_match",
+             "degraded_reason": "", "llm_invoked": False,
+             "resolved_entity_count": 0, "locate_ms": 300.0, "duration_ms": 80},
+            {"execution_path": "traditional", "fallback_reason": "",
+             "degraded_reason": "", "llm_invoked": False,
+             "resolved_entity_count": 0, "locate_ms": 0.0, "duration_ms": 30},
+            # A path this service does not know about (NULL, or a name another
+            # build writes) is left out rather than guessed at.
+            {"execution_path": "", "fallback_reason": "", "degraded_reason": "",
+             "llm_invoked": False, "resolved_entity_count": 0,
+             "locate_ms": 200.0, "duration_ms": 50},
+            {"execution_path": "context_scope", "fallback_reason": "",
+             "degraded_reason": "", "llm_invoked": False,
+             "resolved_entity_count": 0, "locate_ms": 0.0, "duration_ms": 40},
+        ]
+
+        summary = summarize_search(rows)
+
+        assert summary["query_count"] == 4
+        assert summary["retrieval_query_count"] == 1
+        assert summary["no_entity_match_rate"] == 1.0
+        assert summary["latency_ms"]["sample_count"] == 1
 
     def test_locate_percentile_keeps_the_l4_path_out(self):
         rows = [
@@ -225,7 +257,7 @@ class TestSearchMetrics:
         rows = [{
             "execution_path": "tree_shadow", "fallback_reason": "",
             "degraded_reason": "", "llm_invoked": False,
-            "resolved_entity_count": 0, "duration_ms": 40,
+            "resolved_entity_count": 0, "locate_ms": 400.0, "duration_ms": 40,
         }] + [
             {"execution_path": "tree_shadow", "fallback_reason": "",
              "degraded_reason": "", "llm_invoked": False,
@@ -259,7 +291,10 @@ class TestSearchMetrics:
         repo.record_search(
             scope_type=SCOPE["scope_type"], scope_id=SCOPE["scope_id"],
             execution_path="tree", duration_ms=50,
-            diagnostics={"resolved_entity_count": 1, "locate_llm_invoked": True},
+            diagnostics={
+                "resolved_entity_count": 1, "locate_llm_invoked": True,
+                "locate_ms": 120.0,
+            },
         )
 
         snapshot = TreeMetricsService(repository=repo).snapshot(**SCOPE)
