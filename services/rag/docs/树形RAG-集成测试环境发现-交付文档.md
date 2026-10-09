@@ -102,6 +102,49 @@ pytest -q（默认跳过外部集成）   ->  218 passed, 4 skipped
 | CI 同理 | CI 里如果连的是同一个共享库，也会踩同样的坑 |
 | 共享库的边界 | 现在本机开发、CI、另一个部署共用一个 PostgreSQL。这不是本仓库能单方面改掉的，但至少要知道：任何"独占扫描某张表"的测试在这里都不成立 |
 
+## 8. 后续处理：远端 worker 已停
+
+用户要求"把远端服务停了，避免抢 worker"，2026-10-09 已执行：
+
+```text
+远端主机      39.97.235.59（阿里云 ECS，hostname iZ2zeeceg32un8fblwra37Z）
+compose 栈    docker-{core,knowledge,rag,agent}-service、agent-*-worker、nginx
+停掉的服务    docker-rag-worker-1   ← 唯一消费 rag_mvp.processing_jobs 的进程
+重启策略      unless-stopped        ← 手动停止后，宿主机重启也不会自己起来
+保留运行      docker-rag-service-1（远端 API，不消费 job）
+```
+
+停止命令（在远端执行）：
+
+```bash
+docker stop docker-rag-worker-1
+# 恢复：docker start docker-rag-worker-1
+# 或 docker compose -f <compose 目录>/docker-compose.server.yml up -d rag-worker
+```
+
+**验证方式**（本地 worker 也临时停掉，否则会被本机自己领走）：
+
+```text
+1. 本地停 rag worker
+2. 建一个 processing_jobs 行
+3. 连续观察 4 秒
+
+停止前：创建后约 0.2s 就被认领，状态在 retry_wait <-> processing 之间每 5s 循环
+停止后：t+0 ~ t+3 全程 status=pending，lease_owner 为空 —— 没有任何消费者
+```
+
+验证用的 job 已删除（清理后行数 0），本地 rag worker 已按原样重启。
+
+**跑那四个外部集成用例时，本地 worker 也必须停**——它们假定自己独占 job 生命周期，
+本机的 worker 同样会抢：
+
+```powershell
+# 停本机 rag worker（只匹配 rag 的 worker.py，不影响 agent）
+Get-CimInstance Win32_Process -Filter "Name='python.exe'" |
+  Where-Object { $_.CommandLine -match '(^|[\s\\/])worker\.py' -and $_.CommandLine -notmatch 'agent' } |
+  ForEach-Object { Stop-Process -Id $_.ProcessId -Force }
+```
+
 ## 8. 变更文件
 
 ```text
