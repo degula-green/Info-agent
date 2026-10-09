@@ -193,6 +193,55 @@ class RetrievalTests(unittest.TestCase):
         self.assertIn("L1", response.diagnostics["locate_layer_ms"])
         self.assertEqual(service.authorization.batch_sizes, [1])
 
+    def test_rollout_whitelist_promotes_a_named_scope_only(self) -> None:
+        repository = InMemoryRagMVPRepository()
+        repository.upsert_entity(
+            entity_id="entity-1",
+            scope_type="organization",
+            scope_id="org-1",
+            domain="project",
+            canonical_name="青云项目",
+            normalized_key="青云项目",
+            registry_version=1,
+        )
+        original_mode = settings.tree_mode
+        original_rollout = settings.tree_rollout_scopes
+        object.__setattr__(settings, "tree_mode", "shadow")
+        object.__setattr__(settings, "tree_rollout_scopes", "organization:org-1")
+        try:
+            service = RAGRetrievalService(
+                repository=repository,
+                indexer=_Indexer(),
+                embedding=_Embedding(),
+                authorization=_Authorization(),
+            )
+            promoted = service.search(SearchRequest(
+                query="青云项目进展",
+                user_id="user-1",
+                scope_type="organization",
+                scope_id="org-1",
+                knowledge_base_ids=("kb-1",),
+            ))
+            untouched = service.search(SearchRequest(
+                query="青云项目进展",
+                user_id="user-1",
+                scope_type="organization",
+                scope_id="org-2",
+                knowledge_base_ids=("kb-1",),
+            ))
+        finally:
+            object.__setattr__(settings, "tree_mode", original_mode)
+            object.__setattr__(settings, "tree_rollout_scopes", original_rollout)
+
+        self.assertEqual(promoted.diagnostics["tree_mode"], "tree")
+        self.assertEqual(promoted.diagnostics["tree_mode_default"], "shadow")
+        self.assertEqual(promoted.diagnostics["effective_execution_path"], "tree")
+        # The neighbouring scope keeps the deployment default.
+        self.assertEqual(untouched.diagnostics["tree_mode"], "shadow")
+        self.assertEqual(
+            untouched.diagnostics["effective_execution_path"], "tree_shadow"
+        )
+
     def test_logical_dedupe_prefers_protected(self) -> None:
         display = SearchResult("d", "display", score=1.0, source={"logical_position_key": "x", "content_variant": "display"})
         protected = SearchResult("p", "protected", score=0.1, source={"logical_position_key": "x", "content_variant": "protected"})

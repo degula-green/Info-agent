@@ -47,6 +47,7 @@ _METRIC_HELP = {
     "alert_count": "Number of quality guard-rail alerts currently firing",
     "search_query_count": "Retrievals in the metric window",
     "search_retrieval_query_count": "Metric-window rows that actually located entities",
+    "search_shadow_skipped_count": "Shadow requests skipped by the sample rate",
     "search_no_entity_match_rate": "Share of retrievals that resolved no entity",
     "search_resolved_entity_rate": "Share of retrievals that resolved an entity",
     "search_l4_invocation_rate": "Share of retrievals that escalated to L4",
@@ -116,6 +117,9 @@ def flatten_metrics(snapshot: dict[str, Any]) -> dict[str, float]:
         f"{PROMETHEUS_PREFIX}_search_query_count": search.get("query_count") or 0,
         f"{PROMETHEUS_PREFIX}_search_retrieval_query_count": (
             search.get("retrieval_query_count") or 0
+        ),
+        f"{PROMETHEUS_PREFIX}_search_shadow_skipped_count": (
+            search.get("shadow_skipped_count") or 0
         ),
         f"{PROMETHEUS_PREFIX}_search_no_entity_match_rate": (
             search.get("no_entity_match_rate") or 0.0
@@ -211,7 +215,11 @@ def summarize_search(
         row
         for row in rows
         if str(row.get("execution_path") or "") not in NON_RETRIEVAL_PATHS
+        # A shadow request skipped by sampling never ran location, so its empty
+        # result is a budgeting decision, not a location miss.
+        and row.get("shadow_sampled", True) is not False
     ]
+    shadow_skipped = sum(1 for row in rows if row.get("shadow_sampled") is False)
     paths: dict[str, int] = {}
     fallbacks: dict[str, int] = {}
     degraded: dict[str, int] = {}
@@ -268,6 +276,7 @@ def summarize_search(
         "window_hours": int(window_hours),
         "query_count": total,
         "retrieval_query_count": attempted,
+        "shadow_skipped_count": shadow_skipped,
         "execution_paths": paths,
         "fallback_reasons": fallbacks,
         "degraded_reasons": degraded,

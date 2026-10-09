@@ -11,6 +11,11 @@ from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
 from app.application.entity_locator import EntityLocator
+from app.application.tree_rollout import (
+    parse_rollout_scopes,
+    resolve_tree_mode,
+    shadow_sampled,
+)
 from app.application.mvp_ports import (
     AuthorizationGateway,
     EmbeddingProvider,
@@ -83,7 +88,23 @@ class RAGRetrievalService:
         if not scope.available:
             request = replace(request, include_protected=False)
             protected_keys = ()
-        locate = self._locate(request)
+        # Rollout control: the deployment default plus the per-scope whitelist
+        # decide the mode, and shadow work is only paid for on sampled queries.
+        tree_mode = resolve_tree_mode(
+            default=settings.tree_mode,
+            scope_type=request.scope_type,
+            scope_id=request.scope_id,
+            rollout_scopes=parse_rollout_scopes(settings.tree_rollout_scopes),
+        )
+        shadow_sample = True
+        if tree_mode == "shadow":
+            shadow_sample = shadow_sampled(
+                scope_type=request.scope_type,
+                scope_id=request.scope_id,
+                query=request.query,
+                sample_rate=settings.tree_shadow_sample_rate,
+            )
+        locate = self._locate(request, tree_mode=tree_mode, shadow_sample=shadow_sample)
         entity_ids = locate.scope.entity_ids if locate is not None else ()
         # Strip resolved entity names out of the retrieval text: once the entity
         # is known, the name only biases BM25 towards chunks that repeat it.
@@ -119,7 +140,7 @@ class RAGRetrievalService:
         except Exception as exc:
             raise SearchUnavailable("Elasticsearch retrieval failed") from exc
         scoped_branches: dict[str, list[SearchResult]] = {}
-        if settings.tree_mode != "off" and entity_ids:
+        if tree_mode != "off" and entity_ids:
             try:
                 scoped_branches["branch_bm25"] = _annotate_branch(
                     "bm25",
@@ -143,7 +164,7 @@ class RAGRetrievalService:
                 degraded.append("branch_failed")
                 scoped_branches = {}
         effective, execution_path, fallback_reason = select_tree_channels(
-            tree_mode=settings.tree_mode,
+            tree_mode=tree_mode,
             global_branches=global_branches,
             scoped_branches=scoped_branches,
             resolved_entity_count=len(entity_ids),
@@ -157,6 +178,7 @@ class RAGRetrievalService:
             query_vector=query_vector,
             protected_keys=protected_keys,
             degraded=degraded,
+            tree_mode=tree_mode,
         )
         if related_branches:
             effective.update(related_branches)
@@ -224,7 +246,11 @@ class RAGRetrievalService:
             max_per_resource=final_max_per_resource,
         )
         diagnostics = {
-            "tree_mode": settings.tree_mode,
+            "tree_mode": tree_mode,
+            # Kept alongside the resolved mode so a rollout can be audited later:
+            # "why did this scope run tree?" has to be answerable after the fact.
+            "tree_mode_default": settings.tree_mode,
+            "tree_shadow_sampled": shadow_sample,
             "authorization_snapshot_id": scope.snapshot_id,
             "authorized_protected_object_count": len(protected_keys),
             "scope_truncated": scope.truncated,
@@ -296,7 +322,7 @@ class RAGRetrievalService:
                     "entry": request.entry,
                     "knowledge_base_ids": list(request.knowledge_base_ids),
                 },
-                tree_mode=settings.tree_mode,
+                tree_mode=tree_mode,
                 execution_path=diagnostics["effective_execution_path"],
                 diagnostics=diagnostics,
                 result_count=len(results),
@@ -340,6 +366,7 @@ class RAGRetrievalService:
         query_vector: list[float] | None,
         protected_keys: tuple[str, ...],
         degraded: list[str],
+        tree_mode: str | None = None,
     ) -> tuple[dict[str, list[SearchResult]], list[dict[str, Any]]]:
         """Widen to one hop of neighbours when the entity's own node is thin.
 
@@ -347,7 +374,9 @@ class RAGRetrievalService:
         know which entity the user meant; one hop keeps that context while still
         reaching "张三参与的项目" style questions.
         """
-        if not settings.tree_relation_expansion_enabled or settings.tree_mode != "tree":
+        if not settings.tree_relation_expansion_enabled:
+            return {}, []
+        if (tree_mode or settings.tree_mode) != "tree":
             return {}, []
         if not entity_ids or not scoped_branches:
             return {}, []
@@ -397,13 +426,28 @@ class RAGRetrievalService:
                 result.source["retrieval_origin"] = "related"
         return branches, related
 
-    def _locate(self, request: SearchRequest) -> LocateResult | None:
+    def _locate(
+        self,
+        request: SearchRequest,
+        *,
+        tree_mode: str | None = None,
+        shadow_sample: bool = True,
+    ) -> LocateResult | None:
         """Resolve the request's entities, or None when the tree does not apply.
 
         The `sources` entry point addresses a specific knowledge item rather
-        than an entity, so it deliberately skips location.
+        than an entity, so it deliberately skips location. `tree_mode` is the
+        resolved per-request mode; it defaults to the deployment setting for
+        callers that bypass the rollout control.
         """
-        if settings.tree_mode == "off" or request.entry == "sources":
+        mode = tree_mode or settings.tree_mode
+        if mode == "off" or request.entry == "sources":
+            return None
+        if mode == "shadow" and not shadow_sample:
+            # Sampling exists to keep shadow mode affordable. This request was
+            # not picked, so it skips the locate call entirely; the diagnostics
+            # flag it so the quality rates do not count a deliberate skip as a
+            # location miss.
             return None
         if request.entity_ids:
             # The Agent already resolved entities while planning; reusing them

@@ -218,6 +218,32 @@ class TestSearchMetrics:
         assert summary["no_entity_match_rate"] == 0.0
         assert evaluate_alerts({"search": summary}) == []
 
+    def test_sampled_out_shadow_requests_are_not_counted_as_misses(self):
+        # Sampling is a budgeting decision. Counting a deliberate skip as "no
+        # entity matched" would make the location rate look broken exactly when
+        # the sample rate was tuned down.
+        rows = [{
+            "execution_path": "tree_shadow", "fallback_reason": "",
+            "degraded_reason": "", "llm_invoked": False,
+            "resolved_entity_count": 0, "duration_ms": 40,
+        }] + [
+            {"execution_path": "tree_shadow", "fallback_reason": "",
+             "degraded_reason": "", "llm_invoked": False,
+             "resolved_entity_count": 0, "shadow_sampled": False,
+             "duration_ms": 30}
+            for _ in range(9)
+        ]
+
+        summary = summarize_search(rows)
+
+        assert summary["query_count"] == 10
+        assert summary["retrieval_query_count"] == 1
+        assert summary["shadow_skipped_count"] == 9
+        assert summary["no_entity_match_rate"] == 0.0
+        assert summary["latency_ms"] == {
+            "p50": 40, "p95": 40, "max": 40, "sample_count": 1,
+        }
+
     def test_high_no_entity_match_is_flagged(self):
         alerts = evaluate_alerts({
             "search": {"query_count": 10, "no_entity_match_rate": 0.7},
@@ -302,6 +328,7 @@ class TestPrometheusRendering:
             "relation_count": 3, "entities_missing_embedding": 1,
             "alerts": ["no_mounts"],
             "search": {"query_count": 10, "retrieval_query_count": 8,
+                       "shadow_skipped_count": 2,
                        "no_entity_match_rate": 0.2,
                        "resolved_entity_rate": 0.8, "l4_invocation_rate": 0.1,
                        "latency_ms": {"p50": 120, "p95": 900},
@@ -315,6 +342,7 @@ class TestPrometheusRendering:
         assert values["rag_tree_alert_count"] == 1
         assert values["rag_tree_search_query_count"] == 10
         assert values["rag_tree_search_retrieval_query_count"] == 8
+        assert values["rag_tree_search_shadow_skipped_count"] == 2
         assert values["rag_tree_search_latency_p95_ms"] == 900
         assert values["rag_tree_search_locate_p95_ms"] == 42
         assert values["rag_tree_search_locate_sample_count"] == 7

@@ -136,7 +136,7 @@ ES mapping          检索接入 + 灰度       审核页 + 看板       关系�
 | Phase 0 地基改造 | Week 1-2 | ✅ 交付 | 树形RAG-Phase0-地基改造 | 迁移正向+回滚演练、脏数据清理、ES entity_ids/entity_mounts、实库应用 |
 | Phase 1 定位管线 | Week 3 | ✅ 交付 | 树形RAG-Phase1 | L0-L5 管线、L4 门控与验证器、定位单测 |
 | Phase 1 | Week 4 | ✅ 交付 | 树形RAG-Phase1 | pgvector 回填、ES 过滤、tree_mode 三态、residual_query |
-| Phase 1 | Week 5 | ⚠️ 部分 | 树形RAG-Phase1、定位分层耗时 | 灰度与回滚就绪；"常规路径 p95 ≤ 80ms"实测 1330ms 未达标，根因是中间件在远端 |
+| Phase 1 | Week 5 | ⚠️ 部分 | 树形RAG-Phase1、定位分层耗时、灰度白名单 | 灰度开关 + 白名单 + 采样就绪；"常规路径 p95 ≤ 80ms"实测 1330ms 未达标（中间件在远端）；回滚演练未做 |
 | Phase 1（前端） | Week 5 | ✅ 交付 | 树形RAG-Phase1 §2.6 | 审核页列表 / 详情 / 四动作接真实接口 |
 | Phase 2 窗口挂载 | Week 6 | ✅ 交付 | 树形RAG-Phase2、窗口扫描性能实测 | 窗口扫描、水位线、8 类关系枚举校验、挂载写入、并发定档 |
 | Phase 2 | Week 7 | ✅ 交付 | 树形RAG-Phase2 | 置信度分级、候选链路、审核闭环（候选 → promote → 检索命中） |
@@ -623,7 +623,7 @@ branch_refresh_jobs                             审核后增量刷新
   - [x] 分层延迟测量（见 树形RAG-定位分层耗时-交付文档.md）
   - [x] L4 调用率统计
 - [ ] **Day 3**: 灰度准备
-  - [ ] 灰度开关与用户白名单（开关与采样率已就绪，**用户白名单未做**）
+  - [x] 灰度开关与用户白名单（见 树形RAG-灰度白名单-交付文档.md）
   - [ ] 回滚预案演练（预案已成文，未做演练）
 - [x] **Day 4-5**: 灰度观察
   - [x] shadow 模式对照
@@ -689,6 +689,18 @@ branch_refresh_jobs                             审核后增量刷新
 ```
 
 灰度优先按**查询类型**切分（例如只对含明确实体的查询启用 tree 模式），比单纯按用户切更容易定位问题。
+
+落地方式（见 树形RAG-灰度白名单-交付文档.md）：
+
+```text
+RAG_TREE_MODE            部署默认模式，off / shadow / tree
+RAG_TREE_ROLLOUT_SCOPES  提升名单：user:<id>,organization:<id>
+RAG_TREE_SHADOW_SAMPLE_RATE  shadow 定位的采样率，按 scope+query 哈希决定
+```
+
+`off` 是硬杀开关，压过白名单——否则回滚预案第 2 步切 off 之后，被放量的那批 scope
+反而停不下来。"按查询类型切分"由管线本身承担：tree 模式下定位不到实体时直接退化为
+traditional，等于只对含明确实体的查询生效。
 
 ### 3.6 回滚预案
 

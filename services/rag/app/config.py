@@ -346,6 +346,10 @@ class Settings:
     # express "prefer the navigated branch" without ever excluding branch G, so
     # a navigation miss cannot drop the answer.
     tree_mode: str = _text("RAG_TREE_MODE", "shadow").lower()
+    # Scopes promoted to `tree` while every other scope keeps RAG_TREE_MODE.
+    # Format: `user:<id>,organization:<id>`. `RAG_TREE_MODE=off` still wins, so
+    # the documented rollback (shadow -> off) keeps working.
+    tree_rollout_scopes: str = _text("RAG_TREE_ROLLOUT_SCOPES")
     tree_shadow_sample_rate: float = _float("RAG_TREE_SHADOW_SAMPLE_RATE", 1.0)
     tree_mount_weight: float = _float("RAG_TREE_MOUNT_WEIGHT", 0.5)
     tree_max_entities: int = _int("RAG_TREE_MAX_ENTITIES", 8)
