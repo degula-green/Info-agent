@@ -76,6 +76,15 @@ class SlowExtractor:
         return {"entities": [], "relations": []}
 
 
+class FakeIndexer:
+    def __init__(self):
+        self.updated = []
+
+    def update_chunk_mounts(self, chunks):
+        self.updated.extend(chunks)
+        return len(chunks)
+
+
 def _repository_with_messages(count: int, mention: str = "") -> InMemoryRagMVPRepository:
     repo = InMemoryRagMVPRepository()
     chunks = [
@@ -114,11 +123,50 @@ def test_clean_entities_drops_unknown_types_and_credentials():
         {"name": "某设备", "type": "asset", "confidence": 0.9},
         {"name": "数据库账号root 密码123456", "type": "project", "confidence": 0.5},
         {"name": "张三", "type": "person", "confidence": 0.9, "evidence": "密码是 abc"},
+        {"name": "NEW版APP", "type": "project", "confidence": 0.9},
+        {"name": "MVP版本", "type": "project", "confidence": 0.9},
         {"name": "A项目", "type": "project", "confidence": 0.7},
     ])
 
     assert [item["name"] for item in cleaned] == ["A项目", "116服务器"]
     assert cleaned[0]["confidence"] == 0.9
+
+
+def test_incremental_scan_keeps_left_context_and_mounts_new_chunks():
+    repo = _repository_with_messages(0)
+    entity_id = repo.upsert_entity(
+        domain="project",
+        canonical_name="A项目",
+        normalized_key=normalized_text("A项目"),
+        **SCOPE,
+    )["id"]
+    first = _chunk(1, "A项目本周要交付，最近进度怎么样", "2026-10-01T00:01:00Z")
+    repo.upsert_chunks([first])
+    EntityWindowScanWorker(
+        repository=repo,
+        extractor=FakeExtractor({"entities": [
+            {"name": "A项目", "type": "project", "confidence": 0.9},
+        ], "relations": []}),
+    ).run_once()
+
+    second = _chunk(2, "MVP版本已经写好了，正在测试新版app", "2026-10-01T00:02:00Z")
+    repo.upsert_chunks([second])
+    extractor = FakeExtractor({"entities": [
+        {"name": "A项目", "type": "project", "confidence": 0.9},
+    ], "relations": []})
+    indexer = FakeIndexer()
+
+    outcome = EntityWindowScanWorker(
+        repository=repo,
+        extractor=extractor,
+        indexer=indexer,
+    ).run_once()
+
+    assert outcome.windows == 1
+    assert "A项目本周要交付" in extractor.prompts[-1]
+    assert "MVP版本已经写好了" in extractor.prompts[-1]
+    assert (second.chunk_id, entity_id) in repo.branches
+    assert second.chunk_id in {chunk.chunk_id for chunk in indexer.updated}
 
 
 def test_clean_relations_enforces_the_enum():

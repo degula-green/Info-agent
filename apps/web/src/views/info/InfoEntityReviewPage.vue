@@ -27,8 +27,23 @@
       <t-select v-model="status" class="review-toolbar__select" :options="statusOptions" placeholder="全部状态" clearable @change="load" />
       <span class="review-toolbar__spacer" />
       <span class="review-toolbar__count">共 {{ total }} 条</span>
-      <t-button variant="outline" :disabled="!selectedIds.length" @click="batchReview('promote')">批量通过 ({{ selectedIds.length }})</t-button>
-      <t-button theme="danger" variant="outline" :disabled="!selectedIds.length" @click="batchReview('ignore')">批量忽略</t-button>
+      <t-button
+        variant="outline"
+        :disabled="!selectedIds.length || submitting"
+        :loading="submitting"
+        @click="batchReview('promote')"
+      >
+        批量通过 ({{ selectedIds.length }})
+      </t-button>
+      <t-button
+        theme="danger"
+        variant="outline"
+        :disabled="!selectedIds.length || submitting"
+        :loading="submitting"
+        @click="batchReview('ignore')"
+      >
+        批量忽略
+      </t-button>
     </div>
 
     <t-table
@@ -339,7 +354,7 @@ function actionLabel(action: EntityReviewAction) {
 }
 
 async function batchReview(action: 'promote' | 'ignore') {
-  if (!selectedIds.value.length) return
+  if (submitting.value || !selectedIds.value.length) return
   submitting.value = true
   let succeeded = 0
   let failed = 0
