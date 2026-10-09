@@ -3,6 +3,8 @@
 from app.application.tree_metrics_service import (
     TreeMetricsService,
     evaluate_alerts,
+    flatten_metrics,
+    render_prometheus,
     summarize_scan_runs,
     summarize_search,
 )
@@ -148,6 +150,47 @@ class TestSearchMetrics:
         assert summary["latency_ms"]["max"] == 900
         assert summary["latency_ms"]["p95"] >= 200
 
+    def test_scope_exports_do_not_dilute_the_rates(self):
+        # Live data had one export-only build writing 93% of the rows, which
+        # made the no-entity-match rate read 16.9% while every retrieval that
+        # did run resolved nothing. Exports are counted, not averaged over.
+        exports = [
+            {"execution_path": "scope_export", "fallback_reason": "",
+             "degraded_reason": "", "llm_invoked": False,
+             "resolved_entity_count": 0, "duration_ms": 5000}
+            for _ in range(90)
+        ]
+        retrievals = [
+            {"execution_path": "tree_shadow", "fallback_reason": "no_entity_match",
+             "degraded_reason": "", "llm_invoked": False,
+             "resolved_entity_count": 0, "duration_ms": 60}
+            for _ in range(10)
+        ]
+
+        summary = summarize_search(exports + retrievals)
+
+        assert summary["query_count"] == 100
+        assert summary["retrieval_query_count"] == 10
+        assert summary["execution_paths"] == {"scope_export": 90, "tree_shadow": 10}
+        assert summary["no_entity_match_rate"] == 1.0
+        assert summary["resolved_entity_rate"] == 0.0
+        # The slow exports no longer set the retrieval latency percentiles.
+        assert summary["latency_ms"] == {"p50": 60, "p95": 60, "max": 60}
+
+    def test_export_only_window_raises_no_alert(self):
+        rows = [
+            {"execution_path": "scope_export", "fallback_reason": "",
+             "degraded_reason": "", "llm_invoked": False,
+             "resolved_entity_count": 0, "duration_ms": 900}
+            for _ in range(50)
+        ]
+
+        summary = summarize_search(rows)
+
+        assert summary["retrieval_query_count"] == 0
+        assert summary["no_entity_match_rate"] == 0.0
+        assert evaluate_alerts({"search": summary}) == []
+
     def test_high_no_entity_match_is_flagged(self):
         alerts = evaluate_alerts({
             "search": {"query_count": 10, "no_entity_match_rate": 0.7},
@@ -222,3 +265,66 @@ class TestScanMetrics:
         assert snapshot["scan"]["run_count"] == 1
         assert snapshot["scan"]["empty_window_ratio"] == 0.2
         assert snapshot["scan"]["mounts"] == 7
+
+
+class TestPrometheusRendering:
+    def test_flattens_the_dashboard_numbers(self):
+        values = flatten_metrics({
+            "entity_count": 4, "message_count": 100, "mounted_chunk_count": 25,
+            "mount_count": 30, "mount_coverage": 0.25, "pending_candidate_count": 7,
+            "relation_count": 3, "entities_missing_embedding": 1,
+            "alerts": ["no_mounts"],
+            "search": {"query_count": 10, "retrieval_query_count": 8,
+                       "no_entity_match_rate": 0.2,
+                       "resolved_entity_rate": 0.8, "l4_invocation_rate": 0.1,
+                       "latency_ms": {"p50": 120, "p95": 900}},
+            "scan": {"windows": 20, "empty_window_ratio": 0.15, "mounts": 5, "candidates": 9},
+        })
+
+        assert values["rag_tree_entity_count"] == 4
+        assert values["rag_tree_mount_coverage"] == 0.25
+        assert values["rag_tree_alert_count"] == 1
+        assert values["rag_tree_search_query_count"] == 10
+        assert values["rag_tree_search_retrieval_query_count"] == 8
+        assert values["rag_tree_search_latency_p95_ms"] == 900
+        assert values["rag_tree_scan_empty_window_ratio"] == 0.15
+
+    def test_flattening_a_bare_scope_yields_zeros(self):
+        values = flatten_metrics({})
+
+        assert values["rag_tree_entity_count"] == 0
+        assert values["rag_tree_search_latency_p95_ms"] == 0
+        assert values["rag_tree_scan_empty_window_ratio"] == 0.0
+
+    def test_exposition_has_help_type_and_scope_labels(self):
+        text = render_prometheus([
+            ("organization:org-1", {"entity_count": 2, "mount_coverage": 0.5}),
+            ("user:user-1", {"entity_count": 5}),
+        ])
+
+        assert "# TYPE rag_tree_entity_count gauge" in text
+        assert "# HELP rag_tree_entity_count" in text
+        assert 'rag_tree_entity_count{scope="organization:org-1"} 2.0' in text
+        assert 'rag_tree_entity_count{scope="user:user-1"} 5.0' in text
+        # A scope that never reported a value still gets a zero, so a dashboard
+        # does not show a gap where a tenant simply has no mounts yet.
+        assert 'rag_tree_mount_coverage{scope="user:user-1"} 0.0' in text
+
+    def test_exposition_of_no_scopes_is_empty(self):
+        assert render_prometheus([]) == "\n"
+
+    def test_service_renders_every_active_scope(self):
+        repo = InMemoryRagMVPRepository()
+        repo.record_scan_run(
+            scope_type=SCOPE["scope_type"], scope_id=SCOPE["scope_id"],
+            conversations=1, windows=4, empty_windows=1,
+        )
+        repo.upsert_entity(
+            domain="project", canonical_name="A项目",
+            normalized_key=normalized_text("A项目"), **SCOPE
+        )
+
+        text = TreeMetricsService(repository=repo).prometheus()
+
+        assert f"scope=\"organization:org-1\"" in text
+        assert 'rag_tree_entity_count{scope="organization:org-1"} 1.0' in text

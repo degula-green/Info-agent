@@ -1071,6 +1071,36 @@ class PostgresRagMVPRepository:
                 }
                 return metrics
 
+    def list_active_scopes(self, *, limit: int = 50) -> list[dict[str, Any]]:
+        """Scopes with recent activity, for per-scope metric exposition.
+
+        A metrics endpoint has no request scope to read from, so the scopes are
+        derived from the tables that record work: retrieval history, scan runs
+        and the entity registry itself.
+        """
+        with self._connection() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    f"""SELECT scope_type,scope_id::text FROM (
+                          SELECT scope_type,scope_id,MAX(created_at) AS seen
+                            FROM {self.schema}.search_history GROUP BY 1,2
+                          UNION ALL
+                          SELECT scope_type,scope_id,MAX(created_at)
+                            FROM {self.schema}.entity_scan_runs GROUP BY 1,2
+                          UNION ALL
+                          SELECT scope_type,scope_id,MAX(updated_at)
+                            FROM {self.schema}.entity_registry GROUP BY 1,2
+                        ) scopes
+                        GROUP BY scope_type,scope_id
+                        ORDER BY MAX(seen) DESC NULLS LAST
+                        LIMIT %s""",
+                    (max(1, int(limit)),),
+                )
+                return [
+                    {"scope_type": row[0], "scope_id": row[1]}
+                    for row in cursor.fetchall()
+                ]
+
     def find_related_entities(
         self,
         *,
@@ -3927,6 +3957,20 @@ class InMemoryRagMVPRepository:
             "entities_by_domain": domains,
             "relations_by_type": relation_types,
         }
+
+    def list_active_scopes(self, *, limit: int = 50) -> list[dict[str, Any]]:
+        seen: dict[tuple[str, str], None] = {}
+        for item in self.searches:
+            if item.get("scope_type") and item.get("scope_id"):
+                seen.setdefault((str(item["scope_type"]), str(item["scope_id"])), None)
+        for run in self.scan_runs:
+            seen.setdefault((run["scope_type"], run["scope_id"]), None)
+        for item in self.entities:
+            seen.setdefault((item["scope_type"], item["scope_id"]), None)
+        return [
+            {"scope_type": scope_type, "scope_id": scope_id}
+            for scope_type, scope_id in list(seen)[: max(1, int(limit))]
+        ]
 
     def add_outbox_event(self, event: dict[str, Any]) -> str:
         event_id = str(event.get("event_id") or new_uuid())

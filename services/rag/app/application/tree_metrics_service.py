@@ -23,6 +23,40 @@ MAX_NO_ENTITY_MATCH_RATE = 0.5
 MAX_EMPTY_WINDOW_RATIO = 0.5
 SEARCH_WINDOW_HOURS = 24
 SCAN_RUN_WINDOW = 50
+# A scope export walks a scope's contents; it never runs entity location, so it
+# would dilute every retrieval rate below. Live data showed one export-only
+# build contributing 93% of the rows, which made the no-entity-match rate read
+# as 16.9% while the retrievals that did run never resolved anything.
+NON_RETRIEVAL_PATHS = frozenset({"scope_export"})
+# A scrape re-runs the snapshot per scope, and each snapshot is several queries.
+# Keeping the fan-out small bounds scrape cost; the per-scope detail is still
+# available from the authorised admin endpoint.
+DEFAULT_SCOPE_LIMIT = 20
+
+PROMETHEUS_PREFIX = "rag_tree"
+
+_METRIC_HELP = {
+    "entity_count": "Active entities in the scope",
+    "message_count": "Active message chunks in the scope",
+    "mounted_chunk_count": "Message chunks reachable from at least one entity",
+    "mount_count": "Active chunk-to-entity mounts",
+    "mount_coverage": "mounted_chunk_count / message_count",
+    "pending_candidate_count": "Candidates waiting for review",
+    "relation_count": "Entity-to-entity relations",
+    "entities_missing_embedding": "Active entities without a usable vector",
+    "alert_count": "Number of quality guard-rail alerts currently firing",
+    "search_query_count": "Retrievals in the metric window",
+    "search_retrieval_query_count": "Metric-window rows that actually located entities",
+    "search_no_entity_match_rate": "Share of retrievals that resolved no entity",
+    "search_resolved_entity_rate": "Share of retrievals that resolved an entity",
+    "search_l4_invocation_rate": "Share of retrievals that escalated to L4",
+    "search_latency_p50_ms": "Retrieval latency p50 in milliseconds",
+    "search_latency_p95_ms": "Retrieval latency p95 in milliseconds",
+    "scan_window_count": "Windows processed by recent scans",
+    "scan_empty_window_ratio": "Share of scanned windows the model returned empty for",
+    "scan_mount_count": "Mounts written by recent scans",
+    "scan_candidate_count": "Candidates created by recent scans",
+}
 
 
 class TreeMetricsService:
@@ -43,6 +77,79 @@ class TreeMetricsService:
         )
         metrics["alerts"] = evaluate_alerts(metrics)
         return metrics
+
+    def prometheus(self, *, scope_limit: int = DEFAULT_SCOPE_LIMIT) -> str:
+        """Per-scope snapshots rendered for a Prometheus scrape."""
+        samples: list[tuple[str, dict[str, Any]]] = []
+        for scope in self.repository.list_active_scopes(limit=scope_limit):
+            scope_key = f'{scope["scope_type"]}:{scope["scope_id"]}'
+            samples.append((
+                scope_key,
+                self.snapshot(scope_type=scope["scope_type"], scope_id=scope["scope_id"]),
+            ))
+        return render_prometheus(samples)
+
+
+def flatten_metrics(snapshot: dict[str, Any]) -> dict[str, float]:
+    """Pull the dashboard-worthy numbers out of one scope's snapshot."""
+    search = snapshot.get("search") or {}
+    scan = snapshot.get("scan") or {}
+    latency = search.get("latency_ms") or {}
+    return {
+        f"{PROMETHEUS_PREFIX}_entity_count": snapshot.get("entity_count") or 0,
+        f"{PROMETHEUS_PREFIX}_message_count": snapshot.get("message_count") or 0,
+        f"{PROMETHEUS_PREFIX}_mounted_chunk_count": snapshot.get("mounted_chunk_count") or 0,
+        f"{PROMETHEUS_PREFIX}_mount_count": snapshot.get("mount_count") or 0,
+        f"{PROMETHEUS_PREFIX}_mount_coverage": snapshot.get("mount_coverage") or 0.0,
+        f"{PROMETHEUS_PREFIX}_pending_candidate_count": snapshot.get("pending_candidate_count") or 0,
+        f"{PROMETHEUS_PREFIX}_relation_count": snapshot.get("relation_count") or 0,
+        f"{PROMETHEUS_PREFIX}_entities_missing_embedding": (
+            snapshot.get("entities_missing_embedding") or 0
+        ),
+        f"{PROMETHEUS_PREFIX}_alert_count": len(snapshot.get("alerts") or []),
+        f"{PROMETHEUS_PREFIX}_search_query_count": search.get("query_count") or 0,
+        f"{PROMETHEUS_PREFIX}_search_retrieval_query_count": (
+            search.get("retrieval_query_count") or 0
+        ),
+        f"{PROMETHEUS_PREFIX}_search_no_entity_match_rate": (
+            search.get("no_entity_match_rate") or 0.0
+        ),
+        f"{PROMETHEUS_PREFIX}_search_resolved_entity_rate": (
+            search.get("resolved_entity_rate") or 0.0
+        ),
+        f"{PROMETHEUS_PREFIX}_search_l4_invocation_rate": (
+            search.get("l4_invocation_rate") or 0.0
+        ),
+        f"{PROMETHEUS_PREFIX}_search_latency_p50_ms": latency.get("p50") or 0,
+        f"{PROMETHEUS_PREFIX}_search_latency_p95_ms": latency.get("p95") or 0,
+        f"{PROMETHEUS_PREFIX}_scan_window_count": scan.get("windows") or 0,
+        f"{PROMETHEUS_PREFIX}_scan_empty_window_ratio": (
+            scan.get("empty_window_ratio") or 0.0
+        ),
+        f"{PROMETHEUS_PREFIX}_scan_mount_count": scan.get("mounts") or 0,
+        f"{PROMETHEUS_PREFIX}_scan_candidate_count": scan.get("candidates") or 0,
+    }
+
+
+def render_prometheus(samples: list[tuple[str, dict[str, Any]]]) -> str:
+    """Prometheus text exposition, one series per scope.
+
+    Everything here is a gauge: counts, ratios and latency percentiles are all
+    point-in-time values, and the scope label keeps a single dashboard usable
+    for every tenant.
+    """
+    series: dict[str, dict[str, float]] = {}
+    for scope_key, snapshot in samples:
+        for name, value in flatten_metrics(snapshot).items():
+            series.setdefault(name, {})[scope_key] = float(value)
+    lines: list[str] = []
+    for name in sorted(series):
+        short = name[len(PROMETHEUS_PREFIX) + 1:]
+        lines.append(f"# HELP {name} {_METRIC_HELP.get(short, short)}")
+        lines.append(f"# TYPE {name} gauge")
+        for scope_key in sorted(series[name]):
+            lines.append(f'{name}{{scope="{scope_key}"}} {series[name][scope_key]}')
+    return "\n".join(lines) + "\n"
 
 
 def summarize_scan_runs(runs: list[dict[str, Any]]) -> dict[str, Any]:
@@ -86,12 +193,18 @@ def summarize_search(
     were already recorded per query, but nothing turned them into a number.
     """
     total = len(rows)
+    attempts = [
+        row
+        for row in rows
+        if str(row.get("execution_path") or "") not in NON_RETRIEVAL_PATHS
+    ]
     paths: dict[str, int] = {}
     fallbacks: dict[str, int] = {}
     degraded: dict[str, int] = {}
     durations: list[int] = []
     llm_invoked = 0
     resolved = 0
+    unmatched = 0
     for row in rows:
         path = str(row.get("execution_path") or "unknown")
         paths[path] = paths.get(path, 0) + 1
@@ -102,12 +215,16 @@ def summarize_search(
             value = item.strip()
             if value:
                 degraded[value] = degraded.get(value, 0) + 1
+    for row in attempts:
         durations.append(int(row.get("duration_ms") or 0))
         if row.get("llm_invoked"):
             llm_invoked += 1
         if int(row.get("resolved_entity_count") or 0) > 0:
             resolved += 1
+        if str(row.get("fallback_reason") or "").strip() == "no_entity_match":
+            unmatched += 1
     durations.sort()
+    attempted = len(attempts)
 
     def percentile(fraction: float) -> int:
         if not durations:
@@ -118,14 +235,13 @@ def summarize_search(
     return {
         "window_hours": int(window_hours),
         "query_count": total,
+        "retrieval_query_count": attempted,
         "execution_paths": paths,
         "fallback_reasons": fallbacks,
         "degraded_reasons": degraded,
-        "resolved_entity_rate": round(resolved / total, 4) if total else 0.0,
-        "no_entity_match_rate": (
-            round(fallbacks.get("no_entity_match", 0) / total, 4) if total else 0.0
-        ),
-        "l4_invocation_rate": round(llm_invoked / total, 4) if total else 0.0,
+        "resolved_entity_rate": round(resolved / attempted, 4) if attempted else 0.0,
+        "no_entity_match_rate": round(unmatched / attempted, 4) if attempted else 0.0,
+        "l4_invocation_rate": round(llm_invoked / attempted, 4) if attempted else 0.0,
         "latency_ms": {
             "p50": percentile(0.5),
             "p95": percentile(0.95),
@@ -154,8 +270,10 @@ def evaluate_alerts(metrics: dict[str, Any]) -> list[str]:
     if message_count and entity_count and not int(metrics.get("relation_count") or 0):
         alerts.append("no_relations")
     search = metrics.get("search") or {}
-    query_count = int(search.get("query_count") or 0)
-    if query_count and float(search.get("no_entity_match_rate") or 0) > MAX_NO_ENTITY_MATCH_RATE:
+    # Gate on retrieval attempts: a window holding nothing but scope exports has
+    # no location work to judge, and its 0% rate must not read as "healthy".
+    attempts = int(search.get("retrieval_query_count", search.get("query_count") or 0) or 0)
+    if attempts and float(search.get("no_entity_match_rate") or 0) > MAX_NO_ENTITY_MATCH_RATE:
         # Most queries cannot resolve an entity, so the tree is mostly adding a
         # round trip without narrowing anything.
         alerts.append("high_no_entity_match")
