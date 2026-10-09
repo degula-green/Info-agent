@@ -73,11 +73,12 @@
             <p>查看我发起的申请，或处理待我审批的申请</p>
           </div>
         </div>
-        <t-tabs v-model="accessScope" @change="loadAccessRequests">
+        <t-tabs v-model="accessScope" @change="handleAccessScopeChange">
           <t-tab-panel value="mine" label="我发起的" />
           <t-tab-panel value="inbox" label="待我审批" />
           <t-tab-panel value="history" label="历史记录" />
         </t-tabs>
+        <template v-if="accessScope === 'history'">
         <div class="access-toolbar">
           <t-radio-group v-model="deletionStatusFilter" variant="default-filled" size="small" @change="loadDeletionGovernance">
             <t-radio-button value="">全部</t-radio-button>
@@ -114,6 +115,7 @@
             </div>
           </article>
         </div>
+        </template>
         <div class="access-request-list">
           <div v-if="accessLoading" class="access-request-state"><t-icon name="loading" />正在加载权限申请…</div>
           <div v-else-if="!accessRequests.length" class="access-request-state">{{ accessEmptyText }}</div>
@@ -365,8 +367,16 @@ async function loadPage() {
   })
   await Promise.all([coreProfileRequest, connectorRequest, organizationRequest])
   organizationLoading.value = false
+  await handleAccessScopeChange()
+}
+async function handleAccessScopeChange() {
   await loadAccessRequests()
-  await loadDeletionGovernance()
+  if (accessScope.value === 'history') {
+    await loadDeletionGovernance()
+  } else {
+    deletionRequests.value = []
+    deletionLoading.value = false
+  }
 }
 async function loadAccessRequests() {
   const sequence = ++accessRequestSequence
