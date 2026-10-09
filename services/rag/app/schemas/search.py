@@ -5,10 +5,14 @@ from pydantic import BaseModel, Field, field_validator
 
 class SearchBody(BaseModel):
     query: str = Field(default="", max_length=2000)
+    offset: int = Field(default=0, ge=0, le=100000)
     scope_type: str = Field(default="organization", pattern="^(organization|user)$")
     knowledge_base_id: str | None = None
     knowledge_base_ids: list[str] = Field(default_factory=list, max_length=100)
-    top_k: int = Field(default=8, ge=1, le=50)
+    # The scope export pages through one person's whole window; every page
+    # costs an authorization lookup, so a small page size multiplies the
+    # slowest part of the request.
+    top_k: int = Field(default=8, ge=1, le=200)
     include_protected: bool = True
     sender_name: str | None = None
     occurred_after: str | None = None
@@ -20,6 +24,7 @@ class SearchBody(BaseModel):
     conversation_ids: list[str] = Field(default_factory=list, max_length=20)
     conversation_names: list[str] = Field(default_factory=list, max_length=20)
     resource_ids: list[str] = Field(default_factory=list, max_length=100)
+    content_contains: list[str] = Field(default_factory=list, max_length=10)
     resource_types: list[str] = Field(default_factory=list, max_length=5)
     file_extensions: list[str] = Field(default_factory=list, max_length=20)
     message_types: list[str] = Field(default_factory=list, max_length=10)
@@ -46,6 +51,32 @@ class SourceSearchBody(SearchBody):
 class ContentSearchBody(SearchBody):
     query: str = Field(min_length=1, max_length=2000)
     group_by_source: bool = True
+
+
+class ScopeSearchBody(SearchBody):
+    """Full-scope export: every chunk in a filter-defined person scope."""
+
+    pass
+
+
+class ContextAnchor(BaseModel):
+    """One anchor message the caller wants the conversation around."""
+
+    resource_id: str = Field(min_length=1, max_length=128)
+    conversation_id: str | None = Field(default=None, max_length=128)
+    sent_at: str | None = Field(default=None, max_length=64)
+
+
+class ContextSearchBody(SearchBody):
+    """Neighbouring messages in the same conversation, around each anchor.
+
+    A value often sits next to the sentence that names the field ("学号
+    20251714203" then a bare "小呆呆"), so the caller asks for the messages
+    either side of the ones it already found.
+    """
+
+    anchors: list[ContextAnchor] = Field(default_factory=list, max_length=50)
+    radius: int = Field(default=2, ge=1, le=10)
 
 
 class AIDocumentBody(SearchBody):

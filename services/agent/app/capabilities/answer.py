@@ -164,6 +164,32 @@ def _compose_with_context(provider, question: str, evidence: list[dict[str, Any]
     )
 
 
+def _stream_with_context(
+    provider,
+    question: str,
+    evidence: list[dict[str, Any]],
+    *,
+    sink,
+    should_cancel,
+):
+    try:
+        context = current_execution_context().conversation_context
+    except RuntimeError:
+        context = None
+    kwargs: dict[str, Any] = {
+        "on_delta": sink.push,
+        "should_cancel": should_cancel,
+    }
+    if context is not None:
+        signature = inspect.signature(provider.stream_compose)
+        if "conversation_context" in signature.parameters or any(
+            parameter.kind is inspect.Parameter.VAR_KEYWORD
+            for parameter in signature.parameters.values()
+        ):
+            kwargs["conversation_context"] = context
+    return provider.stream_compose(question, evidence, **kwargs)
+
+
 class AnswerComposeCapability:
     """Calls the answer provider and validates the citations it returns."""
 
@@ -236,6 +262,59 @@ class AnswerComposeCapability:
             citations=keep_known_citations(draft.citations, evidence),
             # Reported so the Runtime can charge the Task budget: a capability
             # that spends model calls must not be able to spend them for free.
+            model_calls=max(int(getattr(draft, "model_calls", 0) or 0), 0),
+        ).model_dump()
+
+    def execute_streaming(
+        self,
+        arguments: AnswerComposeInput,
+        *,
+        sink,
+        should_cancel=None,
+    ) -> dict[str, Any]:
+        evidence = _merge_evidence(
+            arguments.attachment_evidence,
+            arguments.knowledge_evidence,
+            arguments.evidence,
+        )
+        if not evidence:
+            answer = "没有找到足够可靠的资料来回答这个问题。"
+            sink.push(answer)
+            sink.complete(answer=answer, citations=[], warnings=[])
+            return AnswerComposeResult(
+                answer=answer, citations=[], model_calls=0
+            ).model_dump()
+
+        stream_compose = getattr(self.provider, "stream_compose", None)
+        if stream_compose is None:
+            result = self.execute(arguments)
+            sink.push(str(result.get("answer") or ""))
+            sink.complete(
+                answer=str(result.get("answer") or ""),
+                citations=list(result.get("citations") or []),
+                warnings=[],
+            )
+            return result
+
+        draft = _stream_with_context(
+            self.provider,
+            arguments.question,
+            evidence,
+            sink=sink,
+            should_cancel=should_cancel,
+        )
+        citations = keep_known_citations(draft.citations, evidence)
+        warnings: list[str] = []
+        if draft.citations and not citations:
+            warnings.append("citation_selection_failed")
+        sink.complete(
+            answer=str(draft.answer),
+            citations=citations,
+            warnings=warnings,
+        )
+        return AnswerComposeResult(
+            answer=str(draft.answer),
+            citations=citations,
             model_calls=max(int(getattr(draft, "model_calls", 0) or 0), 0),
         ).model_dump()
 

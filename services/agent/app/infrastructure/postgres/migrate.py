@@ -40,8 +40,10 @@ BOOTSTRAP_MIGRATIONS = [
     MIGRATIONS_DIR / "20261003_agent_conversation_memory_phase2.up.sql",
     MIGRATIONS_DIR / "20261004_agent_plan_step_dependencies.up.sql",
     MIGRATIONS_DIR / "20261007_agent_desktop_tasks.up.sql",
+    MIGRATIONS_DIR / "20261008_agent_person_fact_snapshots.up.sql",
 ]
 BOOTSTRAP_ROLLBACKS = [
+    MIGRATIONS_DIR / "20261008_agent_person_fact_snapshots.down.sql",
     MIGRATIONS_DIR / "20261007_agent_desktop_tasks.down.sql",
     MIGRATIONS_DIR / "20261004_agent_plan_step_dependencies.down.sql",
     MIGRATIONS_DIR / "20261003_agent_conversation_memory_phase2.down.sql",
@@ -53,10 +55,10 @@ BOOTSTRAP_ROLLBACKS = [
     MIGRATIONS_DIR / "20260925_agent_runtime_rebuild.down.sql",
 ]
 DEFAULT_MIGRATION = (
-    MIGRATIONS_DIR / "20261007_agent_desktop_tasks.up.sql"
+    MIGRATIONS_DIR / "20261008_agent_person_fact_snapshots.up.sql"
 )
 DEFAULT_ROLLBACK = (
-    MIGRATIONS_DIR / "20261007_agent_desktop_tasks.down.sql"
+    MIGRATIONS_DIR / "20261008_agent_person_fact_snapshots.down.sql"
 )
 
 

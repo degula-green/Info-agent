@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from typing import Any
+from uuid import uuid4
 
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
@@ -42,6 +43,7 @@ class PostgresAgentStore:
     def __init__(self, pool: ConnectionPool, schema: str = "agent") -> None:
         self.pool = pool
         self.schema = schema
+        self._person_fact_table_ready = False
 
     # -- helpers ----------------------------------------------------------
 
@@ -104,6 +106,85 @@ class PostgresAgentStore:
     @property
     def _memory_sources(self) -> str:
         return f"{self.schema}.memory_sources"
+
+    @property
+    def _person_fact_snapshots(self) -> str:
+        return f"{self.schema}.agent_person_fact_snapshots"
+
+    def get_person_fact_snapshot(
+        self,
+        *,
+        owner_user_id: str,
+        person_key: str,
+        snapshot_fingerprint: str,
+    ) -> list[dict[str, Any]] | None:
+        self._ensure_person_fact_table()
+        with self.pool.connection() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    f"""SELECT facts FROM {self._person_fact_snapshots}
+                        WHERE owner_user_id=%s AND person_key=%s
+                          AND snapshot_fingerprint=%s""",
+                    (owner_user_id, person_key, snapshot_fingerprint),
+                )
+                row = cursor.fetchone()
+                if not row:
+                    return None
+                value = row[0]
+                return value if isinstance(value, list) else None
+
+    def save_person_fact_snapshot(
+        self,
+        *,
+        owner_user_id: str,
+        person_key: str,
+        snapshot_fingerprint: str,
+        facts: list[dict[str, Any]],
+    ) -> None:
+        self._ensure_person_fact_table()
+        with self.pool.connection() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    f"""INSERT INTO {self._person_fact_snapshots}
+                        (id,owner_user_id,person_key,snapshot_fingerprint,facts)
+                        VALUES (%s,%s,%s,%s,%s)
+                        ON CONFLICT (owner_user_id,person_key,snapshot_fingerprint)
+                        DO UPDATE SET facts=EXCLUDED.facts,updated_at=NOW()""",
+                    (
+                        str(uuid4()),
+                        owner_user_id,
+                        person_key,
+                        snapshot_fingerprint,
+                        Jsonb(facts),
+                    ),
+                )
+            connection.commit()
+
+    def _ensure_person_fact_table(self) -> None:
+        if self._person_fact_table_ready:
+            return
+        with self.pool.connection() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    f"""CREATE TABLE IF NOT EXISTS {self._person_fact_snapshots} (
+                        id UUID PRIMARY KEY,
+                        owner_user_id TEXT NOT NULL,
+                        person_key TEXT NOT NULL,
+                        snapshot_fingerprint TEXT NOT NULL,
+                        facts JSONB NOT NULL DEFAULT '[]'::jsonb,
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        CONSTRAINT agent_person_fact_snapshots_uq
+                            UNIQUE (owner_user_id, person_key, snapshot_fingerprint)
+                    )"""
+                )
+                cursor.execute(
+                    f"""CREATE INDEX IF NOT EXISTS agent_person_fact_snapshots_owner_idx
+                        ON {self._person_fact_snapshots}
+                        (owner_user_id, person_key, updated_at DESC)"""
+                )
+            connection.commit()
+        self._person_fact_table_ready = True
 
     @staticmethod
     def _task_model(row: dict[str, Any]) -> TaskRecord:
@@ -688,6 +769,20 @@ class PostgresAgentStore:
                     "WHERE task_id = %s AND lease_owner = %s",
                     (task_id, owner),
                 )
+
+    def renew_lease(self, task_id: str, owner: str, seconds: float) -> bool:
+        with self.pool.connection() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    f"UPDATE {self._tasks} SET lease_expires_at = %s "
+                    "WHERE task_id = %s AND lease_owner = %s RETURNING task_id",
+                    (
+                        datetime.now(timezone.utc) + timedelta(seconds=seconds),
+                        task_id,
+                        owner,
+                    ),
+                )
+                return cursor.fetchone() is not None
 
     # -- inputs -----------------------------------------------------------
 
@@ -1318,6 +1413,26 @@ class PostgresAgentStore:
                 )
                 row = cursor.fetchone()
         return int(row[0]) if row else 0
+
+    def count_messages_by_conversation(
+        self, conversation_ids: list[str]
+    ) -> dict[str, int]:
+        ids = [str(item) for item in conversation_ids if item]
+        if not ids:
+            return {}
+        with self.pool.connection() as connection:
+            with connection.cursor(row_factory=dict_row) as cursor:
+                cursor.execute(
+                    f"SELECT conversation_id::text AS conversation_id, "
+                    f"COUNT(*) AS message_count FROM {self._messages} "
+                    "WHERE conversation_id = ANY(%s::uuid[]) "
+                    "GROUP BY conversation_id",
+                    (ids,),
+                )
+                rows = cursor.fetchall()
+        return {
+            str(row["conversation_id"]): int(row["message_count"]) for row in rows
+        }
 
     def list_completed_messages_after_boundary(
         self,

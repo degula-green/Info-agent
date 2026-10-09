@@ -93,6 +93,46 @@ class ChatReplyCapability:
             model_calls=max(int(getattr(draft, "model_calls", 0) or 0), 0),
         ).model_dump()
 
+    def execute_streaming(
+        self,
+        arguments: ChatReplyInput,
+        *,
+        sink,
+        should_cancel=None,
+    ) -> dict[str, Any]:
+        try:
+            context = current_execution_context().conversation_context
+        except RuntimeError:
+            context = None
+        static = _known_name_reply(arguments.text, context) if context is not None else None
+        if static is not None:
+            sink.push(static.reply)
+            sink.complete(answer=static.reply, citations=[], warnings=[])
+            return ChatReplyResult(
+                answer=static.reply, model_calls=static.model_calls
+            ).model_dump()
+
+        stream_reply = getattr(self.provider, "stream_reply", None)
+        if stream_reply is None:
+            result = self.execute(arguments)
+            answer = str(result.get("answer") or "")
+            sink.push(answer)
+            sink.complete(answer=answer, citations=[], warnings=[])
+            return result
+
+        draft = _stream_reply_with_context(
+            self.provider,
+            arguments.text,
+            context=context,
+            sink=sink,
+            should_cancel=should_cancel,
+        )
+        sink.complete(answer=draft.reply, citations=[], warnings=[])
+        return ChatReplyResult(
+            answer=draft.reply,
+            model_calls=max(int(getattr(draft, "model_calls", 0) or 0), 0),
+        ).model_dump()
+
 
 def _reply_with_context(provider, text: str):
     try:
@@ -114,6 +154,24 @@ def _reply_with_context(provider, text: str):
     if "conversation_context" not in signature.parameters and not accepts_kwargs:
         return provider.reply(text)
     return provider.reply(text, conversation_context=context)
+
+
+def _stream_reply_with_context(
+    provider, text: str, *, context, sink, should_cancel
+):
+    kwargs: dict[str, Any] = {
+        "on_delta": sink.push,
+        "should_cancel": should_cancel,
+    }
+    if context is not None:
+        signature = inspect.signature(provider.stream_reply)
+        accepts_kwargs = any(
+            parameter.kind is inspect.Parameter.VAR_KEYWORD
+            for parameter in signature.parameters.values()
+        )
+        if "conversation_context" in signature.parameters or accepts_kwargs:
+            kwargs["conversation_context"] = context
+    return provider.stream_reply(text, **kwargs)
 
 
 def _known_name_reply(text: str, context):

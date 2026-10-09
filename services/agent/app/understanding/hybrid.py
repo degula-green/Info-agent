@@ -55,6 +55,13 @@ class HybridUnderstandingProvider:
         # to whichever model happens to be primary.
         self.last_primary_confidence: float | None = None
         self.last_primary_margin: float | None = None
+        # Optional Jev boundary-question diagnostics. They are copied from the
+        # primary so the Runtime can record them on the hybrid event.
+        self.last_subject_kind: str | None = None
+        self.last_query_focus: str | None = None
+        self.last_aux_confidence: float | None = None
+        self.last_combined_intent: str | None = None
+        self.last_combined_reason: str | None = None
         self.intents = getattr(resolved, "intents", None)
         self.available_intents = self.intents
         # Whether the primary judges evidence sources itself. Only the cloud
@@ -81,6 +88,11 @@ class HybridUnderstandingProvider:
         self.last_margin = None
         self.last_primary_confidence = None
         self.last_primary_margin = None
+        self.last_subject_kind = None
+        self.last_query_focus = None
+        self.last_aux_confidence = None
+        self.last_combined_intent = None
+        self.last_combined_reason = None
 
         # The stock Laya head was trained on short instructions, not on
         # attachment-driven ones ("根据这个附件创建日程" reads like a form
@@ -129,6 +141,7 @@ class HybridUnderstandingProvider:
             )
             self.last_decision_source = self.primary_name
             self._record_confidence(evaluation.answer_confidence, evaluation.margin)
+            self._record_primary_aux()
             return evaluation.understanding
 
         if evaluation is not None:
@@ -139,6 +152,7 @@ class HybridUnderstandingProvider:
                 evaluation.fallback_reason or f"{self.primary_name}_uncertain"
             )
             self._record_confidence(evaluation.answer_confidence, evaluation.margin)
+        self._record_primary_aux()
 
         result = _call_provider(
             self.fallback.understand,
@@ -168,6 +182,23 @@ class HybridUnderstandingProvider:
         self.last_margin = margin
         self.last_primary_confidence = confidence
         self.last_primary_margin = margin
+
+    def _record_primary_aux(self) -> None:
+        self.last_subject_kind = getattr(
+            self.primary, "last_subject_kind", None
+        )
+        self.last_query_focus = getattr(
+            self.primary, "last_query_focus", None
+        )
+        self.last_aux_confidence = getattr(
+            self.primary, "last_aux_confidence", None
+        )
+        self.last_combined_intent = getattr(
+            self.primary, "last_combined_intent", None
+        )
+        self.last_combined_reason = getattr(
+            self.primary, "last_combined_reason", None
+        )
 
 
 def _error_reason(exc: Exception, name: str) -> str:

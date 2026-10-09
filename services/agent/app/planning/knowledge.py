@@ -22,6 +22,8 @@ from app.capabilities.knowledge import (
     SEARCH_CONTENT_NAME,
     SEARCH_SOURCES_NAME,
 )
+from app.capabilities.person import PERSON_QUERY_NAME
+from app.capabilities.report import CAPABILITY_NAME as REPORT_WEEKLY_NAME
 from app.capabilities.answer import CAPABILITY_NAME as ANSWER_COMPOSE_NAME
 from app.capabilities.web_research import CAPABILITY_NAME as WEB_RESEARCH_NAME
 from app.infrastructure.web.url_tools import extract_http_urls
@@ -40,6 +42,13 @@ from app.planning.conversation_memory import (
     decide_conversation_memory_plan,
 )
 from app.planning.routing import resolve_evidence_sources
+from app.understanding.subject import (
+    extract_subject_mention,
+    find_time_spans,
+    organization_subject_in,
+    subject_core,
+    subject_is_organization,
+)
 
 KnowledgeMode = Literal["sources", "content", "content_with_sources"]
 
@@ -261,6 +270,155 @@ _PERSONAL_CONTEXT_MARKERS = (
     "内部资料",
 )
 _URL_PATTERN = re.compile(r"https?://[^\s，。；、]+", re.IGNORECASE)
+
+# A question can name a person and still be about the work: the person's three
+# sources (his own messages, the private chat, what mentions him) are the wrong
+# window for "which stage is the project at", and reading them would answer a
+# project question out of one person's private chat.
+_WORK_PROGRESS_MARKERS = ("进展", "进度", "状态", "情况", "阶段")
+
+
+def _asks_about_work_progress(text: str) -> bool:
+    normalized = " ".join(str(text or "").split())
+    if not normalized:
+        return False
+    if not _contains_any(normalized, _WORK_PROGRESS_MARKERS):
+        return False
+    return _contains_any(normalized, _INTERNAL_OBJECT_MARKERS)
+
+
+def classify_person_question(
+    text: str,
+    *,
+    subject_extractor=None,
+) -> tuple[str, str] | None:
+    """Return (name, question) when the turn asks about one named person.
+
+    The model is the primary reader when one is configured; the narrow
+    deterministic reader in ``understanding.subject`` keeps the previous route
+    working when it is not.
+    """
+
+    question = " ".join(str(text or "").split()).strip()
+    if not question:
+        return None
+    mention = extract_subject_mention(
+        question,
+        intent="person.query",
+        extractor=subject_extractor,
+    )
+    if mention.kind not in {"person", "organization"} or not mention.mention:
+        return None
+    return mention.mention, question
+
+
+_WEEKLY_REPORT_WRITE_MARKERS = (
+    "写",
+    "生成",
+    "整理",
+    "做一份",
+    "出一份",
+    "来一份",
+    "写一份",
+    "帮我写",
+    "弄一份",
+)
+_TEMPLATE_CHOICE = re.compile(r"\[模板[:：]\s*(?P<id>[A-Za-z0-9._\-]{1,80})\s*\]")
+
+
+def classify_weekly_report(
+    text: str,
+    *,
+    subject_extractor=None,
+) -> tuple[str, str] | None:
+    """Return (name, instruction) when the turn asks for a weekly report.
+
+    The person is optional: "写周报" with no name means the user's own report,
+    which the capability resolves from their own platform identities. A name is
+    only taken from wording that clearly attaches it to the report, so an
+    unrelated "周报" in a longer sentence does not become a report request.
+    """
+
+    instruction = " ".join(str(text or "").split()).strip()
+    if not instruction or "周报" not in instruction:
+        return None
+    if not any(marker in instruction for marker in _WEEKLY_REPORT_WRITE_MARKERS):
+        return None
+    mention = extract_subject_mention(
+        instruction,
+        intent="report.weekly",
+        extractor=subject_extractor,
+    )
+    if mention.kind == "organization":
+        return None
+    if mention.kind == "person" and mention.mention:
+        return mention.mention, instruction
+    return "我", instruction
+
+
+_WEEK_PHRASE_HINT = re.compile(r"周|星期|礼拜")
+
+
+def _report_time_phrase(instruction: str) -> str:
+    """The time phrase a weekly report should cover, if the user wrote one.
+
+    This reuses the deterministic span finder the subject extractor already
+    runs, so the report never asks a model to do calendar math and the two
+    other subject intents are untouched. A week-shaped span wins over a bare
+    day ("前天和上上周") because this is a weekly report.
+    """
+
+    text = str(instruction or "")
+    spans = [text[start:end].strip() for start, end in find_time_spans(text)]
+    spans = [span for span in spans if span]
+    for span in spans:
+        if _WEEK_PHRASE_HINT.search(span):
+            return span
+    return spans[0] if spans else ""
+
+
+def build_weekly_report_plan(
+    name: str,
+    instruction: str,
+    task: TaskEnvelope,
+    capabilities: list[CapabilityDescriptor],
+) -> Plan | None:
+    registered = {descriptor.name for descriptor in capabilities}
+    if REPORT_WEEKLY_NAME not in registered:
+        return None
+    plan_id = str(uuid4())
+    attachment_ids = [
+        str(value)
+        for value in (task.input.get("attachment_ids") or [])
+        if str(value).strip()
+    ]
+    arguments: dict[str, Any] = {
+        "person": name or "我",
+        "instruction": instruction[:2000],
+        "attachment_ids": attachment_ids[:5],
+    }
+    time_phrase = _report_time_phrase(instruction)
+    if time_phrase:
+        arguments["time_range"] = time_phrase
+    # A candidate chosen from the "which template?" list comes back as an
+    # explicit marker, so the choice survives the round trip through chat text.
+    choice = _TEMPLATE_CHOICE.search(instruction)
+    if choice:
+        arguments["template_attachment_id"] = choice.group("id")
+    return Plan(
+        plan_id=plan_id,
+        task_id=task.task_id,
+        objective=f"给{name or '我'}写周报",
+        steps=[
+            PlanStep(
+                step_id=f"{plan_id}-step-1",
+                plan_id=plan_id,
+                order=1,
+                capability=REPORT_WEEKLY_NAME,
+                arguments=arguments,
+            )
+        ],
+    )
 
 _SENDER_PATTERNS = (
     re.compile(
@@ -534,6 +692,105 @@ def build_knowledge_plan(
     )
 
 
+def build_person_query_plan(
+    name: str,
+    question: str,
+    task: TaskEnvelope,
+    capabilities: list[CapabilityDescriptor],
+) -> Plan | None:
+    registered = {descriptor.name for descriptor in capabilities}
+    if PERSON_QUERY_NAME not in registered:
+        return None
+    plan_id = str(uuid4())
+    return Plan(
+        plan_id=plan_id,
+        task_id=task.task_id,
+        objective=f"回答关于{name}的问题",
+        steps=[
+            PlanStep(
+                step_id=f"{plan_id}-step-1",
+                plan_id=plan_id,
+                order=1,
+                capability=PERSON_QUERY_NAME,
+                arguments={"name": name, "question": question[:2000]},
+            )
+        ],
+    )
+
+
+def build_organization_question_plan(
+    subject: str,
+    question: str,
+    task: TaskEnvelope,
+    capabilities: list[CapabilityDescriptor],
+) -> Plan | None:
+    """Answer a question about an organization, from that organization's material.
+
+    Same chain as any other knowledge question, with one difference: the source
+    step pins the subject name as a phrase the resource must contain. BM25
+    matches "深空公司" and "公司" alike, so without that pin the "scope" is just
+    "everything that mentions 公司".
+    """
+
+    registered = {descriptor.name for descriptor in capabilities}
+    required = {SEARCH_SOURCES_NAME, SEARCH_CONTENT_NAME, KNOWLEDGE_ANSWER_NAME}
+    if not required <= registered:
+        return None
+    name = str(subject or "").strip()
+    if not name:
+        return None
+    # "我们的公司" narrows to the word the corpus actually holds.
+    core = subject_core(name) or name
+    text = " ".join(str(question or "").split()).strip() or name
+    plan_id = str(uuid4())
+    sources_step = PlanStep(
+        step_id=f"{plan_id}-step-1",
+        plan_id=plan_id,
+        order=1,
+        capability=SEARCH_SOURCES_NAME,
+        arguments={
+            "query": core,
+            "content_contains": [core],
+            "resource_types": ["message", "attachment"],
+            "include_personal": True,
+            "top_k": 20,
+        },
+    )
+    content_step = PlanStep(
+        step_id=f"{plan_id}-step-2",
+        plan_id=plan_id,
+        order=2,
+        capability=SEARCH_CONTENT_NAME,
+        arguments={
+            "query": text[:500],
+            "resource_ids_ref": {"step": 1, "output": "resource_ids"},
+            "restrict_to_resource_ids": True,
+            "include_personal": True,
+            "top_k": 10,
+        },
+    )
+    answer_step = PlanStep(
+        step_id=f"{plan_id}-step-3",
+        plan_id=plan_id,
+        order=3,
+        capability=KNOWLEDGE_ANSWER_NAME,
+        arguments={
+            "query": text[:2000],
+            "results_ref": {"step": 2, "output": "results"},
+            "metadata_coverage": (
+                f"$steps.{content_step.step_id}.output.metadata_coverage"
+            ),
+            "empty_answer": f"没有找到{core}的资料。",
+        },
+    )
+    return Plan(
+        plan_id=plan_id,
+        task_id=task.task_id,
+        objective=f"回答关于{name}的问题",
+        steps=[sources_step, content_step, answer_step],
+    )
+
+
 class KnowledgeRoutingPlanner:
     """Intercepts stable knowledge intents and delegates everything else."""
 
@@ -543,10 +800,14 @@ class KnowledgeRoutingPlanner:
         *,
         default_timezone: str = "Asia/Shanghai",
         clock: Callable[[], datetime] | None = None,
+        subject_extractor=None,
     ) -> None:
         self.base = base
         self.default_timezone = default_timezone
         self.clock = clock
+        # Optional first-class subject reader. When absent, the deterministic
+        # readers in understanding.subject keep the historical routes working.
+        self.subject_extractor = subject_extractor
         self._last_call_count = 0
 
     @property
@@ -556,6 +817,12 @@ class KnowledgeRoutingPlanner:
     @property
     def last_call_count(self) -> int:
         return max(int(self._last_call_count or 0), 0)
+
+    def _subject_calls(self) -> int:
+        return max(
+            int(getattr(self.subject_extractor, "last_call_count", 0) or 0),
+            0,
+        )
 
     def set_validators(self, validators) -> None:
         attach = getattr(self.base, "set_validators", None)
@@ -577,10 +844,51 @@ class KnowledgeRoutingPlanner:
         *,
         conversation_context=None,
     ) -> Plan:
+        if self.subject_extractor is not None:
+            try:
+                self.subject_extractor.last_call_count = 0
+            except Exception:  # noqa: BLE001 - optional test doubles need no counter
+                pass
         memory_plan = build_conversation_memory_plan(task, capabilities)
         if memory_plan is not None:
             self._last_call_count = 0
             return memory_plan
+        # "写周报" is a specific deliverable, not a question and not a generic
+        # attachment task: it is recognised first so an uploaded template is
+        # treated as the report's layout instead of as the answer's evidence,
+        # and so the action planner never sees it (it has no report tool).
+        weekly = classify_weekly_report(
+            _task_instruction_text(task),
+            subject_extractor=self.subject_extractor,
+        )
+        if weekly is not None:
+            weekly_plan = build_weekly_report_plan(
+                weekly[0], weekly[1], task, capabilities
+            )
+            if weekly_plan is not None:
+                self._last_call_count = self._subject_calls()
+                return weekly_plan
+        if _intent_named(understanding, REPORT_WEEKLY_NAME) and _registered(
+            capabilities, REPORT_WEEKLY_NAME
+        ):
+            # The classifier named the report while the extractors above could
+            # not read the wording ("帮他弄份上周的周报"). The LLM planner holds
+            # the capability schema, so it can supply the person; the template
+            # the user attached still has to come from the task itself.
+            built = _call_plan(
+                self.base.create_plan,
+                task,
+                capabilities,
+                observations,
+                constraints,
+                understanding,
+                conversation_context=conversation_context,
+            )
+            self._last_call_count = max(
+                int(getattr(self.base, "last_call_count", 0) or 0),
+                0,
+            ) + self._subject_calls()
+            return _ensure_report_arguments(built, task)
         if _explicit_web_research(understanding):
             # The classifier can name a public-web intent with high confidence
             # ("搜索一下飞书开放平台"). The generic internal-object words
@@ -653,6 +961,71 @@ class KnowledgeRoutingPlanner:
             if form_plan is not None:
                 self._last_call_count = 0
                 return form_plan
+        person_extractor = (
+            self.subject_extractor
+            if _intent_named(understanding, PERSON_QUERY_NAME)
+            else None
+        )
+        person = classify_person_question(
+            _task_instruction_text(task),
+            subject_extractor=person_extractor,
+        )
+        if person is not None:
+            if subject_is_organization(person[0]):
+                # "深空公司的情况是什么" reads like a person question to the
+                # extractor, but the name is not a contact: the person path
+                # would only reach its generic fallback with no scope at all.
+                organization_plan = build_organization_question_plan(
+                    person[0], person[1], task, capabilities
+                )
+                if organization_plan is not None:
+                    self._last_call_count = self._subject_calls()
+                    return organization_plan
+            else:
+                person_plan = build_person_query_plan(
+                    person[0], person[1], task, capabilities
+                )
+                if person_plan is not None:
+                    self._last_call_count = self._subject_calls()
+                    return person_plan
+        if _intent_named(understanding, PERSON_QUERY_NAME) and _registered(
+            capabilities, PERSON_QUERY_NAME
+        ):
+            organization = organization_subject_in(_task_instruction_text(task))
+            if organization:
+                organization_plan = build_organization_question_plan(
+                    organization,
+                    _task_instruction_text(task),
+                    task,
+                    capabilities,
+                )
+                if organization_plan is not None:
+                    self._last_call_count = self._subject_calls()
+                    return organization_plan
+            if not _asks_about_work_progress(_task_instruction_text(task)):
+                # The classifier named a person question the extractors above
+                # could not read ("张三那边最近怎么样"). Let the LLM planner fill
+                # the name and question from the capability schema instead of
+                # falling through to a whole-library keyword search that would
+                # answer with whatever mentions the name.
+                built = _call_plan(
+                    self.base.create_plan,
+                    task,
+                    capabilities,
+                    observations,
+                    constraints,
+                    understanding,
+                    conversation_context=conversation_context,
+                )
+                self._last_call_count = max(
+                    int(getattr(self.base, "last_call_count", 0) or 0),
+                    0,
+                ) + self._subject_calls()
+                return augment_personal_knowledge_sources(
+                    built,
+                    task,
+                    capabilities,
+                )
         route = classify_knowledge_question(
             _task_instruction_text(task),
             timezone_name=self.default_timezone,
@@ -661,7 +1034,7 @@ class KnowledgeRoutingPlanner:
         if route is not None:
             plan = build_knowledge_plan(route, task, capabilities)
             if plan is not None:
-                self._last_call_count = 0
+                self._last_call_count = self._subject_calls()
                 return plan
         built = _call_plan(
             self.base.create_plan,
@@ -680,7 +1053,7 @@ class KnowledgeRoutingPlanner:
         self._last_call_count = max(
             int(getattr(self.base, "last_call_count", 0) or 0),
             0,
-        )
+        ) + self._subject_calls()
         return built
 
     def decide_after_observation(
@@ -887,6 +1260,8 @@ def _is_knowledge_plan(plan: Plan) -> bool:
         SEARCH_SOURCES_NAME,
         SEARCH_CONTENT_NAME,
         KNOWLEDGE_ANSWER_NAME,
+        PERSON_QUERY_NAME,
+        REPORT_WEEKLY_NAME,
         ANSWER_COMPOSE_NAME,
     }
     return all(step.capability in knowledge for step in plan.steps)
@@ -1183,6 +1558,74 @@ def _requests_form_completion(
         item.name == FORM_COMPLETE_INTENT and item.confidence >= 0.7
         for item in understanding.intent_candidates
     )
+
+
+# The classifier's own provider threshold already filtered the candidates; this
+# floor only guards against a weak second-place label deciding the route.
+_INTENT_ROUTE_MIN_CONFIDENCE = 0.7
+
+
+def _intent_named(understanding: TaskUnderstanding | None, name: str) -> bool:
+    """Whether the classifier chose ``name`` for this turn."""
+
+    if understanding is None or not understanding.is_task:
+        return False
+    return any(
+        item.name == name and item.confidence >= _INTENT_ROUTE_MIN_CONFIDENCE
+        for item in understanding.intent_candidates
+    )
+
+
+def _registered(
+    capabilities: list[CapabilityDescriptor], name: str
+) -> bool:
+    """The verdict may only route to a capability this deployment registered."""
+
+    return any(descriptor.name == name for descriptor in capabilities)
+
+
+def _ensure_report_arguments(plan: Plan, task: TaskEnvelope) -> Plan:
+    """Carry the turn's own template attachment into a planned report step.
+
+    The model plans the person and the instruction from the schema, but it never
+    sees the upload handle, so the file the user attached has to be copied in
+    afterwards or the report would silently fall back to searching for a
+    template even though the instruction said "我上传的模板". The same turn's
+    time phrase is copied in too, so the report covers the week the user named.
+    """
+
+    attachment_ids = [
+        str(value)
+        for value in (task.input.get("attachment_ids") or [])
+        if str(value).strip()
+    ]
+    instruction = _task_instruction_text(task)[:2000]
+    time_phrase = _report_time_phrase(instruction)
+    steps: list[PlanStep] = []
+    changed = False
+    for step in plan.steps:
+        if step.capability != REPORT_WEEKLY_NAME:
+            steps.append(step)
+            continue
+        arguments = dict(step.arguments or {})
+        step_changed = False
+        if attachment_ids and not arguments.get("attachment_ids"):
+            arguments["attachment_ids"] = attachment_ids[:5]
+            step_changed = True
+        if not str(arguments.get("instruction") or "").strip():
+            arguments["instruction"] = instruction
+            step_changed = True
+        if time_phrase and not str(arguments.get("time_range") or "").strip():
+            arguments["time_range"] = time_phrase
+            step_changed = True
+        if step_changed:
+            changed = True
+            steps.append(step.model_copy(update={"arguments": arguments}))
+        else:
+            steps.append(step)
+    if not changed:
+        return plan
+    return plan.model_copy(update={"steps": steps})
 
 
 def _requests_document_comparison(task: TaskEnvelope) -> bool:

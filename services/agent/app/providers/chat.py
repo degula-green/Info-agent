@@ -10,11 +10,16 @@ from __future__ import annotations
 
 import json
 from contextvars import ContextVar
-from typing import Any, Protocol
+from typing import Any, Callable, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from app.infrastructure.llm.client import LLMError, parse_json_object
+from app.infrastructure.llm.client import (
+    LLMError,
+    LLMStreamCancelled,
+    parse_json_object,
+)
+from app.infrastructure.llm.json_stream import FirstStringFieldExtractor
 
 
 class ChatReplyError(RuntimeError):
@@ -29,6 +34,13 @@ class ChatReplyUnavailable(ChatReplyError):
 
     classification = "retryable_error"
     code = "chat_reply_unavailable"
+
+
+class ChatReplyStreamCancelled(ChatReplyError):
+    """The task was cancelled while the reply stream was in flight."""
+
+    classification = "cancelled"
+    code = "chat_reply_stream_cancelled"
 
 
 class ChatReplyDraft(BaseModel):
@@ -92,6 +104,35 @@ class LlmChatReplyProvider:
         conversation_context: Any | None = None,
     ) -> ChatReplyDraft:
         self.last_call_count = 0
+        messages = self._messages(text, conversation_context)
+        raw = self._complete(messages)
+        return self._finalize(messages, raw)
+
+    def stream_reply(
+        self,
+        text: str,
+        *,
+        conversation_context: Any | None = None,
+        on_delta: Callable[[str], None] | None = None,
+        should_cancel: Callable[[], bool] | None = None,
+        idle_timeout: float | None = None,
+        total_timeout: float | None = None,
+    ) -> ChatReplyDraft:
+        self.last_call_count = 0
+        messages = self._messages(text, conversation_context)
+        raw = self._stream(
+            messages,
+            field="reply",
+            on_delta=on_delta,
+            should_cancel=should_cancel,
+            idle_timeout=idle_timeout,
+            total_timeout=total_timeout,
+        )
+        return self._finalize(messages, raw)
+
+    def _messages(
+        self, text: str, conversation_context: Any | None
+    ) -> list[dict[str, str]]:
         payload: dict[str, Any] = {"text": text}
         if conversation_context is not None:
             payload["conversation_context"] = (
@@ -106,7 +147,11 @@ class LlmChatReplyProvider:
                 "content": json.dumps(payload, ensure_ascii=False),
             },
         ]
-        raw = self._complete(messages)
+        return messages
+
+    def _finalize(
+        self, messages: list[dict[str, str]], raw: str
+    ) -> ChatReplyDraft:
         draft = self._parse(raw)
         if draft is not None:
             return draft
@@ -129,6 +174,49 @@ class LlmChatReplyProvider:
         if draft is None:
             raise ChatReplyError(f"reply output failed after repair: {self._last_error}")
         return draft
+
+    def _stream(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        field: str,
+        on_delta: Callable[[str], None] | None,
+        should_cancel: Callable[[], bool] | None,
+        idle_timeout: float | None,
+        total_timeout: float | None,
+    ) -> str:
+        client = self.client
+        extractor = FirstStringFieldExtractor(field)
+        parts: list[str] = []
+        try:
+            for chunk in client.stream_complete(
+                messages,
+                should_cancel=should_cancel,
+                idle_timeout=idle_timeout,
+                total_timeout=total_timeout,
+            ):
+                if not isinstance(chunk, str) or not chunk:
+                    continue
+                parts.append(chunk)
+                piece = extractor.feed(chunk)
+                if piece and on_delta is not None:
+                    on_delta(piece)
+            tail = extractor.finish()
+            if tail and on_delta is not None:
+                on_delta(tail)
+        except LLMStreamCancelled as exc:
+            raise ChatReplyStreamCancelled(str(exc)) from exc
+        except LLMError as exc:
+            error = (
+                ChatReplyUnavailable
+                if exc.classification == "retryable_error"
+                else ChatReplyError
+            )
+            raise error(str(exc)) from exc
+        self.last_call_count += max(
+            int(getattr(client, "last_call_count", 1)), 1
+        )
+        return "".join(parts)
 
     def _complete(self, messages: list[dict[str, str]]) -> str:
         try:

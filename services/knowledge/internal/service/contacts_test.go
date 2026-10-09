@@ -269,3 +269,243 @@ func TestMergeAvailableContactsKeepsProviderMetadata(t *testing.T) {
 		t.Fatalf("unexpected merged contacts: %+v", contacts)
 	}
 }
+
+func TestAttachContactDerivesNameCore(t *testing.T) {
+	repo := repository.NewMemoryStore()
+	ctx := context.Background()
+	if _, err := repo.SaveConnector(ctx, domain.ConnectorAccount{OwnerUserID: "owner", Platform: domain.PlatformWechat, ExternalAccountID: "wx", Status: domain.ConnectorActive}); err != nil {
+		t.Fatal(err)
+	}
+	view, err := (&Service{Repo: repo}).AttachContact(ctx, "owner", "wechat", "wx-1", "暴躁小李", "", "暴躁小李")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if view.NameCore != "小李" {
+		t.Fatalf("name core = %q, want 小李", view.NameCore)
+	}
+}
+
+func TestResolvePersonMatchesAttachedContactByNameCore(t *testing.T) {
+	repo := repository.NewMemoryStore()
+	ctx := context.Background()
+	account, err := repo.SaveConnector(ctx, domain.ConnectorAccount{OwnerUserID: "owner", Platform: domain.PlatformWechat, ExternalAccountID: "wx", Status: domain.ConnectorActive})
+	if err != nil {
+		t.Fatal(err)
+	}
+	identityID, err := repo.UpsertExternalIdentity(ctx, repository.ExternalIdentityInput{Platform: domain.PlatformWechat, ExternalUserID: "wx-1", DisplayName: "暴躁小李"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = repo.UpsertContactRelation(ctx, repository.ContactRelationInput{OwnerUserID: "owner", ConnectorID: account.ID, ExternalIdentityID: identityID, Remark: "暴躁小李", NameCore: "小李"}); err != nil {
+		t.Fatal(err)
+	}
+	subject, matches, err := (&Service{Repo: repo}).ResolvePerson(ctx, "owner", "暴躁小李")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if subject != "小李" || len(matches) != 1 || !matches[0].Attached || len(matches[0].IdentityIDs) != 1 {
+		t.Fatalf("unexpected resolve result: subject=%q matches=%+v", subject, matches)
+	}
+}
+
+// "给我写周报" must resolve to one person, not to a menu of the caller's own
+// accounts: their WeChat account, the wxid their messages are sent under, and
+// their Feishu account all describe the same human.
+func TestResolvePersonCollapsesSelfIdentitiesIntoOnePerson(t *testing.T) {
+	repo := repository.NewMemoryStore()
+	ctx := context.Background()
+	if _, err := repo.SaveConnector(ctx, domain.ConnectorAccount{ID: "wechat-1", OwnerUserID: "owner", Platform: domain.PlatformWechat, ExternalAccountID: "wxid_base_46ff", Status: domain.ConnectorActive}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repo.SaveConnector(ctx, domain.ConnectorAccount{ID: "feishu-1", OwnerUserID: "owner", Platform: domain.PlatformFeishu, ExternalAccountID: "ou_1", Status: domain.ConnectorActive}); err != nil {
+		t.Fatal(err)
+	}
+	baseID, err := repo.UpsertExternalIdentity(ctx, repository.ExternalIdentityInput{Platform: domain.PlatformWechat, ExternalUserID: "wxid_base", DisplayName: "稻成"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	accountID, err := repo.UpsertExternalIdentity(ctx, repository.ExternalIdentityInput{Platform: domain.PlatformWechat, ExternalUserID: "wxid_base_46ff", DisplayName: "微信 · wxid_base_46ff", MappedUserID: "owner"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	feishuID, err := repo.UpsertExternalIdentity(ctx, repository.ExternalIdentityInput{Platform: domain.PlatformFeishu, ExternalUserID: "ou_1", DisplayName: "用户944626", MappedUserID: "owner"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, matches, err := (&Service{Repo: repo}).ResolvePerson(ctx, "owner", "我")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(matches) != 1 {
+		t.Fatalf("self reference produced %d people, want 1: %+v", len(matches), matches)
+	}
+	if matches[0].DisplayName != "稻成" {
+		t.Fatalf("self display name = %q, want 稻成", matches[0].DisplayName)
+	}
+	for _, want := range []string{baseID, accountID, feishuID} {
+		if !containsString(matches[0].IdentityIDs, want) {
+			t.Fatalf("self match is missing identity %q: %+v", want, matches[0].IdentityIDs)
+		}
+	}
+	// Each platform account travels with the name that platform shows, so a
+	// mention search can anchor on "稻成" for WeChat and the Feishu name for
+	// Feishu instead of on the pronoun 我.
+	if len(matches[0].Identities) != 3 {
+		t.Fatalf("self match should carry every identity: %+v", matches[0].Identities)
+	}
+	for _, identity := range matches[0].Identities {
+		if identity.Platform == "" || identity.DisplayName == "" {
+			t.Fatalf("identity is missing platform or name: %+v", identity)
+		}
+	}
+}
+
+func TestSetSelfDisplayNameReplacesThePlatformPlaceholder(t *testing.T) {
+	repo := repository.NewMemoryStore()
+	ctx := context.Background()
+	if _, err := repo.SaveConnector(ctx, domain.ConnectorAccount{ID: "feishu-1", OwnerUserID: "owner", Platform: domain.PlatformFeishu, ExternalAccountID: "ou_1", Status: domain.ConnectorActive}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repo.UpsertExternalIdentity(ctx, repository.ExternalIdentityInput{Platform: domain.PlatformFeishu, ExternalUserID: "ou_1", DisplayName: "用户944626", MappedUserID: "owner"}); err != nil {
+		t.Fatal(err)
+	}
+
+	service := &Service{Repo: repo}
+	updated, err := service.SetSelfDisplayName(ctx, "owner", "feishu", "DC")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated != 1 {
+		t.Fatalf("updated %d identities, want 1", updated)
+	}
+	_, matches, err := service.ResolvePerson(ctx, "owner", "我")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(matches) != 1 || matches[0].DisplayName != "DC" {
+		t.Fatalf("self display name = %+v, want DC", matches)
+	}
+}
+
+func TestResolvePersonReturnsNoMatchForUnknownName(t *testing.T) {
+	repo := repository.NewMemoryStore()
+	subject, matches, err := (&Service{Repo: repo}).ResolvePerson(context.Background(), "owner", "不存在的人")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if subject == "" || len(matches) != 0 {
+		t.Fatalf("expected no match, got subject=%q matches=%+v", subject, matches)
+	}
+}
+
+// A personal WeChat remark resolves for its owner, using the owner's own
+// contact book row, and the matched identity keeps the platform display name
+// so mention anchoring is unaffected.
+func TestResolvePersonUsesOwnerScopedWechatContactBook(t *testing.T) {
+	repo := repository.NewMemoryStore()
+	ctx := context.Background()
+	now := time.Now().UTC()
+	account, err := repo.SaveConnector(ctx, domain.ConnectorAccount{OwnerUserID: "owner", Platform: domain.PlatformWechat, ExternalAccountID: "wx", Status: domain.ConnectorActive})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = repo.UpsertExternalIdentity(ctx, repository.ExternalIdentityInput{Platform: domain.PlatformWechat, ExternalUserID: "wx-andrea", DisplayName: "Andrea"}); err != nil {
+		t.Fatal(err)
+	}
+	conversation, err := repo.AttachConversation(ctx, repository.AttachInput{UserID: "owner", Platform: domain.PlatformWechat, ExternalConversationID: "wx-andrea", ConversationType: "private", RequestedStartAt: &now, PrimaryConnectorID: account.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := "你好"
+	input := repository.IngestMessageInput{CollectorID: conversation.Collectors[0].ID, ExternalConversationID: "wx-andrea", ExternalMessageID: "message-1", SenderExternalID: "wx-andrea", SenderDisplayName: "Andrea", MessageType: "text", Content: content, ContentHash: hashForTest(content), SentAt: now}
+	input.PayloadHash, err = repository.CalculatePayloadHash(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = repo.IngestMessage(ctx, input); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = repo.SyncWechatContactBook(ctx, "owner", account.ID, []repository.WechatContactBookInput{{ExternalUserID: "wx-andrea", NickName: "Andrea", Remark: "杨思琪", NameCore: "杨思琪"}}, true); err != nil {
+		t.Fatal(err)
+	}
+
+	service := &Service{Repo: repo}
+	subject, matches, err := service.ResolvePerson(ctx, "owner", "杨思琪")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if subject != "杨思琪" || len(matches) != 1 || matches[0].Attached {
+		t.Fatalf("unexpected owner resolve: subject=%q matches=%+v", subject, matches)
+	}
+	if matches[0].DisplayName != "杨思琪" {
+		t.Fatalf("match display name = %q, want the owner's remark 杨思琪", matches[0].DisplayName)
+	}
+	if len(matches[0].Identities) != 1 || matches[0].Identities[0].DisplayName != "Andrea" {
+		t.Fatalf("identity should keep the platform name for mention anchoring: %+v", matches[0].Identities)
+	}
+
+	// Another user with the same string must not resolve the owner's remark.
+	_, otherMatches, err := service.ResolvePerson(ctx, "other", "杨思琪")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(otherMatches) != 0 {
+		t.Fatalf("another user resolved the owner's contact book remark: %+v", otherMatches)
+	}
+}
+
+// A remark whose matched identity is not visible to the owner is treated as no
+// match, so the caller never gets a person with no data behind it.
+func TestResolvePersonTreatsInvisibleWechatRemarkAsNoMatch(t *testing.T) {
+	repo := repository.NewMemoryStore()
+	ctx := context.Background()
+	account, err := repo.SaveConnector(ctx, domain.ConnectorAccount{OwnerUserID: "owner", Platform: domain.PlatformWechat, ExternalAccountID: "wx", Status: domain.ConnectorActive})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = repo.UpsertExternalIdentity(ctx, repository.ExternalIdentityInput{Platform: domain.PlatformWechat, ExternalUserID: "wx-hidden", DisplayName: "Hidden"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = repo.SyncWechatContactBook(ctx, "owner", account.ID, []repository.WechatContactBookInput{{ExternalUserID: "wx-hidden", NickName: "Hidden", Remark: "老王", NameCore: "老王"}}, true); err != nil {
+		t.Fatal(err)
+	}
+	_, matches, err := (&Service{Repo: repo}).ResolvePerson(ctx, "owner", "老王")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(matches) != 0 {
+		t.Fatalf("invisible contact book remark resolved: %+v", matches)
+	}
+}
+
+func TestSyncWechatContactBookMarksMissingAsRemoved(t *testing.T) {
+	repo := repository.NewMemoryStore()
+	ctx := context.Background()
+	account, err := repo.SaveConnector(ctx, domain.ConnectorAccount{OwnerUserID: "owner", Platform: domain.PlatformWechat, ExternalAccountID: "wx", Status: domain.ConnectorActive})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = repo.SyncWechatContactBook(ctx, "owner", account.ID, []repository.WechatContactBookInput{
+		{ExternalUserID: "wx-a", NickName: "A", Remark: "甲", NameCore: "甲"},
+		{ExternalUserID: "wx-b", NickName: "B", Remark: "乙", NameCore: "乙"},
+	}, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = repo.SyncWechatContactBook(ctx, "owner", account.ID, []repository.WechatContactBookInput{
+		{ExternalUserID: "wx-a", NickName: "A", Remark: "甲", NameCore: "甲"},
+	}, true); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := repo.ListWechatContactBook(ctx, "owner", account.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	status := map[string]string{}
+	for _, entry := range entries {
+		status[entry.ExternalUserID] = entry.Status
+	}
+	if status["wx-a"] != "active" || status["wx-b"] != "removed" {
+		t.Fatalf("unexpected contact book status after a complete sync: %+v", entries)
+	}
+}

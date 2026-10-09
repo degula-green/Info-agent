@@ -92,7 +92,10 @@ class RagAuthorizationClient(AuthorizationGateway):
                 denied=exc.status == 403,
                 failed=exc.status != 403,
             )
-        if cache_ttl > 0:
+        # Only a real answer is cached: caching a backend failure kept the
+        # scope unusable for the whole TTL and made one dropped connection look
+        # like a sustained authorization outage.
+        if cache_ttl > 0 and not value.failed and not value.denied:
             with self._lock:
                 self._cache[key] = _CacheEntry(now + cache_ttl, value)
         return value

@@ -26,7 +26,13 @@ from app.infrastructure.web.desktop_form_browser_client import (
 )
 from app.kernel.approval import ApprovalError
 from app.kernel.errors import AgentContractError
-from app.kernel.states import TERMINAL_TASK_STATUSES, WAITING_TASK_STATUSES
+from app.kernel.states import (
+    EVENT_ANSWER_COMPLETED,
+    EVENT_ANSWER_STARTED,
+    EVENT_TASK_COMPLETED,
+    TERMINAL_TASK_STATUSES,
+    WAITING_TASK_STATUSES,
+)
 
 router = APIRouter(prefix="/api/agent/v1")
 
@@ -114,6 +120,11 @@ def create_task(
     organization_id = container.core_client.current_organization(user.access_token)
     if organization_id:
         source_ref["organization_id"] = organization_id
+    # A self report has to print a name, and the identity rows only carry
+    # generated account labels, so the profile nickname travels with the task.
+    owner_name = container.core_client.current_user_name(user.access_token)
+    if owner_name:
+        source_ref["owner_name"] = owner_name
     try:
         task = container.task_service.create_task(
             owner_user_id=user.user_id,
@@ -302,6 +313,8 @@ async def stream_task_events(
     task_id: str,
     request: Request,
     after: int = 0,
+    answer_id: str = "",
+    answer_after: int = 0,
     timeout_seconds: float = 30.0,
     owner_user_id: str = Depends(current_user_id),
 ) -> StreamingResponse:
@@ -317,25 +330,172 @@ async def stream_task_events(
     cursor = after
     if last_event_id and last_event_id.strip().isdigit():
         cursor = max(cursor, int(last_event_id.strip()))
+    current_answer_id = str(answer_id or "").strip()
+    current_answer_after = max(0, int(answer_after or 0))
 
     async def generator() -> AsyncIterator[str]:
-        nonlocal cursor
+        nonlocal cursor, current_answer_id, current_answer_after
         loop = asyncio.get_running_loop()
         deadline = loop.time() + max(timeout_seconds, 0.1)
+        answer_stream = getattr(container, "answer_stream", None)
+        pending_task_completed = None
+        pending_answer_completed = None
+        answer_completed_sent = False
         while True:
+            # 1) Redis deltas first: the final result must never overtake the
+            # tail of the answer.
+            if current_answer_id and answer_stream is not None:
+                try:
+                    deltas = answer_stream.read_deltas(
+                        task_id=task_id,
+                        answer_id=current_answer_id,
+                        after_seq=current_answer_after,
+                    )
+                except Exception:  # noqa: BLE001 - Redis is an optional path
+                    deltas = []
+                for delta in deltas or []:
+                    seq = int(delta.get("seq") or 0)
+                    if seq <= current_answer_after:
+                        continue
+                    current_answer_after = seq
+                    yield _sse(
+                        "answer.delta",
+                        {
+                            "sequence": 0,
+                            "event_type": "answer.delta",
+                            "task_id": task_id,
+                            "payload": {
+                                "answer_id": current_answer_id,
+                                "step_id": str(delta.get("step_id") or ""),
+                                "attempt": int(delta.get("attempt") or 0),
+                                "seq": seq,
+                                "offset": int(delta.get("offset") or 0),
+                                "delta": str(delta.get("delta") or ""),
+                            },
+                        },
+                    )
+            # 2) PostgreSQL events, holding the two terminal markers.
             events = container.task_service.list_events(task_id, after_sequence=cursor)
             for event in events:
                 cursor = event.sequence
+                if event.event_type == EVENT_TASK_COMPLETED:
+                    pending_task_completed = event
+                    continue
+                if event.event_type == EVENT_ANSWER_STARTED:
+                    started_id = str(event.payload.get("answer_id") or "")
+                    if started_id and started_id != current_answer_id:
+                        current_answer_id = started_id
+                        current_answer_after = 0
+                        pending_answer_completed = None
+                        answer_completed_sent = False
+                    yield _sse(
+                        event.event_type,
+                        event.model_dump(mode="json"),
+                        event_id=str(event.sequence),
+                    )
+                    continue
+                if event.event_type == EVENT_ANSWER_COMPLETED:
+                    pending_answer_completed = event
+                    continue
                 yield _sse(
                     event.event_type,
                     event.model_dump(mode="json"),
                     event_id=str(event.sequence),
                 )
+
+            # 3) Emit answer.completed only after the attempt is drained.
+            redis_state: dict[str, Any] = {}
+            if current_answer_id and answer_stream is not None:
+                try:
+                    redis_state = (
+                        answer_stream.status(
+                            task_id=task_id, answer_id=current_answer_id
+                        )
+                        or {}
+                    )
+                except Exception:  # noqa: BLE001 - Redis loss degrades to PG
+                    redis_state = {}
+            if current_answer_id and pending_answer_completed is not None:
+                final_seq: int | None = int(
+                    pending_answer_completed.payload.get("final_seq") or 0
+                )
+            elif current_answer_id and redis_state.get("done"):
+                final_seq = int(redis_state.get("final_seq") or 0)
+            else:
+                final_seq = None
+            redis_lost = bool(
+                current_answer_id
+                and pending_task_completed is not None
+                and answer_stream is not None
+                and not (redis_state.get("next_seq") or redis_state.get("done"))
+            )
+            if current_answer_id and answer_stream is None and pending_task_completed is not None:
+                redis_lost = True
+            if current_answer_id and not answer_completed_sent:
+                answer_done = (
+                    pending_answer_completed is not None
+                    or bool(redis_state.get("done"))
+                )
+                if redis_lost:
+                    # The transient buffer is gone; task.completed carries the
+                    # final result, so do not block the stream on a drain.
+                    answer_completed_sent = True
+                elif answer_done and final_seq is not None and current_answer_after >= final_seq:
+                    payload = (
+                        dict(pending_answer_completed.payload or {})
+                        if pending_answer_completed is not None
+                        else {
+                            "answer_id": current_answer_id,
+                            "final_seq": final_seq,
+                        }
+                    )
+                    if answer_stream is not None:
+                        try:
+                            snapshot = answer_stream.snapshot(
+                                task_id=task_id, answer_id=current_answer_id
+                            )
+                        except Exception:  # noqa: BLE001 - degrade to PG data
+                            snapshot = None
+                        if snapshot:
+                            payload["answer"] = snapshot.get("text", "")
+                            payload["citations"] = snapshot.get("citations", [])
+                            payload["warnings"] = snapshot.get(
+                                "warnings", payload.get("warnings") or []
+                            )
+                    completed_sequence = (
+                        pending_answer_completed.sequence
+                        if pending_answer_completed is not None
+                        else 0
+                    )
+                    yield _sse(
+                        "answer.completed",
+                        {
+                            "sequence": completed_sequence,
+                            "event_type": "answer.completed",
+                            "task_id": task_id,
+                            "payload": payload,
+                        },
+                        event_id=(
+                            str(completed_sequence) if completed_sequence else None
+                        ),
+                    )
+                    answer_completed_sent = True
+
+            # 4) task.completed is the last event on the wire.
+            if pending_task_completed is not None:
+                if not current_answer_id or answer_completed_sent:
+                    yield _sse(
+                        pending_task_completed.event_type,
+                        pending_task_completed.model_dump(mode="json"),
+                        event_id=str(pending_task_completed.sequence),
+                    )
+                    return
+
             task = container.store.get_task(task_id)
             if task is None:
                 return
             if task.status in TERMINAL_TASK_STATUSES or task.status in WAITING_TASK_STATUSES:
-                if not events:
+                if not events and pending_task_completed is None:
                     return
             if loop.time() >= deadline:
                 return
@@ -346,6 +506,45 @@ async def stream_task_events(
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+@router.get("/tasks/{task_id}/answers/{answer_id}")
+def get_answer_snapshot(
+    task_id: str,
+    answer_id: str,
+    owner_user_id: str = Depends(current_user_id),
+) -> dict[str, Any]:
+    """Recover a streamed answer's text when the client detects a seq gap."""
+
+    container = get_container()
+    try:
+        container.task_service.get_task(task_id, owner_user_id=owner_user_id)
+    except TaskNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except TaskPermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    answer_stream = getattr(container, "answer_stream", None)
+    if answer_stream is None:
+        return {
+            "answer_id": answer_id,
+            "text": "",
+            "next_seq": 0,
+            "completed": False,
+            "final_seq": 0,
+        }
+    try:
+        snapshot = answer_stream.snapshot(task_id=task_id, answer_id=answer_id)
+    except Exception:  # noqa: BLE001 - the client falls back to task.completed
+        snapshot = None
+    if snapshot is None:
+        return {
+            "answer_id": answer_id,
+            "text": "",
+            "next_seq": 0,
+            "completed": False,
+            "final_seq": 0,
+        }
+    return snapshot
 
 
 @router.post("/tasks/{task_id}/run")

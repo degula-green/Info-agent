@@ -28,6 +28,28 @@ class RAGClient(Protocol):
     ) -> dict[str, Any]:
         ...
 
+    def export_scope(
+        self,
+        body: dict[str, Any],
+        *,
+        user_id: str,
+        organization_id: str | None,
+        request_id: str,
+        trace_id: str,
+    ) -> dict[str, Any]:
+        ...
+
+    def message_context(
+        self,
+        body: dict[str, Any],
+        *,
+        user_id: str,
+        organization_id: str | None,
+        request_id: str,
+        trace_id: str,
+    ) -> dict[str, Any]:
+        ...
+
 
 class RAGUnavailable(RuntimeError):
     """The RAG service could not answer. Classified as retryable when the
@@ -84,6 +106,42 @@ class HttpRAGClient:
     ) -> dict[str, Any]:
         return self._post(
             "/api/v1/search/content",
+            body,
+            user_id=user_id,
+            organization_id=organization_id,
+            request_id=request_id,
+            trace_id=trace_id,
+        )
+
+    def export_scope(
+        self,
+        body: dict[str, Any],
+        *,
+        user_id: str,
+        organization_id: str | None,
+        request_id: str,
+        trace_id: str,
+    ) -> dict[str, Any]:
+        return self._post(
+            "/api/v1/search/scope",
+            body,
+            user_id=user_id,
+            organization_id=organization_id,
+            request_id=request_id,
+            trace_id=trace_id,
+        )
+
+    def message_context(
+        self,
+        body: dict[str, Any],
+        *,
+        user_id: str,
+        organization_id: str | None,
+        request_id: str,
+        trace_id: str,
+    ) -> dict[str, Any]:
+        return self._post(
+            "/api/v1/search/context",
             body,
             user_id=user_id,
             organization_id=organization_id,

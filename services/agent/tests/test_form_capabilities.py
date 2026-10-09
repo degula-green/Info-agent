@@ -477,7 +477,7 @@ class FakeRetriever:
             ),
         )
 
-    def search(self, query: str, resource_ids=()):
+    def search(self, query: str, resource_ids=(), *, top_k=None):
         from app.infrastructure.rag.form_retriever import RetrievedChunk
 
         self.queries.append(query)
@@ -782,7 +782,11 @@ def test_an_html_form_still_matches_its_own_column_names() -> None:
 
 
 def test_named_subject_scopes_every_query() -> None:
-    """The owner named someone: queries carry it and read only its resources."""
+    """The owner named someone: the read stays in that person's resources.
+
+    The mention window carries the name; the identity windows do not, because
+    his own messages rarely repeat it.
+    """
 
     client = FakeClient()
     retriever = FakeRetriever("学号: 20251714205", carrier="先躺会再说")
@@ -793,9 +797,9 @@ def test_named_subject_scopes_every_query() -> None:
     by_name = {field["name"]: field for field in draft["fields"]}
 
     assert retriever.scopes == ["先躺会再说"]
-    assert retriever.queries and all(
-        query.startswith("先躺会再说") for query in retriever.queries
-    )
+    assert retriever.queries
+    assert any(query.startswith("先躺会再说") for query in retriever.queries)
+    assert "学号" in retriever.queries[0]
     assert by_name["学号"]["value"] == "20251714205"
     assert by_name["学号"]["subject"] == "先躺会再说"
     # The chat is filed under that name, so this is the strongest attribution.
@@ -835,6 +839,179 @@ def test_shared_resource_value_is_offered_but_flagged_for_review() -> None:
     assert "待核对" in result["stages"][-1]
 
 
+def test_subject_after_url_without_space_is_still_read() -> None:
+    """The link must stop at Chinese punctuation, not swallow the instruction."""
+
+    from app.capabilities.form import extract_subject, resolve_scopes
+
+    request = f"【金山文档 | WPS云文档】 班级通讯录\n{URL}，帮我把小呆呆仓鼠的信息填到表格当中"
+
+    assert extract_subject(request) == "小呆呆仓鼠"
+    assert resolve_scopes(request, ["姓名"]) == ["小呆呆仓鼠"]
+
+
+def test_person_form_uses_only_values_the_subject_wrote() -> None:
+    """A private chat is shared evidence, but only the target's line fills it."""
+
+    from app.infrastructure.rag.form_retriever import (
+        RetrievedChunk,
+        ScopeResolution,
+    )
+
+    class PersonRetriever:
+        def resolve_scope(self, scope: str):
+            return ScopeResolution(
+                scope=scope,
+                resource_ids=("other-line", "subject-line"),
+                subject_names=("Castorice",),
+                chunks=(
+                    RetrievedChunk(
+                        text="姓名：小马",
+                        resource_id="other-line",
+                        sender_name="我",
+                        sent_at="2026-10-07T10:00:00+00:00",
+                        source_group="private",
+                        speaker_role="other",
+                    ),
+                    RetrievedChunk(
+                        text="姓名：小呆呆",
+                        resource_id="subject-line",
+                        sender_name="Castorice",
+                        sent_at="2026-10-06T10:00:00+00:00",
+                        source_group="private",
+                        speaker_role="subject",
+                    ),
+                    RetrievedChunk(
+                        text="姓名：提及值",
+                        resource_id="mention-line",
+                        sender_name="Castorice",
+                        sent_at="2026-10-08T10:00:00+00:00",
+                        source_group="mention",
+                        speaker_role="subject",
+                    ),
+                ),
+            )
+
+    client = FakeClient()
+    client.grid = {"headers": ["姓名"], "rows": []}
+    capability = FormPreviewCapability(client, retriever=PersonRetriever())
+    request = f"帮我把小呆呆仓鼠的信息填到 {URL}"
+
+    result = capability.execute(capability.validate({"request": request, "url": URL}))
+    by_name = {field["name"]: field for field in result["form"]["fields"]}
+
+    assert by_name["姓名"]["value"] == "小呆呆"
+    assert by_name["姓名"]["tier"] == "a"
+
+
+def test_person_form_leaves_fields_empty_without_subject_evidence() -> None:
+    """Other people's lines stay context, not a substitute for the subject."""
+
+    from app.infrastructure.rag.form_retriever import (
+        RetrievedChunk,
+        ScopeResolution,
+    )
+
+    class OtherOnlyRetriever:
+        def resolve_scope(self, scope: str):
+            return ScopeResolution(
+                scope=scope,
+                resource_ids=("other-line",),
+                subject_names=("Castorice",),
+                chunks=(
+                    RetrievedChunk(
+                        text="姓名：小马",
+                        resource_id="other-line",
+                        sender_name="我",
+                        sent_at="2026-10-07T10:00:00+00:00",
+                        source_group="private",
+                        speaker_role="other",
+                    ),
+                ),
+            )
+
+    client = FakeClient()
+    client.grid = {"headers": ["姓名"], "rows": []}
+    capability = FormPreviewCapability(client, retriever=OtherOnlyRetriever())
+    request = f"帮我把小呆呆仓鼠的信息填到 {URL}"
+
+    result = capability.execute(capability.validate({"request": request, "url": URL}))
+    by_name = {field["name"]: field for field in result["form"]["fields"]}
+
+    assert by_name["姓名"]["value"] == ""
+    assert any(
+        "未找到由「小呆呆仓鼠」本人发出的可用信息" in warning
+        for warning in result["warnings"]
+    )
+
+
+def test_person_form_topk_stays_in_the_subject_sender_window() -> None:
+    """The ranked lookup must not widen into the whole private conversation."""
+
+    from app.capabilities.person_scope import SOURCE_PRIVATE, SOURCE_SENT
+    from app.infrastructure.rag.form_retriever import (
+        RetrievedChunk,
+        ScopeResolution,
+    )
+
+    class SenderScopedRetriever:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, tuple[str, ...]]] = []
+
+        def resolve_scope(self, scope: str):
+            return ScopeResolution(
+                scope=scope,
+                resource_ids=("sent-1", "private-1"),
+                groups=(
+                    (SOURCE_SENT, ("sent-1",)),
+                    (SOURCE_PRIVATE, ("private-1",)),
+                ),
+                subject_names=("Castorice",),
+            )
+
+        def search_scope(
+            self,
+            query: str,
+            *,
+            sender_ids=(),
+            conversation_ids=(),
+            content_contains=(),
+            top_k=None,
+        ):
+            self.calls.append(
+                {
+                    "sender_ids": tuple(sender_ids),
+                    "conversation_ids": tuple(conversation_ids),
+                    "content_contains": tuple(content_contains),
+                }
+            )
+            if not sender_ids:
+                return []
+            return [
+                RetrievedChunk(
+                    text="学号：20251714205",
+                    resource_id="sent-1",
+                    sender_name="Castorice",
+                    sent_at="2026-10-08T10:00:00+00:00",
+                    source_group=SOURCE_SENT,
+                )
+            ]
+
+    client = FakeClient()
+    client.grid = {"headers": ["学号"], "rows": []}
+    retriever = SenderScopedRetriever()
+    capability = FormPreviewCapability(client, retriever=retriever)
+    request = f"帮我把小呆呆仓鼠的信息填到 {URL}"
+
+    result = capability.execute(capability.validate({"request": request, "url": URL}))
+    by_name = {field["name"]: field for field in result["form"]["fields"]}
+
+    assert by_name["学号"]["value"] == "20251714205"
+    assert retriever.calls
+    assert all(call["sender_ids"] for call in retriever.calls)
+    assert all(not call["conversation_ids"] for call in retriever.calls)
+
+
 def test_no_subject_reads_company_columns_from_the_company_scope() -> None:
     """Without a named subject the columns decide which scope to read."""
 
@@ -847,12 +1024,17 @@ def test_no_subject_reads_company_columns_from_the_company_scope() -> None:
     draft = capability.execute(capability.validate({"request": request, "url": URL}))["form"]
     by_name = {field["name"]: field for field in draft["fields"]}
 
-    assert retriever.scopes == ["我的公司"]
+    assert retriever.scopes == ["公司"]
     assert by_name["公司名称"]["value"] == "青云飞鹏科技有限公司"
 
 
 def test_no_subject_with_mixed_columns_leaves_personal_unscoped() -> None:
-    """"我" is not an entity: resolving it would restrict the lookups wrongly."""
+    """Personal columns stay unscoped when the deployment has no resolver.
+
+    With an identity resolver "我" becomes the owner's own account. Without
+    one there is no entity to resolve, and restricting the lookups to the word
+    would hide the owner's own data, so every value is offered for review.
+    """
 
     client = FakeClient()
     client.grid = {"headers": ["姓名", "公司名称"], "rows": []}
@@ -861,15 +1043,19 @@ def test_no_subject_with_mixed_columns_leaves_personal_unscoped() -> None:
     request = f"帮我填写这个表单 {URL}"
     capability.execute(capability.validate({"request": request, "url": URL}))
 
-    # Only the company scope is resolved; a search for the word "我" returns
-    # arbitrary messages, and restricting to those hides the owner's own data.
-    assert retriever.scopes == ["我的公司"]
+    # Only the company scope is resolved; the personal columns are read
+    # unscoped rather than restricted to the word "我".
+    assert retriever.scopes == ["公司"]
 
 
-def test_a_place_name_without_an_admin_level_is_a_valid_address() -> None:
+def test_address_validation_keeps_places_and_rejects_chat_fragments() -> None:
     from app.capabilities.form import validate_field_value
 
     assert validate_field_value("家庭住址", "狗熊岭")
+    assert validate_field_value("家庭住址", "广东省深圳市南山区科技园路1号")
+    assert not validate_field_value("家庭住址", "珠穆朗玛峰")
+    assert not validate_field_value("家庭住址", "太远了不想去")
+    assert not validate_field_value("家庭住址", "我不知道咋回事一直卡住")
     assert not validate_field_value("家庭住址", "的东西")
     assert not validate_field_value("家庭住址", "了")
 
@@ -883,7 +1069,7 @@ def test_the_newest_evidence_wins_for_the_same_field() -> None:
         def resolve_scope(self, scope: str):
             return ScopeResolution(scope=scope)
 
-        def search(self, query: str, resource_ids=()):
+        def search(self, query: str, resource_ids=(), *, top_k=None):
             if query != "家长姓名":
                 return []
             return [
@@ -927,7 +1113,7 @@ def test_every_column_of_a_wide_form_is_looked_up() -> None:
         def resolve_scope(self, scope: str):
             return ScopeResolution(scope=scope)
 
-        def search(self, query: str, resource_ids=()):
+        def search(self, query: str, resource_ids=(), *, top_k=None):
             self.queries.append(query)
             if query != "家庭住址":
                 return []
@@ -973,9 +1159,10 @@ def test_a_prose_name_is_found_through_the_spoken_query() -> None:
         def resolve_scope(self, scope: str):
             return ScopeResolution(scope=scope)
 
-        def search(self, query: str, resource_ids=()):
+        def search(self, query: str, resource_ids=(), *, top_k=None):
             self.queries.append(query)
-            if query != "我叫":
+            # The query now carries the column and its spoken form together.
+            if "我叫" not in query:
                 return []
             return [
                 RetrievedChunk(
@@ -995,7 +1182,7 @@ def test_a_prose_name_is_found_through_the_spoken_query() -> None:
     )["form"]
     by_name = {field["name"]: field for field in draft["fields"]}
 
-    assert retriever.queries[0] == "姓名" and "我叫" in retriever.queries
+    assert retriever.queries[0] == "姓名 我叫"
     assert by_name["姓名"]["value"] == "小马"
 
 

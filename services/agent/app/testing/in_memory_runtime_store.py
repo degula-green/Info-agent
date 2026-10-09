@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import threading
 from datetime import datetime, timedelta
+from typing import Any
 
 from app.kernel.events import utcnow
 from app.kernel.models import (
@@ -52,6 +53,35 @@ class InMemoryAgentStore:
         self.summary_jobs: dict[str, ConversationSummaryJob] = {}
         self.memories: dict[str, MemoryRecord] = {}
         self.memory_sources: dict[str, list[MemorySourceRecord]] = {}
+        self.person_fact_snapshots: dict[
+            tuple[str, str, str], list[dict[str, Any]]
+        ] = {}
+
+    def get_person_fact_snapshot(
+        self,
+        *,
+        owner_user_id: str,
+        person_key: str,
+        snapshot_fingerprint: str,
+    ) -> list[dict[str, Any]] | None:
+        with self._lock:
+            value = self.person_fact_snapshots.get(
+                (owner_user_id, person_key, snapshot_fingerprint)
+            )
+            return [dict(item) for item in value] if value is not None else None
+
+    def save_person_fact_snapshot(
+        self,
+        *,
+        owner_user_id: str,
+        person_key: str,
+        snapshot_fingerprint: str,
+        facts: list[dict[str, Any]],
+    ) -> None:
+        with self._lock:
+            self.person_fact_snapshots[
+                (owner_user_id, person_key, snapshot_fingerprint)
+            ] = [dict(item) for item in facts]
 
     # -- tasks ------------------------------------------------------------
 
@@ -164,6 +194,14 @@ class InMemoryAgentStore:
             if task is not None and task.lease_owner == owner:
                 task.lease_owner = None
                 task.lease_expires_at = None
+
+    def renew_lease(self, task_id: str, owner: str, seconds: float) -> bool:
+        with self._lock:
+            task = self.tasks.get(task_id)
+            if task is None or task.lease_owner != owner:
+                return False
+            task.lease_expires_at = utcnow() + timedelta(seconds=seconds)
+            return True
 
     # -- inputs -----------------------------------------------------------
 
@@ -537,6 +575,20 @@ class InMemoryAgentStore:
                 for item in self.messages.values()
                 if item.conversation_id == conversation_id
             )
+
+    def count_messages_by_conversation(
+        self, conversation_ids: list[str]
+    ) -> dict[str, int]:
+        wanted = {str(item) for item in conversation_ids if item}
+        if not wanted:
+            return {}
+        counts = {item: 0 for item in wanted}
+        with self._lock:
+            for message in self.messages.values():
+                key = str(message.conversation_id)
+                if key in counts:
+                    counts[key] += 1
+        return counts
 
     def list_completed_messages_after_boundary(
         self,

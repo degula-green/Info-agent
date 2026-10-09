@@ -207,6 +207,56 @@ class RetrievalTests(unittest.TestCase):
         self.assertIn(settings.elasticsearch_display_read_index, indexes)
         self.assertIn(settings.elasticsearch_protected_read_index, indexes)
 
+    def test_scope_export_uses_offset_and_stable_sort(self) -> None:
+        client = _RecordingElasticsearch()
+        index = RagChunkIndex(client)
+        request = SearchRequest(
+            query="",
+            user_id="user-1",
+            scope_type="organization",
+            scope_id="org-1",
+            entry="export",
+            top_k=50,
+            offset=50,
+            resource_types=("message",),
+        )
+
+        index.search_bm25(request, size=request.top_k)
+
+        self.assertTrue(client.calls)
+        self.assertTrue(all(call.get("from_") == 50 for call in client.calls))
+        self.assertTrue(all(call.get("size") == 50 for call in client.calls))
+        self.assertTrue(
+            all(
+                call.get("sort")
+                and call["sort"][0]["sent_at"]["order"] == "desc"
+                for call in client.calls
+            )
+        )
+
+    def test_export_scope_returns_complete_page_diagnostics(self) -> None:
+        indexer = _Indexer()
+        service = RAGRetrievalService(
+            repository=InMemoryRagMVPRepository(),
+            indexer=indexer,
+            embedding=_Embedding(),
+            authorization=_Authorization(),
+        )
+        response = service.export_scope(SearchRequest(
+            query="",
+            user_id="user-1",
+            scope_type="organization",
+            scope_id="org-1",
+            entry="export",
+            top_k=50,
+            offset=50,
+            sender_ids=("sender-1",),
+            resource_types=("message",),
+        ))
+        self.assertEqual(len(response.results), 1)
+        self.assertEqual(response.diagnostics["offset"], 50)
+        self.assertEqual(response.diagnostics["effective_execution_path"], "scope_export")
+
     def test_metadata_filters_and_empty_query(self) -> None:
         request = SearchRequest(
             query="",

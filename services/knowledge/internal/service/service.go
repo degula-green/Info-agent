@@ -19,11 +19,14 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 	"info-agent/knowledge/internal/apperror"
 	"info-agent/knowledge/internal/config"
 	"info-agent/knowledge/internal/contactfacts"
+	"info-agent/knowledge/internal/contactname"
 	"info-agent/knowledge/internal/coreclient"
 	"info-agent/knowledge/internal/domain"
 	"info-agent/knowledge/internal/kv"
@@ -1797,7 +1800,7 @@ func (s *Service) ListConversations(ctx context.Context, userID, platformName st
 
 func contactViewFromRelation(relation repository.ContactRelation) domain.ContactView {
 	i := relation.ExternalIdentity
-	return domain.ContactView{ID: relation.ID, Kind: "external", DisplayName: i.DisplayName, Identities: []domain.ContactIdentity{{ID: i.ID, Platform: i.Platform, WorkspaceKey: i.WorkspaceKey, ExternalUserID: i.ExternalUserID, DisplayName: i.DisplayName, AvatarURL: i.AvatarURL, MappingStatus: i.MappingStatus}}, ConversationIDs: []string{}}
+	return domain.ContactView{ID: relation.ID, Kind: "external", DisplayName: i.DisplayName, Remark: relation.Remark, NameCore: relation.NameCore, Identities: []domain.ContactIdentity{{ID: i.ID, Platform: i.Platform, WorkspaceKey: i.WorkspaceKey, ExternalUserID: i.ExternalUserID, DisplayName: i.DisplayName, AvatarURL: i.AvatarURL, MappingStatus: i.MappingStatus}}, ConversationIDs: []string{}}
 }
 
 func (s *Service) ListContacts(ctx context.Context, userID, platform string) ([]domain.ContactView, error) {
@@ -1845,6 +1848,12 @@ func (s *Service) ListContacts(ctx context.Context, userID, platform string) ([]
 			continue
 		}
 		current.Identities = append(current.Identities, view.Identities...)
+		if current.Remark == "" {
+			current.Remark = view.Remark
+		}
+		if current.NameCore == "" {
+			current.NameCore = view.NameCore
+		}
 		for _, id := range view.ConversationIDs {
 			if !containsString(current.ConversationIDs, id) {
 				current.ConversationIDs = append(current.ConversationIDs, id)
@@ -1898,7 +1907,12 @@ func (s *Service) DiscoverContacts(ctx context.Context, userID, platformName, ke
 				continue
 			}
 			seen[externalID] = struct{}{}
-			contacts = append(contacts, domain.AvailableContact{ExternalUserID: externalID, DisplayName: firstNonEmptyString(fmt.Sprint(value["remark"]), fmt.Sprint(value["nick_name"]), externalID)})
+			remark := firstNonEmptyString(fmt.Sprint(value["remark"]))
+			contacts = append(contacts, domain.AvailableContact{
+				ExternalUserID: externalID,
+				DisplayName:    firstNonEmptyString(fmt.Sprint(value["nick_name"]), remark, externalID),
+				Remark:         remark,
+			})
 		}
 		relations, _ := s.Repo.ListContactRelations(ctx, userID, platformName)
 		selected := map[string]bool{}
@@ -1981,6 +1995,9 @@ func mergeAvailableContacts(primary, fallback []domain.AvailableContact) []domai
 			if out[index].AvatarURL == "" {
 				out[index].AvatarURL = item.AvatarURL
 			}
+			if out[index].Remark == "" {
+				out[index].Remark = item.Remark
+			}
 			continue
 		}
 		item.ExternalUserID = externalID
@@ -2000,12 +2017,54 @@ func firstNonEmptyString(values ...string) string {
 	return ""
 }
 
-func (s *Service) AttachContact(ctx context.Context, userID, platformName, externalUserID, displayName, avatarURL string) (*domain.ContactView, error) {
+// selfReferenceNames are the ways a user says "my own report" instead of a
+// person's name.
+var selfReferenceNames = map[string]struct{}{
+	"我": {}, "自己": {}, "本人": {}, "我的": {}, "我自己": {}, "我本人": {}, "我的周报": {},
+}
+
+func isSelfReference(value string) bool {
+	_, ok := selfReferenceNames[strings.TrimSpace(value)]
+	return ok
+}
+
+// selfNameRank puts a real display name before an auto-generated label
+// ("微信 · wxid_...", Feishu's "用户12345"), so a report about the caller is
+// addressed to a person and not to a storage key.
+func selfNameRank(display string) int {
+	value := strings.TrimSpace(display)
+	if value == "" || strings.Contains(value, "wxid_") || strings.Contains(value, "ou_") {
+		return 1
+	}
+	if placeholderID(value) {
+		return 1
+	}
+	return 0
+}
+
+// placeholderID reports whether a display name is really a generated account
+// label: the prefix "用户" followed only by digits.
+func placeholderID(value string) bool {
+	digits := strings.TrimPrefix(strings.TrimSpace(value), "用户")
+	if digits == value || digits == "" {
+		return false
+	}
+	for _, character := range digits {
+		if character < '0' || character > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+func (s *Service) AttachContact(ctx context.Context, userID, platformName, externalUserID, displayName, avatarURL, remark string) (*domain.ContactView, error) {
 	account, err := s.GetConnector(ctx, userID, platformName)
 	if err != nil {
 		return nil, err
 	}
 	externalUserID = strings.TrimSpace(externalUserID)
+	displayName = strings.TrimSpace(displayName)
+	remark = strings.TrimSpace(remark)
 	if externalUserID == "" {
 		return nil, apperror.New("invalid_contact", "external_user_id is required", 400, false)
 	}
@@ -2019,7 +2078,13 @@ func (s *Service) AttachContact(ctx context.Context, userID, platformName, exter
 	if err != nil {
 		return nil, err
 	}
-	relation, err := s.Repo.UpsertContactRelation(ctx, repository.ContactRelationInput{OwnerUserID: userID, ConnectorID: account.ID, ExternalIdentityID: identity.ID})
+	relation, err := s.Repo.UpsertContactRelation(ctx, repository.ContactRelationInput{
+		OwnerUserID:        userID,
+		ConnectorID:        account.ID,
+		ExternalIdentityID: identity.ID,
+		Remark:             remark,
+		NameCore:           contactname.Extract(firstNonEmptyString(remark, displayName)),
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -2033,6 +2098,188 @@ func (s *Service) AttachContact(ctx context.Context, userID, platformName, exter
 
 func (s *Service) RemoveContact(ctx context.Context, userID, relationID string) error {
 	return s.Repo.DeleteContactRelation(ctx, userID, relationID)
+}
+
+// SetSelfDisplayName corrects the caller's own name on one platform.
+//
+// The OAuth profile is not always usable: some Feishu tenants hand back a
+// placeholder ("用户944626") instead of the name the person goes by. That
+// placeholder would otherwise become the title of every report about them.
+func (s *Service) SetSelfDisplayName(ctx context.Context, userID, platform, displayName string) (int, error) {
+	userID = strings.TrimSpace(userID)
+	platform = strings.ToLower(strings.TrimSpace(platform))
+	name := strings.TrimSpace(displayName)
+	if userID == "" {
+		return 0, apperror.New("invalid_user", "user id is required", 400, false)
+	}
+	if platform != domain.PlatformFeishu && platform != domain.PlatformWechat {
+		return 0, apperror.New("invalid_platform", "unsupported platform", 400, false)
+	}
+	if name == "" || len([]rune(name)) > 60 {
+		return 0, apperror.New("invalid_display_name", "display name is required", 400, false)
+	}
+	return s.Repo.UpdateOwnIdentityDisplayName(ctx, userID, platform, name)
+}
+
+// ResolvePerson turns a name the user typed into one or more people. V1 keeps
+// the lookup narrow: the name is reduced to its core ("暴躁小李" -> "小李")
+// and matched exactly against attached contacts and visible identities. There
+// is deliberately no alias expansion.
+func (s *Service) ResolvePerson(ctx context.Context, userID, name string) (string, []domain.PersonMatch, error) {
+	subject := contactname.Extract(strings.TrimSpace(name))
+	if subject == "" {
+		return "", nil, apperror.New("invalid_person", "name is required", 400, false)
+	}
+	type personAccumulator struct {
+		display    string
+		attached   bool
+		identityID []string
+		relationID []string
+		identities []domain.PersonMatchIdentity
+	}
+	people := map[string]*personAccumulator{}
+	order := []string{}
+	add := func(key, display string, attached bool, identity repository.ExternalIdentity, relationID string) {
+		key = strings.TrimSpace(key)
+		if key == "" {
+			return
+		}
+		current := people[key]
+		if current == nil {
+			current = &personAccumulator{}
+			people[key] = current
+			order = append(order, key)
+		}
+		if current.display == "" && strings.TrimSpace(display) != "" {
+			current.display = strings.TrimSpace(display)
+		}
+		if attached {
+			current.attached = true
+		}
+		if identity.ID != "" && !containsString(current.identityID, identity.ID) {
+			current.identityID = append(current.identityID, identity.ID)
+			current.identities = append(current.identities, domain.PersonMatchIdentity{
+				ID:             identity.ID,
+				Platform:       identity.Platform,
+				DisplayName:    strings.TrimSpace(identity.DisplayName),
+				ExternalUserID: identity.ExternalUserID,
+			})
+		}
+		if relationID != "" && !containsString(current.relationID, relationID) {
+			current.relationID = append(current.relationID, relationID)
+		}
+	}
+	if isSelfReference(subject) {
+		// "给我写周报" has no name to look up. The caller's own messages are the
+		// ones sent under their own platform account, so resolve the identities
+		// that belong to them instead of searching a name.
+		owned, err := s.Repo.ListOwnIdentities(ctx, userID)
+		if err != nil {
+			return "", nil, err
+		}
+		sort.SliceStable(owned, func(i, j int) bool {
+			return selfNameRank(owned[i].DisplayName) < selfNameRank(owned[j].DisplayName)
+		})
+		// Every identity here is the caller themselves: their WeChat account,
+		// their Feishu account, and the wxid their own messages are sent under.
+		// Listing them as separate people made "给我写周报" ask which of them the
+		// user meant, so they collapse into one person keyed by the user id.
+		display := ""
+		// The owner's own name is shown in report titles and file names, so it
+		// prefers the name a platform actually shows. Feishu first (that is the
+		// account the user works under), then any other real name, then the raw
+		// account label so the title is never empty.
+		for _, identity := range owned {
+			if display != "" || selfNameRank(identity.DisplayName) != 0 {
+				continue
+			}
+			if identity.Platform == domain.PlatformFeishu {
+				display = strings.TrimSpace(identity.DisplayName)
+			}
+		}
+		for _, identity := range owned {
+			if display == "" && selfNameRank(identity.DisplayName) == 0 {
+				display = strings.TrimSpace(identity.DisplayName)
+			}
+		}
+		if display == "" && len(owned) > 0 {
+			display = strings.TrimSpace(owned[0].DisplayName)
+		}
+		for _, identity := range owned {
+			add(userID, display, true, identity, "")
+		}
+	} else {
+		relations, err := s.Repo.ListContactRelations(ctx, userID, "")
+		if err != nil {
+			return "", nil, err
+		}
+		for _, relation := range relations {
+			identity := relation.ExternalIdentity
+			if relation.NameCore != subject && identity.DisplayName != subject {
+				continue
+			}
+			add(firstNonEmptyString(identity.MappedUserID, identity.ID), identity.DisplayName, true, identity, relation.ID)
+		}
+		observed, err := s.Repo.ListVisibleIdentitiesByName(ctx, userID, subject)
+		if err != nil {
+			return "", nil, err
+		}
+		for _, identity := range observed {
+			add(firstNonEmptyString(identity.MappedUserID, identity.ID), identity.DisplayName, false, identity, "")
+		}
+		if len(people) == 0 {
+			// Fallback: the owner may know someone by the remark they wrote in
+			// their own WeChat contact book even when the contact was never
+			// attached. The remark is stored owner-scoped and the repository only
+			// returns identities the owner can actually see, so a personal label
+			// never resolves a person for anybody else.
+			bookMatches, err := s.Repo.ListVisibleWechatContactsByName(ctx, userID, subject)
+			if err != nil {
+				return "", nil, err
+			}
+			for _, match := range bookMatches {
+				add(
+					firstNonEmptyString(match.ExternalIdentity.MappedUserID, match.ExternalIdentity.ID),
+					firstNonEmptyString(match.Remark, match.ExternalIdentity.DisplayName),
+					false,
+					match.ExternalIdentity,
+					"",
+				)
+			}
+		}
+	}
+	matches := make([]domain.PersonMatch, 0, len(order))
+	for _, key := range order {
+		current := people[key]
+		// "我" means the caller, and nobody is a recorded member of their own
+		// 1:1 chats: the owner's private window is every private conversation
+		// they collect. For anybody else it stays "my chat with that person".
+		conversations, err := s.Repo.ListPrivateConversationIDs(
+			ctx,
+			userID,
+			current.identityID,
+			key == userID,
+		)
+		if err != nil {
+			return "", nil, err
+		}
+		matches = append(matches, domain.PersonMatch{
+			PersonKey:              key,
+			DisplayName:            current.display,
+			Attached:               current.attached,
+			IdentityIDs:            current.identityID,
+			PrivateConversationIDs: conversations,
+			RelationIDs:            current.relationID,
+			Identities:             current.identities,
+		})
+	}
+	sort.SliceStable(matches, func(i, j int) bool {
+		if matches[i].Attached != matches[j].Attached {
+			return matches[i].Attached
+		}
+		return matches[i].DisplayName < matches[j].DisplayName
+	})
+	return subject, matches, nil
 }
 
 func containsString(values []string, target string) bool {
@@ -3012,6 +3259,40 @@ func (s *Service) OpenInternalAttachment(ctx context.Context, id string, content
 	return attachment, reader, nil
 }
 
+// SearchVisibleAttachments lists collected documents whose file name matches,
+// restricted to what the caller may read. Template discovery for the weekly
+// report starts here because the file name is a cheap, exact filter.
+func (s *Service) SearchVisibleAttachments(ctx context.Context, userID, name string, limit int) ([]domain.Attachment, error) {
+	if strings.TrimSpace(userID) == "" {
+		return nil, apperror.New("invalid_user", "user id is required", 400, false)
+	}
+	return s.Repo.SearchAttachmentsByName(ctx, userID, name, limit)
+}
+
+// OpenVisibleAttachment streams an attachment the user may read. The Agent
+// renders the weekly-report template from the original bytes, so it needs the
+// stored file rather than a knowledge-item projection.
+func (s *Service) OpenVisibleAttachment(ctx context.Context, userID, attachmentID string) (*domain.Attachment, io.ReadCloser, error) {
+	if strings.TrimSpace(userID) == "" {
+		return nil, nil, apperror.New("invalid_user", "user id is required", 400, false)
+	}
+	attachment, err := s.Repo.GetVisibleAttachment(ctx, userID, attachmentID)
+	if err != nil {
+		return nil, nil, err
+	}
+	if attachment.ContentAccessRequired {
+		return nil, nil, apperror.New("attachment_content_restricted", "attachment content requires approval", 403, false)
+	}
+	if strings.TrimSpace(attachment.ObjectRef) == "" {
+		return nil, nil, apperror.New("attachment_content_unavailable", "attachment content is unavailable", 404, false)
+	}
+	reader, err := s.Objects.Open(ctx, attachment.ObjectRef)
+	if err != nil {
+		return nil, nil, apperror.New("attachment_content_unavailable", "attachment content is unavailable", 503, true)
+	}
+	return attachment, reader, nil
+}
+
 func (s *Service) PublishOutbox(ctx context.Context) error {
 	events, err := s.Repo.GetOutbox(ctx, 100)
 	if err != nil {
@@ -3088,6 +3369,35 @@ func (s *Service) ReportManagedDiscovery(ctx context.Context, connectorID, platf
 		return domain.Discovery{}, apperror.Wrap("discovery_store_failed", "cannot save discovery result", 503, true, err)
 	}
 	return discovery, nil
+}
+
+// ReportWechatContacts stores one WeChat owner's local contact book under that
+// owner. The collector derives the owner from its device assignment, so a
+// personal remark can never be written onto another user's scope.
+func (s *Service) ReportWechatContacts(ctx context.Context, connectorID string, entries []domain.WechatContactEntry, complete bool) (int, error) {
+	account, err := s.Repo.GetConnectorByID(ctx, strings.TrimSpace(connectorID))
+	if err != nil {
+		return 0, err
+	}
+	if account.Platform != domain.PlatformWechat {
+		return 0, apperror.New("connector_platform_mismatch", "connector belongs to another platform", 409, false)
+	}
+	inputs := make([]repository.WechatContactBookInput, 0, len(entries))
+	for _, entry := range entries {
+		externalUserID := strings.TrimSpace(entry.ExternalUserID)
+		if externalUserID == "" {
+			continue
+		}
+		nickName := strings.TrimSpace(entry.NickName)
+		remark := strings.TrimSpace(entry.Remark)
+		inputs = append(inputs, repository.WechatContactBookInput{
+			ExternalUserID: externalUserID,
+			NickName:       nickName,
+			Remark:         remark,
+			NameCore:       contactname.Extract(firstNonEmptyString(remark, nickName)),
+		})
+	}
+	return s.Repo.SyncWechatContactBook(ctx, account.OwnerUserID, account.ID, inputs, complete)
 }
 
 // ProcessPrivacy scans protected pending message content and only then opens
@@ -3280,6 +3590,7 @@ func (s *Service) refreshContactProfile(ctx context.Context, candidate repositor
 		conversation *domain.ConversationIngestion
 	}
 	materials := make([]materialMessage, 0, len(visibleMessages))
+	seenText := make(map[string]struct{}, len(visibleMessages))
 	for _, visible := range visibleMessages {
 		message := visible.Message
 		if message.ContactFactsStatus != "succeeded" {
@@ -3292,9 +3603,14 @@ func (s *Service) refreshContactProfile(ctx context.Context, candidate repositor
 			continue
 		}
 		text := strings.TrimSpace(message.Content)
-		if text == "" {
+		if !contactProfileWorkText(text) {
 			continue
 		}
+		key := normalizeProfileText(text)
+		if _, duplicate := seenText[key]; duplicate {
+			continue
+		}
+		seenText[key] = struct{}{}
 		materials = append(materials, materialMessage{
 			id: message.ID, hash: message.ContentHash, text: text, sentAt: message.SentAt,
 			conversation: visible.Conversation,
@@ -3306,10 +3622,15 @@ func (s *Service) refreshContactProfile(ctx context.Context, candidate repositor
 		}
 		return materials[i].sentAt.Before(materials[j].sentAt)
 	})
+	if len(materials) > contactProfileMaxMaterials {
+		materials = materials[len(materials)-contactProfileMaxMaterials:]
+	}
 	fingerprintParts := make([]string, 0, len(materials))
 	lines := make([]string, 0, len(materials))
 	for _, material := range materials {
-		fingerprintParts = append(fingerprintParts, material.id+"\x00"+material.hash)
+		// The source type is part of the fingerprint so adding a new source
+		// (mentions, private chat) forces a profile refresh.
+		fingerprintParts = append(fingerprintParts, "sent\x00"+material.id+"\x00"+material.hash)
 		lines = append(lines, contactProfileEvidenceLine(material.conversation, material.sentAt, material.text))
 	}
 	sort.Strings(fingerprintParts)
@@ -3379,6 +3700,36 @@ func (s *Service) lockContactProfile(ownerUserID, contactKey string) func() {
 	mutex := value.(*sync.Mutex)
 	mutex.Lock()
 	return mutex.Unlock
+}
+
+const contactProfileMaxMaterials = 80
+
+var contactProfileGreetings = map[string]struct{}{
+	"你好": {}, "您好": {}, "hi": {}, "hello": {}, "在吗": {}, "在么": {},
+	"谢谢": {}, "多谢": {}, "好的": {}, "好": {}, "收到": {}, "嗯": {}, "哦": {},
+	"哈哈": {}, "哈哈哈": {}, "早": {}, "早安": {}, "晚安": {}, "再见": {}, "拜拜": {}, "ok": {},
+}
+
+// contactProfileWorkText drops the noise the profile must not spend context on:
+// pure emoji/punctuation, very short replies and greetings.
+func contactProfileWorkText(text string) bool {
+	trimmed := strings.TrimSpace(text)
+	if utf8.RuneCountInString(trimmed) < 4 {
+		return false
+	}
+	if _, greeting := contactProfileGreetings[strings.ToLower(trimmed)]; greeting {
+		return false
+	}
+	for _, r := range trimmed {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			return true
+		}
+	}
+	return false
+}
+
+func normalizeProfileText(text string) string {
+	return strings.ToLower(strings.Join(strings.Fields(strings.TrimSpace(text)), " "))
 }
 
 func contactProfileEvidenceLine(conversation *domain.ConversationIngestion, sentAt time.Time, content string) string {

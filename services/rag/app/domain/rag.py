@@ -222,7 +222,7 @@ class ResourceContext:
             content_type=_text_or_none(merged.get("content_type")),
             access_scope=_text_or_none(merged.get("access_scope")),
             sensitivity=_text_or_none(merged.get("sensitivity")),
-            lifecycle_status=str(merged.get("lifecycle_status") or "active"),
+            lifecycle_status=_snapshot_lifecycle(merged.get("lifecycle_status")),
             title=_text_or_none(merged.get("title")),
             sent_at=_text_or_none(merged.get("sent_at") or merged.get("collected_at")),
             content_access_required=display_required,
@@ -455,6 +455,7 @@ class SearchRequest:
     knowledge_base_ids: tuple[str, ...] = ()
     entry: str = "global"
     top_k: int = 8
+    offset: int = 0
     include_protected: bool = False
     occurred_after: str | None = None
     occurred_before: str | None = None
@@ -466,6 +467,7 @@ class SearchRequest:
     conversation_ids: tuple[str, ...] = ()
     conversation_names: tuple[str, ...] = ()
     resource_ids: tuple[str, ...] = ()
+    content_contains: tuple[str, ...] = ()
     resource_types: tuple[str, ...] = ()
     file_extensions: tuple[str, ...] = ()
     message_types: tuple[str, ...] = ()
@@ -588,6 +590,22 @@ def _text_or_none(value: Any) -> str | None:
     if value is None or not str(value).strip():
         return None
     return str(value).strip()
+
+
+def _snapshot_lifecycle(value: Any) -> str:
+    """Map the knowledge item's lifecycle onto a RAG snapshot lifecycle.
+
+    The knowledge column carries processing states ("ready", "processing") as
+    well as the deletion states, while the snapshot column only models whether
+    the RAG-side copy is usable: active / inactive / deleted. Copying "ready"
+    straight through violated ``resource_snapshots_lifecycle_chk`` and failed
+    the whole indexing job, so a local-library upload could never be indexed.
+    """
+
+    status = str(value or "").strip().lower()
+    if status in {"inactive", "deleted"}:
+        return status
+    return "active"
 
 
 def _file_extension(value: str | None) -> str | None:

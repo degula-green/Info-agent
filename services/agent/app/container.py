@@ -7,7 +7,9 @@ which keeps local development and tests runnable.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
+from typing import Any
 
 from app.application.execution_service import ExecutionService
 from app.application.conversation_memory import (
@@ -32,8 +34,12 @@ from app.capabilities.knowledge import (
     KnowledgeSearchContentCapability,
     KnowledgeSearchSourcesCapability,
 )
+from app.capabilities.person import PERSON_QUERY_NAME, PersonQueryCapability
+from app.capabilities.report import CAPABILITY_NAME as REPORT_WEEKLY_NAME
+from app.capabilities.report import WeeklyReportCapability
 from app.capabilities.todo import TodoCreateCapability
 from app.capabilities.form import FormApplyCapability, FormPreviewCapability
+from app.capabilities.person_scope import PersonResourceScope
 from app.capabilities.web_research import WebResearchCapability
 from app.config import Settings, settings as default_settings
 from app.infrastructure.core.client import CoreClient, HttpCoreClient, NullCoreClient
@@ -51,6 +57,7 @@ from app.infrastructure.web.form_browser_client import FormBrowserClient
 from app.infrastructure.web.tavily_extractor import TavilyRenderer
 from app.infrastructure.web.url_tools import load_aliases
 from app.infrastructure.knowledge.client import HttpKnowledgeClient, KnowledgeClient
+from app.infrastructure.agent_attachments import AgentAttachmentStore
 from app.infrastructure.knowledge.device_auth import (
     DeviceAuthClient,
     HttpDeviceAuthClient,
@@ -62,9 +69,11 @@ from app.infrastructure.postgres.desktop_tasks import (
 )
 from app.infrastructure.llm.client import OpenAIChatClient
 from app.providers.answer import LlmAnswerProvider
+from app.providers.report import LlmReportProvider
 from app.providers.chat import LlmChatReplyProvider
 from app.providers.form_values import LlmFormValueExtractor
 from app.providers.page_fetcher import HttpPageFetcher
+from app.providers.person_facts import LlmPersonFactProvider
 from app.ingress.knowledge_events import KnowledgeEventIngress
 from app.kernel.models import OutboxEvent
 from app.kernel.protocols import AgentStore, TaskEventPublisher, TodoStore
@@ -74,6 +83,8 @@ from app.planning.knowledge import KnowledgeRoutingPlanner
 from app.policy.descriptor import DescriptorPolicy
 from app.testing.in_memory_runtime_store import InMemoryAgentStore
 from app.testing.in_memory_todo_store import InMemoryTodoStore
+
+logger = logging.getLogger("agent.container")
 
 
 class NullPublisher(TaskEventPublisher):
@@ -100,11 +111,17 @@ class AgentContainer:
     knowledge_client: KnowledgeClient
     knowledge_events: KnowledgeEventService
     core_client: CoreClient
+    # Transient Redis channel for streaming answer previews; None when Redis
+    # is not configured. The SSE endpoint reads from it when present.
+    answer_stream: object | None = None
     # Present only when the form-browser sidecar is configured; the takeover
     # endpoints proxy to it so the browser stays off the public surface.
     form_browser: FormBrowserClient | DesktopFormBrowserClient | None = None
     desktop_tasks: DesktopTaskStore | None = None
     device_auth: DeviceAuthClient | None = None
+    # The temporary attachment bucket shared by chat uploads and generated
+    # weekly reports. None when MinIO/Redis are not configured.
+    attachment_store: AgentAttachmentStore | None = None
 
     def close(self) -> None:
         # The two stores normally share one pool; closing it twice is a no-op
@@ -142,6 +159,46 @@ def build_rag_client(settings: Settings) -> RAGClient:
     )
 
 
+def build_agent_attachment_store(settings: Settings) -> AgentAttachmentStore | None:
+    """The Agent's temporary attachment bucket, or None when it is unusable.
+
+    Uploads and generated reports need both MinIO and Redis; without them the
+    weekly-report capability is simply not registered, so the planner reports
+    the intent as unsupported instead of failing mid-run.
+    """
+
+    if not (
+        settings.minio_endpoint.strip()
+        and settings.attachment_minio_bucket.strip()
+        and settings.redis_url.strip()
+    ):
+        return None
+    try:
+        import redis
+        from minio import Minio
+
+        from app.infrastructure.attachment_store import RedisAttachmentStore
+
+        return AgentAttachmentStore(
+            minio=Minio(
+                endpoint=settings.minio_endpoint,
+                access_key=settings.minio_access_key,
+                secret_key=settings.minio_secret_key,
+                secure=False,
+            ),
+            metadata_store=RedisAttachmentStore(
+                redis.from_url(settings.redis_url),
+                settings.attachment_ttl_hours,
+            ),
+            bucket=settings.attachment_minio_bucket,
+            ttl_hours=settings.attachment_ttl_hours,
+            max_bytes=settings.attachment_max_size_bytes,
+        )
+    except Exception:  # noqa: BLE001 - an optional dependency must not stop boot
+        logger.exception("agent attachment store is unavailable")
+        return None
+
+
 def knowledge_tools_enabled(settings: Settings) -> bool:
     """Internal knowledge tools are opt-in, but ``routing`` implies them."""
 
@@ -155,6 +212,30 @@ def _timeout_seconds(value: float) -> int:
     """Descriptor timeouts are whole seconds; a sub-second setting still means 1."""
 
     return max(1, int(round(float(value))))
+
+
+def build_subject_extractor(settings: Settings):
+    """The optional structured reader for whose data a command is about.
+
+    Subject extraction is semantic, so it uses the same LLM client as the
+    planner when one is configured. Deployments without an LLM key keep the
+    deterministic fallback; the three callers never require this object.
+    """
+
+    if not settings.llm_base_url or not settings.llm_api_key:
+        return None
+    from app.providers.subject import LlmSubjectExtractor
+
+    return LlmSubjectExtractor(
+        OpenAIChatClient(
+            base_url=settings.llm_base_url,
+            api_key=settings.llm_api_key,
+            model=settings.llm_model,
+            timeout_seconds=settings.llm_timeout_seconds,
+            max_output_tokens=settings.llm_max_output_tokens,
+            response_format=settings.llm_response_format,
+        )
+    )
 
 
 def build_search_provider(settings: Settings):
@@ -221,6 +302,10 @@ def build_registry(
     todo_store: TodoStore,
     rag_client: RAGClient | None = None,
     form_client: FormBrowserClient | DesktopFormBrowserClient | None = None,
+    knowledge_client: KnowledgeClient | None = None,
+    attachment_store: AgentAttachmentStore | None = None,
+    fact_store: Any | None = None,
+    subject_extractor: Any | None = None,
 ) -> CapabilityRegistry:
     """Every capability the Agent can actually execute.
 
@@ -316,6 +401,55 @@ def build_registry(
                 ),
             ]
         )
+        if knowledge_client is not None:
+            capabilities.append(
+                PersonQueryCapability(
+                    rag_client,
+                    knowledge_client,
+                    answer_provider,
+                    fact_extractor=LlmPersonFactProvider(
+                        OpenAIChatClient(
+                            base_url=settings.llm_base_url,
+                            api_key=settings.llm_api_key,
+                            model=settings.llm_model,
+                            timeout_seconds=settings.person_fact_timeout_seconds,
+                            max_output_tokens=settings.person_fact_max_output_tokens,
+                            response_format=settings.llm_response_format,
+                            json_schema_fallback=settings.llm_json_schema_fallback,
+                        )
+                    ),
+                    fact_store=fact_store,
+                    timeout_seconds=_timeout_seconds(
+                        settings.person_query_timeout_seconds
+                    ),
+                    scope_page_size=settings.person_scope_page_size,
+                    max_scope_chunks=settings.person_scope_max_chunks,
+                    extraction_batch_chars=settings.person_fact_batch_chars,
+                    extraction_batch_items=settings.person_fact_batch_items,
+                )
+            )
+        if knowledge_client is not None and attachment_store is not None:
+            # The weekly report writes its .docx into the Agent's own temporary
+            # bucket, so it needs both the knowledge reads and that bucket.
+            capabilities.append(
+                WeeklyReportCapability(
+                    rag_client,
+                    knowledge_client,
+                    LlmReportProvider(
+                        OpenAIChatClient(
+                            base_url=settings.llm_base_url,
+                            api_key=settings.llm_api_key,
+                            model=settings.llm_model,
+                            timeout_seconds=settings.report_timeout_seconds,
+                            max_output_tokens=settings.report_max_output_tokens,
+                            response_format=settings.llm_response_format,
+                        )
+                    ),
+                    attachment_store,
+                    timezone_name=settings.default_timezone,
+                    timeout_seconds=_timeout_seconds(settings.report_timeout_seconds),
+                )
+            )
     if form_client is not None:
         # Registered only when the browser sidecar is deployed: with no sidecar
         # the form intent must report as unsupported rather than fail at run time.
@@ -338,7 +472,20 @@ def build_registry(
             None,
         )
         retriever = (
-            KnowledgeFormRetriever(knowledge_content, knowledge_sources)
+            KnowledgeFormRetriever(
+                knowledge_content,
+                knowledge_sources,
+                # Form filling reads the same three sources as a person
+                # question; without the identity resolver it can only search
+                # by name, which is how a group message he sent went missing.
+                person_scope=(
+                    PersonResourceScope(rag_client, knowledge_client)
+                    if rag_client is not None and knowledge_client is not None
+                    else None
+                ),
+                # Neighbour lookup is its own RAG endpoint.
+                context_client=rag_client,
+            )
             if knowledge_content
             else None
         )
@@ -364,6 +511,7 @@ def build_registry(
                 form_client,
                 retriever=retriever,
                 value_extractor=value_extractor,
+                subject_extractor=subject_extractor,
                 timeout_seconds=_timeout_seconds(settings.form_preview_timeout_seconds),
             )
         )
@@ -376,7 +524,19 @@ def build_registry(
     return CapabilityRegistry(capabilities)
 
 
-def build_planner(settings: Settings):
+def build_planner(
+    settings: Settings,
+    available: set[str] | None = None,
+    *,
+    subject_extractor: Any | None = None,
+):
+    """``available`` is the registered capability set when the caller knows it.
+
+    The intent router must only reach the LLM planner for intents this
+    deployment can actually execute, otherwise a verdict naming an unregistered
+    capability would be planned and then denied at execution time.
+    """
+
     provider = (settings.planner_provider or "deterministic").strip().lower()
     if provider == "deterministic":
         planner = _build_deterministic_planner(settings)
@@ -397,6 +557,12 @@ def build_planner(settings: Settings):
         llm_intents = {WEB_RESEARCH_INTENT}
         if knowledge_tools_enabled(settings):
             llm_intents.add(KNOWLEDGE_ANSWER_INTENT)
+            # A verdict can name these two intents with wording the
+            # deterministic extractors miss ("帮他弄份周报"); the LLM planner
+            # holds the capability schemas, so it can fill the arguments.
+            for name in (PERSON_QUERY_NAME, REPORT_WEEKLY_NAME):
+                if available is None or name in available:
+                    llm_intents.add(name)
         if settings.form_browser_url.strip():
             # form.complete needs a composed two-step plan (preview, then the
             # approval-gated write), which only the LLM planner can produce.
@@ -415,6 +581,7 @@ def build_planner(settings: Settings):
         return KnowledgeRoutingPlanner(
             planner,
             default_timezone=settings.default_timezone,
+            subject_extractor=subject_extractor,
         )
     return planner
 
@@ -580,6 +747,25 @@ def build_publisher(settings: Settings) -> TaskEventPublisher:
     return NullPublisher()
 
 
+def build_answer_stream(settings: Settings):
+    """Build the transient answer-delta channel, or None when unavailable."""
+
+    if not settings.redis_url:
+        return None
+    try:
+        from app.infrastructure.redis.answer_stream import RedisAnswerStream
+        from app.infrastructure.redis.connection import build_redis
+
+        return RedisAnswerStream(
+            build_redis(settings),
+            ttl_seconds=settings.answer_stream_ttl_seconds,
+            max_len=settings.answer_stream_max_len,
+            snapshot_every=settings.answer_stream_snapshot_every,
+        )
+    except Exception:  # noqa: BLE001 - Redis is an optional accelerator
+        return None
+
+
 def build_container(
     settings: Settings | None = None,
     *,
@@ -596,6 +782,8 @@ def build_container(
     device_auth: DeviceAuthClient | None = None,
     ingress: KnowledgeEventIngress | None = None,
     understanding_provider=None,
+    answer_stream=None,
+    attachment_store: AgentAttachmentStore | None = None,
 ) -> AgentContainer:
     resolved = settings or default_settings
     shared_pool = None
@@ -652,13 +840,27 @@ def build_container(
         raise RuntimeError(
             f"unsupported AGENT_FORM_BROWSER_MODE: {resolved.form_browser_mode}"
         )
+    resolved_attachment_store = (
+        attachment_store
+        if attachment_store is not None
+        else build_agent_attachment_store(resolved)
+    )
+    resolved_subject_extractor = build_subject_extractor(resolved)
     registry = registry or build_registry(
         resolved,
         resolved_todo_store,
         resolved_rag_client,
         resolved_form_client,
+        resolved_knowledge,
+        resolved_attachment_store,
+        resolved_store,
+        subject_extractor=resolved_subject_extractor,
     )
-    resolved_planner = planner or build_planner(resolved)
+    resolved_planner = planner or build_planner(
+        resolved,
+        {descriptor.name for descriptor in registry.list_descriptors()},
+        subject_extractor=resolved_subject_extractor,
+    )
     # The LLM planner re-asks the model when a step's arguments miss the
     # capability schema; it can only do that if it is handed the same
     # validators the deterministic planner uses at plan time.
@@ -672,6 +874,14 @@ def build_container(
         )
     resolved_policy = policy or DescriptorPolicy(registry)
     resolved_publisher = publisher or build_publisher(resolved)
+    resolved_answer_stream = (
+        answer_stream if answer_stream is not None else build_answer_stream(resolved)
+    )
+    logger.info(
+        "answer streaming enabled=%s channel=%s",
+        bool(resolved.answer_streaming_enabled),
+        type(resolved_answer_stream).__name__ if resolved_answer_stream else "none",
+    )
     resolved_understanding = understanding_provider
     if resolved_understanding is None and resolved.understanding_mode.strip().lower() != "off":
         resolved_understanding = build_understanding_provider(resolved)
@@ -755,6 +965,7 @@ def build_container(
             summary_service=summary_service,
             title_service=title_service,
             memory_extraction_service=memory_extraction_service,
+            answer_stream=resolved_answer_stream,
         ),
         knowledge_ingress=resolved_ingress,
         knowledge_client=resolved_knowledge,
@@ -764,7 +975,9 @@ def build_container(
             task_service=task_service,
         ),
         core_client=core or build_core_client(resolved),
+        answer_stream=resolved_answer_stream,
         form_browser=resolved_form_client,
+        attachment_store=resolved_attachment_store,
         desktop_tasks=desktop_tasks,
         device_auth=resolved_device_auth,
     )

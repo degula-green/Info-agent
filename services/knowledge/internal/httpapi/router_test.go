@@ -898,6 +898,50 @@ func TestFixtureReplayHTTPRoundTripPersistsAndDeduplicates(t *testing.T) {
 	}
 }
 
+func TestWechatContactBookEndpointStoresOwnerScopedRows(t *testing.T) {
+	cfg := config.Config{AllowDevAuth: true, AgentClockSkew: time.Minute}
+	app := newApp(cfg)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	account, err := app.Service.Repo.SaveConnector(ctx, domain.ConnectorAccount{OwnerUserID: "u1", Platform: domain.PlatformWechat, ExternalAccountID: "wx", Status: domain.ConnectorActive})
+	if err != nil {
+		t.Fatal(err)
+	}
+	deviceKey := "contact-book-device-key"
+	if err := app.Service.Repo.CreateDevice(ctx, domain.AgentDevice{
+		ID: "device-contacts", ConnectorID: account.ID, OwnerUserID: "u1",
+		KeyHash: sha256Hex([]byte(deviceKey)), ExpiresAt: now.Add(time.Hour),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	body, err := json.Marshal(map[string]any{
+		"connector_id": account.ID,
+		"complete":     true,
+		"items": []map[string]string{
+			{"external_user_id": "wx-a", "nick_name": "Andrea", "remark": "杨思琪"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/api/knowledge/v1/internal/wechat/contacts", bytes.NewReader(body))
+	request.Header.Set("Content-Type", "application/json")
+	signAgentRequest(request, deviceKey, sha256Hex(body))
+	recorder := httptest.NewRecorder()
+	NewRouterWithApp(app).ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("contact book sync failed: status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	entries, err := app.Service.Repo.ListWechatContactBook(ctx, "u1", account.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Remark != "杨思琪" || entries[0].NameCore != "杨思琪" {
+		t.Fatalf("unexpected stored contact book rows: %+v", entries)
+	}
+}
+
 func sha256Hex(value []byte) string {
 	sum := sha256.Sum256(value)
 	return hex.EncodeToString(sum[:])

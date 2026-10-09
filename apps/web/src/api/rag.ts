@@ -61,6 +61,12 @@ export type RagSearchInput = {
   topK?: number
   includeProtected?: boolean
   signal?: AbortSignal
+  /**
+   * Which partition to search. Personal libraries (私人私聊 / 本地知识库) live
+   * in the user scope; the RAG API defaults to organization scope, so a
+   * personal library that forgot to send this could never match its own files.
+   */
+  scopeType?: 'organization' | 'user'
 }
 
 function cleanKnowledgeBaseIds(values?: string[], single?: string) {
@@ -80,6 +86,7 @@ export function searchGlobal(input: RagSearchInput) {
     signal: input.signal,
     body: JSON.stringify({
       query: input.query,
+      scope_type: input.scopeType || 'organization',
       organization_id: input.organizationId || undefined,
       knowledge_base_ids: knowledgeBaseIds.length ? knowledgeBaseIds : undefined,
       top_k: input.topK ?? 12,
@@ -96,6 +103,7 @@ export function searchKnowledge(input: RagSearchInput & { knowledgeBaseId?: stri
     signal: input.signal,
     body: JSON.stringify({
       query: input.query,
+      scope_type: input.scopeType || 'organization',
       knowledge_base_id: knowledgeBaseIds.length === 1 ? knowledgeBaseIds[0] : undefined,
       knowledge_base_ids: knowledgeBaseIds,
       organization_id: input.organizationId || undefined,

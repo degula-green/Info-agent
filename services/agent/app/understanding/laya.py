@@ -68,9 +68,72 @@ _EVIDENCE_PLAN_CRITERIA: dict[str, str] = {
     ),
 }
 
+SUBJECT_KIND_NAME = "subject_kind"
+QUERY_FOCUS_NAME = "query_focus"
+SUBJECT_KIND_VALUES = frozenset({"person", "organization", "none"})
+QUERY_FOCUS_VALUES = frozenset(
+    {"person_self", "work_object", "general_knowledge", "other"}
+)
+# These are deliberately looser than the intent threshold: the auxiliary
+# questions have fewer options and are used for arbitration, not for choosing
+# every intent by themselves.
+SUBJECT_FOCUS_MIN_CONFIDENCE = 0.70
+
+_SUBJECT_KIND_INSTRUCTION = (
+    "判断这条消息指向的主体类型。昵称、别名、拟人化称呼也算 person；"
+    "公司、团队、部门、学校、机构算 organization；"
+    "项目、系统、文档、任务不是主体人物。"
+)
+_SUBJECT_KIND_CRITERIA: dict[str, str] = {
+    "person": (
+        "The message is about a specific person, contact, nickname, alias, "
+        "or anthropomorphic handle."
+    ),
+    "organization": (
+        "The message is about a company, team, department, school, or other "
+        "organization."
+    ),
+    "none": (
+        "There is no explicit subject, or the subject is a project, task, "
+        "system, document, or other non-person object."
+    ),
+}
+
+_QUERY_FOCUS_INSTRUCTION = (
+    "判断这条消息问的是主体本人，还是工作对象/一般内部知识。"
+    "先判断问题对象是不是人本人，再判断谓词。"
+)
+_QUERY_FOCUS_CRITERIA: dict[str, str] = {
+    "person_self": (
+        "Asks about the person themselves: 情况、现状、近况、个人情况、基本信息、"
+        "identity, contact details, job title, recent activity, what they said, "
+        "or what they did. Use this when the question object is the person, "
+        "even if the generic word 情况 is used."
+    ),
+    "work_object": (
+        "Asks about a project, task, system, document, policy, or their "
+        "progress, status, stage, or contents. Do not choose this when the "
+        "question is about a person's own situation, contact details, or "
+        "personal activity."
+    ),
+    "general_knowledge": (
+        "Asks about general company rules, documents, policies, or processes."
+    ),
+    "other": "None of the above.",
+}
+
 _IMAGE_SUFFIXES = frozenset(
     {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp", ".tif", ".tiff"}
 )
+
+
+@dataclass(frozen=True)
+class SubjectFocusEvaluation:
+    subject_kind: str
+    subject_confidence: float
+    query_focus: str
+    query_confidence: float
+    probabilities: dict[str, float]
 
 
 def _ordered_criteria() -> dict[str, str]:
@@ -114,13 +177,17 @@ def verify_model_contract(model_dir: str | Path) -> dict[str, Any]:
 
 
 def build_question(
-    *, include_evidence_plan: bool = False
+    *,
+    include_evidence_plan: bool = False,
+    include_subject_focus: bool = False,
 ) -> dict[str, dict[str, Any]]:
     """The typed questions sent to System One.
 
     ``include_evidence_plan`` is off by default because the fine-tuned Laya
     checkpoint is positionally bound to the intent question; only the cloud
-    backend is asked for the extra source decision.
+    backend is asked for the extra source decision. ``include_subject_focus``
+    adds the two boundary questions Jev uses to separate person questions from
+    knowledge questions before the intent threshold is applied.
     """
 
     questions: dict[str, dict[str, Any]] = {
@@ -135,6 +202,17 @@ def build_question(
             "type": "choice",
             "instructions": _EVIDENCE_PLAN_INSTRUCTION,
             "criteria": dict(_EVIDENCE_PLAN_CRITERIA),
+        }
+    if include_subject_focus:
+        questions[SUBJECT_KIND_NAME] = {
+            "type": "choice",
+            "instructions": _SUBJECT_KIND_INSTRUCTION,
+            "criteria": dict(_SUBJECT_KIND_CRITERIA),
+        }
+        questions[QUERY_FOCUS_NAME] = {
+            "type": "choice",
+            "instructions": _QUERY_FOCUS_INSTRUCTION,
+            "criteria": dict(_QUERY_FOCUS_CRITERIA),
         }
     return questions
 
@@ -217,6 +295,119 @@ def parse_evidence_plan(
     return list(sources), confidence, probabilities
 
 
+def parse_subject_focus(raw: Mapping[str, Any]) -> SubjectFocusEvaluation | None:
+    """Read the optional person/knowledge boundary answers from a cloud reply.
+
+    A backend that does not implement these questions, or returns an invalid
+    option, is treated as "not judged" rather than as a failed request.
+    """
+
+    try:
+        subject = _parse_choice(
+            raw,
+            question_name=SUBJECT_KIND_NAME,
+            required=False,
+        )
+        focus = _parse_choice(
+            raw,
+            question_name=QUERY_FOCUS_NAME,
+            required=False,
+        )
+    except LayaError:
+        return None
+    if subject is None or focus is None:
+        return None
+    subject_kind, subject_confidence, subject_probabilities = subject
+    query_focus, query_confidence, focus_probabilities = focus
+    if subject_kind not in SUBJECT_KIND_VALUES or query_focus not in QUERY_FOCUS_VALUES:
+        return None
+    probabilities = dict(subject_probabilities)
+    probabilities.update(focus_probabilities)
+    return SubjectFocusEvaluation(
+        subject_kind=subject_kind,
+        subject_confidence=subject_confidence,
+        query_focus=query_focus,
+        query_confidence=query_confidence,
+        probabilities=probabilities,
+    )
+
+
+def combine_intent(
+    main_label: str,
+    main_confidence: float,
+    evaluation: SubjectFocusEvaluation | None,
+) -> tuple[str, float, str] | None:
+    """Turn the two auxiliary answers into a final boundary intent.
+
+    The return value is ``(intent, confidence, reason)``. A caller keeps the
+    main intent when this returns ``None``.
+    """
+
+    if evaluation is None:
+        return None
+    subject_kind = evaluation.subject_kind
+    subject_confidence = evaluation.subject_confidence
+    query_focus = evaluation.query_focus
+    query_confidence = evaluation.query_confidence
+    if (
+        subject_kind == "organization"
+        and subject_confidence >= SUBJECT_FOCUS_MIN_CONFIDENCE
+    ):
+        confidence = max(
+            subject_confidence,
+            main_confidence if main_label == "knowledge.answer" else 0.0,
+        )
+        return "knowledge.answer", confidence, "organization_subject"
+    if (
+        subject_kind == "person"
+        and subject_confidence >= SUBJECT_FOCUS_MIN_CONFIDENCE
+        and query_confidence >= SUBJECT_FOCUS_MIN_CONFIDENCE
+    ):
+        confidence = max(subject_confidence, query_confidence)
+        if query_focus == "person_self":
+            confidence = max(
+                confidence,
+                main_confidence if main_label == "person.query" else 0.0,
+            )
+            return "person.query", confidence, "person_self"
+        if query_focus == "work_object":
+            confidence = max(
+                confidence,
+                main_confidence if main_label == "knowledge.answer" else 0.0,
+            )
+            return "knowledge.answer", confidence, "work_object"
+    if (
+        subject_kind == "none"
+        and query_focus == "general_knowledge"
+        and query_confidence >= SUBJECT_FOCUS_MIN_CONFIDENCE
+    ):
+        return "knowledge.answer", query_confidence, "general_knowledge"
+    # The main intent and the subject shape agree even when the generic word
+    # "情况" leaves query_focus ambiguous. That agreement is enough to rescue
+    # a person question from an unnecessary LLM fallback.
+    if (
+        main_label == "person.query"
+        and subject_kind == "person"
+        and subject_confidence >= SUBJECT_FOCUS_MIN_CONFIDENCE
+    ):
+        return (
+            "person.query",
+            max(main_confidence, subject_confidence),
+            "person_subject_agreement",
+        )
+    if (
+        main_label == "knowledge.answer"
+        and subject_kind == "organization"
+        and subject_confidence >= SUBJECT_FOCUS_MIN_CONFIDENCE
+    ):
+        return (
+            "knowledge.answer",
+            max(main_confidence, subject_confidence),
+            "organization_subject_agreement",
+        )
+    return None
+
+
 def score_text(
     client: LayaClient,
     text: str,
@@ -244,7 +435,10 @@ def _interpret(
 ) -> tuple[str, float, dict[str, float]]:
     """Validate one raw response against the frozen intent contract."""
 
-    label, answer_confidence, probabilities = _parse_choice(raw, source=source)
+    parsed = _parse_choice(raw, source=source)
+    if parsed is None:  # pragma: no cover - required=True raises instead
+        raise LayaError(f"{source} response has no intent answer")
+    label, answer_confidence, probabilities = parsed
     unknown = sorted(name for name in probabilities if name not in ALL_INTENT_LABELS)
     if unknown:
         raise LayaError(
@@ -290,6 +484,7 @@ class SystemOneUnderstandingProvider:
         max_len: int | None = None,
         head_max_len: int | None = None,
         request_evidence_plan: bool = False,
+        request_subject_focus: bool = False,
     ) -> None:
         self.client = client
         self.name = str(name)
@@ -301,12 +496,20 @@ class SystemOneUnderstandingProvider:
         # Only the cloud backend is asked to judge evidence sources. The local
         # Laya checkpoint is fine-tuned for the intent question alone.
         self.request_evidence_plan = bool(request_evidence_plan)
+        # The cloud backend can also answer the two boundary questions used to
+        # separate person questions from internal-knowledge questions.
+        self.request_subject_focus = bool(request_subject_focus)
         self.last_call_count = 0
         self.last_fallback_reason: str | None = None
         self.last_answer_confidence: float | None = None
         self.last_margin: float | None = None
         # The versioned model id the backend reported, when it reports one.
         self.last_model: str | None = None
+        self.last_subject_kind: str | None = None
+        self.last_query_focus: str | None = None
+        self.last_aux_confidence: float | None = None
+        self.last_combined_intent: str | None = None
+        self.last_combined_reason: str | None = None
 
     def understand(
         self,
@@ -327,6 +530,11 @@ class SystemOneUnderstandingProvider:
         self.last_answer_confidence = None
         self.last_margin = None
         self.last_model = None
+        self.last_subject_kind = None
+        self.last_query_focus = None
+        self.last_aux_confidence = None
+        self.last_combined_intent = None
+        self.last_combined_reason = None
 
         text = str(task.input.get("text") or "").strip()
         if not text:
@@ -358,9 +566,14 @@ class SystemOneUnderstandingProvider:
         # was trained on: extra metadata moves its distribution substantially.
         if self.request_evidence_plan:
             state: dict[str, Any] = build_evidence_state(task, text)
-            questions = build_question(include_evidence_plan=True)
         else:
             state = {"text": text}
+        if self.request_evidence_plan or self.request_subject_focus:
+            questions = build_question(
+                include_evidence_plan=self.request_evidence_plan,
+                include_subject_focus=self.request_subject_focus,
+            )
+        else:
             questions = build_question()
         raw = self.client.predict(
             state,
@@ -371,9 +584,37 @@ class SystemOneUnderstandingProvider:
         self.last_model = _response_model(raw)
         label, answer_confidence, probabilities = _interpret(raw, source=self.name)
         evidence_sources, evidence_reason = self._resolve_evidence_plan(raw)
+        subject_focus = parse_subject_focus(raw) if self.request_subject_focus else None
+        if subject_focus is not None:
+            self.last_subject_kind = subject_focus.subject_kind
+            self.last_query_focus = subject_focus.query_focus
+            self.last_aux_confidence = min(
+                subject_focus.subject_confidence,
+                subject_focus.query_confidence,
+            )
         ordered = sorted(probabilities.items(), key=lambda item: item[1], reverse=True)
         second_probability = ordered[1][1] if len(ordered) > 1 else 0.0
         margin = answer_confidence - second_probability
+        combined = combine_intent(label, answer_confidence, subject_focus)
+        if combined is not None and not (
+            label not in {"person.query", "knowledge.answer"}
+            and answer_confidence >= threshold
+            and margin >= self.min_margin
+        ):
+            combined_label, combined_confidence, combined_reason = combined
+            self.last_combined_intent = combined_label
+            self.last_combined_reason = combined_reason
+            self.last_answer_confidence = combined_confidence
+            self.last_margin = combined_confidence
+            return self._combined_evaluation(
+                text=text,
+                label=combined_label,
+                answer_confidence=combined_confidence,
+                reason=combined_reason,
+                probabilities=probabilities,
+                evidence_sources=evidence_sources,
+                evidence_reason=evidence_reason,
+            )
 
         self.last_answer_confidence = answer_confidence
         self.last_margin = margin
@@ -476,6 +717,68 @@ class SystemOneUnderstandingProvider:
             accepted=True,
         )
 
+    def _combined_evaluation(
+        self,
+        *,
+        text: str,
+        label: str,
+        answer_confidence: float,
+        reason: str,
+        probabilities: dict[str, float],
+        evidence_sources: list[str] | None = None,
+        evidence_reason: str | None = None,
+    ) -> LayaEvaluation:
+        """The verdict derived from the two auxiliary boundary questions."""
+
+        combined_probabilities = dict(probabilities)
+        # Keep a valid probability distribution for diagnostics: the combined
+        # label is the winner and the original main label remains visible as the
+        # runner-up when it is a different intent.
+        second_label = next(
+            (
+                name
+                for name in sorted(
+                    combined_probabilities,
+                    key=lambda item: combined_probabilities[item],
+                    reverse=True,
+                )
+                if name != label
+            ),
+            "",
+        )
+        combined_probabilities[label] = answer_confidence
+        if second_label:
+            combined_probabilities[second_label] = max(
+                0.0,
+                1.0 - answer_confidence,
+            )
+        margin = answer_confidence - (
+            combined_probabilities[second_label] if second_label else 0.0
+        )
+        return LayaEvaluation(
+            understanding=TaskUnderstanding(
+                is_task=True,
+                goal=text,
+                task_kind=intent_task_kind(label),
+                intent_candidates=[
+                    UnderstandingIntent(
+                        name=label,
+                        confidence=answer_confidence,
+                        evidence=None,
+                    )
+                ],
+                confidence=answer_confidence,
+                reason=f"{self.name}: combined {reason}",
+                evidence_sources=list(evidence_sources or []),
+                evidence_reason=evidence_reason,
+            ),
+            label=label,
+            answer_confidence=answer_confidence,
+            margin=margin,
+            probabilities=combined_probabilities,
+            accepted=True,
+        )
+
     def _resolve_evidence_plan(
         self, raw: Mapping[str, Any]
     ) -> tuple[list[str], str | None]:
@@ -567,6 +870,9 @@ class JevUnderstandingProvider(SystemOneUnderstandingProvider):
             # The cloud backend can answer the extra source question; the
             # fine-tuned local checkpoint cannot.
             request_evidence_plan=True,
+            # Jev also answers the two questions that separate person questions
+            # from internal-knowledge questions.
+            request_subject_focus=True,
         )
 
 
@@ -581,35 +887,59 @@ def _parse_choice(
     raw: Mapping[str, Any],
     *,
     source: str = "System One",
-) -> tuple[str, float, dict[str, float]]:
+    question_name: str = "intent",
+    required: bool = True,
+) -> tuple[str, float, dict[str, float]] | None:
     answers = raw.get("answers")
     if not isinstance(answers, Mapping):
-        raise LayaError(f"{source} response has no answers object")
-    answer = answers.get("intent")
+        if required:
+            raise LayaError(f"{source} response has no answers object")
+        return None
+    answer = answers.get(question_name)
     if not isinstance(answer, Mapping):
-        raise LayaError(f"{source} response has no intent answer")
+        if required:
+            raise LayaError(f"{source} response has no {question_name} answer")
+        return None
 
     label = answer.get("choice")
     if not isinstance(label, str) or not label.strip():
-        raise LayaError(f"{source} intent answer has no choice")
+        if required:
+            raise LayaError(f"{source} {question_name} answer has no choice")
+        return None
 
     raw_probabilities = answer.get("probabilities")
     if not isinstance(raw_probabilities, Mapping) or not raw_probabilities:
-        raise LayaError(f"{source} intent answer has no probabilities")
+        if required:
+            raise LayaError(f"{source} {question_name} answer has no probabilities")
+        return None
     probabilities: dict[str, float] = {}
     for name, value in raw_probabilities.items():
         if not isinstance(name, str) or not name:
-            raise LayaError(f"{source} intent probabilities contain an invalid name")
+            if required:
+                raise LayaError(
+                    f"{source} {question_name} probabilities contain an invalid name"
+                )
+            return None
         if isinstance(value, bool) or not isinstance(value, (int, float)):
-            raise LayaError(f"{source} intent probabilities contain a non-number")
+            if required:
+                raise LayaError(
+                    f"{source} {question_name} probabilities contain a non-number"
+                )
+            return None
         number = float(value)
         if not math.isfinite(number) or number < 0.0 or number > 1.0:
-            raise LayaError(f"{source} intent probability is outside [0, 1]")
+            if required:
+                raise LayaError(
+                    f"{source} {question_name} probability is outside [0, 1]"
+                )
+            return None
         probabilities[name] = number
     if label not in probabilities:
-        raise LayaError(
-            f"{source} choice is missing from its probability distribution"
-        )
+        if required:
+            raise LayaError(
+                f"{source} {question_name} choice is missing from its probability distribution"
+            )
+        return None
 
     # Laya's local server calls it answer_confidence; Jev's cloud API calls it
     # confidence and derives it from the distribution. Never fall back to the
@@ -618,10 +948,16 @@ def _parse_choice(
     if raw_confidence is None:
         raw_confidence = answer.get("answer_confidence")
     if isinstance(raw_confidence, bool) or not isinstance(raw_confidence, (int, float)):
-        raise LayaError(f"{source} answer confidence is not a number")
+        if required:
+            raise LayaError(f"{source} {question_name} answer confidence is not a number")
+        return None
     answer_confidence = float(raw_confidence)
     if not math.isfinite(answer_confidence) or not 0.0 <= answer_confidence <= 1.0:
-        raise LayaError(f"{source} answer confidence is outside [0, 1]")
+        if required:
+            raise LayaError(
+                f"{source} {question_name} answer confidence is outside [0, 1]"
+            )
+        return None
     return label.strip(), answer_confidence, probabilities
 
 

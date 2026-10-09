@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import inspect
 import logging
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
@@ -182,6 +183,25 @@ class AgentRuntime:
             )
         if not self.store.acquire_lease(task_id, lease_owner, self.limits.lease_seconds):
             return self._result(task, waiting_for="lease")
+        stop_heartbeat = threading.Event()
+        heartbeat: threading.Thread | None = None
+        renew = getattr(self.store, "renew_lease", None)
+        if callable(renew):
+            interval = max(0.2, float(self.limits.lease_seconds) / 3.0)
+
+            def beat() -> None:
+                while not stop_heartbeat.wait(interval):
+                    try:
+                        renew(task_id, lease_owner, self.limits.lease_seconds)
+                    except Exception:  # noqa: BLE001 - a lease hiccup must not kill the Task
+                        logger.exception("lease renewal failed for task %s", task_id)
+
+            heartbeat = threading.Thread(
+                target=beat,
+                name=f"agent-lease-{task_id[:8]}",
+                daemon=True,
+            )
+            heartbeat.start()
         conversation_context = None
         if self._conversation_context_loader is not None:
             try:
@@ -194,6 +214,9 @@ class AgentRuntime:
             with bind_conversation_context(conversation_context):
                 return self._drive(task_id)
         finally:
+            stop_heartbeat.set()
+            if heartbeat is not None:
+                heartbeat.join(timeout=1.0)
             self.store.release_lease(task_id, lease_owner)
 
     # -- main loop --------------------------------------------------------
@@ -630,6 +653,23 @@ class AgentRuntime:
             ),
             "fallback_reason": getattr(
                 self.understanding_provider, "last_fallback_reason", None
+            ),
+            # Optional Jev boundary questions. They explain why the primary
+            # classifier chose person.query vs knowledge.answer.
+            "subject_kind": getattr(
+                self.understanding_provider, "last_subject_kind", None
+            ),
+            "query_focus": getattr(
+                self.understanding_provider, "last_query_focus", None
+            ),
+            "aux_confidence": getattr(
+                self.understanding_provider, "last_aux_confidence", None
+            ),
+            "combined_intent": getattr(
+                self.understanding_provider, "last_combined_intent", None
+            ),
+            "combined_reason": getattr(
+                self.understanding_provider, "last_combined_reason", None
             ),
             # Generic names; the laya_* pair below is kept for existing
             # dashboards built before Jev could be the primary classifier.
@@ -1980,6 +2020,35 @@ class AgentRuntime:
         )
 
         call = self.executor.execute(task, plan, step, attempt)
+        if (
+            call.status != "succeeded"
+            and isinstance(call.error, dict)
+            and call.error.get("partial_answer")
+        ):
+            # Persist the text that was already shown so a refresh can restore
+            # it. The status stays failed/cancelled, so memory and summary only
+            # see the final successful answer.
+            current = self.store.get_task(task.task_id)
+            if current is not None:
+                result = dict(current.result or {})
+                result["partial_answer"] = str(call.error.get("partial_answer") or "")
+                result["partial_answer_id"] = str(call.error.get("answer_id") or "")
+                current.result = result
+                current.updated_at = utcnow()
+                self.store.commit(current)
+        if (
+            call.status != "succeeded"
+            and isinstance(call.error, dict)
+            and call.error.get("classification") == "cancelled"
+        ):
+            # The owner cancelled the Task while the answer stream was in
+            # flight. The terminal status is already persisted by the cancel
+            # endpoint; do not try to move a terminal Task back to ready.
+            if step.status == "running":
+                ensure_step_transition(step.status, "ready")
+                step.status = "ready"
+                self.store.update_step(step)
+            return self._result(self.store.get_task(task.task_id), executed=executed)
         observation = self.executor.to_observation(call)
         # Only a fresh execution reports provenance and spend: a call row that
         # was reused unchanged already paid for itself the first time.
@@ -2528,6 +2597,30 @@ def _result_preview(capability: str, output: dict[str, Any]) -> dict[str, Any] |
             "item_count": len(observed),
             "written_range": str(output.get("written_range") or ""),
             "verified": bool(output.get("verified")),
+        }
+    if capability == "report.weekly":
+        # The card needs the artifact id, the resolved period and the source
+        # list; the .docx body never travels through the event stream.
+        return {
+            "block_type": "report",
+            "summary": str(output.get("message") or ""),
+            "status": str(output.get("status") or ""),
+            "title": str(output.get("title") or ""),
+            "subject_name": str(output.get("subject_name") or ""),
+            "period": str(output.get("period") or ""),
+            "file_name": str(output.get("file_name") or ""),
+            "attachment_id": str(output.get("attachment_id") or ""),
+            "size_bytes": int(output.get("size_bytes") or 0),
+            "expires_at": str(output.get("expires_at") or ""),
+            "template_origin": str(output.get("template_origin") or ""),
+            "citations": [
+                item for item in (output.get("citations") or []) if isinstance(item, dict)
+            ][:30],
+            "candidates": [
+                item
+                for item in (output.get("candidates") or [])
+                if isinstance(item, dict)
+            ][:10],
         }
     return None
 

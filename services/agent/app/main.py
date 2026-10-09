@@ -27,6 +27,7 @@ from app.routers import (  # noqa: E402
     desktop_tasks,
     health,
     memories,
+    reports,
     tasks,
 )
 from app.routers import todos  # noqa: E402
@@ -43,6 +44,7 @@ async def lifespan(application: FastAPI):
     todos.set_container(container)
     conversations.set_container(container)
     memories.set_container(container)
+    reports.set_container(container)
     desktop_tasks.set_container(container)
     logger.info("agent api started with %s store", type(container.store).__name__)
     try:
@@ -60,4 +62,5 @@ app.include_router(todos.router)
 app.include_router(attachments.router)
 app.include_router(conversations.router)
 app.include_router(memories.router)
+app.include_router(reports.router)
 app.include_router(desktop_tasks.router)

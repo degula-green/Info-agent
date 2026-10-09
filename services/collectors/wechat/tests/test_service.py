@@ -159,6 +159,41 @@ class CollectorServiceTest(unittest.TestCase):
         finally:
             service.db = original_db
 
+    def test_contact_book_sync_pushes_owner_local_rows(self):
+        original_db = service.db
+        try:
+            service.db = ContactDB()
+            service.sync_contact_book()
+        finally:
+            service.db = original_db
+        payload = next(
+            call[2] for call in self.calls if call[0].endswith("/internal/wechat/contacts")
+        )
+        self.assertEqual(payload["connector_id"], "account")
+        self.assertTrue(payload["complete"])
+        self.assertEqual(
+            [
+                (item["external_user_id"], item["nick_name"], item["remark"])
+                for item in payload["items"]
+            ],
+            [
+                ("notifymessage", "服务通知", ""),
+                ("wxid_selected", "KO", "杨静涵"),
+                ("wxid_symbols", "......", ""),
+            ],
+        )
+
+    def test_contact_book_sync_skips_when_contact_table_is_unavailable(self):
+        original_db = service.db
+        try:
+            service.db = FakeDB()
+            service.sync_contact_book()
+        finally:
+            service.db = original_db
+        self.assertFalse(
+            any(call[0].endswith("/internal/wechat/contacts") for call in self.calls)
+        )
+
     def test_heartbeat_stop_command_updates_local_state_and_acknowledges(self):
         service.apply_heartbeat_response(
             {

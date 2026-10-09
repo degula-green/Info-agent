@@ -45,8 +45,18 @@ export async function resolveLibrarySearchScope(
 ) {
   const store = useInfoKnowledgeStore()
   const organizationId = await resolveOrganizationId()
+  // Personal libraries are stored in the user partition; the RAG search
+  // defaults to organization scope, so the scope has to be stated explicitly.
+  const scopeType: 'organization' | 'user' = libraryKind.startsWith('private_') ? 'user' : 'organization'
   if (!store.loadedAt) {
     try { await store.ensureSources() } catch { /* fall through to org/global scope */ }
+  }
+  // A file library aggregates uploads, and an upload is not attached to a
+  // conversation. Scoping the search to the attached chats' knowledge bases
+  // therefore excluded every file the user had just uploaded, so an archived
+  // weekly report could not be found by its content.
+  if (libraryKind === 'organization_files' || libraryKind === 'private_local') {
+    return { organizationId, knowledgeBaseIds: [], mode: 'global' as const, scopeType }
   }
   const fromItems = new Set<string>()
   for (const item of items) {
@@ -57,7 +67,7 @@ export async function resolveLibrarySearchScope(
     if (chat?.knowledgeBaseId) fromItems.add(String(chat.knowledgeBaseId))
   }
   if (fromItems.size) {
-    return { organizationId, knowledgeBaseIds: [...fromItems], mode: 'knowledge' as const }
+    return { organizationId, knowledgeBaseIds: [...fromItems], mode: 'knowledge' as const, scopeType }
   }
 
   const filter = (chat: InfoChat) => {
@@ -67,12 +77,12 @@ export async function resolveLibrarySearchScope(
   }
   const knowledgeBaseIds = store.collectKnowledgeBaseIds(filter)
   if (knowledgeBaseIds.length) {
-    return { organizationId, knowledgeBaseIds, mode: 'knowledge' as const }
+    return { organizationId, knowledgeBaseIds, mode: 'knowledge' as const, scopeType }
   }
 
   // Never pass the logical library.id into RAG; org libraries can still search
   // by organization_id, personal libraries by owner-visible scope.
-  return { organizationId, knowledgeBaseIds: [], mode: 'global' as const }
+  return { organizationId, knowledgeBaseIds: [], mode: 'global' as const, scopeType }
 }
 
 /** Explain empty search when ES found candidates but authz dropped them all. */

@@ -1,4 +1,4 @@
-"""Contract tests for the intent-v6 migration.
+"""Contract tests for the intent contract in ``intent_contract.json``.
 
 The taxonomy lives in ``app/understanding/intent_contract.json``. These tests
 pin the frozen option order, prove that the Agent, the Laya provider and the
@@ -37,6 +37,8 @@ EXPECTED_ORDER = (
     "web.research",
     "compliance.assess",
     "form.complete",
+    "person.query",
+    "report.weekly",
     "non_task",
     "other_task",
 )
@@ -47,7 +49,7 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 
 
 def test_option_order_is_frozen() -> None:
-    assert INTENT_SCHEMA_VERSION == "intent-v6"
+    assert INTENT_SCHEMA_VERSION == "intent-v7"
     assert INTENT_OPTION_ORDER == EXPECTED_ORDER
     assert ALL_INTENT_LABELS == set(EXPECTED_ORDER)
 
@@ -66,6 +68,8 @@ def test_business_and_boundary_split() -> None:
         "web.research",
         "compliance.assess",
         "form.complete",
+        "person.query",
+        "report.weekly",
     }
     assert BOUNDARY_INTENTS == {"non_task", "other_task"}
     assert {item.name for item in INTENT_CATALOG} == INTENT_NAMES
@@ -88,14 +92,14 @@ def test_laya_criteria_follow_the_contract_order() -> None:
     }
     criteria = build_question()["intent"]["criteria"]
     assert tuple(criteria) == EXPECTED_ORDER
-    assert laya_module.LayaUnderstandingProvider.schema_version == "intent-v6"
+    assert laya_module.LayaUnderstandingProvider.schema_version == "intent-v7"
 
 
 def test_model_contract_check_accepts_a_matching_checkpoint(tmp_path: Path) -> None:
     (tmp_path / "rl_agent_config.json").write_text(
         json.dumps(
             {
-                "intent_schema_version": "intent-v6",
+                "intent_schema_version": "intent-v7",
                 "option_order": list(EXPECTED_ORDER),
             }
         ),
@@ -112,7 +116,7 @@ def test_model_contract_check_accepts_a_matching_checkpoint(tmp_path: Path) -> N
     [
         {"option_order": list(EXPECTED_ORDER)},
         {"intent_schema_version": "intent-v5", "option_order": list(EXPECTED_ORDER)},
-        {"intent_schema_version": "intent-v6", "option_order": ["todo.create"]},
+        {"intent_schema_version": "intent-v7", "option_order": ["todo.create"]},
     ],
 )
 def test_model_contract_check_rejects_a_mismatched_checkpoint(

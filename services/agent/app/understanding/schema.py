@@ -120,6 +120,8 @@ INTENT_REQUIRES: dict[str, frozenset[str] | None] = {
     "web.research": frozenset({"web.research"}),
     "compliance.assess": None,
     "form.complete": frozenset({"form.preview"}),
+    "person.query": frozenset({"person.query"}),
+    "report.weekly": frozenset({"report.weekly"}),
 }
 
 

@@ -36,6 +36,10 @@ type Config struct {
 	OpenFGAStoreID              string
 	OpenFGAModelID              string
 	OpenFGAAPIToken             string
+	// OpenFGATimeout bounds one authorization call. The store can live on a
+	// different host, where a 2s ceiling turned ordinary slow responses into
+	// authorization failures.
+	OpenFGATimeout              time.Duration
 	RAGAuthorizationToken       string
 	KnowledgeAuthorizationToken string
 	KnowledgeURL                string
@@ -59,6 +63,10 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 	refreshGrace, err := durationEnv("CORE_REFRESH_ROTATION_GRACE", 5*time.Second)
+	if err != nil {
+		return Config{}, err
+	}
+	openfgaTimeout, err := durationEnv("CORE_OPENFGA_TIMEOUT", 6*time.Second)
 	if err != nil {
 		return Config{}, err
 	}
@@ -94,6 +102,7 @@ func Load() (Config, error) {
 		OpenFGAStoreID:              env("CORE_OPENFGA_STORE_ID", ""),
 		OpenFGAModelID:              env("CORE_OPENFGA_MODEL_ID", ""),
 		OpenFGAAPIToken:             env("CORE_OPENFGA_API_TOKEN", ""),
+		OpenFGATimeout:              openfgaTimeout,
 		RAGAuthorizationToken:       env("CORE_RAG_AUTHZ_TOKEN", ""),
 		KnowledgeAuthorizationToken: env("CORE_KNOWLEDGE_AUTHZ_TOKEN", env("CORE_RAG_AUTHZ_TOKEN", "")),
 		KnowledgeURL:                env("CORE_KNOWLEDGE_URL", "http://127.0.0.1:8090"),

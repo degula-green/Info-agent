@@ -32,6 +32,18 @@ x-agent-environment: &agent-environment
   AGENT_SEARXNG_BASE_URL: ${AGENT_SEARXNG_BASE_URL:-http://searxng:8080}
   AGENT_CRAWL4AI_BASE_URL: ${AGENT_CRAWL4AI_BASE_URL:-http://crawl4ai:11235}
   AGENT_CRAWL4AI_API_TOKEN: ${CRAWL4AI_API_TOKEN:-local-development-only}
+  # Person, weekly-report and multimodal attachment features added on the
+  # agent branch. These are defaults; a deployment can override them.
+  AGENT_ATTACHMENT_MINIO_BUCKET: ${AGENT_ATTACHMENT_MINIO_BUCKET:-agent-temp}
+  AGENT_ATTACHMENT_TTL_HOURS: ${AGENT_ATTACHMENT_TTL_HOURS:-24}
+  AGENT_ATTACHMENT_MAX_SIZE_BYTES: ${AGENT_ATTACHMENT_MAX_SIZE_BYTES:-20971520}
+  AGENT_MINIO_ENDPOINT: ${AGENT_MINIO_ENDPOINT:-minio:9000}
+  AGENT_MINIO_ACCESS_KEY: ${AGENT_MINIO_ACCESS_KEY:-minioadmin}
+  AGENT_MINIO_SECRET_KEY: ${AGENT_MINIO_SECRET_KEY:-minioadmin}
+  AGENT_PERSON_QUERY_TIMEOUT_SECONDS: ${AGENT_PERSON_QUERY_TIMEOUT_SECONDS:-180}
+  AGENT_REPORT_TIMEOUT_SECONDS: ${AGENT_REPORT_TIMEOUT_SECONDS:-180}
+  AGENT_REPORT_MAX_OUTPUT_TOKENS: ${AGENT_REPORT_MAX_OUTPUT_TOKENS:-4000}
+  AGENT_ANSWER_STREAMING_ENABLED: ${AGENT_ANSWER_STREAMING_ENABLED:-true}
 
 services:
   web:
@@ -293,7 +305,9 @@ services:
         psql --dbname="$${KNOWLEDGE_DATABASE_URL}" --set=ON_ERROR_STOP=1 --file=/migrations/20260927_knowledge_rag_mvp_status.sql &&
         psql --dbname="$${KNOWLEDGE_DATABASE_URL}" --set=ON_ERROR_STOP=1 --file=/migrations/20260925_contact_profiles.sql &&
         psql --dbname="$${KNOWLEDGE_DATABASE_URL}" --set=ON_ERROR_STOP=1 --file=/migrations/20261004_wechat_device_assignments.up.sql &&
-        psql --dbname="$${KNOWLEDGE_DATABASE_URL}" --set=ON_ERROR_STOP=1 --file=/migrations/20261007_wechat_control_flow.up.sql
+        psql --dbname="$${KNOWLEDGE_DATABASE_URL}" --set=ON_ERROR_STOP=1 --file=/migrations/20261007_wechat_control_flow.up.sql &&
+        psql --dbname="$${KNOWLEDGE_DATABASE_URL}" --set=ON_ERROR_STOP=1 --file=/migrations/20261007_contact_name_core.up.sql &&
+        psql --dbname="$${KNOWLEDGE_DATABASE_URL}" --set=ON_ERROR_STOP=1 --file=/migrations/20261009_wechat_contact_book.up.sql
     depends_on:
       postgres:
         condition: service_healthy
@@ -322,6 +336,10 @@ services:
       - ../db/migrations/20261004_wechat_device_assignments.down.sql:/migrations/20261004_wechat_device_assignments.down.sql:ro
       - ../db/migrations/20261007_wechat_control_flow.up.sql:/migrations/20261007_wechat_control_flow.up.sql:ro
       - ../db/migrations/20261007_wechat_control_flow.down.sql:/migrations/20261007_wechat_control_flow.down.sql:ro
+      - ../db/migrations/20261007_contact_name_core.up.sql:/migrations/20261007_contact_name_core.up.sql:ro
+      - ../db/migrations/20261007_contact_name_core.down.sql:/migrations/20261007_contact_name_core.down.sql:ro
+      - ../db/migrations/20261009_wechat_contact_book.up.sql:/migrations/20261009_wechat_contact_book.up.sql:ro
+      - ../db/migrations/20261009_wechat_contact_book.down.sql:/migrations/20261009_wechat_contact_book.down.sql:ro
     restart: "no"
 
   redis:

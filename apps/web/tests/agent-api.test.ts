@@ -17,6 +17,7 @@ import {
   deleteAgentTodo,
   draftSortKey,
   endOfDayISO,
+  getAgentAnswerSnapshot,
   getAgentConversation,
   listAgentConversations,
   listAgentTodos,
@@ -907,6 +908,129 @@ test('Agent SSE parsing resumes after the last sequence', async () => {
   assert.deepEqual(seen.map((event) => event.event_type), ['task.planning', 'task.completed'])
   assert.equal(seen[1].payload.answer, '完成')
   assert.match(urls[1], /after=1/)
+})
+
+test('Agent SSE reports a healthy segment end as waiting, not reconnect', async () => {
+  installStorage()
+  let streamCalls = 0
+  globalThis.fetch = async (input) => {
+    const url = String(input)
+    if (url.endsWith('/auth/me')) return json({ id: USER_ID, email: 'user@example.com', nickname: 'user', status: 'active' })
+    streamCalls += 1
+    if (streamCalls === 1) return sse(taskEvent(1, 'task.planning'))
+    return sse(taskEvent(2, 'task.completed', { answer: '完成' }))
+  }
+
+  const waiting: number[] = []
+  const reconnects: number[] = []
+  await streamAgentTaskEvents(
+    'task-1',
+    {
+      onEvent: (event) => event.event_type !== 'task.completed',
+      onWaiting: (segment) => waiting.push(segment),
+      onReconnect: (attempt) => reconnects.push(attempt),
+    },
+    { maxReconnects: 1 },
+  )
+
+  assert.deepEqual(waiting, [1])
+  assert.deepEqual(reconnects, [])
+})
+
+test('Agent SSE reports a request failure as reconnect, not waiting', async () => {
+  installStorage()
+  let streamCalls = 0
+  globalThis.fetch = async (input) => {
+    const url = String(input)
+    if (url.endsWith('/auth/me')) return json({ id: USER_ID, email: 'user@example.com', nickname: 'user', status: 'active' })
+    streamCalls += 1
+    if (streamCalls === 1) return json({ error: 'temporary' }, 503)
+    return sse(taskEvent(2, 'task.completed', { answer: '完成' }))
+  }
+
+  const waiting: number[] = []
+  const reconnects: number[] = []
+  await streamAgentTaskEvents(
+    'task-1',
+    {
+      onEvent: (event) => event.event_type !== 'task.completed',
+      onWaiting: (segment) => waiting.push(segment),
+      onReconnect: (attempt) => reconnects.push(attempt),
+    },
+    { maxReconnects: 1 },
+  )
+
+  assert.deepEqual(waiting, [])
+  assert.deepEqual(reconnects, [1])
+})
+
+test('Agent SSE tracks the answer cursor separately from the task cursor', async () => {
+  installStorage()
+  const urls: string[] = []
+  const cursorStates: Array<{ answerId: string; answerAfter: number }> = []
+  let streamCalls = 0
+  globalThis.fetch = async (input) => {
+    const url = String(input)
+    if (url.endsWith('/auth/me')) return json({ id: USER_ID, email: 'user@example.com', nickname: 'user', status: 'active' })
+    urls.push(url)
+    streamCalls += 1
+    if (streamCalls === 1) {
+      const delta = (seq: number, value: string) =>
+        `id: 0\nevent: answer.delta\ndata: ${JSON.stringify({
+          task_id: 'task-1',
+          sequence: 0,
+          event_type: 'answer.delta',
+          payload: { answer_id: 'a1', step_id: 'step-1', attempt: 1, seq, offset: seq, delta: value },
+        })}\n\n`
+      return sse(
+        taskEvent(2, 'answer.started', {
+          answer_id: 'a1',
+          step_id: 'step-1',
+          attempt: 1,
+          next_seq: 1,
+        }),
+        delta(1, 'he'),
+        delta(2, 'llo'),
+      )
+    }
+    return sse(taskEvent(3, 'task.completed', { answer: 'hello' }))
+  }
+
+  const seen: string[] = []
+  await streamAgentTaskEvents(
+    'task-1',
+    {
+      onEvent: (event) => {
+        seen.push(event.event_type)
+        return event.event_type !== 'task.completed'
+      },
+      onAnswerCursor: (state) => cursorStates.push({ ...state }),
+    },
+    { maxReconnects: 1 },
+  )
+
+  assert.deepEqual(seen, ['answer.started', 'answer.delta', 'answer.delta', 'task.completed'])
+  // The PG cursor advances from answer.started but never from sequence-0 deltas.
+  assert.match(urls[1], /after=2/)
+  assert.match(urls[1], /answer_id=a1/)
+  assert.match(urls[1], /answer_after=2/)
+  assert.equal(cursorStates.at(-1)?.answerAfter, 2)
+})
+
+test('Agent answer snapshot uses the recovery endpoint', async () => {
+  installStorage()
+  const urls: string[] = []
+  globalThis.fetch = async (input) => {
+    const url = String(input)
+    if (url.endsWith('/auth/me')) return json({ id: USER_ID, email: 'user@example.com', nickname: 'user', status: 'active' })
+    urls.push(url)
+    return json({ answer_id: 'a1', text: 'hello', next_seq: 2, completed: false, final_seq: 0 })
+  }
+
+  const snapshot = await getAgentAnswerSnapshot('task-1', 'a1')
+
+  assert.equal(snapshot.text, 'hello')
+  assert.ok(urls[0].endsWith('/tasks/task-1/answers/a1'))
 })
 
 test('rejecting an approval posts its optimistic version', async () => {

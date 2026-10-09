@@ -10,7 +10,7 @@
       <div v-if="detail" class="contact-detail" :aria-busy="detailLoading">
         <div class="contact-detail__identity">
           <div class="avatar">{{ (detail.contact.display_name || detail.contact.identities?.[0]?.display_name || '?').slice(0, 1) }}</div>
-          <div><h2>{{ detail.contact.display_name || '未命名联系人' }}</h2><span>{{ detail.contact.kind === 'internal' ? `内部联系人 · ${detail.contact.internal_user_id || ''}` : '外部联系人' }}</span></div>
+          <div><h2>{{ detail.contact.display_name || '未命名联系人' }}</h2><span>{{ detail.contact.kind === 'internal' ? `内部联系人 · ${detail.contact.internal_user_id || ''}` : '外部联系人' }}<template v-if="detail.contact.name_core"> · 主体名 {{ detail.contact.name_core }}</template></span></div>
         </div>
         <div class="contact-detail__identities"><span v-for="identity in detail.contact.identities" :key="identity.id">{{ identity.platform === 'feishu' ? '飞书' : '微信' }} · {{ identity.display_name || identity.external_user_id }}</span></div>
         <div v-if="detailLoading" class="contact-detail__loading"><t-icon name="loading" />正在加载联系人画像…</div>
@@ -95,7 +95,7 @@ watch(platform, load); watch(attachPlatform, () => { if (showAttach.value) void 
 onBeforeUnmount(() => { if (contactPollTimer != null) window.clearInterval(contactPollTimer) })
 async function refreshConnectors() { try { connectors.value = await getConnectors() } catch { connectors.value = [] } }
 async function discover() { discovering.value = true; visibleContactCount.value = 100; error.value = ''; try { available.value = await discoverContacts(attachPlatform.value, query.value) } catch (e:any) { available.value = []; error.value = e?.message || '联系人发现失败' } finally { discovering.value = false } }
-async function attach(item: AvailableContactDTO) { if (item.selected) return; try { await attachContact({ platform: attachPlatform.value, externalUserID: item.external_user_id, displayName: item.display_name, avatarURL: item.avatar_url }); item.selected = true; await load() } catch (e:any) { error.value = e?.message || '联系人接入失败' } }
+async function attach(item: AvailableContactDTO) { if (item.selected) return; try { await attachContact({ platform: attachPlatform.value, externalUserID: item.external_user_id, displayName: item.display_name, avatarURL: item.avatar_url, remark: item.remark }); item.selected = true; await load() } catch (e:any) { error.value = e?.message || '联系人接入失败' } }
 async function openDetail(contact: ContactDTO) {
   detail.value = { contact, profile: { contact_key: contact.id, summary: '', status: 'pending' }, facts: [], attachments: [] }
   showDetail.value = true

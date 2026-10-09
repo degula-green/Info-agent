@@ -234,6 +234,9 @@ class AgentStore(Protocol):
     def acquire_lease(self, task_id: str, owner: str, seconds: float) -> bool:
         ...
 
+    def renew_lease(self, task_id: str, owner: str, seconds: float) -> bool:
+        ...
+
     def release_lease(self, task_id: str, owner: str) -> None:
         ...
 
@@ -385,6 +388,11 @@ class AgentStore(Protocol):
         ...
 
     def count_messages(self, conversation_id: str) -> int:
+        ...
+
+    def count_messages_by_conversation(
+        self, conversation_ids: list[str]
+    ) -> dict[str, int]:
         ...
 
     def list_completed_messages_after_boundary(

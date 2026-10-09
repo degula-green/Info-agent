@@ -247,6 +247,158 @@ class RAGRetrievalService:
             pass
         return RetrievalResponse(request_id=request_id, results=results, diagnostics=diagnostics)
 
+    def context_scope(
+        self,
+        request: SearchRequest,
+        *,
+        anchors: list[dict[str, Any]],
+        radius: int = 2,
+    ) -> RetrievalResponse:
+        """Messages around the caller's anchors, in the same conversation.
+
+        The anchor filters (sender / conversation / phrase) describe *which*
+        messages were found, not which neighbours are allowed, so they are
+        dropped here; the anchor's own conversation plus per-result
+        authorization decide what comes back.
+        """
+
+        started = time.perf_counter()
+        request_id = uuid.uuid4().hex
+        scope = self.authorization.search_scope(
+            user_id=request.user_id,
+            scope_type=request.scope_type,
+            scope_id=request.scope_id,
+            resource_parts=("original", "content"),
+        )
+        if scope.denied:
+            raise AuthorizationDenied("authorization denied")
+        if scope.failed or scope.truncated:
+            raise AuthorizationUnavailable("authorization scope is incomplete")
+        protected_keys: tuple[str, ...] = ()
+        if scope.available:
+            protected_keys = scope.authorized_protected_object_keys
+        else:
+            request = replace(request, include_protected=False)
+        window = replace(
+            request,
+            query="",
+            sender_ids=(),
+            sender_names=(),
+            conversation_ids=(),
+            conversation_names=(),
+            content_contains=(),
+            resource_ids=(),
+            resource_types=("message",),
+            offset=0,
+        )
+        try:
+            values = self.indexer.search_message_context(
+                window, anchors, radius=radius
+            )
+        except Exception as exc:  # noqa: BLE001 - mapped to a service error
+            raise SearchUnavailable("Elasticsearch retrieval failed") from exc
+        results = self._authorize_results(request, values, scope)
+        diagnostics = {
+            "authorization_snapshot_id": scope.snapshot_id,
+            "scope_truncated": scope.truncated,
+            "anchor_count": len(anchors),
+            "radius": radius,
+            "returned_chunk_count": len(results),
+            "effective_execution_path": "context_scope",
+            "latency_ms": int((time.perf_counter() - started) * 1000),
+        }
+        try:
+            self.repository.record_search(
+                user_id=request.user_id,
+                scope_type=request.scope_type,
+                scope_id=request.scope_id,
+                query_hash=hashlib.sha256(b"context").hexdigest(),
+                query_redacted="",
+                filters={
+                    "entry": request.entry,
+                    "anchors": len(anchors),
+                    "radius": radius,
+                },
+                result_count=len(results),
+            )
+        except Exception:  # noqa: BLE001 - audit must not break retrieval
+            pass
+        return RetrievalResponse(
+            request_id=request_id, results=results, diagnostics=diagnostics
+        )
+
+    def export_scope(self, request: SearchRequest) -> RetrievalResponse:
+        """Return complete chunks for one metadata-defined scope page.
+
+        This is the agent's "take the whole person scope" primitive: it keeps
+        the authorization boundary and metadata filters, but skips BM25/KNN
+        ranking. Sorting is deterministic (sent_at, chunk_id) so the caller can
+        page with ``offset`` until ``has_more`` is false without silently
+        dropping the few messages that happen to rank low for a weak query.
+        """
+
+        started = time.perf_counter()
+        request_id = uuid.uuid4().hex
+        request = _resolve_time_request(request)
+        scope = self.authorization.search_scope(
+            user_id=request.user_id,
+            scope_type=request.scope_type,
+            scope_id=request.scope_id,
+            resource_parts=("original", "content"),
+        )
+        if scope.denied:
+            raise AuthorizationDenied("authorization denied")
+        if scope.failed or scope.truncated:
+            raise AuthorizationUnavailable("authorization scope is incomplete")
+        if scope.available:
+            protected_keys = scope.authorized_protected_object_keys
+        else:
+            request = replace(request, include_protected=False)
+            protected_keys = ()
+        try:
+            values = self.indexer.search_bm25(
+                request,
+                protected_object_keys=protected_keys,
+                size=request.top_k,
+            )
+        except Exception as exc:
+            raise SearchUnavailable("Elasticsearch retrieval failed") from exc
+        results = self._authorize_results(request, values, scope)
+        diagnostics = {
+            "authorization_snapshot_id": scope.snapshot_id,
+            "scope_truncated": scope.truncated,
+            "offset": request.offset,
+            "page_size": request.top_k,
+            "returned_chunk_count": len(results),
+            "effective_execution_path": "scope_export",
+        }
+        try:
+            self.repository.record_search(
+                user_id=request.user_id,
+                scope_type=request.scope_type,
+                scope_id=request.scope_id,
+                query_hash=hashlib.sha256(request.query.encode("utf-8")).hexdigest(),
+                query_redacted=redact_query(request.query),
+                filters={
+                    "entry": request.entry,
+                    "offset": request.offset,
+                    "resource_ids": list(request.resource_ids),
+                },
+                tree_mode=settings.tree_mode,
+                execution_path=diagnostics["effective_execution_path"],
+                diagnostics=diagnostics,
+                result_count=len(results),
+                duration_ms=int((time.perf_counter() - started) * 1000),
+                request_id=request_id,
+            )
+        except Exception:
+            pass
+        return RetrievalResponse(
+            request_id=request_id,
+            results=results,
+            diagnostics=diagnostics,
+        )
+
     def answer(self, request: SearchRequest) -> dict[str, Any]:
         response = self.search(request)
         provider = self.answer_provider

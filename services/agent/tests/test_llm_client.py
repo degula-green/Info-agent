@@ -8,7 +8,13 @@ from typing import Any, Mapping
 import pytest
 
 from app.infrastructure.http import HttpResult, IntegrationError
-from app.infrastructure.llm.client import LLMError, OpenAIChatClient
+from app.infrastructure.llm.client import (
+    LLMError,
+    LLMStreamCancelled,
+    LLMUnavailable,
+    OpenAIChatClient,
+)
+from app.infrastructure.llm.stream_http import StreamCancelled
 
 
 class RecordingHttp:
@@ -258,3 +264,72 @@ def test_a_client_that_never_asked_for_a_schema_still_sends_json_object() -> Non
     )
 
     assert http.calls[0]["body"]["response_format"] == {"type": "json_object"}
+
+
+def test_stream_complete_parses_sse_content_deltas() -> None:
+    captured: dict[str, Any] = {}
+
+    def fake_transport(method: str, url: str, **kwargs: Any):
+        captured["method"] = method
+        captured["url"] = url
+        captured.update(kwargs)
+        return iter(
+            [
+                'data: {"choices":[{"delta":{"content":"{\\""}}]}\n',
+                "\n",
+                'data: {"choices":[{"delta":{"content":"answer"}}]}\n',
+                "data: [DONE]\n",
+            ]
+        )
+
+    client = OpenAIChatClient(
+        base_url="http://model.local/v1",
+        api_key="secret",
+        model="qwen-test",
+        http=RecordingHttp(),
+        stream_transport=fake_transport,
+    )
+
+    chunks = list(client.stream_complete([{"role": "user", "content": "hello"}]))
+
+    assert chunks == ['{"', "answer"]
+    assert captured["method"] == "POST"
+    assert captured["url"] == "http://model.local/v1/chat/completions"
+    assert captured["token"] == "secret"
+    assert captured["body"]["stream"] is True
+    assert captured["body"]["response_format"] == {"type": "json_object"}
+    assert client.last_call_count == 1
+
+
+def test_stream_complete_maps_cancellation_to_a_dedicated_error() -> None:
+    def fake_transport(method: str, url: str, **kwargs: Any):
+        def generate():
+            raise StreamCancelled("stopped")
+            yield ""  # pragma: no cover - makes this a generator
+
+        return generate()
+
+    client = OpenAIChatClient(
+        base_url="http://model.local/v1",
+        model="qwen-test",
+        http=RecordingHttp(),
+        stream_transport=fake_transport,
+    )
+
+    with pytest.raises(LLMStreamCancelled):
+        list(client.stream_complete([{"role": "user", "content": "hello"}]))
+
+
+def test_stream_complete_maps_retryable_transport_errors() -> None:
+    def fake_transport(method: str, url: str, **kwargs: Any):
+        raise IntegrationError("remote stream idle timeout", retryable=True)
+
+    client = OpenAIChatClient(
+        base_url="http://model.local/v1",
+        model="qwen-test",
+        http=RecordingHttp(),
+        stream_transport=fake_transport,
+    )
+
+    with pytest.raises(LLMUnavailable):
+        list(client.stream_complete([{"role": "user", "content": "hello"}]))

@@ -1,5 +1,5 @@
 {
-  "schema_version": "intent-v6",
+  "schema_version": "intent-v7",
   "instruction": "Choose the workflow that best matches the user's primary intent.",
   "options": [
     {
@@ -64,6 +64,32 @@
       ],
       "laya_criteria": "Fill in or complete the fields of a form using information provided or authorized by the user, then prepare a preview for confirmation. The action is writing values into the form. Requests to submit, send or file an already filled form or application to an external system are not this intent, and neither are other file or document operations such as adding a password, converting data to a table, or printing a list.",
       "generation_prompt": "生成{count}条中文用户消息，用户要求填写或补全表单字段，或填写后进入预览确认；不要生成只要求提交或发送已填写表单的请求。"
+    },
+    {
+      "name": "person.query",
+      "kind": "business",
+      "task_kind": "answer",
+      "description": "回答某个具体人物本人的情况：他是谁、联系方式、职位，或他说过什么、最近在忙什么",
+      "examples": [
+        "张三的情况是什么",
+        "张三最近在忙什么",
+        "问一下张三的手机号"
+      ],
+      "laya_criteria": "The user asks about one person themselves: who they are, their contact details, their job title, or what that person personally said or is busy with. Do NOT choose this when the message asks about the progress, status or details of a project, task, system or document that merely involves that person, or when a person name is only used to locate company material; those are knowledge.answer. Also do NOT choose this when the subject is an organization rather than a person - a company, group, bank, team, department, school or studio - even when the sentence has the shape of a person question such as \"X的情况是什么\"; questions about an organization are knowledge.answer.",
+      "generation_prompt": "生成{count}条中文用户消息，用户想了解某个具体人物本人的情况，例如他是谁、手机号、邮箱、职位，或他最近在忙什么、说过什么。要包含人名，并带上“的情况”“最近在忙什么”“问一下××的手机号”等表达；不要生成问某个项目或任务进展的句子。"
+    },
+    {
+      "name": "report.weekly",
+      "kind": "business",
+      "task_kind": "action",
+      "description": "根据某个人的资料和一份模板，生成一份 Word 周报文档",
+      "examples": [
+        "给我写一份周报",
+        "按这个模板给张三写周报",
+        "用采集到的模板给张三生成周报"
+      ],
+      "laya_criteria": "The user asks to write or generate a weekly report document for one person, following a template. The message explicitly asks for a weekly report (写周报 / 生成周报 / 按模板写周报 / 按这个模板给他写周报). Other documents, summaries or questions are not this intent.",
+      "generation_prompt": "生成{count}条中文用户消息，用户要求给某个人写一份周报，可能指定模板来源（我上传的模板、采集到的模板）或文件名。要包含“写周报”“生成一份周报”“按这个模板给××写周报”等表达；不要生成只提到周报这个词的闲聊或其他文档请求。"
     },
     {
       "name": "non_task",

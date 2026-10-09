@@ -27,8 +27,10 @@ from app.infrastructure.qa import QAUnavailable
 from app.schemas.search import (
     AIDocumentBody,
     ContentSearchBody,
+    ContextSearchBody,
     QAConversationBody,
     QATitleBody,
+    ScopeSearchBody,
     SearchBody,
     SourceSearchBody,
     TreeSearchBody,
@@ -79,6 +81,7 @@ def _request(
         knowledge_base_ids=body.clean_library_ids(),
         entry=entry,
         top_k=body.top_k,
+        offset=body.offset,
         include_protected=body.include_protected,
         occurred_after=body.occurred_after,
         occurred_before=body.occurred_before,
@@ -90,6 +93,7 @@ def _request(
         conversation_ids=tuple(body.conversation_ids),
         conversation_names=tuple(body.conversation_names),
         resource_ids=tuple(body.resource_ids),
+        content_contains=tuple(body.content_contains),
         resource_types=tuple(body.resource_types),
         file_extensions=tuple(body.file_extensions),
         message_types=tuple(body.message_types),
@@ -164,6 +168,37 @@ def search_sources(
     return _sources_response(response, top_k=request.top_k)
 
 
+@router.post("/search/context")
+def search_context(
+    body: ContextSearchBody,
+    x_user_id: str | None = Header(default=None),
+    x_organization_id: str | None = Header(default=None),
+    x_agent_service_token: str | None = Header(default=None),
+    service: RAGRetrievalService = Depends(get_retrieval_service),
+) -> dict[str, object]:
+    """Neighbouring messages around the caller's anchors, same conversation."""
+
+    _require_agent_service(x_agent_service_token)
+    request = _request(
+        body,
+        entry="context",
+        header_user_id=x_user_id,
+        header_organization_id=x_organization_id,
+    )
+    anchors = [
+        {
+            "resource_id": item.resource_id,
+            "conversation_id": item.conversation_id,
+            "sent_at": item.sent_at,
+        }
+        for item in body.anchors
+    ]
+    response = service.context_scope(request, anchors=anchors, radius=body.radius)
+    return _scope_response(
+        response, offset=0, top_k=max(len(response.results), 1)
+    )
+
+
 @router.post("/search/content")
 def search_content(
     body: ContentSearchBody,
@@ -181,6 +216,31 @@ def search_content(
     )
     response = _run_search(request, service)
     return _content_response(response, top_k=request.top_k)
+
+
+@router.post("/search/scope")
+def search_scope(
+    body: ScopeSearchBody,
+    x_user_id: str | None = Header(default=None),
+    x_organization_id: str | None = Header(default=None),
+    x_agent_service_token: str | None = Header(default=None),
+    service: RAGRetrievalService = Depends(get_retrieval_service),
+) -> dict[str, object]:
+    """Complete-scope export used by person-scoped fact extraction."""
+
+    _require_agent_service(x_agent_service_token)
+    request = _request(
+        body,
+        entry="export",
+        header_user_id=x_user_id,
+        header_organization_id=x_organization_id,
+    )
+    response = _run_search(request, service, export=True)
+    return _scope_response(
+        response,
+        offset=request.offset,
+        top_k=request.top_k,
+    )
 
 
 @router.post("/ai/documents")
@@ -358,9 +418,11 @@ def delete_qa_conversation(
 def _run_search(
     request: SearchRequest,
     service: RAGRetrievalService,
+    *,
+    export: bool = False,
 ) -> RetrievalResponse:
     try:
-        return service.search(request)
+        return service.export_scope(request) if export else service.search(request)
     except SearchUnavailable as exc:
         raise HTTPException(status_code=503, detail="search_unavailable") from exc
     except AuthorizationDenied as exc:
@@ -402,6 +464,63 @@ def _sources_response(response: RetrievalResponse, *, top_k: int) -> dict[str, A
             **response.diagnostics,
             "metadata_coverage": _metadata_coverage(response.results),
         },
+    }
+
+
+def _scope_response(
+    response: RetrievalResponse,
+    *,
+    offset: int,
+    top_k: int,
+) -> dict[str, Any]:
+    items = [_scope_item(result) for result in response.results]
+    resource_ids = list(
+        dict.fromkeys(
+            str(item["resource_id"])
+            for item in items
+            if item.get("resource_id")
+        )
+    )
+    return {
+        "request_id": response.request_id,
+        "items": items,
+        "resource_ids": resource_ids,
+        "returned_count": len(items),
+        "offset": offset,
+        "next_offset": offset + len(items),
+        "has_more": len(items) >= max(1, top_k),
+        "diagnostics": {
+            **response.diagnostics,
+            "metadata_coverage": _metadata_coverage(response.results),
+        },
+    }
+
+
+def _scope_item(result: Any) -> dict[str, Any]:
+    source = result.source
+    return {
+        "chunk_id": result.chunk_id,
+        "resource_id": source.get("resource_id"),
+        "resource_type": source.get("resource_type"),
+        "knowledge_item_id": source.get("knowledge_item_id"),
+        "title": source.get("title") or source.get("file_name"),
+        "file_name": source.get("file_name"),
+        "message_id": source.get("message_id"),
+        "message_type": source.get("message_type"),
+        "sender": {
+            "id": source.get("sender_identity_id"),
+            "name": source.get("sender_display_name"),
+            "platform": source.get("sender_platform"),
+        },
+        "conversation": {
+            "id": source.get("source_conversation_id"),
+            "name": source.get("source_conversation_name"),
+            "type": source.get("source_conversation_type"),
+            "platform": source.get("source_platform"),
+        },
+        "sent_at": source.get("sent_at"),
+        "text": result.content,
+        "position": dict(source.get("source_locator") or {}) or None,
     }
 
 

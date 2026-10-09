@@ -8,7 +8,12 @@ from app.infrastructure.module2.urls import knowledge_api_url
 
 
 class KnowledgeSourceUnavailable(RuntimeError):
-    pass
+    retryable = True
+    code = "knowledge_source_unavailable"
+
+    def __init__(self, message: str, *, retryable: bool = True) -> None:
+        super().__init__(message)
+        self.retryable = retryable
 
 
 class Module2KnowledgeClient:
@@ -57,7 +62,19 @@ class Module2KnowledgeClient:
                 timeout=settings.knowledge_timeout_seconds,
             ).json()
         except IntegrationError as exc:
-            raise KnowledgeSourceUnavailable("module 2 source request failed") from exc
+            status = getattr(exc, "status", None)
+            retryable = bool(getattr(exc, "retryable", True))
+            if status is not None:
+                # 409 means the Knowledge item exists but is not ready yet
+                # (permission/classification/processing still in flight), so
+                # the right behavior is a delayed retry rather than a terminal
+                # failure. 404/400/403 are permanent for this job.
+                retryable = status >= 500 or status in {408, 409, 425, 429}
+            detail = f"status={status}" if status is not None else "status=transport"
+            raise KnowledgeSourceUnavailable(
+                f"module 2 source request failed ({detail})",
+                retryable=retryable,
+            ) from exc
         if not isinstance(value, dict):
             raise KnowledgeSourceUnavailable("module 2 returned an invalid source response")
         return value

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import queue
+import random
 import threading
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -117,29 +118,41 @@ class MVPWorkerRuntime:
             self.stop()
 
     def _lane_loop(self, lane: str) -> None:
+        backoff = max(0.05, float(settings.lane_poll_interval_seconds))
         while not self.stop_event.is_set():
             job_id: str | None = None
             try:
-                job_id = self.queues[lane].get(
-                    timeout=settings.lane_poll_interval_seconds
+                try:
+                    job_id = self.queues[lane].get(
+                        timeout=settings.lane_poll_interval_seconds
+                    )
+                except queue.Empty:
+                    claimed = self.repository.claim_jobs(lane, limit=1)
+                    if claimed:
+                        self._process_claimed(lane, claimed[0])
+                else:
+                    claimed = self.repository.claim_jobs(
+                        lane,
+                        limit=1,
+                        job_id=job_id,
+                    )
+                    if claimed:
+                        self._process_claimed(lane, claimed[0])
+                backoff = max(
+                    0.05,
+                    float(settings.lane_poll_interval_seconds),
                 )
-            except queue.Empty:
-                claimed = self.repository.claim_jobs(lane, limit=1)
-                if claimed:
-                    self._process_claimed(lane, claimed[0])
-                continue
-            try:
-                claimed = self.repository.claim_jobs(
-                    lane,
-                    limit=1,
-                    job_id=job_id,
-                )
-                if claimed:
-                    self._process_claimed(lane, claimed[0])
             except Exception:
-                logger.exception("lane %s failed job_id=%s", lane, job_id)
+                logger.exception(
+                    "lane %s iteration failed job_id=%s; retrying",
+                    lane,
+                    job_id,
+                )
+                self.stop_event.wait(backoff)
+                backoff = min(30.0, backoff * 2)
             finally:
-                self.queues[lane].task_done()
+                if job_id is not None:
+                    self.queues[lane].task_done()
 
     def _process_claimed(self, lane: str, job: dict[str, Any]) -> None:
         heartbeat_stop = threading.Event()
@@ -377,6 +390,12 @@ class MVPWorkerRuntime:
                 {"error_code": code, "retryable": False},
             )
             return
+        base_delay = max(1.0, float(settings.task_retry_base_seconds))
+        max_delay = max(base_delay, float(settings.task_retry_max_seconds))
+        delay = min(max_delay, base_delay * (2 ** max(0, retry_count - 1)))
+        # Jitter keeps a recovered upstream from being hit by a synchronized
+        # retry wave when several jobs failed at the same time.
+        delay = min(max_delay, delay * random.uniform(0.8, 1.2))
         fields = {
             "status": "retry_wait",
             "current_stage": "fetch" if lane == "parse" else "index",
@@ -384,7 +403,7 @@ class MVPWorkerRuntime:
             "lease_until": datetime.now(timezone.utc),
             "retry_count": retry_count,
             "next_retry_at": datetime.now(timezone.utc)
-            + timedelta(seconds=5),
+            + timedelta(seconds=delay),
             "last_error": str(exc)[:2000],
         }
         if lane == "parse":

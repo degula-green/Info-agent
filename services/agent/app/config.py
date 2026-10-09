@@ -443,6 +443,66 @@ class Settings:
     answer_max_output_tokens: int = _int(
         1200, "AGENT_ANSWER_MAX_OUTPUT_TOKENS", "agent_ANSWER_MAX_OUTPUT_TOKENS"
     )
+    # Person-scoped fact extraction: one model call per message batch, plus a
+    # deterministic full-scope export that is allowed to run past the old
+    # 10-resource window.
+    person_fact_timeout_seconds: float = _float(
+        30.0,
+        "AGENT_PERSON_FACT_TIMEOUT_SECONDS",
+        "agent_PERSON_FACT_TIMEOUT_SECONDS",
+    )
+    person_fact_max_output_tokens: int = _int(
+        1600,
+        "AGENT_PERSON_FACT_MAX_OUTPUT_TOKENS",
+        "agent_PERSON_FACT_MAX_OUTPUT_TOKENS",
+    )
+    person_scope_page_size: int = _int(
+        50, "AGENT_PERSON_SCOPE_PAGE_SIZE", "agent_PERSON_SCOPE_PAGE_SIZE"
+    )
+    person_scope_max_chunks: int = _int(
+        5000, "AGENT_PERSON_SCOPE_MAX_CHUNKS", "agent_PERSON_SCOPE_MAX_CHUNKS"
+    )
+    person_fact_batch_chars: int = _int(
+        6000, "AGENT_PERSON_FACT_BATCH_CHARS", "agent_PERSON_FACT_BATCH_CHARS"
+    )
+    person_fact_batch_items: int = _int(
+        40, "AGENT_PERSON_FACT_BATCH_ITEMS", "agent_PERSON_FACT_BATCH_ITEMS"
+    )
+    person_query_timeout_seconds: float = _float(
+        180.0,
+        "AGENT_PERSON_QUERY_TIMEOUT_SECONDS",
+        "agent_PERSON_QUERY_TIMEOUT_SECONDS",
+    )
+    # A weekly report fills every template slot in one JSON response, which is
+    # far longer than an answer, and it reads a whole week of material first.
+    report_timeout_seconds: float = _float(
+        180.0, "AGENT_REPORT_TIMEOUT_SECONDS", "agent_REPORT_TIMEOUT_SECONDS"
+    )
+    report_max_output_tokens: int = _int(
+        4000, "AGENT_REPORT_MAX_OUTPUT_TOKENS", "agent_REPORT_MAX_OUTPUT_TOKENS"
+    )
+    # Stream answer text as it is generated. Off by default so the existing
+    # one-shot path stays the fallback until the streaming path is verified.
+    answer_streaming_enabled: bool = _bool(
+        False,
+        "AGENT_ANSWER_STREAMING_ENABLED",
+        "agent_ANSWER_STREAMING_ENABLED",
+    )
+    answer_stream_ttl_seconds: int = _int(
+        3600,
+        "AGENT_ANSWER_STREAM_TTL_SECONDS",
+        "agent_ANSWER_STREAM_TTL_SECONDS",
+    )
+    answer_stream_max_len: int = _int(
+        2000,
+        "AGENT_ANSWER_STREAM_MAX_LEN",
+        "agent_ANSWER_STREAM_MAX_LEN",
+    )
+    answer_stream_snapshot_every: int = _int(
+        50,
+        "AGENT_ANSWER_STREAM_SNAPSHOT_EVERY",
+        "agent_ANSWER_STREAM_SNAPSHOT_EVERY",
+    )
     # Conversation memory Phase 1: inject the recent tail plus a rolling
     # summary for the same conversation only. No cross-session memory.
     conversation_context_enabled: bool = _bool(
