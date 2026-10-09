@@ -622,7 +622,7 @@ branch_refresh_jobs                             审核后增量刷新
   - [x] 五层管线端到端
   - [x] 分层延迟测量（见 树形RAG-定位分层耗时-交付文档.md）
   - [x] L4 调用率统计
-- [ ] **Day 3**: 灰度准备
+- [x] **Day 3**: 灰度准备
   - [x] 灰度开关与用户白名单（见 树形RAG-灰度白名单-交付文档.md）
   - [x] 回滚预案演练（见 树形RAG-回滚演练-交付文档.md）
 - [x] **Day 4-5**: 灰度观察
@@ -632,13 +632,13 @@ branch_refresh_jobs                             审核后增量刷新
 
 #### Week 5（前端并行）: 审核页启动
 
-- [ ] **Day 1-2**: 旧 mock 处理
-  - [ ] 摘除 `/organization/knowledge` 导航入口，或加"未接入"标识
-  - [ ] 抽取可复用的组件与样式（候选抽屉字段组织、对照表）
-- [ ] **Day 3-5**: 审核页骨架
-  - [ ] 候选列表接 `GET /api/v1/admin/entity-candidates`
-  - [ ] 详情抽屉接 `GET /api/v1/admin/entity-candidates/{id}`
-  - [ ] 四个动作接 `POST .../review`（携带幂等键）
+- [x] **Day 1-2**: 旧 mock 处理
+  - [x] 摘除 `/organization/knowledge` 导航入口，或加"未接入"标识（组织页入口已摘除，旧页面顶部保留"设计稿演示"告示，仅 URL 直达）
+  - [x] 抽取可复用的组件与样式（候选抽屉字段组织、对照表）
+- [x] **Day 3-5**: 审核页骨架
+  - [x] 候选列表接 `GET /api/v1/admin/entity-candidates`
+  - [x] 详情抽屉接 `GET /api/v1/admin/entity-candidates/{id}`
+  - [x] 四个动作接 `POST .../review`（携带幂等键）
 
 ### 3.4 验收标准
 
@@ -879,7 +879,7 @@ Week 8: 审核效率优化（快捷键、默认名称推荐、历史记录填充
   - [ ] mount_method / confidence 写入
   - [ ] 检索阈值参数
 - [ ] **Day 3-4**: 候选来源切换
-  - [ ] memory_service 正则来源切到 LLM 来源
+  - [x] memory_service 正则来源切到 LLM 来源（见 树形RAG-候选来源切换-交付文档.md）
   - [ ] 审核接口回归
 - [ ] **Day 5**: 关系写入
   - [ ] entity_relations 落库

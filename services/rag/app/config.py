@@ -210,6 +210,13 @@ class Settings:
     # Minimum spacing between call starts; 0 disables. Concurrency bounds calls
     # in flight, this bounds call starts per second.
     extract_min_interval_ms: int = _int("RAG_EXTRACT_MIN_INTERVAL_MS", 0)
+    # Phase 1 kept regex discovery as the transitional candidate source; Phase 2
+    # made the window scan the real one. The regex patterns match any 2-40 chars
+    # ending in 公司/项目/系统/合同/制度, so leaving it on floods the review queue
+    # with 0.55-confidence rows next to the model's 0.85 ones.
+    memory_regex_candidates_enabled: bool = _bool(
+        "RAG_MEMORY_REGEX_CANDIDATES_ENABLED", False
+    )
     # Concurrency is for the window scan worker, not for a single request.
     extract_concurrency: int = _int("RAG_EXTRACT_CONCURRENCY", 8)
     # Sliding window over a conversation. 20 messages keeps a topic in view;

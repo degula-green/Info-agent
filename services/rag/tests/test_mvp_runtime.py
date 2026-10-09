@@ -7,6 +7,7 @@ from app.application.index_service import MVPIndexService
 from app.application.memory_service import MemoryCandidateService
 from app.application.parse_service import MVPParseService
 from app.application.runtime import MVPWorkerRuntime, _event_payload_from_job
+from app.config import settings
 from app.domain.rag import Chunk
 from app.infrastructure.embedding.client import HashEmbeddingProvider
 from app.infrastructure.persistence.mvp import InMemoryRagMVPRepository
@@ -136,7 +137,14 @@ class RuntimeTests(unittest.TestCase):
         job = repository.get_job(job["id"])
         self.assertEqual(job["status"], "ready")
         claimed = repository.claim_jobs("memory", limit=1, job_id=job["id"])[0]
-        runtime._run_memory(claimed)
+        # The regex source is off by default since Phase 2 moved candidate
+        # discovery to the window scan; this covers the transitional switch.
+        original = settings.memory_regex_candidates_enabled
+        object.__setattr__(settings, "memory_regex_candidates_enabled", True)
+        try:
+            runtime._run_memory(claimed)
+        finally:
+            object.__setattr__(settings, "memory_regex_candidates_enabled", original)
         self.assertGreaterEqual(len(repository.candidates), 1)
         self.assertTrue(indexer.chunks)
         self.assertTrue(all(chunk.embedding_status == "ready" for chunk in indexer.chunks))
