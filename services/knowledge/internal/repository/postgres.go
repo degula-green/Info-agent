@@ -4389,8 +4389,8 @@ func (s *PostgresStore) DeletionMetrics(ctx context.Context, now time.Time) (Del
 			FROM knowledge.deletion_requests
 		), target_stats AS (
 			SELECT
-				COUNT(*) FILTER (WHERE last_error IS NOT NULL AND last_error<>'') AS failed_target_count,
-				COALESCE(AVG(EXTRACT(EPOCH FROM (updated_at - COALESCE(dr.execution_started_at,dr.requested_at)))) FILTER (WHERE dt.visibility_state='hidden'),0) AS visibility_avg,
+			COUNT(*) FILTER (WHERE dt.last_error IS NOT NULL AND dt.last_error<>'') AS failed_target_count,
+				COALESCE(AVG(EXTRACT(EPOCH FROM (dt.updated_at - COALESCE(dr.execution_started_at,dr.requested_at)))) FILTER (WHERE dt.visibility_state='hidden'),0) AS visibility_avg,
 				COALESCE(percentile_cont(0.95) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM (dt.updated_at - COALESCE(dr.execution_started_at,dr.requested_at)))) FILTER (WHERE dt.visibility_state='hidden'),0) AS visibility_p95,
 				COALESCE(AVG(EXTRACT(EPOCH FROM (dt.updated_at - COALESCE(dr.execution_started_at,dr.requested_at)))) FILTER (WHERE dt.vector_state='deleted'),0) AS vector_avg,
 				COALESCE(percentile_cont(0.95) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM (dt.updated_at - COALESCE(dr.execution_started_at,dr.requested_at)))) FILTER (WHERE dt.vector_state='deleted'),0) AS vector_p95,
