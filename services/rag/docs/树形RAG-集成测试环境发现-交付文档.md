@@ -102,24 +102,29 @@ pytest -q（默认跳过外部集成）   ->  218 passed, 4 skipped
 | CI 同理 | CI 里如果连的是同一个共享库，也会踩同样的坑 |
 | 共享库的边界 | 现在本机开发、CI、另一个部署共用一个 PostgreSQL。这不是本仓库能单方面改掉的，但至少要知道：任何"独占扫描某张表"的测试在这里都不成立 |
 
-## 8. 后续处理：远端 worker 已停
+## 8. 后续处理：远端整套服务已停
 
-用户要求"把远端服务停了，避免抢 worker"，2026-10-09 已执行：
+用户要求"把远端服务停了，避免抢 worker"，2026-10-09 已执行。分两步：先只停
+`rag-worker`（唯一消费 job 的进程），确认验证通过后再按用户要求停掉整套。
 
 ```text
 远端主机      39.97.235.59（阿里云 ECS，hostname iZ2zeeceg32un8fblwra37Z）
-compose 栈    docker-{core,knowledge,rag,agent}-service、agent-*-worker、nginx
-停掉的服务    docker-rag-worker-1   ← 唯一消费 rag_mvp.processing_jobs 的进程
+compose 项目  docker（配置 /root/workspace/aims/docker/docker-compose.server.yml）
+停掉的服务    全部 10 个容器：core/knowledge/rag/agent service、agent 两个 worker、
+              rag-worker、nginx，以及两个 migrate 一次性容器
 重启策略      unless-stopped        ← 手动停止后，宿主机重启也不会自己起来
-保留运行      docker-rag-service-1（远端 API，不消费 job）
+当前状态      无运行中的容器（docker ps 为空）
 ```
 
 停止命令（在远端执行）：
 
 ```bash
-docker stop docker-rag-worker-1
-# 恢复：docker start docker-rag-worker-1
-# 或 docker compose -f <compose 目录>/docker-compose.server.yml up -d rag-worker
+docker stop docker-rag-worker-1                 # 第一步：只停抢 job 的
+cd /root/workspace/aims/docker
+docker compose -f docker-compose.server.yml stop   # 第二步：停整套
+
+# 恢复：docker compose -f docker-compose.server.yml up -d
+#（只恢复 worker：docker start docker-rag-worker-1）
 ```
 
 **验证方式**（本地 worker 也临时停掉，否则会被本机自己领走）：
@@ -134,6 +139,11 @@ docker stop docker-rag-worker-1
 ```
 
 验证用的 job 已删除（清理后行数 0），本地 rag worker 已按原样重启。
+
+**整栈停掉后的共享库验证**：`pg_stat_activity` 里 39.97.235.59 的连接数从 15 变成
+**0**，只剩本机（61.54.104.60，30 个连接）与另一台客户端（218.29.191.106，10 个）。
+本地五个服务（8000/8080/8090/8095/5173）仍全部 200——中间件在 123.57.175.182，
+与这次停的是不同主机。
 
 **跑那四个外部集成用例时，本地 worker 也必须停**——它们假定自己独占 job 生命周期，
 本机的 worker 同样会抢：
