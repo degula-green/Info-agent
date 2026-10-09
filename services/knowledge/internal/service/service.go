@@ -4036,7 +4036,7 @@ func (s *Service) canGovernDeletions(ctx context.Context, userID, organizationID
 		return true, nil
 	}
 	decisions, err := s.Core.CheckBatch(ctx, userID, organizationID, []coreclient.AuthorizationCheck{{
-		ResourceType: "organization", ResourcePart: "content_governance", ResourceID: organizationID, Action: "view",
+		ResourceType: "organization", ResourcePart: "information_admin", ResourceID: organizationID, Action: "view",
 	}})
 	if err != nil {
 		return false, err
