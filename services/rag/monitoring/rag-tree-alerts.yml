@@ -92,3 +92,15 @@ groups:
           description: >-
             抓不到指标本身也是一种故障：鉴权头、token 文件或抓取超时都可能
             是原因（该端点约 10s 完成一次抓取）。
+
+      - alert: RagTreeUnknownSearchPathWriter
+        expr: rag_tree_search_unknown_path_count > 0
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "search_history 出现未知执行路径（scope {{ $labels.scope }}）"
+          description: >-
+            有写入方用了本服务不认识的 execution_path。这些行已被排除在检索率之外，
+            但说明观测契约在不知情的情况下变了——之前正是这种变化让一整版数据静默稀释了
+            指标。看该 scope tree-metrics JSON 里的 unknown_paths 拿具体路径名。

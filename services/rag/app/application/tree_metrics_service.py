@@ -30,8 +30,17 @@ SCAN_RUN_WINDOW = 50
 # advance, and one build already writes those rows with a NULL path. Since the
 # entry split the label alone is not enough either - `traditional` now covers
 # both "located, then fell back" and "hybrid entry that never located at all".
-# So the gate is the thing being measured: did location run?
-RETRIEVAL_PATHS = frozenset({"tree", "tree_shadow", "traditional", "metadata_filter"})
+# So the gate is the thing being measured: did location run? (`locate_ms > 0`)
+RETRIEVAL_PATHS = frozenset({"tree", "tree_shadow", "traditional"})
+# Traffic we already know about and deliberately keep out of the rates:
+#   scope_export   - bulk scope export on the agent branch (one row per page)
+#   context_scope  - anchor-context read on the agent branch
+#   metadata_filter- the `sources` entry, which addresses a known resource
+#                    instead of searching content, so it never locates
+# Anything outside both sets is an *unknown* writer - see unknown_path_count.
+KNOWN_NON_RETRIEVAL_PATHS = frozenset(
+    {"scope_export", "context_scope", "metadata_filter"}
+)
 # A scrape re-runs the snapshot per scope, and each snapshot is several queries.
 # Keeping the fan-out small bounds scrape cost; the per-scope detail is still
 # available from the authorised admin endpoint.
@@ -56,6 +65,10 @@ _METRIC_HELP = {
     "search_query_count": "Retrievals in the metric window",
     "search_retrieval_query_count": "Metric-window rows that actually located entities",
     "search_shadow_skipped_count": "Shadow requests skipped by the sample rate",
+    "search_unknown_path_count": (
+        "Rows whose execution_path is neither a retrieval path nor a known "
+        "non-retrieval one - a writer changed without this service knowing"
+    ),
     "search_no_entity_match_rate": "Share of retrievals that resolved no entity",
     "search_resolved_entity_rate": "Share of retrievals that resolved an entity",
     "search_l4_invocation_rate": "Share of retrievals that escalated to L4",
@@ -140,6 +153,9 @@ def flatten_metrics(snapshot: dict[str, Any]) -> dict[str, float]:
         ),
         f"{PROMETHEUS_PREFIX}_search_shadow_skipped_count": (
             search.get("shadow_skipped_count") or 0
+        ),
+        f"{PROMETHEUS_PREFIX}_search_unknown_path_count": (
+            search.get("unknown_path_count") or 0
         ),
         f"{PROMETHEUS_PREFIX}_search_no_entity_match_rate": (
             search.get("no_entity_match_rate") or 0.0
@@ -244,6 +260,21 @@ def summarize_search(
         and row.get("shadow_sampled", True) is not False
     ]
     shadow_skipped = sum(1 for row in rows if row.get("shadow_sampled") is False)
+    # A path outside both sets means a writer started using a label this service
+    # has never seen - the shape of the incident that let a whole release of
+    # rows dilute the location rate unnoticed. An empty label counts: that is
+    # how the anchor-context reads land in some builds.
+    known_paths = RETRIEVAL_PATHS | KNOWN_NON_RETRIEVAL_PATHS
+    unknown_path_names = sorted({
+        str(row.get("execution_path") or "").strip()
+        for row in rows
+        if str(row.get("execution_path") or "").strip() not in known_paths
+    })
+    unknown_path_count = sum(
+        1
+        for row in rows
+        if str(row.get("execution_path") or "").strip() not in known_paths
+    )
     paths: dict[str, int] = {}
     fallbacks: dict[str, int] = {}
     degraded: dict[str, int] = {}
@@ -301,6 +332,8 @@ def summarize_search(
         "query_count": total,
         "retrieval_query_count": attempted,
         "shadow_skipped_count": shadow_skipped,
+        "unknown_path_count": unknown_path_count,
+        "unknown_paths": unknown_path_names,
         "execution_paths": paths,
         "fallback_reasons": fallbacks,
         "degraded_reasons": degraded,
@@ -333,6 +366,11 @@ def evaluate_alerts(metrics: dict[str, Any]) -> list[str]:
     if message_count and entity_count and not int(metrics.get("relation_count") or 0):
         alerts.append("no_relations")
     search = metrics.get("search") or {}
+    if int(search.get("unknown_path_count") or 0):
+        # Someone writes `search_history` with a label this service has never
+        # seen. The rates already ignore it, but the contract moved without us -
+        # exactly how a whole release of rows went unnoticed before.
+        alerts.append("unknown_search_path")
     # Gate on retrieval attempts: a window holding nothing but scope exports has
     # no location work to judge, and its 0% rate must not read as "healthy".
     attempts = int(search.get("retrieval_query_count", search.get("query_count") or 0) or 0)

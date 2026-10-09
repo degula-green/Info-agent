@@ -171,12 +171,25 @@ scope_access_log（新） = 只存非检索的 scope 读取（export / context�
 - 新增用例覆盖四种行：定位后降级、hybrid 不定位、`execution_path` 为空、
   另一个构建写的 `context_scope`；只有第一种计入。
 
-**仍未做**：`unknown_path_count` 哨兵。语义要按下面重定义后再加，否则会误报。
+**`unknown_path_count` 哨兵：也已落地**（同一批改动）。
 
-> `unknown_path_count` 的正确语义是"**出现了白名单外的路径名**"，不是"有多少行没定位"。
-> 后者会把搜索框每一次 hybrid 请求都算进去（现在每次都是不定位的），告警天天响、
-> 最后被无视。真正值得报警的是"又一个构建开始往这张表写"——考虑到这张表已经两次
-> 被别的构建写入（`scope_export` 1974 行、`metadata_filter` 382 行），这个哨兵值得单独做。
+语义按下面重定义后实现，并分成两组而不是一组：
+
+```text
+RETRIEVAL_PATHS           = {tree, tree_shadow, traditional}
+KNOWN_NON_RETRIEVAL_PATHS = {scope_export, context_scope, metadata_filter}
+unknown                   = 两组都不在（空路径 / NULL 也算）
+```
+
+分成两组是关键：`scope_export` / `context_scope` 是**已知**的非检索流量，把它们也算作
+"未知"会让哨兵一直响，最后被无视。要捕捉的是"**又一个构建开始往这张表写**"——这正是
+已经发生过两次的事（`scope_export` 1974 行、`metadata_filter` 382 行，都是事后才被发现）。
+
+落地内容：`unknown_path_count` + `unknown_paths`（具体路径名，进 tree-metrics JSON）、
+Prometheus 序列 `rag_tree_search_unknown_path_count`、服务内护栏 `unknown_search_path`、
+以及监控栈告警 `RagTreeUnknownSearchPathWriter`（规则文件有"序列必须真实存在"的交叉校验）。
+
+实测：本地作用域 `unknown_path_count = 0`（现有路径全在已知集里），指标族 29 → 30。
 
 ### Phase 2：新增独立审计表（纯加法迁移，不改 search_history DDL）
 
@@ -365,3 +378,5 @@ services/agent/app/capabilities/form.py                     表单填充（多�
 - v1.1 (2026-10-09): Phase 1 标记为已落地并修正为"白名单 + locate_ms 双闸门"；
   用 merge-tree 实测修正冲突面（27 → 10 个重叠、1 个真冲突）；
   合并策略由 rebase 改为 merge；新增 §10 合并 dry-run 验证结果
+- v1.2 (2026-10-09): `unknown_path_count` 哨兵落地（拆成检索/已知非检索/未知三分类，
+  含 Prometheus 序列、服务内护栏与监控栈告警）

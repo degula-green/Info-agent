@@ -181,6 +181,48 @@ class TestSearchMetrics:
         # The slow exports no longer set the retrieval latency percentiles.
         assert summary["latency_ms"] == {"p50": 60, "p95": 60, "max": 60, "sample_count": 10}
 
+    def test_known_non_retrieval_paths_are_not_reported_as_unknown(self):
+        # These writes are already understood - a bulk export and an
+        # anchor-context read from the agent branch, plus the sources entry.
+        # If the sentinel fired on them it would never stop firing.
+        rows = [
+            {"execution_path": path, "fallback_reason": "", "degraded_reason": "",
+             "llm_invoked": False, "resolved_entity_count": 0,
+             "locate_ms": 0.0, "duration_ms": 40}
+            for path in ("scope_export", "context_scope", "metadata_filter")
+        ]
+
+        summary = summarize_search(rows)
+
+        assert summary["unknown_path_count"] == 0
+        assert summary["unknown_paths"] == []
+        assert evaluate_alerts({"search": summary}) == []
+
+    def test_an_unlabelled_writer_is_reported(self):
+        # The failure mode this sentinel exists for: another build starts
+        # writing rows this service cannot classify. An empty path counts -
+        # that is how the anchor-context reads landed in one build.
+        rows = [
+            {"execution_path": "", "fallback_reason": "", "degraded_reason": "",
+             "llm_invoked": False, "resolved_entity_count": 0,
+             "locate_ms": 0.0, "duration_ms": 30},
+            {"execution_path": "context_snapshot", "fallback_reason": "",
+             "degraded_reason": "", "llm_invoked": False,
+             "resolved_entity_count": 0, "locate_ms": 0.0, "duration_ms": 30},
+            {"execution_path": "tree_shadow", "fallback_reason": "",
+             "degraded_reason": "", "llm_invoked": False,
+             "resolved_entity_count": 1, "locate_ms": 400.0, "duration_ms": 60},
+        ]
+
+        summary = summarize_search(rows)
+
+        assert summary["unknown_path_count"] == 2
+        assert summary["unknown_paths"] == ["", "context_snapshot"]
+        # The known row still counts normally; the unknown ones are excluded
+        # from the rates but surfaced as an alert.
+        assert summary["retrieval_query_count"] == 1
+        assert "unknown_search_path" in evaluate_alerts({"search": summary})
+
     def test_only_requests_that_ran_location_count_towards_the_rates(self):
         # After the entry split, `traditional` covers two very different rows: one
         # that located and then fell back, and one from a hybrid entry that never
@@ -457,6 +499,7 @@ class TestPrometheusRendering:
             "alerts": ["no_mounts"],
             "search": {"query_count": 10, "retrieval_query_count": 8,
                        "shadow_skipped_count": 2,
+                       "unknown_path_count": 1,
                        "no_entity_match_rate": 0.2,
                        "resolved_entity_rate": 0.8, "l4_invocation_rate": 0.1,
                        "latency_ms": {"p50": 120, "p95": 900},
@@ -475,6 +518,7 @@ class TestPrometheusRendering:
         assert values["rag_tree_search_query_count"] == 10
         assert values["rag_tree_search_retrieval_query_count"] == 8
         assert values["rag_tree_search_shadow_skipped_count"] == 2
+        assert values["rag_tree_search_unknown_path_count"] == 1
         assert values["rag_tree_search_latency_p95_ms"] == 900
         assert values["rag_tree_search_locate_p95_ms"] == 42
         assert values["rag_tree_search_locate_sample_count"] == 7
