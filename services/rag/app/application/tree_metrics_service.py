@@ -45,6 +45,8 @@ _METRIC_HELP = {
     "relation_count": "Entity-to-entity relations",
     "review_count": "Candidate review decisions recorded in the scope",
     "review_approval_rate": "Share of decided reviews that accepted the candidate",
+    "review_duration_avg_seconds": "Average reported review dwell time, in seconds",
+    "review_duration_sample_count": "Reviews that reported a dwell time",
     "entities_missing_embedding": "Active entities without a usable vector",
     "alert_count": "Number of quality guard-rail alerts currently firing",
     "search_query_count": "Retrievals in the metric window",
@@ -115,6 +117,14 @@ def flatten_metrics(snapshot: dict[str, Any]) -> dict[str, float]:
         f"{PROMETHEUS_PREFIX}_review_count": snapshot.get("review_count") or 0,
         f"{PROMETHEUS_PREFIX}_review_approval_rate": (
             snapshot.get("review_approval_rate") or 0.0
+        ),
+        # Prometheus convention is base units, so the stored milliseconds are
+        # exposed as seconds.
+        f"{PROMETHEUS_PREFIX}_review_duration_avg_seconds": round(
+            float(snapshot.get("review_duration_avg_ms") or 0.0) / 1000.0, 3
+        ),
+        f"{PROMETHEUS_PREFIX}_review_duration_sample_count": (
+            snapshot.get("review_duration_sample_count") or 0
         ),
         f"{PROMETHEUS_PREFIX}_entities_missing_embedding": (
             snapshot.get("entities_missing_embedding") or 0

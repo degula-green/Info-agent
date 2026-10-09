@@ -21,6 +21,11 @@ class CandidateReviewBody(BaseModel):
     domain: str | None = None
     note: str | None = None
     expected_status: str | None = None
+    # How long the reviewer actually spent on this candidate, measured by the
+    # review page (drawer opened -> decision submitted). Optional because a
+    # scripted or API-driven review has no dwell time, and bounded because the
+    # client is the only source for it.
+    duration_ms: int | None = Field(default=None, ge=0, le=86_400_000)
 
 
 class EntityBody(BaseModel):
@@ -222,6 +227,7 @@ def review_candidate(
             domain=body.domain,
             target_entity_id=body.target_entity_id,
             note=body.note,
+            duration_ms=body.duration_ms,
         )
     except LookupError as exc:
         raise HTTPException(status_code=404, detail="candidate_not_found") from exc

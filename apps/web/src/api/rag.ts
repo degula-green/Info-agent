@@ -242,6 +242,8 @@ export function reviewEntityCandidate(input: {
   targetEntityId?: string
   note?: string
   expectedStatus?: string
+  /** 审核停留时长（毫秒）；批量审核没有停留过程，不传。 */
+  durationMs?: number
 }) {
   return adminRequest<EntityReviewResult>(
     `/admin/entity-candidates/${encodeURIComponent(input.candidateId)}/review?scope_type=organization`,
@@ -258,6 +260,7 @@ export function reviewEntityCandidate(input: {
         target_entity_id: input.targetEntityId || undefined,
         note: input.note || undefined,
         expected_status: input.expectedStatus || undefined,
+        duration_ms: input.durationMs ?? undefined,
       }),
     },
   )

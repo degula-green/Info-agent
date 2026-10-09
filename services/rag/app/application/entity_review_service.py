@@ -9,6 +9,22 @@ class InvalidReviewIdempotency(RuntimeError):
     pass
 
 
+# The review page is the only source of dwell time, so it is untrusted input.
+# Bound it here (the router's request model bounds it too, and the repository
+# clamps once more before the CHECK constraint): a clock skew must not write a
+# 3-day "review" that skews the average.
+MAX_REVIEW_DURATION_MS = 86_400_000
+
+
+def _review_duration_ms(value: int | None) -> int | None:
+    if value is None:
+        return None
+    try:
+        return max(0, min(int(value), MAX_REVIEW_DURATION_MS))
+    except (TypeError, ValueError):
+        return None
+
+
 class EntityReviewService:
     def __init__(self, *, repository: EntityRegistryRepository) -> None:
         self.repository = repository
@@ -28,6 +44,7 @@ class EntityReviewService:
         domain: str | None,
         target_entity_id: str | None,
         note: str | None,
+        duration_ms: int | None = None,
     ) -> dict[str, Any]:
         request_id = _resolve_request_id(review_request_id, idempotency_key)
         return self.repository.review_candidate(
@@ -42,6 +59,7 @@ class EntityReviewService:
             domain=domain,
             target_entity_id=target_entity_id,
             note=note,
+            duration_ms=_review_duration_ms(duration_ms),
         )
 
 

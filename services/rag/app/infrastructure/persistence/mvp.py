@@ -1095,6 +1095,18 @@ class PostgresRagMVPRepository:
                 metrics["review_actions"] = actions
                 metrics["review_count"] = sum(actions.values())
                 metrics["review_approval_rate"] = _review_approval_rate(actions)
+                cursor.execute(
+                    f"""SELECT COALESCE(AVG(r.review_duration_ms), 0),
+                               COUNT(r.review_duration_ms)
+                          FROM {self.schema}.entity_review_requests r
+                          JOIN {self.schema}.entity_candidates c
+                            ON c.id = r.candidate_id
+                         WHERE c.scope_type=%s AND c.scope_id=%s::uuid""",
+                    scope_params,
+                )
+                duration_row = cursor.fetchone()
+                metrics["review_duration_avg_ms"] = round(float(duration_row[0] or 0), 1)
+                metrics["review_duration_sample_count"] = int(duration_row[1] or 0)
                 return metrics
 
     def list_active_scopes(self, *, limit: int = 50) -> list[dict[str, Any]]:
@@ -2164,9 +2176,19 @@ class PostgresRagMVPRepository:
         domain: str | None = None,
         target_entity_id: str | None = None,
         note: str | None = None,
+        duration_ms: int | None = None,
     ) -> dict[str, Any]:
         if action not in {"promote", "merge", "ignore", "defer"}:
             raise ValueError("unsupported review action")
+        # The client is the only source for dwell time, so clamp it rather than
+        # trusting it: a clock skew or a bad integration must not produce a
+        # 3-day "review duration" that skews the metric.
+        duration: int | None = None
+        if duration_ms is not None:
+            try:
+                duration = max(0, min(int(duration_ms), 86_400_000))
+            except (TypeError, ValueError):
+                duration = None
         with self._connection() as connection:
             with connection.cursor() as cursor:
                 cursor.execute(
@@ -2264,11 +2286,11 @@ class PostgresRagMVPRepository:
                 cursor.execute(
                     f"""INSERT INTO {self.schema}.entity_review_requests
                     (candidate_id,review_request_id,action,target_entity_id,reviewer_id,expected_status,
-                     result_status,registry_version)
-                    VALUES (%s::uuid,%s::uuid,%s,%s::uuid,%s::uuid,%s,%s,%s)""",
+                     result_status,registry_version,review_duration_ms)
+                    VALUES (%s::uuid,%s::uuid,%s,%s::uuid,%s::uuid,%s,%s,%s,%s)""",
                     (
                         candidate_id, review_request_id, action, target_entity_id, reviewer_id,
-                        expected_status, result_status, registry_version,
+                        expected_status, result_status, registry_version, duration,
                     ),
                 )
                 job_id = None
@@ -4011,7 +4033,7 @@ class InMemoryRagMVPRepository:
         for value in relations.values():
             key = str(value["relation_type"])
             relation_types[key] = relation_types.get(key, 0) + 1
-        actions = self._review_actions_for(scope_type, scope_id)
+        actions, review_durations = self._review_stats_for(scope_type, scope_id)
         return {
             "message_count": len(messages),
             "mounted_chunk_count": mounted,
@@ -4039,10 +4061,19 @@ class InMemoryRagMVPRepository:
             "review_actions": actions,
             "review_count": sum(actions.values()),
             "review_approval_rate": _review_approval_rate(actions),
+            "review_duration_avg_ms": (
+                round(sum(review_durations) / len(review_durations), 1)
+                if review_durations else 0.0
+            ),
+            "review_duration_sample_count": len(review_durations),
         }
 
-    def _review_actions_for(self, scope_type: str, scope_id: str) -> dict[str, int]:
+    def _review_stats_for(
+        self, scope_type: str, scope_id: str
+    ) -> tuple[dict[str, int], list[int]]:
+        """Actions and reported dwell times for one scope's reviews."""
         actions: dict[str, int] = {}
+        durations: list[int] = []
         for review in self.reviews:
             candidate = self.candidates.get(str(review.get("candidate_id") or ""))
             if not candidate:
@@ -4053,7 +4084,10 @@ class InMemoryRagMVPRepository:
                 continue
             action = str(review.get("action") or "")
             actions[action] = actions.get(action, 0) + 1
-        return actions
+            duration = review.get("duration_ms")
+            if isinstance(duration, int):
+                durations.append(duration)
+        return actions, durations
 
     def list_active_scopes(self, *, limit: int = 50) -> list[dict[str, Any]]:
         seen: dict[tuple[str, str], None] = {}

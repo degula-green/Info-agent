@@ -322,6 +322,18 @@ class TestReviewMetrics:
         assert metrics["review_count"] == 0
         assert metrics["review_approval_rate"] == 0.0
 
+    def test_dwell_time_average_ignores_reviews_that_reported_nothing(self):
+        repo, (first, second, third) = self._reviewed_candidates()
+        self._review(repo, first, "promote", 7, duration_ms=4000)
+        self._review(repo, second, "ignore", 8, duration_ms=2000)
+        # 批量/脚本审核没有停留过程，写 NULL——不能被当成 0 拉低平均。
+        self._review(repo, third, "ignore", 9)
+
+        metrics = repo.tree_metrics(**SCOPE)
+
+        assert metrics["review_duration_avg_ms"] == 3000.0
+        assert metrics["review_duration_sample_count"] == 2
+
     def test_merge_counts_as_an_approval(self):
         repo, (first, second, _) = self._reviewed_candidates()
         target = repo.upsert_entity(
@@ -405,6 +417,7 @@ class TestPrometheusRendering:
             "entity_count": 4, "message_count": 100, "mounted_chunk_count": 25,
             "mount_count": 30, "mount_coverage": 0.25, "pending_candidate_count": 7,
             "relation_count": 3, "review_count": 5, "review_approval_rate": 0.6,
+            "review_duration_avg_ms": 4200.0, "review_duration_sample_count": 4,
             "entities_missing_embedding": 1,
             "alerts": ["no_mounts"],
             "search": {"query_count": 10, "retrieval_query_count": 8,
@@ -422,6 +435,8 @@ class TestPrometheusRendering:
         assert values["rag_tree_alert_count"] == 1
         assert values["rag_tree_review_count"] == 5
         assert values["rag_tree_review_approval_rate"] == 0.6
+        assert values["rag_tree_review_duration_avg_seconds"] == 4.2
+        assert values["rag_tree_review_duration_sample_count"] == 4
         assert values["rag_tree_search_query_count"] == 10
         assert values["rag_tree_search_retrieval_query_count"] == 8
         assert values["rag_tree_search_shadow_skipped_count"] == 2

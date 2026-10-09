@@ -191,6 +191,9 @@ const error = ref('')
 const selectedIds = ref<string[]>([])
 
 const drawerVisible = ref(false)
+// 审核停留时长的起点：抽屉打开那一刻。只有审核页知道这个值，
+// 后端拿不到，所以由前端测量后随审核请求一起上报。
+const openedAt = ref<number | null>(null)
 const detail = ref<EntityCandidateDetail | null>(null)
 const draftName = ref('')
 const draftDomain = ref('')
@@ -269,6 +272,7 @@ function onPageChange(value: { current: number; pageSize: number }) {
 
 async function open(candidateId: string) {
   drawerVisible.value = true
+  openedAt.value = Date.now()
   detail.value = null
   mergeMode.value = false
   mergeTarget.value = ''
@@ -286,6 +290,7 @@ async function open(candidateId: string) {
   } catch (exc) {
     error.value = exc instanceof Error ? exc.message : '加载候选详情失败'
     drawerVisible.value = false
+    openedAt.value = null
   }
 }
 
@@ -314,9 +319,13 @@ async function submit(action: EntityReviewAction) {
       targetEntityId: action === 'merge' ? mergeTarget.value : undefined,
       note: note.value || undefined,
       expectedStatus: detail.value.status,
+      // 停留时长只对"打开详情后作出决定"的路径有意义；批量审核从列表直接
+      // 提交，没有停留过程，因此那条路径不发这个字段。
+      durationMs: openedAt.value === null ? undefined : Date.now() - openedAt.value,
     })
     MessagePlugin.success(`已${actionLabel(action)}`)
     drawerVisible.value = false
+    openedAt.value = null
     await load()
   } catch (exc) {
     MessagePlugin.error(exc instanceof Error ? exc.message : '审核提交失败')
