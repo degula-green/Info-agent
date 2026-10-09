@@ -56,7 +56,6 @@ class Settings:
     http_host: str = _text("RAG_HTTP_HOST", "0.0.0.0")
     http_port: int = _int("RAG_HTTP_PORT", 8000)
     log_level: str = _text("RAG_LOG_LEVEL", "INFO")
-    internal_auth_token: str = _text("RAG_INTERNAL_AUTH_TOKEN")
     rag_internal_token: str = _text("RAG_INTERNAL_TOKEN", "local-development-only")
 
     # RAG-owned PostgreSQL state (jobs, index records, search history, QA and
@@ -78,12 +77,6 @@ class Settings:
     elasticsearch_password: str = _text("ELASTICSEARCH_PASSWORD")
     elasticsearch_api_key: str = _text("ELASTICSEARCH_API_KEY")
     elasticsearch_ca_cert_path: str = _text("ELASTICSEARCH_CA_CERT_PATH")
-    elasticsearch_display_index: str = _text(
-        "ELASTICSEARCH_DISPLAY_INDEX", "rag_chunks_display_write"
-    )
-    elasticsearch_protected_index: str = _text(
-        "ELASTICSEARCH_PROTECTED_INDEX", "rag_chunks_protected_write"
-    )
     elasticsearch_display_read_index: str = _text(
         "ELASTICSEARCH_DISPLAY_READ_INDEX", "rag_chunks_display_read"
     )
