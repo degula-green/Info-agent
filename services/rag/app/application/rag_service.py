@@ -474,10 +474,20 @@ class RAGRetrievalService:
                     "anchors": len(anchors),
                     "radius": radius,
                 },
+                # The strict Postgres signature needs every one of these. They
+                # were missing here, and the except below swallowed the
+                # TypeError: the read was never recorded in production while the
+                # in-memory double (whose record_search takes **value) made the
+                # tests look green.
+                tree_mode=settings.tree_mode,
+                execution_path=diagnostics["effective_execution_path"],
+                diagnostics=diagnostics,
                 result_count=len(results),
+                duration_ms=int((time.perf_counter() - started) * 1000),
+                request_id=request_id,
             )
         except Exception:  # noqa: BLE001 - audit must not break retrieval
-            pass
+            logger.warning("context scope read was not recorded", exc_info=True)
         return RetrievalResponse(
             request_id=request_id, results=results, diagnostics=diagnostics
         )
@@ -546,8 +556,8 @@ class RAGRetrievalService:
                 duration_ms=int((time.perf_counter() - started) * 1000),
                 request_id=request_id,
             )
-        except Exception:
-            pass
+        except Exception:  # noqa: BLE001 - audit must not break the export
+            logger.warning("scope export was not recorded", exc_info=True)
         return RetrievalResponse(
             request_id=request_id,
             results=results,

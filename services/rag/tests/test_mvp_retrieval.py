@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import unittest
 from dataclasses import replace
 
@@ -13,7 +14,34 @@ from app.domain.rag import (
     SearchResult,
 )
 from app.infrastructure.rag_elasticsearch import RagChunkIndex, _bm25_query, _filters
-from app.infrastructure.persistence.mvp import InMemoryRagMVPRepository
+from app.infrastructure.persistence.mvp import (
+    InMemoryRagMVPRepository,
+    PostgresRagMVPRepository,
+)
+
+
+class _StrictRecordSearchRepository(InMemoryRagMVPRepository):
+    """The in-memory double enforces the production `record_search` signature.
+
+    InMemory takes ``**value``, so a caller that forgets a keyword fails only
+    against the strict Postgres method - and the caller's ``except Exception``
+    then swallows the TypeError. That is exactly how the anchor-context read
+    went unrecorded in production while the tests stayed green. The required
+    set is derived from the real method, not copied by hand.
+    """
+
+    REQUIRED = frozenset(
+        name
+        for name, parameter in inspect.signature(
+            PostgresRagMVPRepository.record_search
+        ).parameters.items()
+        if name != "self" and parameter.default is inspect.Parameter.empty
+    )
+
+    def record_search(self, **value):
+        missing = self.REQUIRED - set(value)
+        assert not missing, f"record_search 缺少必需参数: {sorted(missing)}"
+        return super().record_search(**value)
 
 
 class _Embedding:
@@ -76,6 +104,21 @@ class _Indexer:
     def search_neighbors(self, request, anchors, **kwargs):
         self.calls.append(("neighbors", kwargs))
         return list(self.neighbors)
+
+    def search_message_context(self, request, anchors, radius=2, **kwargs):
+        self.calls.append(("context", {"anchors": len(anchors), "radius": radius}))
+        return [SearchResult(
+            chunk_id="ctx-1",
+            content="锚点周边消息",
+            source={
+                "logical_position_key": "l-ctx",
+                "resource_id": "r-ctx",
+                "knowledge_item_id": "item-1",
+                "resource_type": "message",
+                "content_variant": "display",
+                "rag_eligible": True,
+            },
+        )]
 
 
 class _ProtectedIndexer(_Indexer):
@@ -473,6 +516,77 @@ class RetrievalTests(unittest.TestCase):
                 and call["sort"][0]["sent_at"]["order"] == "desc"
                 for call in client.calls
             )
+        )
+
+    def test_context_scope_records_under_the_production_signature(self) -> None:
+        # Regression: this call was missing tree_mode / execution_path /
+        # diagnostics / duration_ms / request_id. The strict Postgres
+        # record_search raised TypeError, the caller swallowed it, and the read
+        # was never recorded in production - while the loose in-memory double
+        # kept the suite green. The strict double fails loudly instead.
+        repository = _StrictRecordSearchRepository()
+        service = RAGRetrievalService(
+            repository=repository,
+            indexer=_Indexer(),
+            embedding=_Embedding(),
+            authorization=_Authorization(),
+        )
+
+        response = service.context_scope(
+            SearchRequest(
+                query="",
+                user_id="user-1",
+                scope_type="organization",
+                scope_id="org-1",
+                entry="context",
+            ),
+            anchors=[{"conversation_id": "conv-1", "sent_at": "2026-10-01T00:00:00Z"}],
+            radius=3,
+        )
+
+        self.assertEqual(
+            response.diagnostics["effective_execution_path"], "context_scope"
+        )
+        recorded = repository.searches
+        self.assertEqual(len(recorded), 1)
+        self.assertEqual(recorded[0]["execution_path"], "context_scope")
+        self.assertEqual(recorded[0]["tree_mode"], settings.tree_mode)
+        self.assertEqual(recorded[0]["result_count"], len(response.results))
+        self.assertGreaterEqual(recorded[0]["duration_ms"], 0)
+        self.assertTrue(recorded[0]["request_id"])
+        self.assertEqual(recorded[0]["diagnostics"]["radius"], 3)
+
+    def test_the_strict_double_rejects_an_incomplete_recording(self) -> None:
+        # Self-check on the guard: if it accepted anything, the regression tests
+        # beside it would pass for the wrong reason.
+        repository = _StrictRecordSearchRepository()
+
+        with self.assertRaises(AssertionError):
+            repository.record_search(user_id="user-1", scope_type="organization")
+
+    def test_export_scope_records_under_the_production_signature(self) -> None:
+        repository = _StrictRecordSearchRepository()
+        service = RAGRetrievalService(
+            repository=repository,
+            indexer=_Indexer(),
+            embedding=_Embedding(),
+            authorization=_Authorization(),
+        )
+
+        service.export_scope(SearchRequest(
+            query="",
+            user_id="user-1",
+            scope_type="organization",
+            scope_id="org-1",
+            entry="export",
+            top_k=50,
+            offset=50,
+            sender_ids=("sender-1",),
+            resource_types=("message",),
+        ))
+
+        self.assertEqual(
+            [row["execution_path"] for row in repository.searches], ["scope_export"]
         )
 
     def test_export_scope_returns_complete_page_diagnostics(self) -> None:
