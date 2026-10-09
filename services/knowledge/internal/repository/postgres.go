@@ -4624,10 +4624,10 @@ func (s *PostgresStore) MarkDeletionPurged(ctx context.Context, requestID string
 		return dbError(err)
 	}
 	defer tx.Rollback(ctx)
-	if _, err = tx.Exec(ctx, `UPDATE knowledge.messages m SET lifecycle_status='purged',normalized_content='',normalized_content_ref=NULL,content_hash=postgresEmptyContentHash,content_purged_at=$2 FROM knowledge.deletion_targets dt WHERE dt.deletion_request_id=$1 AND dt.resource_type='message' AND m.id=dt.resource_id`, requestID, now); err != nil {
+	if _, err = tx.Exec(ctx, `UPDATE knowledge.messages m SET lifecycle_status='purged',normalized_content='',normalized_content_ref=NULL,content_hash=$3,content_purged_at=$2 FROM knowledge.deletion_targets dt WHERE dt.deletion_request_id=$1 AND dt.resource_type='message' AND m.id=dt.resource_id`, requestID, now, postgresEmptyContentHash); err != nil {
 		return dbError(err)
 	}
-	if _, err = tx.Exec(ctx, `UPDATE knowledge.knowledge_items ki SET lifecycle_status='purged',content_ref='',original_content_ref=NULL,content_hash=postgresEmptyContentHash,content_purged_at=$2,updated_at=$2 FROM knowledge.deletion_targets dt WHERE dt.deletion_request_id=$1 AND dt.knowledge_item_id=ki.id`, requestID, now); err != nil {
+	if _, err = tx.Exec(ctx, `UPDATE knowledge.knowledge_items ki SET lifecycle_status='purged',content_ref='',original_content_ref=NULL,content_hash=$3,content_purged_at=$2,updated_at=$2 FROM knowledge.deletion_targets dt WHERE dt.deletion_request_id=$1 AND dt.knowledge_item_id=ki.id`, requestID, now, postgresEmptyContentHash); err != nil {
 		return dbError(err)
 	}
 	if _, err = tx.Exec(ctx, `UPDATE knowledge.deletion_targets SET object_state=CASE WHEN object_state='not_required' THEN object_state ELSE 'deleted' END,updated_at=$2 WHERE deletion_request_id=$1`, requestID, now); err != nil {
