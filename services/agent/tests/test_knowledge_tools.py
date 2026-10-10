@@ -9,6 +9,8 @@ from pydantic import ValidationError
 
 from app.capabilities.answer import AnswerComposeCapability
 from app.capabilities.knowledge import (
+    ContentChunk,
+    ContentResult,
     KnowledgeAnswerCapability,
     KnowledgeAnswerInput,
     KnowledgeSearchContentCapability,
@@ -427,6 +429,45 @@ def test_tree_results_bind_into_knowledge_answer() -> None:
     )
 
 
+def test_answer_citations_group_chunks_from_one_resource() -> None:
+    capability = KnowledgeAnswerCapability(_AnswerProvider())
+    output = capability.execute(
+        KnowledgeAnswerInput(
+            query="青云飞鹏官网在讲什么",
+            results=[
+                ContentResult(
+                    resource_id="attachment-1",
+                    resource_type="attachment",
+                    title="青云飞鹏",
+                    best_score=0.9,
+                    matched_chunk_count=2,
+                    chunks=[
+                        ContentChunk(
+                            chunk_id="chunk-1",
+                            text="后端程序运行在服务器上",
+                            score=0.9,
+                        ),
+                        ContentChunk(
+                            chunk_id="chunk-2",
+                            text="用户内容存在服务器上",
+                            score=0.8,
+                        ),
+                    ],
+                )
+            ],
+        )
+    )
+
+    assert len(output["citations"]) == 1
+    citation = output["citations"][0]
+    assert citation["resource_id"] == "attachment-1"
+    assert citation["evidence_ids"] == ["chunk-1", "chunk-2"]
+    assert citation["quotes"] == [
+        "后端程序运行在服务器上",
+        "用户内容存在服务器上",
+    ]
+
+
 def test_knowledge_tools_are_registered_only_when_enabled() -> None:
     disabled = build_registry(
         make_settings(rag_agent_tools_enabled=False),
@@ -520,6 +561,26 @@ def test_tree_first_content_question_routes_to_search_tree_and_answer() -> None:
         "knowledge.answer",
     ]
     assert plan.steps[0].arguments["fallback_to_content"] is True
+
+
+def test_tree_first_routes_aims_server_configuration_to_tree() -> None:
+    route = classify_knowledge_question("aims的服务器配置信息是什么")
+    assert route is not None
+    assert route.mode == "content"
+
+    task = type("Task", (), {"task_id": "task-1"})()
+    plan = build_knowledge_plan(
+        route,
+        task,
+        [
+            KnowledgeSearchTreeCapability.descriptor,
+            KnowledgeAnswerCapability.descriptor,
+        ],
+        retrieval_mode="tree_first",
+    )
+
+    assert plan is not None
+    assert plan.steps[0].capability == "knowledge.search_tree"
     assert plan.steps[1].arguments["results_ref"] == {
         "step": 1,
         "output": "results",
@@ -752,7 +813,9 @@ def test_knowledge_answer_keeps_only_known_enriched_citations() -> None:
     assert output["citations"] == [
         {
             "evidence_id": "chunk-1",
+            "evidence_ids": ["chunk-1"],
             "quote": "预算内容",
+            "quotes": ["预算内容"],
             "resource_id": "resource-1",
             "resource_type": "attachment",
             "title": "预算表.xlsx",

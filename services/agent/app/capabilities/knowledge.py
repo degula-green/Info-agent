@@ -1098,21 +1098,34 @@ def _known_knowledge_citations(
         if isinstance(item, dict) and item.get("evidence_id")
     }
     kept: list[dict[str, Any]] = []
-    seen: set[str] = set()
+    by_resource: dict[tuple[str, str], dict[str, Any]] = {}
     for item in citations or []:
         if not isinstance(item, dict):
             continue
         evidence_id = str(item.get("evidence_id") or "").strip()
         source = known.get(evidence_id)
-        if not evidence_id or source is None or evidence_id in seen:
+        if not evidence_id or source is None:
             continue
-        seen.add(evidence_id)
-        kept.append(
-            {
+        resource_id = str(source.get("resource_id") or "").strip()
+        resource_type = str(source.get("resource_type") or "").strip()
+        key = (
+            (resource_type, resource_id)
+            if resource_id
+            else ("evidence", evidence_id)
+        )
+        quote = str(item.get("quote") or source.get("quote") or "")[:QUOTE_CHARS]
+        existing = by_resource.get(key)
+        if existing is not None:
+            if evidence_id not in existing["evidence_ids"]:
+                existing["evidence_ids"].append(evidence_id)
+            if quote and quote not in existing["quotes"]:
+                existing["quotes"].append(quote)
+            continue
+        citation = {
                 "evidence_id": evidence_id,
-                "quote": str(item.get("quote") or source.get("quote") or "")[
-                    :QUOTE_CHARS
-                ],
+                "evidence_ids": [evidence_id],
+                "quote": quote,
+                "quotes": [quote] if quote else [],
                 "resource_id": source.get("resource_id"),
                 "resource_type": source.get("resource_type"),
                 "title": source.get("title"),
@@ -1123,8 +1136,9 @@ def _known_knowledge_citations(
                 "conversation_platform": source.get("conversation_platform"),
                 "sent_at": source.get("sent_at"),
                 "position": source.get("position"),
-            }
-        )
+        }
+        kept.append(citation)
+        by_resource[key] = citation
     return kept
 
 

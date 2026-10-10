@@ -688,7 +688,7 @@ class RAGRetrievalService:
                     min_mount_confidence=(
                         request.min_mount_confidence
                         if request.min_mount_confidence is not None
-                        else 0.65
+                        else settings.tree_min_mount_confidence
                     ),
                     residual_query=request.query,
                 ),
@@ -703,7 +703,11 @@ class RAGRetrievalService:
                 occurred_after=request.occurred_after,
                 occurred_before=request.occurred_before,
                 top_k=request.top_k,
-                min_mount_confidence=request.min_mount_confidence,
+                min_mount_confidence=(
+                    request.min_mount_confidence
+                    if request.min_mount_confidence is not None
+                    else settings.tree_min_mount_confidence
+                ),
                 allow_llm=request.locate_allow_llm,
             )
         )
