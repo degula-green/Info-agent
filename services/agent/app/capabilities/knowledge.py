@@ -33,7 +33,7 @@ ATTACHMENT_EXTENSIONS = {
 
 
 class KnowledgeToolUnavailable(RuntimeError):
-    pass
+    classification = "retryable_error"
 
 
 class SearchSourcesInput(BaseModel):

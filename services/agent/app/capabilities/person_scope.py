@@ -37,7 +37,7 @@ CONTENT_RESOURCE_BATCH = 100
 
 
 class PersonScopeUnavailable(RuntimeError):
-    pass
+    classification = "retryable_error"
 
 
 def resolve_person(
