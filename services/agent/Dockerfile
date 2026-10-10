@@ -16,7 +16,8 @@ RUN pip install --no-cache-dir \
     "uvicorn[standard]==0.34.0" \
     "minio>=7.2.0,<8" \
     "httpx>=0.27,<1" \
-    "python-multipart>=0.0.20,<1"
+    "python-multipart>=0.0.20,<1" \
+    "python-docx>=1.2.0"
 
 COPY app ./app
 COPY worker.py knowledge_worker.py worker_supervisor.py ./
