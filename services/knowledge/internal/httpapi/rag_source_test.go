@@ -53,7 +53,7 @@ func readySourceRouter(t *testing.T) (*gin.Engine, string, *repository.MemorySto
 	if _, err := repo.TryMarkKnowledgeReady(ctx, item.ID, "source-trace"); err != nil {
 		t.Fatal(err)
 	}
-	cfg := config.Config{InternalServiceToken: "rag-token", MaxAttachmentBytes: 1024}
+	cfg := config.Config{InternalServiceToken: "agent-token", RAGServiceToken: "rag-token", MaxAttachmentBytes: 1024}
 	svc := service.New(repo, kv.NewMemory(), nil, nil, nil, nil, cfg)
 	app := &App{Service: svc, Config: cfg}
 	return NewRouterWithApp(app), item.ID, repo
@@ -150,6 +150,9 @@ func TestRAGResultCallbackAuthenticatesAndProtectsState(t *testing.T) {
 	payload := ragResultPayload(eventID, jobID, "processing", 1, 2)
 	if result := postRAGResult(t, router, itemID, "", "rag", payload); result.Code != http.StatusUnauthorized {
 		t.Fatalf("missing callback token returned %d: %s", result.Code, result.Body.String())
+	}
+	if result := postRAGResult(t, router, itemID, "agent-token", "rag", payload); result.Code != http.StatusUnauthorized {
+		t.Fatalf("agent token authorized a RAG callback: %d: %s", result.Code, result.Body.String())
 	}
 	if result := postRAGResult(t, router, itemID, "rag-token", "worker", payload); result.Code != http.StatusForbidden {
 		t.Fatalf("wrong callback caller returned %d: %s", result.Code, result.Body.String())
