@@ -4,6 +4,7 @@ from typing import Any
 
 from app.capabilities.person import PersonQueryCapability, PersonQueryInput
 from app.capabilities.person_scope import mention_anchors, usable_person_name
+from app.infrastructure.knowledge.client import KnowledgeUnavailable
 from app.kernel.execution_context import ExecutionContext, bind_execution_context
 from app.planning.knowledge import classify_person_question
 from app.providers.person_facts import PersonFact
@@ -105,6 +106,11 @@ class _Knowledge:
         return {"subject_name": "小李", "matches": self.matches}
 
 
+class _UnavailableKnowledge:
+    def resolve_person(self, **kwargs):
+        raise KnowledgeUnavailable("knowledge unavailable")
+
+
 class _Provider:
     def compose(self, question, evidence, **kwargs):
         return type(
@@ -146,6 +152,19 @@ def test_classify_person_question_extracts_name() -> None:
     )
     assert classify_person_question("青云官网是什么") is None
     assert classify_person_question("张三发过哪些文件") is None
+
+
+def test_person_query_falls_back_to_content_when_person_lookup_is_unavailable() -> None:
+    rag = _RAG()
+    capability = PersonQueryCapability(rag, _UnavailableKnowledge(), _Provider())
+
+    with bind_execution_context(_context()):
+        output = capability.execute(
+            PersonQueryInput(name="小李", question="小李最近的任务是什么")
+        )
+
+    assert output["coverage"]["path"] == "generic_fallback"
+    assert rag.content_calls
 
 
 def test_classify_person_question_accepts_who_is_and_profile_intro() -> None:

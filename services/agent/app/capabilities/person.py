@@ -163,8 +163,11 @@ class PersonQueryCapability:
                 request_id=context.request_id,
                 trace_id=context.trace_id,
             )
-        except PersonScopeUnavailable as exc:
-            raise PersonQueryUnavailable("person lookup is unavailable") from exc
+        except PersonScopeUnavailable:
+            # Person resolution is an optimization, not the only retrieval
+            # path. If Knowledge is temporarily unavailable, keep the turn
+            # useful by falling back to generic content search.
+            return self._fallback(context, arguments, arguments.name)
         if not matches:
             return self._fallback(context, arguments, subject)
         if len(matches) > 1:
