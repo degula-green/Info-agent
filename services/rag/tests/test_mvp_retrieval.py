@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+import threading
 import unittest
 from dataclasses import replace
 
@@ -137,6 +138,42 @@ class _ProtectedIndexer(_Indexer):
             for item in self.protected_variants
             if item.source.get("knowledge_item_id") in knowledge_item_ids
         ]
+
+
+class _BarrierAuthorization(_Authorization):
+    def __init__(self, barrier: threading.Barrier):
+        super().__init__()
+        self.barrier = barrier
+
+    def search_scope(self, **kwargs):
+        self.barrier.wait(timeout=2)
+        return super().search_scope(**kwargs)
+
+
+class _BarrierEmbedding(_Embedding):
+    def __init__(self, barrier: threading.Barrier):
+        super().__init__()
+        self.barrier = barrier
+
+    def embed(self, texts):
+        self.barrier.wait(timeout=2)
+        return super().embed(texts)
+
+
+class _BarrierIndexer(_Indexer):
+    def __init__(self, barrier: threading.Barrier):
+        super().__init__()
+        self.barrier = barrier
+
+    def search_bm25(self, request, **kwargs):
+        values = super().search_bm25(request, **kwargs)
+        self.barrier.wait(timeout=2)
+        return values
+
+    def search_knn(self, request, vector, **kwargs):
+        values = super().search_knn(request, vector, **kwargs)
+        self.barrier.wait(timeout=2)
+        return values
 
 
 class _RecordingElasticsearch:
@@ -386,6 +423,44 @@ class RetrievalTests(unittest.TestCase):
         self.assertEqual(response.diagnostics["resolved_entity_count"], 0)
         self.assertEqual(embedding.calls, [])
         self.assertEqual([call[0] for call in indexer.calls], ["bm25"])
+
+    def test_authorization_and_embedding_run_in_parallel(self) -> None:
+        barrier = threading.Barrier(2)
+        service = RAGRetrievalService(
+            repository=InMemoryRagMVPRepository(),
+            indexer=_Indexer(),
+            embedding=_BarrierEmbedding(barrier),
+            authorization=_BarrierAuthorization(barrier),
+        )
+
+        response = service.search(SearchRequest(
+            query="并行检索",
+            user_id="user-1",
+            scope_type="organization",
+            scope_id="org-1",
+            entry="global",
+        ))
+
+        self.assertEqual(response.diagnostics["effective_execution_path"], "traditional")
+
+    def test_bm25_and_knn_run_in_parallel(self) -> None:
+        barrier = threading.Barrier(2)
+        service = RAGRetrievalService(
+            repository=InMemoryRagMVPRepository(),
+            indexer=_BarrierIndexer(barrier),
+            embedding=_Embedding(),
+            authorization=_Authorization(),
+        )
+
+        response = service.search(SearchRequest(
+            query="并行召回",
+            user_id="user-1",
+            scope_type="organization",
+            scope_id="org-1",
+            entry="global",
+        ))
+
+        self.assertEqual(response.diagnostics["effective_execution_path"], "traditional")
 
     def test_the_tree_entry_reports_no_match_instead_of_falling_back(self) -> None:
         # Empty registry: the tree surface has nothing to narrow to. It says so
