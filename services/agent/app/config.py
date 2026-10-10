@@ -164,6 +164,14 @@ class Settings:
         "RAG_AGENT_METADATA_TOOLS_ENABLED",
         "rag_AGENT_METADATA_TOOLS_ENABLED",
     )
+    # "content" keeps the current Agent knowledge path. "tree_first" asks the
+    # Knowledge planner to use the entity-scoped tree endpoint before falling
+    # back to traditional content retrieval.
+    knowledge_retrieval_mode: str = _text(
+        "content",
+        "AGENT_KNOWLEDGE_RETRIEVAL_MODE",
+        "agent_KNOWLEDGE_RETRIEVAL_MODE",
+    )
     default_timezone: str = _text(
         "Asia/Shanghai", "AGENT_DEFAULT_TIMEZONE", "agent_DEFAULT_TIMEZONE"
     )

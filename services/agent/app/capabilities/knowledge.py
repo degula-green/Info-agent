@@ -17,6 +17,7 @@ from app.kernel.models import (
 
 SEARCH_SOURCES_NAME = "knowledge.search_sources"
 SEARCH_CONTENT_NAME = "knowledge.search_content"
+SEARCH_TREE_NAME = "knowledge.search_tree"
 KNOWLEDGE_ANSWER_NAME = "knowledge.answer"
 
 MAX_ANSWER_CHUNKS = 50
@@ -125,6 +126,14 @@ class SearchContentPlanInput(BaseModel):
     top_k: int = Field(default=10, ge=1, le=50)
 
 
+class SearchTreeInput(SearchContentInput):
+    fallback_to_content: bool = True
+
+
+class SearchTreePlanInput(SearchContentPlanInput):
+    fallback_to_content: bool = True
+
+
 class ContentChunk(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -166,6 +175,14 @@ class SearchContentOutput(BaseModel):
     metadata_coverage: str
 
 
+class SearchTreeOutput(SearchContentOutput):
+    retrieval_path: str = "tree"
+    tree_mode: str = "tree"
+    fallback_reason: str | None = None
+    entity_ids: list[str] = Field(default_factory=list)
+    locate_ms: float = 0.0
+
+
 class KnowledgeAnswerInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -194,7 +211,10 @@ class KnowledgeAnswerPlanInput(BaseModel):
     timezone: str | None = Field(default=None, max_length=64)
     results_ref: StepOutputRef | None = Field(
         default=None,
-        description="引用更早 knowledge.search_content 步骤输出的 results",
+        description=(
+            "引用更早 knowledge.search_content 或 knowledge.search_tree "
+            "步骤输出的 results"
+        ),
     )
     sources_ref: StepOutputRef | None = Field(
         default=None,
@@ -373,6 +393,107 @@ class KnowledgeSearchContentCapability:
         return output.model_dump()
 
 
+class KnowledgeSearchTreeCapability:
+    descriptor = CapabilityDescriptor(
+        name=SEARCH_TREE_NAME,
+        description=(
+            "按实体范围检索知识库中的具体内容片段（只读）。"
+            "适合已经出现项目、组织或人名的问题；树没有命中时可按参数回退传统检索。"
+        ),
+        input_schema=SearchTreeInput.model_json_schema(),
+        planner_input_schema=SearchTreePlanInput.model_json_schema(),
+        input_bindings=[
+            CapabilityInputBinding(
+                planner_argument="resource_ids_ref",
+                runtime_argument="resource_ids",
+                source_capability=SEARCH_SOURCES_NAME,
+                source_output="resource_ids",
+            )
+        ],
+        output_schema=SearchTreeOutput.model_json_schema(),
+        risk_level="read_only",
+        side_effect=False,
+        requires_approval=False,
+        idempotent=True,
+        timeout_seconds=30,
+    )
+
+    def __init__(
+        self,
+        client: RAGClient,
+        content_capability: KnowledgeSearchContentCapability,
+        *,
+        min_answer_score: float = 0.0,
+    ) -> None:
+        self.client = client
+        self.content_capability = content_capability
+        self.min_answer_score = max(float(min_answer_score), 0.0)
+
+    def validate(self, arguments: dict[str, Any]) -> SearchTreeInput:
+        return SearchTreeInput.model_validate(arguments)
+
+    def execute(self, arguments: SearchTreeInput) -> dict[str, Any]:
+        context = current_execution_context()
+        requests = _scope_requests(
+            owner_user_id=context.owner_user_id,
+            organization_id=context.organization_id,
+            include_personal=arguments.include_personal,
+        )
+        body = {
+            "query": arguments.query,
+            "resource_ids": arguments.resource_ids,
+            "sender_ids": arguments.sender_ids,
+            "conversation_ids": arguments.conversation_ids,
+            "content_contains": arguments.content_contains,
+            "knowledge_base_ids": arguments.knowledge_base_ids,
+            "top_k": arguments.top_k,
+            "include_protected": True,
+        }
+        responses = _parallel_scope_calls(
+            requests,
+            lambda scope: self.client.search_tree(
+                {**body, **scope},
+                user_id=context.owner_user_id,
+                organization_id=context.organization_id,
+                request_id=context.request_id,
+                trace_id=context.trace_id,
+            ),
+        )
+        merged = _merge_tree_content(
+            responses,
+            limit=arguments.top_k,
+            min_score=self.min_answer_score,
+        )
+        tree = _tree_diagnostics(responses)
+        if merged or not arguments.fallback_to_content:
+            return _tree_output(
+                merged,
+                responses=responses,
+                diagnostics=tree,
+                retrieval_path="tree",
+                summary=_content_summary(merged, arguments),
+            ).model_dump()
+
+        fallback_arguments = SearchContentInput.model_validate(
+            arguments.model_dump(exclude={"fallback_to_content"})
+        )
+        fallback = self.content_capability.execute(fallback_arguments)
+        return _tree_output(
+            [ContentResult.model_validate(item) for item in fallback["results"]],
+            responses=responses,
+            diagnostics=tree,
+            retrieval_path="traditional_fallback",
+            has_more=bool(fallback.get("has_more")),
+            metadata_coverage=str(
+                fallback.get("metadata_coverage") or tree["metadata_coverage"]
+            ),
+            summary=(
+                f"树检索未命中（{tree.get('fallback_reason') or 'empty_scope'}），"
+                "已回退传统检索"
+            ),
+        ).model_dump()
+
+
 class KnowledgeAnswerCapability:
     descriptor = CapabilityDescriptor(
         name=KNOWLEDGE_ANSWER_NAME,
@@ -387,6 +508,7 @@ class KnowledgeAnswerCapability:
                 planner_argument="results_ref",
                 runtime_argument="results",
                 source_capability=SEARCH_CONTENT_NAME,
+                source_capabilities=[SEARCH_CONTENT_NAME, SEARCH_TREE_NAME],
                 source_output="results",
             ),
         ],
@@ -643,6 +765,183 @@ def _merge_content(
     return sorted(results, key=lambda item: item.best_score, reverse=True)[:limit]
 
 
+def _merge_tree_content(
+    responses: list[dict[str, Any]],
+    *,
+    limit: int,
+    min_score: float = 0.0,
+) -> list[ContentResult]:
+    """Adapt the tree endpoint's legacy chunk rows to the content contract."""
+    grouped: dict[str, dict[str, Any]] = {}
+    for response in responses:
+        for raw in response.get("items") or []:
+            if not isinstance(raw, dict):
+                continue
+            source = raw.get("source") if isinstance(raw.get("source"), dict) else {}
+            resource_id = _text(raw.get("resource_id") or source.get("resource_id"))
+            resource_type = _text(
+                raw.get("resource_type") or source.get("resource_type")
+            )
+            chunk_id = _text(raw.get("chunk_id"))
+            score = float(raw.get("best_score") or raw.get("score") or 0)
+            if not resource_id or not chunk_id or score < min_score:
+                continue
+            key = ":".join(
+                (
+                    resource_type,
+                    resource_id,
+                    str(raw.get("content_version") or ""),
+                )
+            )
+            sender = raw.get("sender") if isinstance(raw.get("sender"), dict) else {}
+            conversation = (
+                raw.get("conversation")
+                if isinstance(raw.get("conversation"), dict)
+                else {}
+            )
+            header = (
+                raw.get("context_header")
+                if isinstance(raw.get("context_header"), dict)
+                else {}
+            )
+            item = grouped.setdefault(
+                key,
+                {
+                    "resource_id": resource_id,
+                    "resource_type": resource_type,
+                    "title": _text(
+                        raw.get("title")
+                        or raw.get("file_name")
+                        or source.get("title")
+                        or source.get("file_name")
+                        or header.get("title")
+                        or header.get("file_name")
+                    ),
+                    "sender_name": _text(
+                        raw.get("sender_display_name")
+                        or sender.get("name")
+                        or source.get("sender_display_name")
+                    ),
+                    "conversation_id": _text(
+                        raw.get("source_conversation_id")
+                        or conversation.get("id")
+                        or source.get("source_conversation_id")
+                    ),
+                    "conversation_name": _text(
+                        raw.get("source_conversation_name")
+                        or conversation.get("name")
+                        or source.get("source_conversation_name")
+                    ),
+                    "conversation_type": _text(
+                        raw.get("source_conversation_type")
+                        or conversation.get("type")
+                        or source.get("source_conversation_type")
+                    ),
+                    "conversation_platform": _text(
+                        raw.get("source_platform")
+                        or conversation.get("platform")
+                        or source.get("platform")
+                    ),
+                    "sent_at": _text(raw.get("sent_at") or source.get("sent_at")),
+                    "best_score": score,
+                    "chunks": {},
+                },
+            )
+            item["best_score"] = max(float(item["best_score"]), score)
+            item["chunks"].setdefault(
+                chunk_id,
+                {
+                    "chunk_id": chunk_id,
+                    "text": str(raw.get("content") or raw.get("text") or ""),
+                    "score": score,
+                    "score_type": str(raw.get("score_type") or "rrf"),
+                    "position": raw.get("position") or raw.get("source_locator"),
+                },
+            )
+
+    results: list[ContentResult] = []
+    for item in grouped.values():
+        chunks = sorted(
+            item.pop("chunks").values(),
+            key=lambda chunk: chunk["score"],
+            reverse=True,
+        )[:3]
+        if not chunks:
+            continue
+        results.append(
+            ContentResult(
+                **item,
+                score_type="rrf",
+                matched_chunk_count=len(chunks),
+                chunks=[ContentChunk(**chunk) for chunk in chunks],
+            )
+        )
+    return sorted(results, key=lambda item: item.best_score, reverse=True)[:limit]
+
+
+def _tree_diagnostics(responses: list[dict[str, Any]]) -> dict[str, Any]:
+    diagnostics = [
+        response.get("diagnostics")
+        for response in responses
+        if isinstance(response.get("diagnostics"), dict)
+    ]
+    first = diagnostics[0] if diagnostics else {}
+    entity_ids: list[str] = []
+    for item in diagnostics:
+        entity_scope = item.get("entity_scope")
+        values = (
+            entity_scope.get("entity_ids")
+            if isinstance(entity_scope, dict)
+            else None
+        )
+        for entity_id in values or []:
+            if entity_id not in entity_ids:
+                entity_ids.append(str(entity_id))
+    return {
+        "tree_mode": str(first.get("tree_mode") or "tree"),
+        "effective_execution_path": str(
+            first.get("effective_execution_path") or "tree"
+        ),
+        "fallback_reason": first.get("fallback_reason"),
+        "entity_ids": entity_ids,
+        "locate_ms": max(
+            (float(item.get("locate_ms") or 0) for item in diagnostics),
+            default=0.0,
+        ),
+        "metadata_coverage": str(first.get("metadata_coverage") or "complete"),
+    }
+
+
+def _tree_output(
+    results: list[ContentResult],
+    *,
+    responses: list[dict[str, Any]],
+    diagnostics: dict[str, Any],
+    retrieval_path: str,
+    has_more: bool | None = None,
+    metadata_coverage: str | None = None,
+    summary: str,
+) -> SearchTreeOutput:
+    return SearchTreeOutput(
+        results=results,
+        evidence=_answer_evidence(results),
+        returned_source_count=len(results),
+        returned_chunk_count=sum(len(item.chunks) for item in results),
+        has_more=(
+            any(bool(item.get("has_more")) for item in responses)
+            if has_more is None
+            else has_more
+        ),
+        summary=summary,
+        metadata_coverage=metadata_coverage or diagnostics["metadata_coverage"],
+        retrieval_path=retrieval_path,
+        tree_mode=diagnostics["tree_mode"],
+        fallback_reason=diagnostics["fallback_reason"],
+        entity_ids=diagnostics["entity_ids"],
+        locate_ms=diagnostics["locate_ms"],
+    )
+
+
 def _attachment_extensions(values: list[str]) -> list[str]:
     extensions: list[str] = []
     for value in values:
@@ -799,21 +1098,34 @@ def _known_knowledge_citations(
         if isinstance(item, dict) and item.get("evidence_id")
     }
     kept: list[dict[str, Any]] = []
-    seen: set[str] = set()
+    by_resource: dict[tuple[str, str], dict[str, Any]] = {}
     for item in citations or []:
         if not isinstance(item, dict):
             continue
         evidence_id = str(item.get("evidence_id") or "").strip()
         source = known.get(evidence_id)
-        if not evidence_id or source is None or evidence_id in seen:
+        if not evidence_id or source is None:
             continue
-        seen.add(evidence_id)
-        kept.append(
-            {
+        resource_id = str(source.get("resource_id") or "").strip()
+        resource_type = str(source.get("resource_type") or "").strip()
+        key = (
+            (resource_type, resource_id)
+            if resource_id
+            else ("evidence", evidence_id)
+        )
+        quote = str(item.get("quote") or source.get("quote") or "")[:QUOTE_CHARS]
+        existing = by_resource.get(key)
+        if existing is not None:
+            if evidence_id not in existing["evidence_ids"]:
+                existing["evidence_ids"].append(evidence_id)
+            if quote and quote not in existing["quotes"]:
+                existing["quotes"].append(quote)
+            continue
+        citation = {
                 "evidence_id": evidence_id,
-                "quote": str(item.get("quote") or source.get("quote") or "")[
-                    :QUOTE_CHARS
-                ],
+                "evidence_ids": [evidence_id],
+                "quote": quote,
+                "quotes": [quote] if quote else [],
                 "resource_id": source.get("resource_id"),
                 "resource_type": source.get("resource_type"),
                 "title": source.get("title"),
@@ -824,8 +1136,9 @@ def _known_knowledge_citations(
                 "conversation_platform": source.get("conversation_platform"),
                 "sent_at": source.get("sent_at"),
                 "position": source.get("position"),
-            }
-        )
+        }
+        kept.append(citation)
+        by_resource[key] = citation
     return kept
 
 

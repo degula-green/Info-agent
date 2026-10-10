@@ -28,6 +28,17 @@ class RAGClient(Protocol):
     ) -> dict[str, Any]:
         ...
 
+    def search_tree(
+        self,
+        body: dict[str, Any],
+        *,
+        user_id: str,
+        organization_id: str | None,
+        request_id: str,
+        trace_id: str,
+    ) -> dict[str, Any]:
+        ...
+
     def export_scope(
         self,
         body: dict[str, Any],
@@ -106,6 +117,24 @@ class HttpRAGClient:
     ) -> dict[str, Any]:
         return self._post(
             "/api/v1/search/content",
+            body,
+            user_id=user_id,
+            organization_id=organization_id,
+            request_id=request_id,
+            trace_id=trace_id,
+        )
+
+    def search_tree(
+        self,
+        body: dict[str, Any],
+        *,
+        user_id: str,
+        organization_id: str | None,
+        request_id: str,
+        trace_id: str,
+    ) -> dict[str, Any]:
+        return self._post(
+            "/api/v1/search/tree",
             body,
             user_id=user_id,
             organization_id=organization_id,

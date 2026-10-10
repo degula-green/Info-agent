@@ -380,8 +380,8 @@ class RetrievalTests(unittest.TestCase):
         self.assertEqual(indexer.calls, [])
 
     def test_the_effective_mount_threshold_reaches_the_indexer(self) -> None:
-        # The caller left min_mount_confidence unset, so the locator's default
-        # (0.65) is the effective value. Passing the raw request field through
+        # The caller left min_mount_confidence unset, so the configured tree
+        # mount floor is the effective value. Passing the raw request field through
         # would leave the ES filter with None and let every mount in,
         # regardless of confidence.
         repository = InMemoryRagMVPRepository()
@@ -417,7 +417,8 @@ class RetrievalTests(unittest.TestCase):
 
         self.assertTrue(indexer.requests)
         self.assertEqual(
-            {request.min_mount_confidence for request in indexer.requests}, {0.65}
+            {request.min_mount_confidence for request in indexer.requests},
+            {settings.tree_min_mount_confidence},
         )
 
     def test_logical_dedupe_prefers_protected(self) -> None:

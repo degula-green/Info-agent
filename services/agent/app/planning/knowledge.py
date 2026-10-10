@@ -21,6 +21,7 @@ from app.capabilities.knowledge import (
     KNOWLEDGE_ANSWER_NAME,
     SEARCH_CONTENT_NAME,
     SEARCH_SOURCES_NAME,
+    SEARCH_TREE_NAME,
 )
 from app.capabilities.person import PERSON_QUERY_NAME
 from app.capabilities.report import CAPABILITY_NAME as REPORT_WEEKLY_NAME
@@ -592,9 +593,15 @@ def build_knowledge_plan(
     route: KnowledgeRoute,
     task: TaskEnvelope,
     capabilities: list[CapabilityDescriptor],
+    *,
+    retrieval_mode: str = "content",
 ) -> Plan | None:
     registered = {descriptor.name for descriptor in capabilities}
-    if SEARCH_CONTENT_NAME not in registered and SEARCH_SOURCES_NAME not in registered:
+    if (
+        SEARCH_CONTENT_NAME not in registered
+        and SEARCH_SOURCES_NAME not in registered
+        and SEARCH_TREE_NAME not in registered
+    ):
         return None
 
     plan_id = str(uuid4())
@@ -618,14 +625,22 @@ def build_knowledge_plan(
             return None
         sources_step = add_step(SEARCH_SOURCES_NAME, dict(route.source_arguments))
     elif route.mode == "content":
-        if SEARCH_CONTENT_NAME not in registered:
+        content_capability = (
+            SEARCH_TREE_NAME
+            if retrieval_mode == "tree_first" and SEARCH_TREE_NAME in registered
+            else SEARCH_CONTENT_NAME
+        )
+        if content_capability not in registered:
             return None
+        content_arguments = {
+            **route.content_arguments,
+            "restrict_to_resource_ids": False,
+        }
+        if content_capability == SEARCH_TREE_NAME:
+            content_arguments["fallback_to_content"] = True
         search_content_step = add_step(
-            SEARCH_CONTENT_NAME,
-            {
-                **route.content_arguments,
-                "restrict_to_resource_ids": False,
-            },
+            content_capability,
+            content_arguments,
         )
     else:
         if (
@@ -801,6 +816,7 @@ class KnowledgeRoutingPlanner:
         default_timezone: str = "Asia/Shanghai",
         clock: Callable[[], datetime] | None = None,
         subject_extractor=None,
+        retrieval_mode: str = "content",
     ) -> None:
         self.base = base
         self.default_timezone = default_timezone
@@ -808,6 +824,7 @@ class KnowledgeRoutingPlanner:
         # Optional first-class subject reader. When absent, the deterministic
         # readers in understanding.subject keep the historical routes working.
         self.subject_extractor = subject_extractor
+        self.retrieval_mode = str(retrieval_mode or "content").strip().lower()
         self._last_call_count = 0
 
     @property
@@ -1032,7 +1049,12 @@ class KnowledgeRoutingPlanner:
             clock=self.clock,
         )
         if route is not None:
-            plan = build_knowledge_plan(route, task, capabilities)
+            plan = build_knowledge_plan(
+                route,
+                task,
+                capabilities,
+                retrieval_mode=self.retrieval_mode,
+            )
             if plan is not None:
                 self._last_call_count = self._subject_calls()
                 return plan

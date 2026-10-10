@@ -22,6 +22,15 @@ class _StubHttp:
         raise self.error
 
 
+class _RecordingHttp:
+    def __init__(self) -> None:
+        self.calls = []
+
+    def request(self, method, url, **kwargs):
+        self.calls.append((method, url, kwargs))
+        return type("Response", (), {"json": lambda self: {"items": []}})()
+
+
 def _client(error: Exception) -> HttpRAGClient:
     return HttpRAGClient(
         base_url="http://127.0.0.1:8000",
@@ -59,3 +68,26 @@ def test_request_level_rag_failure_stays_permanent() -> None:
         )
 
     assert classify_error(excinfo.value) == "permanent_error"
+
+
+def test_tree_search_uses_the_tree_endpoint() -> None:
+    http = _RecordingHttp()
+    client = HttpRAGClient(
+        base_url="http://127.0.0.1:8000",
+        service_token="token",
+        http=http,
+    )
+
+    client.search_tree(
+        {"query": "青云飞鹏"},
+        user_id="user-1",
+        organization_id="org-1",
+        request_id="request-1",
+        trace_id="trace-1",
+    )
+
+    method, url, kwargs = http.calls[0]
+    assert method == "POST"
+    assert url.endswith("/api/v1/search/tree")
+    assert kwargs["headers"]["X-User-ID"] == "user-1"
+    assert kwargs["headers"]["X-Organization-ID"] == "org-1"

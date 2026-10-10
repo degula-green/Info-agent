@@ -33,6 +33,7 @@ from app.capabilities.knowledge import (
     KnowledgeAnswerCapability,
     KnowledgeSearchContentCapability,
     KnowledgeSearchSourcesCapability,
+    KnowledgeSearchTreeCapability,
 )
 from app.capabilities.person import PERSON_QUERY_NAME, PersonQueryCapability
 from app.capabilities.report import CAPABILITY_NAME as REPORT_WEEKLY_NAME
@@ -388,11 +389,17 @@ def build_registry(
     if knowledge_tools_enabled(settings) and rag_client is not None:
         # Internal knowledge is answered from collected company data. These
         # capabilities are read-only and never ask for approval.
+        content_capability = KnowledgeSearchContentCapability(
+            rag_client,
+            min_answer_score=settings.knowledge_min_answer_score,
+        )
         capabilities.extend(
             [
                 KnowledgeSearchSourcesCapability(rag_client),
-                KnowledgeSearchContentCapability(
+                content_capability,
+                KnowledgeSearchTreeCapability(
                     rag_client,
+                    content_capability,
                     min_answer_score=settings.knowledge_min_answer_score,
                 ),
                 KnowledgeAnswerCapability(
@@ -582,6 +589,7 @@ def build_planner(
             planner,
             default_timezone=settings.default_timezone,
             subject_extractor=subject_extractor,
+            retrieval_mode=settings.knowledge_retrieval_mode,
         )
     return planner
 

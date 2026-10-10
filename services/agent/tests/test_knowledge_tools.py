@@ -9,13 +9,17 @@ from pydantic import ValidationError
 
 from app.capabilities.answer import AnswerComposeCapability
 from app.capabilities.knowledge import (
+    ContentChunk,
+    ContentResult,
     KnowledgeAnswerCapability,
     KnowledgeAnswerInput,
     KnowledgeSearchContentCapability,
     KnowledgeSearchSourcesCapability,
+    KnowledgeSearchTreeCapability,
     KnowledgeToolUnavailable,
     SearchContentInput,
     SearchSourcesInput,
+    SearchTreeInput,
 )
 from app.capabilities.web_research import WebResearchCapability
 from app.container import build_container, build_planner, build_registry
@@ -82,6 +86,9 @@ class _RAG:
     def __init__(self) -> None:
         self.source_calls: list[dict[str, Any]] = []
         self.content_calls: list[dict[str, Any]] = []
+        self.tree_calls: list[dict[str, Any]] = []
+        self.tree_empty = False
+        self.content_has_more = False
 
     @staticmethod
     def _source(resource_id: str, score: float, name: str) -> dict[str, Any]:
@@ -158,8 +165,45 @@ class _RAG:
             ],
             "returned_source_count": 1,
             "returned_chunk_count": 1,
-            "has_more": False,
+            "has_more": self.content_has_more,
             "diagnostics": {"metadata_coverage": "complete"},
+        }
+
+    def search_tree(self, body, **identity):
+        self.tree_calls.append(dict(body))
+        diagnostics = {
+            "tree_mode": "tree",
+            "effective_execution_path": "tree",
+            "fallback_reason": "no_entity_match" if self.tree_empty else None,
+            "entity_scope": {
+                "entity_ids": [] if self.tree_empty else ["entity-1"],
+            },
+            "locate_ms": 12.5,
+            "metadata_coverage": "complete",
+        }
+        if self.tree_empty:
+            return {"items": [], "has_more": False, "diagnostics": diagnostics}
+        return {
+            "items": [
+                {
+                    "chunk_id": "tree-chunk-1",
+                    "resource_id": "resource-tree-1",
+                    "resource_type": "message",
+                    "title": "实体范围内的消息",
+                    "source_conversation_id": "conversation-1",
+                    "source_conversation_name": "aims",
+                    "source_conversation_type": "group",
+                    "source_platform": "feishu",
+                    "sender_display_name": "张三",
+                    "sent_at": "2026-10-01T10:30:00+08:00",
+                    "content": "树检索到的内容",
+                    "score": 0.4,
+                    "score_type": "rrf",
+                    "source_locator": {"paragraph_index": 1},
+                }
+            ],
+            "has_more": False,
+            "diagnostics": diagnostics,
         }
 
 
@@ -243,6 +287,10 @@ def test_tool_inputs_reject_identity_fields() -> None:
                 "organization_id": "other",
             }
         )
+    with pytest.raises(ValidationError):
+        SearchTreeInput.model_validate(
+            {"query": "预算", "user_id": "other"}
+        )
 
 
 def test_content_capability_declares_resource_ids_binding() -> None:
@@ -250,6 +298,58 @@ def test_content_capability_declares_resource_ids_binding() -> None:
     assert descriptor.input_bindings[0].planner_argument == "resource_ids_ref"
     assert descriptor.input_bindings[0].runtime_argument == "resource_ids"
     assert descriptor.input_bindings[0].source_output == "resource_ids"
+
+
+def test_tree_capability_returns_entity_scoped_results() -> None:
+    client = _RAG()
+    content = KnowledgeSearchContentCapability(client)
+    capability = KnowledgeSearchTreeCapability(client, content)
+    with bind_execution_context(context()):
+        output = capability.execute(SearchTreeInput(query="aims 新版app"))
+
+    assert output["retrieval_path"] == "tree"
+    assert output["tree_mode"] == "tree"
+    assert output["entity_ids"] == ["entity-1"]
+    assert output["locate_ms"] == 12.5
+    assert output["returned_source_count"] == 1
+    assert output["evidence"][0]["quote"] == "树检索到的内容"
+    assert client.content_calls == []
+
+
+def test_tree_capability_falls_back_to_traditional_content() -> None:
+    client = _RAG()
+    client.tree_empty = True
+    client.content_has_more = True
+    content = KnowledgeSearchContentCapability(client)
+    capability = KnowledgeSearchTreeCapability(client, content)
+    with bind_execution_context(context()):
+        output = capability.execute(
+            SearchTreeInput(query="新版app什么时候发布", fallback_to_content=True)
+        )
+
+    assert output["retrieval_path"] == "traditional_fallback"
+    assert output["fallback_reason"] == "no_entity_match"
+    assert output["has_more"] is True
+    assert output["returned_source_count"] == 1
+    assert output["evidence"][0]["quote"] == "预算内容"
+    assert len(client.tree_calls) == 1
+    assert len(client.content_calls) == 1
+
+
+def test_tree_capability_can_disable_fallback() -> None:
+    client = _RAG()
+    client.tree_empty = True
+    content = KnowledgeSearchContentCapability(client)
+    capability = KnowledgeSearchTreeCapability(client, content)
+    with bind_execution_context(context()):
+        output = capability.execute(
+            SearchTreeInput(query="新版app什么时候发布", fallback_to_content=False)
+        )
+
+    assert output["retrieval_path"] == "tree"
+    assert output["returned_source_count"] == 0
+    assert output["fallback_reason"] == "no_entity_match"
+    assert client.content_calls == []
 
 
 def test_search_sources_output_binds_into_search_content() -> None:
@@ -290,6 +390,84 @@ def test_search_sources_output_binds_into_search_content() -> None:
     )
 
 
+def test_tree_results_bind_into_knowledge_answer() -> None:
+    descriptors = [
+        KnowledgeSearchTreeCapability.descriptor,
+        KnowledgeAnswerCapability.descriptor,
+    ]
+    plan = Plan(
+        plan_id="plan-1",
+        task_id="task-1",
+        objective="树检索后回答",
+        steps=[
+            PlanStep(
+                step_id="step-1",
+                plan_id="plan-1",
+                order=1,
+                capability="knowledge.search_tree",
+                arguments={"query": "青云飞鹏交付"},
+            ),
+            PlanStep(
+                step_id="step-2",
+                plan_id="plan-1",
+                order=2,
+                capability="knowledge.answer",
+                arguments={
+                    "query": "青云飞鹏交付",
+                    "results_ref": {"step": 1, "output": "results"},
+                },
+            ),
+        ],
+    )
+
+    bound = bind_plan_references(plan, descriptors)
+
+    assert "results_ref" not in bound.steps[1].arguments
+    assert (
+        bound.steps[1].arguments["results"]
+        == "$steps.step-1.output.results"
+    )
+
+
+def test_answer_citations_group_chunks_from_one_resource() -> None:
+    capability = KnowledgeAnswerCapability(_AnswerProvider())
+    output = capability.execute(
+        KnowledgeAnswerInput(
+            query="青云飞鹏官网在讲什么",
+            results=[
+                ContentResult(
+                    resource_id="attachment-1",
+                    resource_type="attachment",
+                    title="青云飞鹏",
+                    best_score=0.9,
+                    matched_chunk_count=2,
+                    chunks=[
+                        ContentChunk(
+                            chunk_id="chunk-1",
+                            text="后端程序运行在服务器上",
+                            score=0.9,
+                        ),
+                        ContentChunk(
+                            chunk_id="chunk-2",
+                            text="用户内容存在服务器上",
+                            score=0.8,
+                        ),
+                    ],
+                )
+            ],
+        )
+    )
+
+    assert len(output["citations"]) == 1
+    citation = output["citations"][0]
+    assert citation["resource_id"] == "attachment-1"
+    assert citation["evidence_ids"] == ["chunk-1", "chunk-2"]
+    assert citation["quotes"] == [
+        "后端程序运行在服务器上",
+        "用户内容存在服务器上",
+    ]
+
+
 def test_knowledge_tools_are_registered_only_when_enabled() -> None:
     disabled = build_registry(
         make_settings(rag_agent_tools_enabled=False),
@@ -305,6 +483,7 @@ def test_knowledge_tools_are_registered_only_when_enabled() -> None:
     )
     assert enabled.find("knowledge.search_sources") is not None
     assert enabled.find("knowledge.search_content") is not None
+    assert enabled.find("knowledge.search_tree") is not None
     assert enabled.find("knowledge.answer") is not None
 
 
@@ -358,6 +537,50 @@ def test_content_question_routes_to_search_content_and_answer() -> None:
         "knowledge.search_content",
         "knowledge.answer",
     ]
+
+
+def test_tree_first_content_question_routes_to_search_tree_and_answer() -> None:
+    route = classify_knowledge_question("采购合同的违约责任是什么？")
+    assert route is not None
+    assert route.mode == "content"
+
+    task = type("Task", (), {"task_id": "task-1"})()
+    plan = build_knowledge_plan(
+        route,
+        task,
+        [
+            KnowledgeSearchTreeCapability.descriptor,
+            KnowledgeAnswerCapability.descriptor,
+        ],
+        retrieval_mode="tree_first",
+    )
+
+    assert plan is not None
+    assert [step.capability for step in plan.steps] == [
+        "knowledge.search_tree",
+        "knowledge.answer",
+    ]
+    assert plan.steps[0].arguments["fallback_to_content"] is True
+
+
+def test_tree_first_routes_aims_server_configuration_to_tree() -> None:
+    route = classify_knowledge_question("aims的服务器配置信息是什么")
+    assert route is not None
+    assert route.mode == "content"
+
+    task = type("Task", (), {"task_id": "task-1"})()
+    plan = build_knowledge_plan(
+        route,
+        task,
+        [
+            KnowledgeSearchTreeCapability.descriptor,
+            KnowledgeAnswerCapability.descriptor,
+        ],
+        retrieval_mode="tree_first",
+    )
+
+    assert plan is not None
+    assert plan.steps[0].capability == "knowledge.search_tree"
     assert plan.steps[1].arguments["results_ref"] == {
         "step": 1,
         "output": "results",
@@ -590,7 +813,9 @@ def test_knowledge_answer_keeps_only_known_enriched_citations() -> None:
     assert output["citations"] == [
         {
             "evidence_id": "chunk-1",
+            "evidence_ids": ["chunk-1"],
             "quote": "预算内容",
+            "quotes": ["预算内容"],
             "resource_id": "resource-1",
             "resource_type": "attachment",
             "title": "预算表.xlsx",

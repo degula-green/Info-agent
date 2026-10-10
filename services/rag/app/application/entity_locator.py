@@ -648,4 +648,4 @@ def _composition(query: str) -> str:
 def _min_mount_confidence(request: LocateRequest) -> float:
     if request.min_mount_confidence is not None:
         return float(request.min_mount_confidence)
-    return 0.65
+    return float(settings.tree_min_mount_confidence)

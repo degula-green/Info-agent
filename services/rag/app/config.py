@@ -372,6 +372,11 @@ class Settings:
     tree_mount_weight: float = _float("RAG_TREE_MOUNT_WEIGHT", 0.5)
     tree_max_entities: int = _int("RAG_TREE_MAX_ENTITIES", 8)
     tree_max_mounts_per_chunk: int = _int("RAG_TREE_MAX_MOUNTS_PER_CHUNK", 8)
+    # Prefer strong window mounts over the weak tier. Weak mounts remain in the
+    # database for diagnostics and can be enabled explicitly per request.
+    tree_min_mount_confidence: float = _float(
+        "RAG_TREE_MIN_MOUNT_CONFIDENCE", 0.85
+    )
     # L4 escalation. Off by default: it puts a model round trip on the query
     # path, so it stays opt-in until the call rate and latency are measured.
     # Base URL / key / model fall back to the extraction model when unset.
