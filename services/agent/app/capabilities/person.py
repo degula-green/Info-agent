@@ -75,7 +75,7 @@ DEFAULT_SELF_PRIVATE_DAYS = 20
 
 
 class PersonQueryUnavailable(RuntimeError):
-    pass
+    classification = "retryable_error"
 
 
 class PersonQueryInput(BaseModel):

@@ -141,7 +141,7 @@ REPORT_QUERY = (
 
 
 class WeeklyReportUnavailable(RuntimeError):
-    pass
+    classification = "retryable_error"
 
 
 class WeeklyReportInput(BaseModel):
