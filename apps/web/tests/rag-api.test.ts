@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { afterEach, test } from 'node:test'
-import { searchGlobal, searchKnowledge } from '../src/api/rag.ts'
+import { searchGlobal, searchKeyword, searchKnowledge } from '../src/api/rag.ts'
 
 const originalFetch = globalThis.fetch
 const originalSessionStorage = Object.getOwnPropertyDescriptor(globalThis, 'sessionStorage')
@@ -34,7 +34,7 @@ test('search fails closed when the current user cannot be resolved, then retries
       ? json({ id: '7d0779ab-9ea4-409e-a51c-842b5b9fb875', email: 'user@example.com', nickname: 'user', status: 'active' })
       : json({ id: 'dev-user' })
     if (url.endsWith('/auth/refresh')) return json({ message: 'authentication required' }, 401)
-    if (url.endsWith('/search/global') || url.endsWith('/search/knowledge')) return json({ items: [{ chunk_id: 'chunk-1', content: 'result' }], diagnostics: { candidate_count: 1, authorized_count: 1 } })
+    if (url.endsWith('/search/global') || url.endsWith('/search/knowledge') || url.endsWith('/search/keyword')) return json({ items: [{ chunk_id: 'chunk-1', content: 'result' }], diagnostics: { candidate_count: 1, authorized_count: 1 } })
     throw new Error(`unexpected request: ${url}`)
   }
 
@@ -53,4 +53,9 @@ test('search fails closed when the current user cannot be resolved, then retries
   const knowledgeCall = calls.find((call) => call.url.endsWith('/search/knowledge'))
   assert.ok(knowledgeCall)
   assert.equal(knowledgeCall.headers.get('X-User-ID'), '7d0779ab-9ea4-409e-a51c-842b5b9fb875')
+
+  await searchKeyword({ query: '2025' })
+  const keywordCall = calls.find((call) => call.url.endsWith('/search/keyword'))
+  assert.ok(keywordCall)
+  assert.equal(keywordCall.headers.get('X-User-ID'), '7d0779ab-9ea4-409e-a51c-842b5b9fb875')
 })

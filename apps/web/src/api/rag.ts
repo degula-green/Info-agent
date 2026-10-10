@@ -95,6 +95,22 @@ export function searchGlobal(input: RagSearchInput) {
   })
 }
 
+export function searchKeyword(input: RagSearchInput) {
+  const knowledgeBaseIds = cleanKnowledgeBaseIds(input.knowledgeBaseIds)
+  return request<RagSearchResponse>('/search/keyword', {
+    method: 'POST',
+    signal: input.signal,
+    body: JSON.stringify({
+      query: input.query,
+      scope_type: input.scopeType || 'organization',
+      organization_id: input.organizationId || undefined,
+      knowledge_base_ids: knowledgeBaseIds.length ? knowledgeBaseIds : undefined,
+      top_k: input.topK ?? 20,
+      include_protected: input.includeProtected ?? true,
+    }),
+  })
+}
+
 export function searchKnowledge(input: RagSearchInput & { knowledgeBaseId?: string; knowledgeBaseIds?: string[] }) {
   const knowledgeBaseIds = cleanKnowledgeBaseIds(input.knowledgeBaseIds, input.knowledgeBaseId)
   if (!knowledgeBaseIds.length) throw new Error('knowledge_base_id is required')

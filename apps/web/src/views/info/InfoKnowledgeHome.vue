@@ -28,7 +28,7 @@
     <div v-if="query.trim()" class="knowledge-search-panel">
       <div class="knowledge-search-panel__summary">
         <strong>{{ searchLoading ? '正在搜索…' : searchResults.length ? `找到 ${searchResults.length} 条结果` : '没有匹配内容' }}</strong>
-        <span>全库检索 · BM25 + 向量</span>
+        <span>快速检索 · 关键词 BM25</span>
       </div>
       <div v-if="searchError" class="knowledge-alert" role="alert"><t-icon name="error-circle" /><span>{{ searchError }}</span></div>
       <div v-else-if="searchLoading" class="knowledge-loading"><t-loading text="正在检索…" /></div>
@@ -120,7 +120,7 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import type { KnowledgeLibraryDTO } from '@/api/info-knowledge'
-import { searchGlobal } from '@/api/rag'
+import { searchKeyword } from '@/api/rag'
 import InfoSearchPreviewDialog from '@/components/InfoSearchPreviewDialog.vue'
 import { useSearchResultNavigation } from '@/composables/useSearchResultNavigation'
 import type { SearchResult } from '@/mock'
@@ -223,7 +223,7 @@ watch(query, (value) => {
     try {
       const scope = await resolveGlobalSearchScope()
       if (seq !== searchSeq) return
-      const response = await searchGlobal({
+      const response = await searchKeyword({
         query: normalized,
         organizationId: scope.organizationId,
         knowledgeBaseIds: scope.knowledgeBaseIds,
