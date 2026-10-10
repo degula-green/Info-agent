@@ -58,6 +58,9 @@ The public API is under `/api/v1`:
 `shadow` computes tree diagnostics while returning the traditional result.
 `tree` returns only the entity-scoped result, or an empty result with a reason;
 the caller decides whether to request traditional retrieval next.
+The deployment default is now `tree`, so every organization can use the tree
+surface. Set `RAG_TREE_MODE=shadow` or `off` to roll back without deleting tree
+data.
 
 ## Boundaries
 

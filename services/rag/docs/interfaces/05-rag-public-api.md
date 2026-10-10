@@ -62,7 +62,7 @@ POST /api/v1/search/tree
 | `global` | BM25 + kNN + RRF |
 | `knowledge` | BM25 + kNN + RRF |
 | `keyword` | 仅 BM25；不生成 embedding、不跑 kNN、不定位树、不扩展附件邻居 |
-| `tree` | 实体范围 + Chunk 检索；默认 shadow，`tree` 模式不回退全库 |
+| `tree` | 实体范围 + Chunk 检索；全局默认 `tree`，不回退全库；可用 `off/shadow` 回滚 |
 
 ### Search Response
 
