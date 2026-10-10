@@ -203,7 +203,7 @@ func registerRAGSourceRoutes(r *gin.Engine, app *App) {
 func ragServiceMiddleware(app *App) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		parts := strings.Fields(c.GetHeader("Authorization"))
-		if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") || app.Config.InternalServiceToken == "" || !hmac.Equal([]byte(parts[1]), []byte(app.Config.InternalServiceToken)) {
+		if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") || app.Config.RAGServiceToken == "" || !hmac.Equal([]byte(parts[1]), []byte(app.Config.RAGServiceToken)) {
 			writeError(c, apperror.Clone(apperror.ErrUnauthorized))
 			c.Abort()
 			return
