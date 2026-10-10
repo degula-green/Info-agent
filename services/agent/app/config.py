@@ -168,7 +168,7 @@ class Settings:
     # Knowledge planner to use the entity-scoped tree endpoint before falling
     # back to traditional content retrieval.
     knowledge_retrieval_mode: str = _text(
-        "content",
+        "tree_first",
         "AGENT_KNOWLEDGE_RETRIEVAL_MODE",
         "agent_KNOWLEDGE_RETRIEVAL_MODE",
     )
