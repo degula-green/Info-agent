@@ -51,6 +51,7 @@ scope_key
 ```text
 POST /api/v1/search/global
 POST /api/v1/search/knowledge
+POST /api/v1/search/keyword
 POST /api/v1/search/tree
 ```
 
@@ -59,8 +60,9 @@ POST /api/v1/search/tree
 | 接口 | 策略 |
 |---|---|
 | `global` | BM25 + kNN + RRF |
-| `knowledge` | BM25 |
-| `tree` | Tree Mode + Chunk 检索，当前默认 shadow |
+| `knowledge` | BM25 + kNN + RRF |
+| `keyword` | 仅 BM25；不生成 embedding、不跑 kNN、不定位树、不扩展附件邻居 |
+| `tree` | 实体范围 + Chunk 检索；默认 shadow，`tree` 模式不回退全库 |
 
 ### Search Response
 

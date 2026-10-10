@@ -28,6 +28,7 @@ from app.schemas.search import (
     AIDocumentBody,
     ContentSearchBody,
     ContextSearchBody,
+    KeywordSearchBody,
     QAConversationBody,
     QATitleBody,
     ScopeSearchBody,
@@ -127,6 +128,22 @@ def knowledge_search(
     request = _request(
         body,
         entry="knowledge",
+        header_user_id=x_user_id,
+        header_organization_id=x_organization_id,
+    )
+    return _search_response(_run_search(request, service))
+
+
+@router.post("/search/keyword")
+def keyword_search(
+    body: KeywordSearchBody,
+    x_user_id: str | None = Header(default=None),
+    x_organization_id: str | None = Header(default=None),
+    service: RAGRetrievalService = Depends(get_retrieval_service),
+) -> dict[str, object]:
+    request = _request(
+        body,
+        entry="keyword",
         header_user_id=x_user_id,
         header_organization_id=x_organization_id,
     )

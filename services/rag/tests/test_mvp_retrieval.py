@@ -48,7 +48,11 @@ class _Embedding:
     model = "test"
     dimensions = 8
 
+    def __init__(self):
+        self.calls = []
+
     def embed(self, texts):
+        self.calls.append(list(texts))
         return [[0.1] * 8 for _ in texts]
 
 
@@ -176,6 +180,17 @@ class RetrievalTests(unittest.TestCase):
             scoped_branches=scoped, tree_reason=None, degraded=[],
         )
         self.assertEqual(path, "tree_shadow")
+        self.assertEqual(effective, global_branches)
+
+        effective, path, reason = select_retrieval_channels(
+            policy="keyword",
+            tree_mode="tree",
+            global_branches=global_branches,
+            scoped_branches=scoped,
+            tree_reason=None,
+            degraded=[],
+        )
+        self.assertEqual((path, reason), ("keyword", None))
         self.assertEqual(effective, global_branches)
 
         # The tree surface reports why it cannot answer instead of substituting.
@@ -344,6 +359,33 @@ class RetrievalTests(unittest.TestCase):
                     )
         finally:
             object.__setattr__(settings, "tree_mode", original)
+
+    def test_keyword_entry_uses_bm25_only(self) -> None:
+        repository = InMemoryRagMVPRepository()
+        indexer = _Indexer()
+        embedding = _Embedding()
+        service = RAGRetrievalService(
+            repository=repository,
+            indexer=indexer,
+            embedding=embedding,
+            authorization=_Authorization(),
+        )
+
+        response = service.search(SearchRequest(
+            query="服务器 配置",
+            user_id="user-1",
+            scope_type="organization",
+            scope_id="org-1",
+            knowledge_base_ids=("kb-1",),
+            entry="keyword",
+        ))
+
+        self.assertEqual(response.diagnostics["channel_policy"], "keyword")
+        self.assertEqual(response.diagnostics["effective_execution_path"], "keyword")
+        self.assertEqual(response.diagnostics["locate_ms"], 0)
+        self.assertEqual(response.diagnostics["resolved_entity_count"], 0)
+        self.assertEqual(embedding.calls, [])
+        self.assertEqual([call[0] for call in indexer.calls], ["bm25"])
 
     def test_the_tree_entry_reports_no_match_instead_of_falling_back(self) -> None:
         # Empty registry: the tree surface has nothing to narrow to. It says so

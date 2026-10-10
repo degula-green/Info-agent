@@ -53,6 +53,12 @@ class ContentSearchBody(SearchBody):
     group_by_source: bool = True
 
 
+class KeywordSearchBody(SearchBody):
+    """Fast lexical-only search; empty query lists the newest matches."""
+
+    pass
+
+
 class ScopeSearchBody(SearchBody):
     """Full-scope export: every chunk in a filter-defined person scope."""
 

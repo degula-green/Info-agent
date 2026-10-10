@@ -61,11 +61,17 @@ class RetrievalResponse:
 # offer, /search/tree returns nothing and a reason. Deciding to ask for
 # traditional retrieval next belongs to the caller (the agent's tool loop).
 TREE_CHANNEL_POLICY = "tree"
+KEYWORD_CHANNEL_POLICY = "keyword"
 DEFAULT_CHANNEL_POLICY = "hybrid"
 
 
 def channel_policy_for(entry: str) -> str:
-    return TREE_CHANNEL_POLICY if str(entry or "") == "tree" else DEFAULT_CHANNEL_POLICY
+    value = str(entry or "")
+    if value == "tree":
+        return TREE_CHANNEL_POLICY
+    if value == "keyword":
+        return KEYWORD_CHANNEL_POLICY
+    return DEFAULT_CHANNEL_POLICY
 
 class RAGRetrievalService:
     def __init__(
@@ -162,7 +168,7 @@ class RAGRetrievalService:
             )
         query_vector: list[float] | None = None
         degraded: list[str] = []
-        if request.entry not in {"knowledge", "sources"}:
+        if request.entry not in {"knowledge", "sources", "keyword"}:
             try:
                 vectors = self.embedding.embed([retrieval_request.query])
                 query_vector = vectors[0] if vectors else None
@@ -287,7 +293,11 @@ class RAGRetrievalService:
             item for item in authorized_anchors
             if item.source.get("resource_type") == "attachment"
         ]
-        if settings.neighbor_radius > 0 and expandable_anchors:
+        if (
+            request.entry != "keyword"
+            and settings.neighbor_radius > 0
+            and expandable_anchors
+        ):
             try:
                 neighbors = self.indexer.search_neighbors(
                     request,
@@ -878,7 +888,12 @@ def select_retrieval_channels(
     nothing depends on the tree being good yet.
     """
     if policy != TREE_CHANNEL_POLICY:
-        return dict(global_branches), "traditional", None
+        path = (
+            "keyword"
+            if policy == KEYWORD_CHANNEL_POLICY
+            else "traditional"
+        )
+        return dict(global_branches), path, None
     if tree_mode == "shadow":
         return dict(global_branches), "tree_shadow", tree_reason
     if tree_reason:
