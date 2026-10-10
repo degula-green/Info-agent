@@ -47,9 +47,11 @@ for name, values in global_branches.items():
 
 ```text
 tree_mode=tree    → 返回实体范围结果；空/失败则返回空 + reason，不替代为传统结果
-tree_mode=shadow  → 照跑树并记录诊断，但返回传统结果（验证期用，默认值）
+tree_mode=shadow  → 照跑树并记录诊断，但返回传统结果（回滚/验证用）
 tree_mode=off     → 返回空 + reason=tree_disabled
 ```
+
+当前部署默认值已切换为 `tree`，所有组织默认可用；`shadow/off` 保留用于回滚。
 
 **服务端不再做回退**：树表面拿不到结果时给出 `fallback_reason`
 （`tree_disabled` / `no_entity_match` / `empty_scope` / `branch_failed` /

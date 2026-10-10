@@ -5,6 +5,7 @@ import logging
 import re
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
@@ -61,11 +62,17 @@ class RetrievalResponse:
 # offer, /search/tree returns nothing and a reason. Deciding to ask for
 # traditional retrieval next belongs to the caller (the agent's tool loop).
 TREE_CHANNEL_POLICY = "tree"
+KEYWORD_CHANNEL_POLICY = "keyword"
 DEFAULT_CHANNEL_POLICY = "hybrid"
 
 
 def channel_policy_for(entry: str) -> str:
-    return TREE_CHANNEL_POLICY if str(entry or "") == "tree" else DEFAULT_CHANNEL_POLICY
+    value = str(entry or "")
+    if value == "tree":
+        return TREE_CHANNEL_POLICY
+    if value == "keyword":
+        return KEYWORD_CHANNEL_POLICY
+    return DEFAULT_CHANNEL_POLICY
 
 class RAGRetrievalService:
     def __init__(
@@ -93,20 +100,6 @@ class RAGRetrievalService:
         started = time.perf_counter()
         request_id = uuid.uuid4().hex
         request = _resolve_time_request(request)
-        scope = self.authorization.search_scope(
-            user_id=request.user_id,
-            scope_type=request.scope_type,
-            scope_id=request.scope_id,
-            resource_parts=("original", "content"),
-        )
-        protected_keys = scope.authorized_protected_object_keys if scope.available else ()
-        if scope.denied:
-            raise AuthorizationDenied("authorization denied")
-        if scope.failed or scope.truncated:
-            raise AuthorizationUnavailable("authorization scope is incomplete")
-        if not scope.available:
-            request = replace(request, include_protected=False)
-            protected_keys = ()
         # Channel policy for this entry, then the rollout state of the tree
         # surface. Traditional entries never call the locator at all.
         policy = channel_policy_for(request.entry)
@@ -118,104 +111,152 @@ class RAGRetrievalService:
         )
         shadow_sample = True
         tree_reason: str | None = None
-        locate = None
-        entity_ids: tuple[str, ...] = ()
         if policy == TREE_CHANNEL_POLICY:
             if tree_mode == "off":
                 tree_reason = "tree_disabled"
-            else:
-                if tree_mode == "shadow":
-                    shadow_sample = shadow_sampled(
-                        scope_type=request.scope_type,
-                        scope_id=request.scope_id,
-                        query=request.query,
-                        sample_rate=settings.tree_shadow_sample_rate,
-                    )
-                if tree_mode == "shadow" and not shadow_sample:
+            elif tree_mode == "shadow":
+                shadow_sample = shadow_sampled(
+                    scope_type=request.scope_type,
+                    scope_id=request.scope_id,
+                    query=request.query,
+                    sample_rate=settings.tree_shadow_sample_rate,
+                )
+                if not shadow_sample:
                     tree_reason = "shadow_not_sampled"
-                else:
-                    locate = self._locate(request, tree_mode=tree_mode, shadow_sample=True)
-                    entity_ids = locate.scope.entity_ids if locate is not None else ()
-                    if not entity_ids:
-                        tree_reason = "no_entity_match"
-        # The unscoped channels run for traditional entries, and for the shadow
-        # phase where the tree is measured but its result is not adopted yet.
-        run_unscoped = policy != TREE_CHANNEL_POLICY or tree_mode == "shadow"
-        run_tree_channels = (
-            policy == TREE_CHANNEL_POLICY
-            and tree_mode in {"shadow", "tree"}
-            and bool(entity_ids)
+
+        needs_embedding = request.entry not in {"knowledge", "sources", "keyword"}
+        executor = ThreadPoolExecutor(max_workers=4)
+        scope_future = executor.submit(
+            self.authorization.search_scope,
+            user_id=request.user_id,
+            scope_type=request.scope_type,
+            scope_id=request.scope_id,
+            resource_parts=("original", "content"),
         )
-        # Strip resolved entity names out of the retrieval text: once the entity
-        # is known, the name only biases BM25 towards chunks that repeat it.
-        retrieval_request = request
-        if locate is not None and locate.scope.residual_query:
-            retrieval_request = replace(request, query=locate.scope.residual_query)
-        if locate is not None and locate.scope.min_mount_confidence:
-            # The locator resolves the effective threshold (request value, else
-            # configuration). Hand that downstream instead of the raw request
-            # field, otherwise a caller who left it unset would get every mount
-            # regardless of confidence.
-            retrieval_request = replace(
-                retrieval_request,
-                min_mount_confidence=locate.scope.min_mount_confidence,
+        locate_future = None
+        if policy == TREE_CHANNEL_POLICY and tree_reason is None:
+            locate_future = executor.submit(
+                self._locate,
+                request,
+                tree_mode=tree_mode,
+                shadow_sample=True,
             )
-        query_vector: list[float] | None = None
-        degraded: list[str] = []
-        if request.entry not in {"knowledge", "sources"}:
-            try:
-                vectors = self.embedding.embed([retrieval_request.query])
-                query_vector = vectors[0] if vectors else None
-            except Exception:
-                degraded.append("embedding_failed")
-        global_branches: dict[str, list[SearchResult]] = {}
-        # Only the tree entry in tree mode skips this: the whole point of the
-        # split is that a tree request does not pay for an unscoped query it is
-        # not going to use.
-        if run_unscoped:
-            try:
-                global_branches["bm25"] = _annotate_branch(
-                    "bm25",
-                    self.indexer.search_bm25(
-                        retrieval_request,
-                        protected_object_keys=protected_keys,
-                    ),
+        embed_future = None
+        if needs_embedding and policy != TREE_CHANNEL_POLICY:
+            embed_future = executor.submit(self.embedding.embed, [request.query])
+
+        try:
+            scope = scope_future.result()
+            protected_keys = (
+                scope.authorized_protected_object_keys if scope.available else ()
+            )
+            if scope.denied:
+                raise AuthorizationDenied("authorization denied")
+            if scope.failed or scope.truncated:
+                raise AuthorizationUnavailable("authorization scope is incomplete")
+            if not scope.available:
+                request = replace(request, include_protected=False)
+                protected_keys = ()
+
+            locate = locate_future.result() if locate_future is not None else None
+            entity_ids = locate.scope.entity_ids if locate is not None else ()
+            if (
+                policy == TREE_CHANNEL_POLICY
+                and tree_reason is None
+                and not entity_ids
+            ):
+                tree_reason = "no_entity_match"
+
+            # The unscoped channels run for traditional entries, and for the
+            # shadow phase where the tree is measured but not adopted.
+            run_unscoped = policy != TREE_CHANNEL_POLICY or tree_mode == "shadow"
+            run_tree_channels = (
+                policy == TREE_CHANNEL_POLICY
+                and tree_mode in {"shadow", "tree"}
+                and bool(entity_ids)
+            )
+            retrieval_request = request
+            if locate is not None and locate.scope.residual_query:
+                retrieval_request = replace(request, query=locate.scope.residual_query)
+            if locate is not None and locate.scope.min_mount_confidence:
+                retrieval_request = replace(
+                    retrieval_request,
+                    min_mount_confidence=locate.scope.min_mount_confidence,
+                )
+
+            query_vector: list[float] | None = None
+            degraded: list[str] = []
+            if needs_embedding:
+                try:
+                    vectors = (
+                        embed_future.result()
+                        if embed_future is not None
+                        else executor.submit(
+                            self.embedding.embed, [retrieval_request.query]
+                        ).result()
+                    )
+                    query_vector = vectors[0] if vectors else None
+                except Exception:
+                    degraded.append("embedding_failed")
+
+            branch_futures = {}
+            if run_unscoped:
+                branch_futures["bm25"] = executor.submit(
+                    self.indexer.search_bm25,
+                    retrieval_request,
+                    protected_object_keys=protected_keys,
                 )
                 if query_vector is not None:
-                    global_branches["knn"] = _annotate_branch(
-                        "knn",
-                        self.indexer.search_knn(
-                            retrieval_request,
-                            query_vector,
-                            protected_object_keys=protected_keys,
-                        ),
-                    )
-            except Exception as exc:
-                raise SearchUnavailable("Elasticsearch retrieval failed") from exc
-        scoped_branches: dict[str, list[SearchResult]] = {}
-        if run_tree_channels:
-            try:
-                scoped_branches["branch_bm25"] = _annotate_branch(
-                    "bm25",
-                    self.indexer.search_bm25(
+                    branch_futures["knn"] = executor.submit(
+                        self.indexer.search_knn,
                         retrieval_request,
+                        query_vector,
+                        protected_object_keys=protected_keys,
+                    )
+            if run_tree_channels:
+                branch_futures["branch_bm25"] = executor.submit(
+                    self.indexer.search_bm25,
+                    retrieval_request,
+                    entity_ids=entity_ids,
+                    protected_object_keys=protected_keys,
+                )
+                if query_vector is not None:
+                    branch_futures["branch_knn"] = executor.submit(
+                        self.indexer.search_knn,
+                        retrieval_request,
+                        query_vector,
                         entity_ids=entity_ids,
                         protected_object_keys=protected_keys,
-                    ),
-                )
-                if query_vector is not None:
-                    scoped_branches["branch_knn"] = _annotate_branch(
-                        "knn",
-                        self.indexer.search_knn(
-                            retrieval_request,
-                            query_vector,
-                            entity_ids=entity_ids,
-                            protected_object_keys=protected_keys,
-                        ),
                     )
-            except Exception:
+
+            global_branches: dict[str, list[SearchResult]] = {}
+            scoped_branches: dict[str, list[SearchResult]] = {}
+            global_failed = False
+            scoped_failed = False
+            for name, future in branch_futures.items():
+                try:
+                    values = future.result()
+                except Exception:
+                    if name.startswith("branch_"):
+                        scoped_failed = True
+                    else:
+                        global_failed = True
+                    continue
+                annotated = _annotate_branch(
+                    "bm25" if name.endswith("bm25") else "knn",
+                    values,
+                )
+                if name.startswith("branch_"):
+                    scoped_branches[name] = annotated
+                else:
+                    global_branches[name] = annotated
+            if global_failed:
+                raise SearchUnavailable("Elasticsearch retrieval failed")
+            if scoped_failed:
                 degraded.append("branch_failed")
                 scoped_branches = {}
+        finally:
+            executor.shutdown(wait=True)
         effective, execution_path, fallback_reason = select_retrieval_channels(
             policy=policy,
             tree_mode=tree_mode,
@@ -287,7 +328,11 @@ class RAGRetrievalService:
             item for item in authorized_anchors
             if item.source.get("resource_type") == "attachment"
         ]
-        if settings.neighbor_radius > 0 and expandable_anchors:
+        if (
+            request.entry != "keyword"
+            and settings.neighbor_radius > 0
+            and expandable_anchors
+        ):
             try:
                 neighbors = self.indexer.search_neighbors(
                     request,
@@ -878,7 +923,12 @@ def select_retrieval_channels(
     nothing depends on the tree being good yet.
     """
     if policy != TREE_CHANNEL_POLICY:
-        return dict(global_branches), "traditional", None
+        path = (
+            "keyword"
+            if policy == KEYWORD_CHANNEL_POLICY
+            else "traditional"
+        )
+        return dict(global_branches), path, None
     if tree_mode == "shadow":
         return dict(global_branches), "tree_shadow", tree_reason
     if tree_reason:

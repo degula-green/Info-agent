@@ -6,11 +6,20 @@ from app.application.rag_service import RetrievalResponse
 from app.config import settings
 from app.domain.rag import SearchResult
 from app.routers import api
-from app.schemas.search import ContentSearchBody, SearchBody, SourceSearchBody
+from app.schemas.search import (
+    ContentSearchBody,
+    KeywordSearchBody,
+    SearchBody,
+    SourceSearchBody,
+)
 
 
 class _Service:
+    def __init__(self):
+        self.requests = []
+
     def search(self, request):
+        self.requests.append(request)
         return RetrievalResponse(
             request_id="request-1",
             results=[SearchResult(
@@ -77,6 +86,18 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(response["returned_source_count"], 1)
         self.assertEqual(response["items"][0]["matched_chunk_count"], 1)
         self.assertEqual(response["items"][0]["chunks"][0]["text"], "content")
+
+    def test_keyword_search_uses_the_keyword_entry(self) -> None:
+        service = _Service()
+        response = api.keyword_search(
+            KeywordSearchBody(query="服务器 配置", scope_type="organization"),
+            x_user_id="user-1",
+            x_organization_id="org-1",
+            service=service,
+        )
+
+        self.assertEqual(service.requests[0].entry, "keyword")
+        self.assertEqual(response["items"][0]["chunk_id"], "chunk-1")
 
     def test_agent_search_rejects_wrong_service_token(self) -> None:
         original = settings.agent_service_token

@@ -392,8 +392,10 @@ async function loadAccessRequests() {
             .then((result) => result.items || [])
             .catch(() => [] as CoreAccessRequest[])
         : Promise.resolve([] as CoreAccessRequest[]),
-      listDeletionRequests(sourceScope, deletionView)
-        .catch(() => [] as DeletionRequestDTO[]),
+      accessScope.value === 'history'
+        ? Promise.resolve([] as DeletionRequestDTO[])
+        : listDeletionRequests(sourceScope, deletionView)
+            .catch(() => [] as DeletionRequestDTO[]),
     ])
     const unified = [
       ...privateItems.filter((item) => matchesAccessView(item.status)).map(unifiedPrivateAccessRequest),

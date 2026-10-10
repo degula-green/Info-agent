@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+import threading
 import unittest
 from dataclasses import replace
 
@@ -48,7 +49,11 @@ class _Embedding:
     model = "test"
     dimensions = 8
 
+    def __init__(self):
+        self.calls = []
+
     def embed(self, texts):
+        self.calls.append(list(texts))
         return [[0.1] * 8 for _ in texts]
 
 
@@ -135,6 +140,42 @@ class _ProtectedIndexer(_Indexer):
         ]
 
 
+class _BarrierAuthorization(_Authorization):
+    def __init__(self, barrier: threading.Barrier):
+        super().__init__()
+        self.barrier = barrier
+
+    def search_scope(self, **kwargs):
+        self.barrier.wait(timeout=2)
+        return super().search_scope(**kwargs)
+
+
+class _BarrierEmbedding(_Embedding):
+    def __init__(self, barrier: threading.Barrier):
+        super().__init__()
+        self.barrier = barrier
+
+    def embed(self, texts):
+        self.barrier.wait(timeout=2)
+        return super().embed(texts)
+
+
+class _BarrierIndexer(_Indexer):
+    def __init__(self, barrier: threading.Barrier):
+        super().__init__()
+        self.barrier = barrier
+
+    def search_bm25(self, request, **kwargs):
+        values = super().search_bm25(request, **kwargs)
+        self.barrier.wait(timeout=2)
+        return values
+
+    def search_knn(self, request, vector, **kwargs):
+        values = super().search_knn(request, vector, **kwargs)
+        self.barrier.wait(timeout=2)
+        return values
+
+
 class _RecordingElasticsearch:
     def __init__(self) -> None:
         self.calls = []
@@ -176,6 +217,17 @@ class RetrievalTests(unittest.TestCase):
             scoped_branches=scoped, tree_reason=None, degraded=[],
         )
         self.assertEqual(path, "tree_shadow")
+        self.assertEqual(effective, global_branches)
+
+        effective, path, reason = select_retrieval_channels(
+            policy="keyword",
+            tree_mode="tree",
+            global_branches=global_branches,
+            scoped_branches=scoped,
+            tree_reason=None,
+            degraded=[],
+        )
+        self.assertEqual((path, reason), ("keyword", None))
         self.assertEqual(effective, global_branches)
 
         # The tree surface reports why it cannot answer instead of substituting.
@@ -344,6 +396,71 @@ class RetrievalTests(unittest.TestCase):
                     )
         finally:
             object.__setattr__(settings, "tree_mode", original)
+
+    def test_keyword_entry_uses_bm25_only(self) -> None:
+        repository = InMemoryRagMVPRepository()
+        indexer = _Indexer()
+        embedding = _Embedding()
+        service = RAGRetrievalService(
+            repository=repository,
+            indexer=indexer,
+            embedding=embedding,
+            authorization=_Authorization(),
+        )
+
+        response = service.search(SearchRequest(
+            query="服务器 配置",
+            user_id="user-1",
+            scope_type="organization",
+            scope_id="org-1",
+            knowledge_base_ids=("kb-1",),
+            entry="keyword",
+        ))
+
+        self.assertEqual(response.diagnostics["channel_policy"], "keyword")
+        self.assertEqual(response.diagnostics["effective_execution_path"], "keyword")
+        self.assertEqual(response.diagnostics["locate_ms"], 0)
+        self.assertEqual(response.diagnostics["resolved_entity_count"], 0)
+        self.assertEqual(embedding.calls, [])
+        self.assertEqual([call[0] for call in indexer.calls], ["bm25"])
+
+    def test_authorization_and_embedding_run_in_parallel(self) -> None:
+        barrier = threading.Barrier(2)
+        service = RAGRetrievalService(
+            repository=InMemoryRagMVPRepository(),
+            indexer=_Indexer(),
+            embedding=_BarrierEmbedding(barrier),
+            authorization=_BarrierAuthorization(barrier),
+        )
+
+        response = service.search(SearchRequest(
+            query="并行检索",
+            user_id="user-1",
+            scope_type="organization",
+            scope_id="org-1",
+            entry="global",
+        ))
+
+        self.assertEqual(response.diagnostics["effective_execution_path"], "traditional")
+
+    def test_bm25_and_knn_run_in_parallel(self) -> None:
+        barrier = threading.Barrier(2)
+        service = RAGRetrievalService(
+            repository=InMemoryRagMVPRepository(),
+            indexer=_BarrierIndexer(barrier),
+            embedding=_Embedding(),
+            authorization=_Authorization(),
+        )
+
+        response = service.search(SearchRequest(
+            query="并行召回",
+            user_id="user-1",
+            scope_type="organization",
+            scope_id="org-1",
+            entry="global",
+        ))
+
+        self.assertEqual(response.diagnostics["effective_execution_path"], "traditional")
 
     def test_the_tree_entry_reports_no_match_instead_of_falling_back(self) -> None:
         # Empty registry: the tree surface has nothing to narrow to. It says so

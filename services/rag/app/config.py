@@ -363,7 +363,7 @@ class Settings:
     # always runs alongside it (branch G). These weights are the RRF votes that
     # express "prefer the navigated branch" without ever excluding branch G, so
     # a navigation miss cannot drop the answer.
-    tree_mode: str = _text("RAG_TREE_MODE", "shadow").lower()
+    tree_mode: str = _text("RAG_TREE_MODE", "tree").lower()
     # Scopes promoted to `tree` while every other scope keeps RAG_TREE_MODE.
     # Format: `user:<id>,organization:<id>`. `RAG_TREE_MODE=off` still wins, so
     # the documented rollback (shadow -> off) keeps working.

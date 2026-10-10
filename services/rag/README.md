@@ -49,13 +49,18 @@ authoritative recovery source when a process or queue is lost.
 The public API is under `/api/v1`:
 
 - `/search/global`: BM25 + kNN + RRF.
-- `/search/knowledge`: BM25 only.
-- `/search/tree`: Tree Mode (`off`, `shadow`, or `boost`).
+- `/search/knowledge`: BM25 + kNN + RRF.
+- `/search/keyword`: BM25 only. It does not call the embedding provider, kNN,
+  tree location, or attachment-neighbour expansion.
+- `/search/tree`: entity-scoped retrieval (`off`, `shadow`, or `tree`).
 - `/ai/documents` and `/ai/documents/stream`: RAG-backed answer generation.
 
-`shadow` is the default. It computes branch diagnostics without changing
-results. `boost` adds branch votes to RRF while retaining the full-corpus
-channel. Exclusive tree filtering is intentionally not implemented.
+`shadow` computes tree diagnostics while returning the traditional result.
+`tree` returns only the entity-scoped result, or an empty result with a reason;
+the caller decides whether to request traditional retrieval next.
+The deployment default is now `tree`, so every organization can use the tree
+surface. Set `RAG_TREE_MODE=shadow` or `off` to roll back without deleting tree
+data.
 
 ## Boundaries
 
