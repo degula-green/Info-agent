@@ -15,7 +15,7 @@ func TestOutboxPublishRefusesAnUnconfiguredStream(t *testing.T) {
 
 	call := func() *httptest.ResponseRecorder {
 		request := httptest.NewRequest(http.MethodPost, "/api/knowledge/v1/internal/worker/publish", nil)
-		request.Header.Set("Authorization", "Bearer rag-token")
+		request.Header.Set("Authorization", "Bearer agent-token")
 		result := httptest.NewRecorder()
 		router.ServeHTTP(result, request)
 		return result
