@@ -1211,8 +1211,8 @@ test('deleting a to-do uses the explicit delete endpoint', async () => {
 
 test('real to-do labels preserve the ledger phrase and source', () => {
   const now = new Date('2026-10-02T00:00:00Z')
-  assert.equal(agentTodoTimeLabel(todo({ due_at: '2026-10-02T08:00:00Z' }), now), '今天')
-  assert.equal(agentTodoTimeLabel(todo({ due_at: '2026-10-03T08:00:00Z' }), now), '明天')
+  assert.equal(agentTodoTimeLabel(todo({ due_at: '2026-10-02T08:00:00Z' }), now), '今天 16:00')
+  assert.equal(agentTodoTimeLabel(todo({ due_at: '2026-10-03T08:00:00Z' }), now), '明天 16:00')
   assert.equal(
     agentTodoTimeLabel(todo({ due_at: null, due_expression: '下周三下午' }), now),
     '下周三下午',

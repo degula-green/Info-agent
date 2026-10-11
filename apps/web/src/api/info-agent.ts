@@ -822,13 +822,17 @@ export function agentTodoTimeLabel(todo: AgentTodo, now = new Date()): string {
   const today = calendarDate(now, zone)
   if (!dueDate || !today) return formatMoment(raw, zone) || '无时间'
   const difference = calendarDayNumber(dueDate) - calendarDayNumber(today)
-  if (difference === 0) return '今天'
-  if (difference === 1) return '明天'
+  const clock = timeOfISO(raw, zone)
+  const withClock = (label: string) => (clock ? `${label} ${clock}` : label)
+  if (difference === 0) return withClock('今天')
+  if (difference === 1) return withClock('明天')
   const daysUntilSunday = (7 - today.weekday) % 7
-  if (difference > 1 && difference <= daysUntilSunday) return TODO_WEEKDAYS[dueDate.weekday]
+  if (difference > 1 && difference <= daysUntilSunday) {
+    return withClock(TODO_WEEKDAYS[dueDate.weekday])
+  }
   const month = String(dueDate.month).padStart(2, '0')
   const day = String(dueDate.day).padStart(2, '0')
-  return `${month}-${day}`
+  return withClock(`${month}-${day}`)
 }
 
 /** Human-readable provenance the ledger actually carries today. */
