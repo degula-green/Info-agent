@@ -5,7 +5,12 @@ import threading
 import unittest
 from dataclasses import replace
 
-from app.application.rag_service import RAGRetrievalService, dedupe_logical_positions
+from app.application.rag_service import (
+    RAGRetrievalService,
+    dedupe_logical_positions,
+    filter_qa_anchor_candidates,
+    rrf_fuse,
+)
 from app.config import settings
 from app.domain.rag import (
     AccessCheck,
@@ -14,7 +19,12 @@ from app.domain.rag import (
     SearchRequest,
     SearchResult,
 )
-from app.infrastructure.rag_elasticsearch import RagChunkIndex, _bm25_query, _filters
+from app.infrastructure.rag_elasticsearch import (
+    RagChunkIndex,
+    _bm25_query,
+    _filters,
+    _phrase_query,
+)
 from app.infrastructure.persistence.mvp import (
     InMemoryRagMVPRepository,
     PostgresRagMVPRepository,
@@ -76,11 +86,19 @@ class _Authorization:
 
 
 class _Indexer:
-    def __init__(self, *, bm25_results=None, knn_results=None, neighbors=None):
+    def __init__(
+        self,
+        *,
+        bm25_results=None,
+        knn_results=None,
+        phrase_results=None,
+        neighbors=None,
+    ):
         self.calls = []
         self.requests = []
         self.bm25_results = bm25_results
         self.knn_results = knn_results or []
+        self.phrase_results = phrase_results or []
         self.neighbors = neighbors or []
 
     def search_bm25(self, request, **kwargs):
@@ -105,6 +123,11 @@ class _Indexer:
         self.requests.append(request)
         self.calls.append(("knn", kwargs))
         return list(self.knn_results)
+
+    def search_phrase(self, request, **kwargs):
+        self.requests.append(request)
+        self.calls.append(("phrase", kwargs))
+        return list(self.phrase_results)
 
     def search_neighbors(self, request, anchors, **kwargs):
         self.calls.append(("neighbors", kwargs))
@@ -422,7 +445,10 @@ class RetrievalTests(unittest.TestCase):
         self.assertEqual(response.diagnostics["locate_ms"], 0)
         self.assertEqual(response.diagnostics["resolved_entity_count"], 0)
         self.assertEqual(embedding.calls, [])
-        self.assertEqual([call[0] for call in indexer.calls], ["bm25"])
+        self.assertEqual(
+            sorted(call[0] for call in indexer.calls),
+            ["bm25", "phrase"],
+        )
 
     def test_authorization_and_embedding_run_in_parallel(self) -> None:
         barrier = threading.Barrier(2)
@@ -608,6 +634,185 @@ class RetrievalTests(unittest.TestCase):
         indexes = [call["index"] for call in client.calls]
         self.assertIn(settings.elasticsearch_display_read_index, indexes)
         self.assertIn(settings.elasticsearch_protected_read_index, indexes)
+
+    def test_global_and_keyword_bm25_collapse_candidates_by_resource(self) -> None:
+        client = _RecordingElasticsearch()
+        index = RagChunkIndex(client)
+        for entry in ("global", "keyword"):
+            with self.subTest(entry=entry):
+                client.calls.clear()
+                index.search_bm25(SearchRequest(
+                    query="青云飞鹏",
+                    user_id="user-1",
+                    scope_type="organization",
+                    scope_id="org-1",
+                    entry=entry,
+                ))
+                self.assertTrue(client.calls)
+                self.assertTrue(
+                    all(
+                        call.get("collapse") == {"field": "resource_id"}
+                        for call in client.calls
+                    )
+                )
+                self.assertTrue(
+                    all(
+                        call.get("size") == settings.resource_candidate_limit
+                        for call in client.calls
+                    )
+                )
+
+    def test_global_knn_collapses_candidates_by_resource(self) -> None:
+        client = _RecordingElasticsearch()
+        index = RagChunkIndex(client)
+        index.search_knn(
+            SearchRequest(
+                query="青云飞鹏",
+                user_id="user-1",
+                scope_type="organization",
+                scope_id="org-1",
+                entry="global",
+            ),
+            [0.1, 0.2],
+        )
+        self.assertTrue(client.calls)
+        self.assertTrue(
+            all(
+                call.get("collapse") == {"field": "resource_id"}
+                for call in client.calls
+            )
+        )
+        self.assertTrue(
+            all(
+                call["knn"]["k"] == settings.resource_candidate_limit
+                for call in client.calls
+            )
+        )
+
+    def test_phrase_query_covers_message_and_file_text_fields(self) -> None:
+        query = _phrase_query("青云飞鹏", _filters(SearchRequest(
+            query="青云飞鹏",
+            user_id="user-1",
+            scope_type="organization",
+            scope_id="org-1",
+        )), boost=3.0)
+        fields = {
+            next(iter(clause["match_phrase"]))
+            for clause in query["bool"]["should"]
+        }
+        self.assertEqual(fields, {"content", "file_name", "title", "heading_path"})
+        self.assertEqual(query["bool"]["minimum_should_match"], 1)
+
+    def test_resource_level_rrf_merges_chunks_from_the_same_resource(self) -> None:
+        bm25 = SearchResult(
+            chunk_id="chunk-1",
+            content="这是青云飞鹏的宣讲ppt",
+            score=6.99,
+            source={
+                "logical_position_key": "position-1",
+                "resource_id": "resource-1",
+                "resource_type": "message",
+                "bm25_score": 6.99,
+                "matched_by": ["bm25"],
+            },
+        )
+        phrase = SearchResult(
+            chunk_id="chunk-2",
+            content="这是青云飞鹏的宣讲ppt",
+            score=12.0,
+            source={
+                "logical_position_key": "position-2",
+                "resource_id": "resource-1",
+                "resource_type": "message",
+                "phrase_score": 12.0,
+                "matched_by": ["phrase"],
+            },
+        )
+
+        fused = rrf_fuse(
+            {"bm25": [bm25], "phrase": [phrase]},
+            k=60,
+            weights={"bm25": 0.5, "phrase": 1.5},
+            resource_level=True,
+        )
+
+        self.assertEqual(len(fused), 1)
+        self.assertEqual(fused[0].source["resource_id"], "resource-1")
+        self.assertIn("bm25", fused[0].source["matched_by"])
+        self.assertIn("phrase", fused[0].source["matched_by"])
+        self.assertEqual(fused[0].source["bm25_score"], 6.99)
+        self.assertEqual(fused[0].source["phrase_score"], 12.0)
+
+    def test_exact_phrase_candidate_bypasses_weak_bm25_gate(self) -> None:
+        phrase = SearchResult(
+            chunk_id="chunk-2",
+            content="这是青云飞鹏的宣讲ppt",
+            score=6.99,
+            source={
+                "resource_id": "resource-1",
+                "resource_type": "message",
+                "bm25_score": 6.99,
+                "phrase_score": 12.0,
+            },
+        )
+        ordinary = SearchResult(
+            chunk_id="chunk-3",
+            content="今天天气如何",
+            score=7.2,
+            source={
+                "resource_id": "resource-2",
+                "resource_type": "message",
+                "bm25_score": 7.2,
+            },
+        )
+
+        kept, dropped = filter_qa_anchor_candidates(
+            {"bm25": [phrase, ordinary]},
+            vector_min_score=0.72,
+            bm25_min_score=7.5,
+        )
+
+        self.assertEqual(dropped, 1)
+        self.assertEqual(
+            [item.source["resource_id"] for item in kept["bm25"]],
+            ["resource-1"],
+        )
+
+    def test_knn_only_candidate_needs_the_stricter_global_floor(self) -> None:
+        vector_only = SearchResult(
+            chunk_id="chunk-4",
+            content="明天完成青云项目",
+            score=0.73,
+            source={
+                "resource_id": "resource-4",
+                "resource_type": "message",
+                "vector_score": 0.73,
+            },
+        )
+        corroborated = SearchResult(
+            chunk_id="chunk-5",
+            content="青云飞鹏",
+            score=0.73,
+            source={
+                "resource_id": "resource-5",
+                "resource_type": "message",
+                "bm25_score": 8.0,
+                "vector_score": 0.73,
+            },
+        )
+
+        kept, dropped = filter_qa_anchor_candidates(
+            {"knn": [vector_only, corroborated]},
+            vector_min_score=0.72,
+            vector_only_min_score=0.8,
+            bm25_min_score=7.5,
+        )
+
+        self.assertEqual(dropped, 1)
+        self.assertEqual(
+            [item.source["resource_id"] for item in kept["knn"]],
+            ["resource-5"],
+        )
 
     def test_scope_export_uses_offset_and_stable_sort(self) -> None:
         client = _RecordingElasticsearch()

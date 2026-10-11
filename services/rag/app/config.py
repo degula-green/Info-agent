@@ -357,13 +357,26 @@ class Settings:
     # Global hybrid search must not return a result merely because a branch
     # produced a ranked candidate. These floors are applied before RRF.
     global_vector_min_score: float = _float("RAG_GLOBAL_VECTOR_MIN_SCORE", 0.72)
+    global_vector_only_min_score: float = _float(
+        "RAG_GLOBAL_VECTOR_ONLY_MIN_SCORE", 0.8
+    )
     global_bm25_min_score: float = _float("RAG_GLOBAL_BM25_MIN_SCORE", 7.5)
     global_bm25_minimum_should_match: str = _text(
         "RAG_GLOBAL_BM25_MINIMUM_SHOULD_MATCH", "70%"
     )
+    # Global and keyword search rank resources, not individual chunks. A large
+    # attachment can otherwise fill the entire chunk window and hide messages
+    # that match the same short query.
+    resource_candidate_enabled: bool = _bool(
+        "RAG_RESOURCE_CANDIDATE_ENABLED", True
+    )
+    resource_candidate_limit: int = _int("RAG_RESOURCE_CANDIDATE_LIMIT", 80)
+    global_phrase_enabled: bool = _bool("RAG_GLOBAL_PHRASE_ENABLED", True)
+    global_phrase_boost: float = _float("RAG_GLOBAL_PHRASE_BOOST", 3.0)
     rrf_k: int = _int("RAG_RRF_K", 60)
     rrf_keyword_weight: float = _float("RAG_RRF_KEYWORD_WEIGHT", 0.5)
     rrf_vector_weight: float = _float("RAG_RRF_VECTOR_WEIGHT", 0.5)
+    rrf_phrase_weight: float = _float("RAG_RRF_PHRASE_WEIGHT", 1.5)
     final_top_k: int = _int("RAG_FINAL_TOP_K", 8)
     max_chunks_per_item: int = _int("RAG_MAX_CHUNKS_PER_ITEM", 4)
     # The tree defines a candidate set (branch T) and the unscoped Chunk search

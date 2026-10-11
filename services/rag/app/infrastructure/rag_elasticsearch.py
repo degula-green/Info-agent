@@ -164,10 +164,15 @@ class RagChunkIndex:
         protected_object_keys: tuple[str, ...] = (),
         size: int | None = None,
     ) -> list[SearchResult]:
+        resource_mode = _resource_candidate_search(request)
         page_size = size or (
-            request.top_k
-            if request.entry in {"sources", "export"}
-            else settings.bm25_top_k
+            settings.resource_candidate_limit
+            if resource_mode
+            else (
+                request.top_k
+                if request.entry in {"sources", "export"}
+                else settings.bm25_top_k
+            )
         )
         branches = [
             (settings.elasticsearch_display_read_index, _filters(request, entity_ids=entity_ids)),
@@ -207,6 +212,8 @@ class RagChunkIndex:
                     else None
                 ),
             }
+            if resource_mode:
+                search_kwargs["collapse"] = {"field": "resource_id"}
             if request.offset:
                 search_kwargs["from_"] = request.offset
             response = self._search(**search_kwargs)
@@ -222,6 +229,12 @@ class RagChunkIndex:
         protected_object_keys: tuple[str, ...] = (),
         size: int | None = None,
     ) -> list[SearchResult]:
+        resource_mode = _resource_candidate_search(request)
+        page_size = size or (
+            settings.resource_candidate_limit
+            if resource_mode
+            else settings.knn_top_k
+        )
         branches = [
             (settings.elasticsearch_display_read_index, _filters(request, entity_ids=entity_ids)),
         ]
@@ -237,12 +250,68 @@ class RagChunkIndex:
                 knn={
                     "field": "embedding",
                     "query_vector": query_vector,
-                    "k": size or settings.knn_top_k,
+                    "k": page_size,
                     "num_candidates": settings.knn_num_candidates,
                     "filter": filters,
                 },
-                size=size or settings.knn_top_k,
+                size=page_size,
+                **(
+                    {"collapse": {"field": "resource_id"}}
+                    if resource_mode
+                    else {}
+                ),
             )
+            output.extend(_results(response))
+        return _dedupe_display_protected(output)
+
+    def search_phrase(
+        self,
+        request: SearchRequest,
+        *,
+        protected_object_keys: tuple[str, ...] = (),
+        size: int | None = None,
+    ) -> list[SearchResult]:
+        """Exact phrase candidates for short global/keyword queries.
+
+        IK tokenisation can split a short entity name into several low-weight
+        tokens. A phrase branch keeps a message such as "青云飞鹏的宣讲ppt"
+        eligible even when a large attachment has a higher aggregate BM25
+        score.
+        """
+
+        query = str(request.query or "").strip()
+        if not query:
+            return []
+        resource_mode = _resource_candidate_search(request)
+        page_size = size or (
+            settings.resource_candidate_limit
+            if resource_mode
+            else settings.bm25_top_k
+        )
+        branches = [
+            (settings.elasticsearch_display_read_index, _filters(request)),
+        ]
+        if request.include_protected:
+            branches.append((
+                settings.elasticsearch_protected_read_index,
+                _filters(request),
+            ))
+        output: list[SearchResult] = []
+        for index, filters in branches:
+            search_kwargs: dict[str, Any] = {
+                "index": index,
+                "query": _phrase_query(
+                    query,
+                    filters,
+                    boost=settings.global_phrase_boost,
+                ),
+                "size": page_size,
+            }
+            if resource_mode:
+                search_kwargs["collapse"] = {"field": "resource_id"}
+            if request.offset:
+                search_kwargs["from_"] = request.offset
+            response = self._search(**search_kwargs)
             output.extend(_results(response))
         return _dedupe_display_protected(output)
 
@@ -419,6 +488,34 @@ class RagChunkIndex:
             if _not_found(exc):
                 return {"hits": {"hits": []}}
             raise ElasticsearchUnavailable("Elasticsearch search failed") from exc
+
+
+def _resource_candidate_search(request: SearchRequest) -> bool:
+    return bool(
+        settings.resource_candidate_enabled
+        and request.entry in {"global", "keyword"}
+        and str(request.query or "").strip()
+    )
+
+
+def _phrase_query(
+    query: str,
+    filters: list[dict[str, Any]],
+    *,
+    boost: float,
+) -> dict[str, Any]:
+    return {
+        "bool": {
+            "should": [
+                {"match_phrase": {"content": {"query": query, "boost": boost}}},
+                {"match_phrase": {"file_name": {"query": query, "boost": boost}}},
+                {"match_phrase": {"title": {"query": query, "boost": boost}}},
+                {"match_phrase": {"heading_path": {"query": query, "boost": boost}}},
+            ],
+            "minimum_should_match": 1,
+            "filter": filters,
+        }
+    }
 
 
 def _bm25_query(

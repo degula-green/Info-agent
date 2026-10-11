@@ -125,7 +125,7 @@ class RAGRetrievalService:
                     tree_reason = "shadow_not_sampled"
 
         needs_embedding = request.entry not in {"knowledge", "sources", "keyword"}
-        executor = ThreadPoolExecutor(max_workers=4)
+        executor = ThreadPoolExecutor(max_workers=6)
         scope_future = executor.submit(
             self.authorization.search_scope,
             user_id=request.user_id,
@@ -213,6 +213,17 @@ class RAGRetrievalService:
                         query_vector,
                         protected_object_keys=protected_keys,
                     )
+                search_phrase = getattr(self.indexer, "search_phrase", None)
+                if (
+                    callable(search_phrase)
+                    and settings.global_phrase_enabled
+                    and request.entry in {"global", "keyword"}
+                ):
+                    branch_futures["phrase"] = executor.submit(
+                        search_phrase,
+                        retrieval_request,
+                        protected_object_keys=protected_keys,
+                    )
             if run_tree_channels:
                 branch_futures["branch_bm25"] = executor.submit(
                     self.indexer.search_bm25,
@@ -242,10 +253,13 @@ class RAGRetrievalService:
                     else:
                         global_failed = True
                     continue
-                annotated = _annotate_branch(
-                    "bm25" if name.endswith("bm25") else "knn",
-                    values,
-                )
+                if name.endswith("phrase"):
+                    branch_name = "phrase"
+                elif name.endswith("bm25"):
+                    branch_name = "bm25"
+                else:
+                    branch_name = "knn"
+                annotated = _annotate_branch(branch_name, values)
                 if name.startswith("branch_"):
                     scoped_branches[name] = annotated
                 else:
@@ -285,6 +299,7 @@ class RAGRetrievalService:
         raw_global_candidate_count = sum(len(value) for value in global_branches.values())
         raw_branch_candidate_count = sum(len(value) for value in scoped_branches.values())
         raw_related_candidate_count = sum(len(value) for value in related_branches.values())
+        phrase_candidate_count = len(effective.get("phrase", ()))
         gate_dropped = 0
         if request.entry == "ai":
             effective, gate_dropped = filter_qa_anchor_candidates(
@@ -296,6 +311,7 @@ class RAGRetrievalService:
             effective, gate_dropped = filter_qa_anchor_candidates(
                 effective,
                 vector_min_score=settings.global_vector_min_score,
+                vector_only_min_score=settings.global_vector_only_min_score,
                 bm25_min_score=settings.global_bm25_min_score,
             )
         elif request.entry == "knowledge":
@@ -307,9 +323,11 @@ class RAGRetrievalService:
         fused = rrf_fuse(
             effective,
             k=settings.rrf_k,
+            resource_level=request.entry in {"global", "keyword"},
             weights={
                 "bm25": settings.rrf_keyword_weight,
                 "knn": settings.rrf_vector_weight,
+                "phrase": settings.rrf_phrase_weight,
                 "branch_bm25": settings.tree_mount_weight,
                 "branch_knn": settings.tree_mount_weight,
                 "related_bm25": settings.tree_relation_weight,
@@ -318,6 +336,9 @@ class RAGRetrievalService:
         )
         fused = dedupe_logical_positions(fused)
         if request.entry == "sources":
+            anchor_max_per_resource = 1
+            final_max_per_resource = 1
+        elif request.entry in {"global", "keyword"}:
             anchor_max_per_resource = 1
             final_max_per_resource = 1
         elif request.entry == "content":
@@ -341,7 +362,7 @@ class RAGRetrievalService:
             if item.source.get("resource_type") == "attachment"
         ]
         if (
-            request.entry != "keyword"
+            request.entry not in {"keyword", "global"}
             and settings.neighbor_radius > 0
             and expandable_anchors
         ):
@@ -414,6 +435,9 @@ class RAGRetrievalService:
                 for item in related_entities
             ],
             "global_candidate_count": raw_global_candidate_count,
+            "phrase_candidate_count": phrase_candidate_count,
+            "resource_candidate_enabled": settings.resource_candidate_enabled,
+            "resource_candidate_limit": settings.resource_candidate_limit,
             "score_gate_dropped_count": gate_dropped,
             "anchor_candidate_count": len(anchor_candidates),
             "authorization_candidate_count": len(anchor_candidates),
@@ -426,10 +450,16 @@ class RAGRetrievalService:
                 "qa_vector_min_score": settings.qa_vector_min_score,
                 "qa_bm25_min_score": settings.qa_bm25_min_score,
                 "global_vector_min_score": settings.global_vector_min_score,
+                "global_vector_only_min_score": (
+                    settings.global_vector_only_min_score
+                ),
                 "global_bm25_min_score": settings.global_bm25_min_score,
                 "global_bm25_minimum_should_match": (
                     settings.global_bm25_minimum_should_match
                 ),
+                "resource_candidate_enabled": settings.resource_candidate_enabled,
+                "resource_candidate_limit": settings.resource_candidate_limit,
+                "global_phrase_enabled": settings.global_phrase_enabled,
                 "bm25_top_k": settings.bm25_top_k,
                 "knn_top_k": settings.knn_top_k,
             },
@@ -905,6 +935,9 @@ def _annotate_branch(branch: str, results: list[SearchResult]) -> list[SearchRes
         elif branch == "knn":
             result.source["vector_score"] = result.score
             result.source["vector_rank"] = rank
+        elif branch == "phrase":
+            result.source["phrase_score"] = result.score
+            result.source["phrase_rank"] = rank
         matched = {
             str(value)
             for value in result.source.get("matched_by", ())
@@ -961,6 +994,7 @@ def filter_qa_anchor_candidates(
     branches: dict[str, list[SearchResult]],
     *,
     vector_min_score: float,
+    vector_only_min_score: float | None = None,
     bm25_min_score: float,
 ) -> tuple[dict[str, list[SearchResult]], int]:
     output: dict[str, list[SearchResult]] = {}
@@ -971,13 +1005,21 @@ def filter_qa_anchor_candidates(
             source = result.source
             bm25_score = _float_or_none(source.get("bm25_score"))
             vector_score = _float_or_none(source.get("vector_score"))
+            phrase_score = _float_or_none(source.get("phrase_score"))
             bm25_ok = bm25_score is not None and (
                 bm25_score >= bm25_min_score
                 if bm25_min_score > 0
                 else bm25_score > 0
             )
-            vector_ok = vector_score is not None and vector_score >= vector_min_score
-            if bm25_ok or vector_ok:
+            phrase_ok = phrase_score is not None and phrase_score > 0
+            vector_floor = (
+                vector_only_min_score
+                if vector_only_min_score is not None
+                and not (phrase_ok or bm25_ok)
+                else vector_min_score
+            )
+            vector_ok = vector_score is not None and vector_score >= vector_floor
+            if phrase_ok or bm25_ok or vector_ok:
                 kept.append(result)
             else:
                 dropped += 1
@@ -1115,24 +1157,51 @@ def rrf_fuse(
     *,
     k: int,
     weights: dict[str, float],
+    resource_level: bool = False,
 ) -> list[SearchResult]:
     scores: dict[str, float] = {}
     values: dict[str, SearchResult] = {}
-    protected: set[str] = set()
+    priority_by_key: dict[str, int] = {}
+    branch_priority = {
+        "phrase": 3,
+        "bm25": 2,
+        "branch_bm25": 2,
+        "related_bm25": 2,
+        "knn": 1,
+        "branch_knn": 1,
+        "related_knn": 1,
+    }
     for name, results in branches.items():
         weight = float(weights.get(name, 1.0))
+        priority = branch_priority.get(name, 0)
         for rank, result in enumerate(results, start=1):
-            key = result.source.get("logical_position_key") or result.chunk_id
+            key = (
+                _resource_key(result)
+                if resource_level
+                else result.source.get("logical_position_key") or result.chunk_id
+            )
             scores[key] = scores.get(key, 0.0) + weight / (k + rank)
             if key in values:
                 _merge_provenance(values[key], result)
-            if key not in values or (
-                result.source.get("content_variant") == "protected"
-                and key not in protected
-            ):
+            result_protected = result.source.get("content_variant") == "protected"
+            current = values.get(key)
+            current_protected = (
+                current is not None
+                and current.source.get("content_variant") == "protected"
+            )
+            replace = (
+                current is None
+                or (result_protected and not current_protected)
+                or (
+                    result_protected == current_protected
+                    and priority > priority_by_key.get(key, -1)
+                )
+            )
+            if replace:
+                if current is not None:
+                    _merge_provenance(result, current)
                 values[key] = result
-                if result.source.get("content_variant") == "protected":
-                    protected.add(key)
+                priority_by_key[key] = priority
     ordered = sorted(values.items(), key=lambda item: (-scores[item[0]], item[0]))
     output: list[SearchResult] = []
     for rank, (key, result) in enumerate(ordered, start=1):
@@ -1150,6 +1219,8 @@ def _merge_provenance(target: SearchResult, incoming: SearchResult) -> None:
         "bm25_rank",
         "vector_score",
         "vector_rank",
+        "phrase_score",
+        "phrase_rank",
     ):
         if key not in target.source and key in incoming.source:
             target.source[key] = incoming.source[key]
