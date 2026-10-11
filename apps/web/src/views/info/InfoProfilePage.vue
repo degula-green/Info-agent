@@ -65,87 +65,12 @@
         </div>
       </section>
 
-      <section class="profile-panel access-panel" aria-labelledby="access-title">
-        <div class="profile-panel__heading">
-          <span class="profile-panel__icon"><t-icon name="lock-on" /></span>
-          <div>
-            <h2 id="access-title">权限申请</h2>
-            <p>查看我发起的申请，或处理待我审批的申请</p>
-          </div>
-        </div>
-        <t-tabs v-model="accessScope" @change="handleAccessScopeChange">
-          <t-tab-panel value="mine" label="我发起的" />
-          <t-tab-panel value="inbox" label="待我审批" />
-          <t-tab-panel value="history" label="历史记录" />
-        </t-tabs>
-        <template v-if="accessScope === 'history'">
-        <div class="access-toolbar">
-          <t-radio-group v-model="deletionStatusFilter" variant="default-filled" size="small" @change="loadDeletionGovernance">
-            <t-radio-button value="">全部</t-radio-button>
-            <t-radio-button value="pending">待审批</t-radio-button>
-            <t-radio-button value="executing">执行中</t-radio-button>
-            <t-radio-button value="failed">失败</t-radio-button>
-            <t-radio-button value="completed">已完成</t-radio-button>
-          </t-radio-group>
-          <t-button size="small" variant="outline" :loading="deletionLoading" @click="loadDeletionGovernance">刷新</t-button>
-        </div>
-        <div v-if="deletionLoading" class="access-request-state"><t-icon name="loading" />正在加载删除治理记录…</div>
-        <div v-else-if="!deletionRequests.length" class="access-request-state">暂无删除治理记录</div>
-        <div v-else class="deletion-governance-list">
-          <article v-for="item in deletionRequests" :key="item.id" class="deletion-governance">
-            <div class="deletion-governance__head">
-              <strong>{{ item.scope_type === 'message' ? '消息删除' : item.scope_type }}</strong>
-              <t-tag :theme="deletionStatusTheme(item.status)" variant="light">{{ deletionStatusLabel(item.status) }}</t-tag>
-            </div>
-            <small>申请：{{ item.requester_user_id }} · {{ formatDateTime(item.requested_at) }}</small>
-            <small v-if="item.reviewer_user_id">审批：{{ item.reviewer_user_id }} · {{ item.reviewed_at ? formatDateTime(item.reviewed_at) : '处理中' }}</small>
-            <div class="deletion-progress">
-              <span v-for="target in item.targets" :key="target.id" class="deletion-progress__item">
-                <em>可见性 {{ deletionStageLabel(target.visibility_state) }}</em>
-                <em>授权 {{ deletionStageLabel(target.auth_state) }}</em>
-                <em>向量 {{ deletionStageLabel(target.vector_state) }}</em>
-                <em>对象 {{ deletionStageLabel(target.object_state) }}</em>
-              </span>
-            </div>
-            <small v-if="item.last_error || item.targets.some((target) => target.last_error)" class="deletion-error">
-              失败原因：{{ item.last_error || item.targets.find((target) => target.last_error)?.last_error }}
-            </small>
-            <div v-if="item.status === 'failed' || item.targets.some((target) => target.last_error)" class="deletion-governance__actions">
-              <t-button size="small" theme="primary" variant="outline" :loading="deletionRetrying[item.id]" @click="retryGovernance(item)">重试失败阶段</t-button>
-            </div>
-          </article>
-        </div>
-        </template>
-        <div class="access-request-list">
-          <div v-if="accessLoading" class="access-request-state"><t-icon name="loading" />正在加载权限申请…</div>
-          <div v-else-if="!accessRequests.length" class="access-request-state">{{ accessEmptyText }}</div>
-          <article v-for="request in accessRequests" v-else :key="request.id" class="access-request">
-            <div class="access-request__main">
-              <strong>{{ request.title }}</strong>
-              <small>{{ request.subtitle }}</small>
-              <small v-if="request.excerpt" class="access-request__excerpt">{{ request.excerpt }}</small>
-              <small v-if="request.stageSummary" class="access-request__stage">{{ request.stageSummary }}</small>
-              <small>{{ request.reason || '未填写申请说明' }} · {{ formatDateTime(request.created_at) }}</small>
-            </div>
-            <t-tag :theme="accessStatusTheme(request.status)" variant="light">{{ request.statusLabel || accessStatusLabel(request.status) }}</t-tag>
-            <div v-if="request.canReview" class="access-request__actions">
-              <t-button v-if="request.source === 'core' && request.contextAvailable" size="small" variant="text" @click="openAccessContext(request)">查看上下文</t-button>
-              <t-button size="small" theme="primary" @click="reviewAccess(request, 'approve')">通过</t-button>
-              <t-button size="small" theme="danger" variant="outline" @click="reviewAccess(request, 'reject')">拒绝</t-button>
-            </div>
-          </article>
-        </div>
-      </section>
     </div>
 
     <div class="profile-actions">
       <t-button theme="primary" @click="saveProfile">
         <template #icon><t-icon name="check" /></template>
         保存修改
-      </t-button>
-      <t-button variant="outline" @click="restoreDialogVisible = true">
-        <template #icon><t-icon name="refresh" /></template>
-        恢复演示数据
       </t-button>
     </div>
 
@@ -215,9 +140,6 @@
         </div>
       </div>
     </t-dialog>
-    <t-dialog v-model:visible="restoreDialogVisible" header="恢复演示数据" :confirm-btn="{ content: '恢复数据', theme: 'danger' }" cancel-btn="取消" @confirm="restoreDemo">
-      <p class="restore-dialog__copy">将恢复默认资料、连接器、会话和问答历史，当前本地修改会被覆盖。</p>
-    </t-dialog>
     <t-dialog v-model:visible="createDialogVisible" header="创建组织" :confirm-btn="{ content: '创建组织', loading: organizationSubmitting, disabled: !organizationName.trim() }" :cancel-btn="{ content: '取消', disabled: organizationSubmitting }" :close-btn="!organizationSubmitting" @confirm="submitCreateOrganization">
       <div class="organization-dialog"><p>创建后你将成为该组织的 Owner。</p><t-input v-model="organizationName" maxlength="200" autofocus placeholder="请输入组织名称" @keydown.enter.prevent="submitCreateOrganization" /><span class="organization-dialog__count">{{ organizationName.length }}/200</span></div>
     </t-dialog>
@@ -237,9 +159,9 @@ import { useAuthStore } from '@/stores/auth'
 import { connectorCatalog, getConnectors, getFeishuAuthorizeURL, type Connector, type ConnectorPlatform, type Profile, unbindConnector } from '@/api/info-profile'
 import { oauthCallbackNotice } from '@/knowledge-mapping'
 import { downloadAvatar, getCurrentUser, updateCurrentUser, uploadAvatar as uploadCoreAvatar } from '@/api/core-auth'
-import { acceptOrganizationInvitation, approveAccessRequest, createOrganization, getCurrentOrganization, listAccessRequests, rejectAccessRequest, type CoreAccessRequest, type CoreOrganizationResponse } from '@/api/core-organization'
+import { acceptOrganizationInvitation, createOrganization, getCurrentOrganization, type CoreOrganizationResponse } from '@/api/core-organization'
 import { CoreAuthError } from '@/api/core-auth'
-import { approveDeletionRequest, approvePrivateAccessRequest, createWechatPairing, getDeletionRequest, getWechatPairingStatus, listDeletionRequests, listPrivateAccessRequests, rejectDeletionRequest, rejectPrivateAccessRequest, retryDeletionRequest, type DeletionRequestDTO, type PrivateAccessRequestDTO } from '@/api/info-knowledge'
+import { createWechatPairing, getWechatPairingStatus } from '@/api/info-knowledge'
 import { listLocalWechatAccounts, pairLocalWechatAccount, type LocalWechatAccount } from '@/api/wechat-local-agent'
 import { desktopRuntimeActive, openExternalUrl } from '@/api/runtime-config'
 
@@ -253,7 +175,6 @@ const connectors = ref<Connector[]>(connectorCatalog())
 const avatarInput = ref<HTMLInputElement | null>(null)
 const feishuDialogVisible = ref(false)
 const wechatDialogVisible = ref(false)
-const restoreDialogVisible = ref(false)
 const createDialogVisible = ref(false)
 const joinDialogVisible = ref(false)
 const organizationLoading = ref(false)
@@ -261,31 +182,7 @@ const organizationSubmitting = ref(false)
 const organizationName = ref('')
 const invitationToken = ref('')
 const organization = ref<CoreOrganizationResponse | null>(null)
-const accessScope = ref<'mine' | 'inbox' | 'history'>(route.query.tab === 'permissions' ? 'inbox' : 'mine')
-type UnifiedAccessRequest = {
-  id: string
-  source: 'core' | 'private' | 'deletion'
-  title: string
-  subtitle: string
-  excerpt: string
-  reason: string
-  status: string
-  statusLabel?: string
-  created_at: string
-  contextAvailable: boolean
-  canReview: boolean
-  stageSummary?: string
-  raw: CoreAccessRequest | PrivateAccessRequestDTO | DeletionRequestDTO
-}
-const accessRequests = ref<UnifiedAccessRequest[]>([])
-const accessLoading = ref(false)
-let accessRequestSequence = 0
 const currentUserID = ref('')
-const deletionStatusFilter = ref('')
-const deletionRequests = ref<DeletionRequestDTO[]>([])
-const deletionLoading = ref(false)
-const deletionRetrying = reactive<Record<string, boolean>>({})
-let deletionRequestSequence = 0
 const wechatPairingID = ref('')
 const wechatPairingCode = ref('')
 const wechatAccounts = ref<LocalWechatAccount[]>([])
@@ -315,12 +212,6 @@ const wechatConfirmButton = computed(() => {
   }
   return { content: '重新检测', loading: wechatBinding.value, disabled: wechatBinding.value }
 })
-const accessEmptyText = computed(() => {
-  if (accessScope.value === 'inbox') return '当前没有需要你审批的申请'
-  if (accessScope.value === 'history') return '暂无历史申请记录'
-  return '暂无进行中的申请'
-})
-
 function maskedWechatID(value: string) {
   const text = String(value || '').trim()
   if (text.length <= 12) return text || '未知微信账号'
@@ -367,222 +258,7 @@ async function loadPage() {
   })
   await Promise.all([coreProfileRequest, connectorRequest, organizationRequest])
   organizationLoading.value = false
-  await handleAccessScopeChange()
 }
-async function handleAccessScopeChange() {
-  await loadAccessRequests()
-  if (accessScope.value === 'history') {
-    await loadDeletionGovernance()
-  } else {
-    deletionRequests.value = []
-    deletionLoading.value = false
-  }
-}
-async function loadAccessRequests() {
-  const sequence = ++accessRequestSequence
-  accessLoading.value = true
-  try {
-    const organizationID = organization.value?.organization.id || ''
-    const sourceScope = accessScope.value === 'inbox' ? 'inbox' : 'mine'
-    const deletionView = accessScope.value === 'history' ? 'history' : 'active'
-    const [privateItems, coreItems, deletionItems] = await Promise.all([
-      listPrivateAccessRequests(sourceScope).catch(() => [] as PrivateAccessRequestDTO[]),
-      organizationID
-        ? listAccessRequests(sourceScope === 'inbox' ? 'review' : 'mine', organizationID)
-            .then((result) => result.items || [])
-            .catch(() => [] as CoreAccessRequest[])
-        : Promise.resolve([] as CoreAccessRequest[]),
-      accessScope.value === 'history'
-        ? Promise.resolve([] as DeletionRequestDTO[])
-        : listDeletionRequests(sourceScope, deletionView)
-            .catch(() => [] as DeletionRequestDTO[]),
-    ])
-    const unified = [
-      ...privateItems.filter((item) => matchesAccessView(item.status)).map(unifiedPrivateAccessRequest),
-      ...coreItems.filter((item) => matchesAccessView(item.status)).map(unifiedCoreAccessRequest),
-      ...deletionItems.map(unifiedDeletionRequest),
-    ].sort((left, right) => Date.parse(right.created_at) - Date.parse(left.created_at))
-    if (sequence === accessRequestSequence) accessRequests.value = unified
-  } catch (cause) {
-    if (sequence === accessRequestSequence) accessRequests.value = []
-    MessagePlugin.error(errorMessage(cause, '权限申请加载失败'))
-  } finally {
-    if (sequence === accessRequestSequence) accessLoading.value = false
-  }
-}
-async function reviewAccess(request: UnifiedAccessRequest, action: 'approve' | 'reject') {
-  try {
-    if (request.source === 'deletion') {
-      if (action === 'approve') await approveDeletionRequest(request.id)
-      else await rejectDeletionRequest(request.id)
-    } else if (request.source === 'core') {
-      if (action === 'approve') await approveAccessRequest(request.id)
-      else await rejectAccessRequest(request.id)
-    } else if (action === 'approve') {
-      await approvePrivateAccessRequest(request.id)
-    } else {
-      await rejectPrivateAccessRequest(request.id)
-    }
-    await loadAccessRequests()
-    MessagePlugin.success(action === 'approve' ? '已通过权限申请' : '已拒绝权限申请')
-  } catch (cause) {
-    MessagePlugin.error(errorMessage(cause, action === 'approve' ? '审批失败' : '拒绝失败'))
-  }
-}
-
-async function loadDeletionGovernance() {
-  const sequence = ++deletionRequestSequence
-  deletionLoading.value = true
-  try {
-    const items = await listDeletionRequests('governance', 'all', deletionStatusFilter.value, {
-      limit: 50,
-    }).catch(() => [] as DeletionRequestDTO[])
-    const detailed = await Promise.all(items.map(async (item) => {
-      if (item.status === 'failed' || item.targets.some((target) => target.last_error)) {
-        return getDeletionRequest(item.id).catch(() => item)
-      }
-      return item
-    }))
-    if (sequence === deletionRequestSequence) deletionRequests.value = detailed
-  } finally {
-    if (sequence === deletionRequestSequence) deletionLoading.value = false
-  }
-}
-
-async function retryGovernance(request: DeletionRequestDTO) {
-  deletionRetrying[request.id] = true
-  try {
-    await retryDeletionRequest(request.id)
-    MessagePlugin.success('已重新提交失败阶段')
-    await loadDeletionGovernance()
-  } catch (cause) {
-    MessagePlugin.error(errorMessage(cause, '重试失败'))
-  } finally {
-    deletionRetrying[request.id] = false
-  }
-}
-
-function deletionStatusLabel(status: string) {
-  return ({
-    pending: '待审批',
-    approved: '已通过',
-    rejected: '已拒绝',
-    executing: '执行中',
-    completed: '已完成',
-    failed: '失败',
-    cancelled: '已关闭',
-    superseded: '已合并',
-    expired: '已过期',
-    revoked: '已撤销',
-  } as Record<string, string>)[status] || status
-}
-
-function deletionStatusTheme(status: string) {
-  if (status === 'completed') return 'success'
-  if (status === 'failed' || status === 'rejected') return 'danger'
-  if (status === 'pending') return 'warning'
-  return 'primary'
-}
-
-function deletionStageLabel(status: string) {
-  return ({ active: '待处理', hidden: '已隐藏', pending: '待处理', revoked: '已撤销', deleted: '已删除', skipped: '无需处理', not_required: '无需处理', failed: '失败' } as Record<string, string>)[status] || status
-}
-function unifiedPrivateAccessRequest(request: PrivateAccessRequestDTO): UnifiedAccessRequest {
-  const resource = request.resource_type === 'attachment' ? '附件' : '私聊信息'
-  const action = request.requested_action === 'download' ? '下载' : '查看'
-  return {
-    id: request.id,
-    source: 'private',
-    title: `${resource} · ${action}`,
-    subtitle: '私聊共享权限',
-    excerpt: '',
-    reason: request.reason || '',
-    status: request.status,
-    created_at: request.created_at,
-    contextAvailable: false,
-    canReview: accessScope.value === 'inbox' && request.status === 'pending',
-    raw: request,
-  }
-}
-
-function unifiedCoreAccessRequest(request: CoreAccessRequest): UnifiedAccessRequest {
-  const requester = request.requester_nickname || request.requester_email || request.requester_user_id
-  const resource = request.resource_type === 'attachment_content' ? (request.action === 'download' ? '附件下载' : '附件查看') : '消息原文查看'
-  const source = [platformLabel(request.source_platform), request.source_conversation_name].filter(Boolean).join(' · ')
-  const sender = request.sender_display_name ? `发送人 ${request.sender_display_name}` : ''
-  const sent = request.sent_at ? formatDateTime(request.sent_at) : ''
-  return {
-    id: request.id,
-    source: 'core',
-    title: `${requester} 申请${resource}`,
-    subtitle: [source, sender, sent].filter(Boolean).join(' · ') || '来源上下文不可用',
-    excerpt: request.file_name || request.masked_excerpt || '',
-    reason: request.reason || '',
-    status: request.status,
-    created_at: request.created_at,
-    contextAvailable: Boolean(request.source_conversation_id),
-    canReview: accessScope.value === 'inbox' && request.status === 'pending',
-    raw: request,
-  }
-}
-
-function unifiedDeletionRequest(request: DeletionRequestDTO): UnifiedAccessRequest {
-  const requester = request.requester_display_name || request.requester_email ||
-    (request.requester_user_id === currentUserID.value ? '我' : `用户 ${shortID(request.requester_user_id)}`)
-  return {
-    id: request.id,
-    source: 'deletion',
-    title: `${requester} 申请删除消息`,
-    subtitle: request.target_summary || `消息 ${shortID(request.scope_id)}`,
-    excerpt: '',
-    reason: request.reason || '',
-    status: request.status,
-    statusLabel: request.status_label,
-    created_at: request.created_at,
-    contextAvailable: false,
-    canReview: Boolean(request.can_review),
-    stageSummary: request.stage_summary,
-    raw: request,
-  }
-}
-
-function matchesAccessView(status: string) {
-  if (accessScope.value === 'inbox') return status === 'pending'
-  if (accessScope.value === 'history') {
-    return ['cancelled', 'completed', 'failed', 'rejected', 'superseded', 'expired', 'revoked'].includes(status)
-  }
-  return ['pending', 'approved', 'executing'].includes(status)
-}
-
-function shortID(value?: string) {
-  const text = String(value || '').trim()
-  return text.length > 8 ? `${text.slice(0, 8)}…` : text || '未知资源'
-}
-
-function platformLabel(value?: string) {
-  return value === 'feishu' ? '飞书' : value === 'wechat' ? '个人微信' : value === 'wecom' ? '企业微信' : value || ''
-}
-
-function openAccessContext(request: UnifiedAccessRequest) {
-  if (request.source !== 'core') return
-  const raw = request.raw as CoreAccessRequest
-  if (!raw.source_conversation_id || !raw.source_platform) return
-  const query = new URLSearchParams({ return: '/profile' })
-  if (raw.source_message_id) query.set('message', raw.source_message_id)
-  void router.push(`/knowledge/${encodeURIComponent(raw.source_platform)}/conversations/${encodeURIComponent(raw.source_conversation_id)}?${query}`)
-}
-
-function accessStatusLabel(status: string) {
-  return ({ pending: '待审批', approved: '已通过', executing: '处理中', completed: '已完成', rejected: '已拒绝', failed: '执行失败', cancelled: '已关闭', superseded: '已合并', expired: '已过期', revoked: '已撤销' } as Record<string, string>)[status] || status
-}
-function accessStatusTheme(status: string) {
-  if (status === 'approved' || status === 'completed') return 'success'
-  if (status === 'rejected' || status === 'failed') return 'danger'
-  if (status === 'pending') return 'warning'
-  if (status === 'executing') return 'primary'
-  return 'default'
-}
-function formatDateTime(value?: string) { if (!value) return ''; return new Date(value).toLocaleString('zh-CN', { dateStyle: 'short', timeStyle: 'short' }) }
 async function submitCreateOrganization() {
   const name = organizationName.value.trim()
   if (!name || name.length > 200 || organizationSubmitting.value) return
@@ -879,12 +555,6 @@ async function handleOAuthCallback() {
   delete query.error
   await router.replace({ path: route.path, query })
 }
-async function restoreDemo() {
-  store.resetDemo()
-  restoreDialogVisible.value = false
-  await loadPage()
-  MessagePlugin.success('演示数据已恢复')
-}
 onMounted(async () => {
   await loadPage()
   await handleOAuthCallback()
@@ -1143,139 +813,12 @@ onBeforeUnmount(() => {
   white-space: nowrap;
 }
 
-.access-toolbar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  margin-top: 12px;
-}
-
-.deletion-governance-list {
-  display: grid;
-  gap: 10px;
-  margin-top: 12px;
-}
-
-.deletion-governance {
-  display: grid;
-  gap: 8px;
-  padding: 14px;
-  border: 1px solid var(--td-component-stroke);
-  border-radius: 7px;
-  background: var(--td-bg-color-container);
-}
-
-.deletion-governance__head,
-.deletion-governance__actions {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-}
-
-.deletion-governance small {
-  color: var(--td-text-color-secondary);
-  font-size: 12px;
-}
-
-.deletion-progress {
-  display: grid;
-  gap: 6px;
-}
-
-.deletion-progress__item {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-}
-
-.deletion-progress__item em {
-  padding: 3px 7px;
-  border-radius: 4px;
-  color: var(--td-text-color-secondary);
-  background: var(--td-bg-color-secondarycontainer);
-  font-size: 11px;
-  font-style: normal;
-}
-
-.deletion-error {
-  color: var(--td-error-color-7);
-}
-
-.access-request-list {
-  margin-top: 4px;
-}
-
-.access-request-state {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 8px;
-  min-height: 88px;
-  color: var(--td-text-color-secondary);
-  font-size: 13px;
-}
-
-.access-request {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  min-height: 68px;
-  padding: 12px 24px;
-  border-bottom: 1px solid var(--td-component-stroke);
-}
-
-.access-request:last-child {
-  border-bottom: 0;
-}
-
-.access-request__main {
-  flex: 1;
-  min-width: 0;
-}
-
-.access-request__main strong,
-.access-request__main small {
-  display: block;
-}
-
-.access-request__main small {
-  margin-top: 4px;
-  overflow: hidden;
-  color: var(--td-text-color-secondary);
-  font-size: 12px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.access-request__main .access-request__excerpt {
-  color: var(--td-text-color-primary);
-  font-weight: 500;
-}
-
-.access-request__main .access-request__stage {
-  color: var(--td-brand-color);
-}
-
-.access-request__actions {
-  display: flex;
-  gap: 8px;
-}
-
 .profile-actions {
   display: flex;
   align-items: center;
   gap: 10px;
   justify-content: flex-end;
   margin-top: 20px;
-}
-
-.restore-dialog__copy {
-  margin: 0;
-  color: var(--td-text-color-secondary);
-  font-size: 13px;
-  line-height: 1.7;
 }
 
 .avatar-dialog {
@@ -1462,15 +1005,9 @@ onBeforeUnmount(() => {
 
   .profile-panel__heading,
   .profile-setting-row,
-  .connector-row,
-  .access-request {
+  .connector-row {
     padding-right: 18px;
     padding-left: 18px;
-  }
-
-  .access-request {
-    align-items: flex-start;
-    flex-wrap: wrap;
   }
 
   .profile-setting-row {

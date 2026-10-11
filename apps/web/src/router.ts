@@ -21,6 +21,7 @@ const router = createRouter({
       { path: 'knowledge/:platform', name: 'knowledgePlatform', component: () => import('./views/info/InfoKnowledgePage.vue') },
       { path: 'knowledge/:platform/conversations/:conversationId', name: 'conversation', component: () => import('./views/info/InfoConversationPage.vue') },
       { path: 'organization', name: 'organization', component: () => import('./views/info/InfoOrganizationPage.vue') },
+      { path: 'organization/permissions', name: 'organizationPermissions', component: () => import('./views/info/InfoAccessCenterPage.vue') },
       { path: 'organization/knowledge', name: 'organizationKnowledge', component: () => import('./views/info/InfoKnowledgeStructurePage.vue') },
       { path: 'organization/entity-review', name: 'organizationEntityReview', component: () => import('./views/info/InfoEntityReviewPage.vue') },
       { path: 'contacts', name: 'contacts', component: () => import('./views/info/InfoContactsPage.vue') },
@@ -33,6 +34,9 @@ const router = createRouter({
 })
 
 router.beforeEach(async (to) => {
+  if (to.name === 'profile' && to.query.tab === 'permissions') {
+    return { name: 'organizationPermissions', query: { tab: 'inbox' } }
+  }
   const store = useAuthStore()
   if (to.meta.requiresAuth) {
     if (!getAuthSession().accessToken) return { name: 'login', query: { redirect: to.fullPath } }

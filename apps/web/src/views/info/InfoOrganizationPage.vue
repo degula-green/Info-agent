@@ -51,29 +51,24 @@
       </div>
     </section>
 
-    <section v-if="canReviewAccess" class="access-review-section" aria-labelledby="access-review-title">
+    <section v-if="organization" class="access-review-section" aria-labelledby="access-review-title">
       <div class="members-toolbar">
         <div>
-          <h2 id="access-review-title">原文访问申请</h2>
-          <p>审批通过后立即同步原文查看或下载权限</p>
+          <h2 id="access-review-title">权限与审批</h2>
+          <p>查看、下载和删除申请统一在这里处理</p>
         </div>
       </div>
       <div v-if="accessLoading" class="member-loading"><t-loading size="small" text="正在加载访问申请..." /></div>
-      <div v-else-if="accessRequests.length" class="access-review-list">
+      <div class="access-review-list">
         <article class="access-review-row">
           <div>
-            <strong>{{ accessRequests.length }} 条待审批申请</strong>
-            <span>请在个人主页统一查看申请人、来源群聊和脱敏消息摘要</span>
+            <strong>{{ accessSummaryTitle }}</strong>
+            <span>{{ accessSummaryDetail }}</span>
           </div>
           <div class="access-review-actions">
-            <t-button size="small" theme="primary" @click="router.push('/profile?tab=permissions')">进入审批中心</t-button>
+            <t-button size="small" theme="primary" @click="router.push(accessCenterPath)">进入权限与审批</t-button>
           </div>
         </article>
-      </div>
-      <div v-else class="member-empty">
-        <t-icon name="check-circle" />
-        <strong>暂无待审批申请</strong>
-        <span>新的原文查看或下载申请会出现在这里</span>
       </div>
     </section>
 
@@ -198,6 +193,8 @@ import { MessagePlugin } from 'tdesign-vue-next'
 import { useRouter } from 'vue-router'
 import { CoreAuthError, getCurrentUser } from '@/api/core-auth'
 import { createOrganizationInvitation, getCurrentOrganization, getOrganizationCapabilities, getOrganizationExitPreflight, grantOrganizationRole, leaveOrganization, listAccessRequests, listOrganizationMembers, reactivateOrganizationMember, removeOrganizationMember, revokeOrganizationInvitation, revokeOrganizationRole, suspendOrganizationMember, transferOrganizationOwner, type CoreAccessRequest, type CoreOrganizationCapabilities, type CoreOrganizationExitPreflight, type CoreOrganizationMember, type CoreOrganizationResponse } from '@/api/core-organization'
+import { listDeletionRequests, listPrivateAccessRequests, type DeletionRequestDTO, type PrivateAccessRequestDTO } from '@/api/info-knowledge'
+import { matchesAccessView } from '@/access-control/access-display'
 import { desktopInvitationBaseUrl } from '@/api/runtime-config'
 
 type ManagementRole = 'owner' | 'information_admin' | 'membership_approver'
@@ -227,8 +224,10 @@ const invitationDialogVisible = ref(false)
 const revokeDialogVisible = ref(false)
 const invitation = ref<Invitation | null>(null)
 const invitationDraft = ref<Invitation | null>(null)
-const accessRequests = ref<CoreAccessRequest[]>([])
 const accessLoading = ref(false)
+const pendingReviewCount = ref(0)
+const myActiveCount = ref(0)
+let accessSummarySequence = 0
 const exitDialogVisible = ref(false)
 const exitLoading = ref(false)
 const exitSubmitting = ref(false)
@@ -247,6 +246,17 @@ const canTransferOwner = computed(() => capabilities.value?.can_transfer_owner ?
 const canLeave = computed(() => capabilities.value?.can_leave ?? false)
 const canInvite = computed(() => capabilities.value?.can_invite ?? (currentRoles.value.includes('owner') || currentRoles.value.includes('membership_approver')))
 const canReviewAccess = computed(() => currentRoles.value.includes('owner') || currentRoles.value.includes('information_admin'))
+const accessCenterPath = computed(() => canReviewAccess.value ? '/organization/permissions?tab=inbox' : '/organization/permissions?tab=mine')
+const accessSummaryTitle = computed(() => {
+  if (pendingReviewCount.value) return `${pendingReviewCount.value} 条待我处理`
+  if (myActiveCount.value) return `${myActiveCount.value} 条申请正在处理`
+  return '暂无待处理申请'
+})
+const accessSummaryDetail = computed(() => {
+  if (pendingReviewCount.value) return '可统一审批查看、下载和删除申请'
+  if (myActiveCount.value) return '你发起的申请正在审批或删除处理中'
+  return '新的查看、下载或删除申请会出现在这里'
+})
 const currentIdentity = computed(() => currentRoles.value.includes('owner') ? '管理员' : currentRoles.value.includes('information_admin') ? '信息管理员' : currentRoles.value.includes('membership_approver') ? '成员审批员' : '成员')
 const organizationStatusLabel = computed(() => organization.value?.organization.status === 'active' ? '正常' : organization.value?.organization.status || '')
 const filteredMembers = computed(() => {
@@ -392,26 +402,55 @@ async function loadCapabilities() {
   if (!organization.value) return
   capabilities.value = await getOrganizationCapabilities(organization.value.organization.id)
 }
-async function loadAccessRequests() {
-  if (!organization.value || !canReviewAccess.value) {
-    accessRequests.value = []
+function countUniqueRequests(...groups: Array<Array<{ id: string }>>) {
+  return new Set(groups.flat().map((item) => item.id)).size
+}
+async function loadAccessSummary() {
+  if (!organization.value) {
+    pendingReviewCount.value = 0
+    myActiveCount.value = 0
     return
   }
+  const sequence = ++accessSummarySequence
   accessLoading.value = true
   try {
-    const result = await listAccessRequests('review', organization.value.organization.id)
-    accessRequests.value = result.items || []
+    const organizationID = organization.value.organization.id
+    const [coreReview, coreMine, privateReview, privateMine, deletionReview, deletionMine] = await Promise.all([
+      canReviewAccess.value
+        ? listAccessRequests('review', organizationID).then((result) => result.items || []).catch(() => [] as CoreAccessRequest[])
+        : Promise.resolve([] as CoreAccessRequest[]),
+      listAccessRequests('mine', organizationID).then((result) => result.items || []).catch(() => [] as CoreAccessRequest[]),
+      canReviewAccess.value
+        ? listPrivateAccessRequests('inbox').catch(() => [] as PrivateAccessRequestDTO[])
+        : Promise.resolve([] as PrivateAccessRequestDTO[]),
+      listPrivateAccessRequests('mine').catch(() => [] as PrivateAccessRequestDTO[]),
+      canReviewAccess.value
+        ? listDeletionRequests('inbox', 'active').catch(() => [] as DeletionRequestDTO[])
+        : Promise.resolve([] as DeletionRequestDTO[]),
+      listDeletionRequests('mine', 'active').catch(() => [] as DeletionRequestDTO[]),
+    ])
+    if (sequence !== accessSummarySequence) return
+    pendingReviewCount.value = countUniqueRequests(coreReview, privateReview, deletionReview)
+    myActiveCount.value = countUniqueRequests(
+      coreMine.filter((item) => matchesAccessView(item.status, 'mine')),
+      privateMine.filter((item) => matchesAccessView(item.status, 'mine')),
+      deletionMine,
+    )
   } catch (cause) {
-    MessagePlugin.error(errorMessage(cause, '访问申请加载失败'))
+    if (sequence === accessSummarySequence) {
+      pendingReviewCount.value = 0
+      myActiveCount.value = 0
+      MessagePlugin.error(errorMessage(cause, '权限申请加载失败'))
+    }
   } finally {
-    accessLoading.value = false
+    if (sequence === accessSummarySequence) accessLoading.value = false
   }
 }
 async function loadOrganization() {
   pageLoading.value = true
   try {
     const [current, user] = await Promise.all([getCurrentOrganization(), getCurrentUser()])
-    organization.value = current; currentUserID.value = user.id; await Promise.all([loadMembers(), loadCapabilities()]); await loadAccessRequests()
+    organization.value = current; currentUserID.value = user.id; await Promise.all([loadMembers(), loadCapabilities()]); await loadAccessSummary()
   } catch (cause) {
     if (cause instanceof CoreAuthError && cause.code === 'ORG_MEMBERSHIP_REQUIRED') MessagePlugin.info('你尚未加入组织')
     else MessagePlugin.error(errorMessage(cause, '组织信息加载失败'))

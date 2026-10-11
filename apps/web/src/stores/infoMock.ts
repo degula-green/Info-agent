@@ -82,6 +82,5 @@ export const useInfoMockStore = defineStore('infoMock', () => {
   }
   function renameQa(id: string, title: string) { const qa = qaSessions.value.find((item) => String(item.id) === String(id)); if (qa) qa.question = title.trim() || qa.question }
   function deleteQa(id: string) { qaSessions.value = qaSessions.value.filter((item) => String(item.id) !== String(id)) }
-  function resetDemo() { const state = cloneMockState(); profile.value = state.profile; sources.value = state.sources; qaSessions.value = state.qaSessions; recentSearches.value = state.recentSearches; localStorage.removeItem(STATE_KEY) }
-  return { isAuthenticated, profile, sources, qaSessions, recentSearches, allChats, boundSources, collectingChats, totalMessages, totalFiles, login, logout, findSource, findChat, bindSource, unbindSource, updateProfile, setCollection, accessSession, updateMessage, updateFile, addRecentSearch, search, ask, renameQa, deleteQa, resetDemo }
+  return { isAuthenticated, profile, sources, qaSessions, recentSearches, allChats, boundSources, collectingChats, totalMessages, totalFiles, login, logout, findSource, findChat, bindSource, unbindSource, updateProfile, setCollection, accessSession, updateMessage, updateFile, addRecentSearch, search, ask, renameQa, deleteQa }
 })
