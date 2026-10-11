@@ -171,7 +171,7 @@ def extract_time_expression(text: str) -> tuple[str, str | None]:
 def build_title(text: str, matched: str | None) -> str:
     """The to-do title: the message without its time phrase or filler words."""
 
-    remainder = text.replace(matched, " ", 1) if matched else text
+    remainder = text.replace(matched, "", 1) if matched else text
     remainder = _COARSE_TIME.sub(" ", remainder)
     remainder = re.sub(r"\s+", " ", remainder).strip(_TRIM).strip()
     if not remainder:

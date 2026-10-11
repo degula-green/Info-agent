@@ -27,6 +27,7 @@ import {
   sortAgentTodos,
   streamAgentTaskEvents,
   submitAgentTaskInput,
+  timeOfISO,
   updateAgentTodo,
   uploadAgentAttachment,
   type AgentApproval,
@@ -423,6 +424,12 @@ test('endOfDayISO resolves the last minute of the day in the draft timezone', ()
   assert.equal(endOfDayISO('not-a-day', 'Asia/Shanghai'), '')
 })
 
+test('timeOfISO reads a deadline clock time in the draft timezone', () => {
+  assert.equal(timeOfISO('2026-10-11T11:00:00Z', 'Asia/Shanghai'), '19:00')
+  assert.equal(timeOfISO('2026-10-11T15:59:00Z', 'Asia/Shanghai'), '23:59')
+  assert.equal(timeOfISO(undefined, 'Asia/Shanghai'), '')
+})
+
 test('dayOfISO reads the calendar day back in the draft timezone', () => {
   assert.equal(dayOfISO('2026-09-29T15:59:00Z', 'Asia/Shanghai'), '2026-09-29')
   // 16:00Z is already the next day in Shanghai.
@@ -446,6 +453,55 @@ test('composeEditedArguments pins the resolved day and drops the stale phrase', 
   // message timestamp and overwrite the day the owner just picked.
   assert.equal(edited.due_expression, null)
   assert.equal(edited.timezone, 'Asia/Shanghai')
+})
+
+test('composeEditedArguments keeps the original deadline when only the title changes', () => {
+  const draft = buildScheduleDraft({
+    task: task(),
+    approval: approval({
+      capability: 'todo.create',
+      arguments: {
+        title: '我要开会',
+        due_expression: '今天晚上7点',
+        due_at: '2026-10-11T11:00:00Z',
+        timezone: 'Asia/Shanghai',
+      },
+    }),
+  })
+
+  const { arguments: edited } = composeEditedArguments(draft, {
+    title: '参加项目会',
+    dueDate: '2026-10-11',
+    dueTime: '19:00',
+  })
+
+  assert.equal(edited.timezone, 'Asia/Shanghai')
+  assert.ok(!('due_at' in edited))
+  assert.ok(!('due_expression' in edited))
+})
+
+test('composeEditedArguments keeps the clock time when the owner changes the date', () => {
+  const draft = buildScheduleDraft({
+    task: task(),
+    approval: approval({
+      capability: 'todo.create',
+      arguments: {
+        title: '我要开会',
+        due_expression: '今天晚上7点',
+        due_at: '2026-10-11T11:00:00Z',
+        timezone: 'Asia/Shanghai',
+      },
+    }),
+  })
+
+  const { arguments: edited } = composeEditedArguments(draft, {
+    title: '我要开会',
+    dueDate: '2026-10-12',
+    dueTime: '19:00',
+  })
+
+  assert.equal(edited.due_at, '2026-10-12T11:00:00.000Z')
+  assert.equal(edited.due_expression, null)
 })
 
 test('composeEditedArguments clears both fields when the owner unsets the date', () => {

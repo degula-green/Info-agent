@@ -220,5 +220,6 @@ class TodoCreateCapability:
                 else None
             ),
             "due_expression": todo.due_expression,
+            "timezone": todo.timezone,
             "todo_status": todo.status,
         }

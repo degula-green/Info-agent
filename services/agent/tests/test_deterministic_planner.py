@@ -157,6 +157,14 @@ def test_resolvable_time_is_materialised_so_the_approval_shows_it() -> None:
     assert plan.steps[0].arguments["due_expression"] == "明天晚上八点"
 
 
+def test_removing_the_time_phrase_does_not_leave_a_gap_in_the_title() -> None:
+    plan = PLANNER.create_plan(envelope("我今天晚上7点要开会"), [descriptor()], [])
+
+    assert plan.steps[0].arguments["title"] == "我要开会"
+    assert plan.steps[0].arguments["due_expression"] == "今天晚上7点"
+    assert plan.steps[0].arguments["due_at"] == "2026-09-25T11:00:00Z"
+
+
 def test_ambiguous_time_stays_unresolved_without_blocking_the_todo() -> None:
     plan = PLANNER.create_plan(envelope("明天八点开会"), [descriptor()], [])
 

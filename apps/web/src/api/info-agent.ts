@@ -751,7 +751,7 @@ function text(value: unknown): string {
   return typeof value === 'string' ? value.trim() : ''
 }
 
-function formatMoment(value: unknown, timezone?: string): string {
+export function formatMoment(value: unknown, timezone?: string): string {
   const raw = text(value)
   if (!raw) return ''
   const moment = new Date(raw)
@@ -1017,17 +1017,17 @@ function offsetMinutesIn(zone: string, at: Date): number {
 }
 
 /**
- * The last minute of `day` in `zone`, as an ISO instant.
- *
- * The owner edits a calendar day, not a clock time, so the deadline is the end
- * of that day — the same rule the backend uses for "明天" (23:59, not 00:00,
- * which would read as overdue the moment it was written).
+ * A `YYYY-MM-DD` calendar day and `HH:mm` local clock time, as an ISO instant.
  */
-export function endOfDayISO(day: string, zone: string): string {
-  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(day.trim())
-  if (!match) return ''
-  const [, year, month, date] = match
-  const naiveUTC = Date.UTC(Number(year), Number(month) - 1, Number(date), 23, 59, 0)
+export function isoAtLocalTime(day: string, time: string, zone: string): string {
+  const dayMatch = /^(\d{4})-(\d{2})-(\d{2})$/.exec(day.trim())
+  const timeMatch = /^(\d{1,2}):(\d{2})$/.exec(time.trim())
+  if (!dayMatch || !timeMatch) return ''
+  const [, year, month, date] = dayMatch
+  const hour = Number(timeMatch[1])
+  const minute = Number(timeMatch[2])
+  if (hour < 0 || hour > 23 || minute < 0 || minute > 59) return ''
+  const naiveUTC = Date.UTC(Number(year), Number(month) - 1, Number(date), hour, minute, 0)
   let instant = new Date(naiveUTC)
   for (let i = 0; i < 3; i += 1) {
     const offset = offsetMinutesIn(zone, instant)
@@ -1036,6 +1036,38 @@ export function endOfDayISO(day: string, zone: string): string {
     instant = next
   }
   return instant.toISOString()
+}
+
+/**
+ * The last minute of `day` in `zone`, as an ISO instant.
+ *
+ * A date-only phrase such as "明天" has no clock time, so its deadline is the
+ * end of that day rather than midnight, which would read as overdue at once.
+ */
+export function endOfDayISO(day: string, zone: string): string {
+  return isoAtLocalTime(day, '23:59', zone)
+}
+
+/** The `HH:mm` clock time of an ISO instant, read in `zone`. */
+export function timeOfISO(iso: string | undefined, zone: string): string {
+  const raw = text(iso)
+  if (!raw) return ''
+  const moment = new Date(raw)
+  if (Number.isNaN(moment.getTime())) return ''
+  try {
+    const parts = new Intl.DateTimeFormat('en-GB', {
+      timeZone: zone,
+      hourCycle: 'h23',
+      hour: '2-digit',
+      minute: '2-digit',
+    }).formatToParts(moment)
+    const read = (type: string) => parts.find((part) => part.type === type)?.value || ''
+    const hour = read('hour')
+    const minute = read('minute')
+    return hour && minute ? `${hour}:${minute}` : ''
+  } catch {
+    return ''
+  }
 }
 
 /** The calendar day of an ISO instant, read in `zone`, as YYYY-MM-DD. */
@@ -1065,6 +1097,8 @@ export interface DraftEdit {
   title: string
   /** YYYY-MM-DD, or '' when the owner cleared the time. */
   dueDate: string
+  /** HH:mm in the draft timezone; omitted or empty preserves the original time. */
+  dueTime?: string
 }
 
 export interface ComposedEdit {
@@ -1076,25 +1110,28 @@ export interface ComposedEdit {
 /**
  * Builds the argument payload for one edited draft.
  *
- * The backend re-parses `due_expression` with the *message's* timestamp
- * ("明天" means the day after the message was sent, which is the product rule),
- * so the edit sends the resolved `due_at` **and** clears `due_expression`.
- * A cleared date sends neither: the to-do keeps its title but loses its
- * deadline, which is a legitimate state.
+ * The backend re-parses `due_expression` with the message's timestamp, so an
+ * edited date sends the resolved `due_at` and clears `due_expression`. A
+ * title-only edit leaves both fields untouched. Changing the date preserves the
+ * original local clock time instead of silently moving the deadline to 23:59.
  */
 export function composeEditedArguments(draft: ScheduleDraft, edit: DraftEdit): ComposedEdit {
   const zone = draft.timezone || 'Asia/Shanghai'
   const dueDate = edit.dueDate.trim()
-  const arguments_: Record<string, unknown> = {
-    // Never keep the original hash-guarded values: every key the capability
-    // accepts is sent, so an edit cannot leave a stale phrase behind.
-    due_at: null,
-    due_expression: null,
-    timezone: zone,
-  }
+  const originalDueAt = draft.dueAt || draft.startTime
+  const originalDate = dayOfISO(originalDueAt, zone)
+  const originalTime = timeOfISO(originalDueAt, zone)
+  const requestedTime = edit.dueTime?.trim() || ''
+  const timeChanged = Boolean(requestedTime) && requestedTime !== originalTime
+  const arguments_: Record<string, unknown> = { timezone: zone }
   let timeExpression = ''
-  if (dueDate) {
-    const dueAt = endOfDayISO(dueDate, zone)
+  if (!dueDate) {
+    arguments_.due_at = null
+    arguments_.due_expression = null
+  } else if (dueDate === originalDate && !timeChanged) {
+    timeExpression = draft.timeExpression || dueDate
+  } else {
+    const dueAt = isoAtLocalTime(dueDate, requestedTime || originalTime || '23:59', zone)
     if (dueAt) {
       arguments_.due_at = dueAt
       arguments_.due_expression = null

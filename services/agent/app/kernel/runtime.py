@@ -734,6 +734,7 @@ class AgentRuntime:
             "title": output.get("title"),
             "due_at": output.get("due_at"),
             "due_expression": output.get("due_expression"),
+            "timezone": output.get("timezone"),
             "step_id": latest.step_id,
         }
 

@@ -137,7 +137,7 @@
             <div v-if="message.todo" class="agent-todo">
               <div class="agent-todo__title"><t-icon name="task-checked" />待办已创建</div>
               <strong>{{ message.todo.title }}</strong>
-              <span>{{ message.todo.due_at || message.todo.due_expression || '未设置截止时间' }}</span>
+              <span>{{ todoTimeLabel(message.todo) }}</span>
             </div>
 
             <div v-if="message.formResult" class="agent-form-result">
@@ -174,6 +174,10 @@
                 <label>
                   <span>截止日期</span>
                   <input v-model="approvalEditors[message.id].dueDate" type="date" />
+                </label>
+                <label>
+                  <span>截止时间</span>
+                  <input v-model="approvalEditors[message.id].dueTime" type="time" />
                 </label>
               </template>
               <template v-else-if="message.approval.capability === 'form.apply'">
@@ -451,6 +455,7 @@ import {
   dayOfISO,
   fetchTakeoverFrame,
   fetchAgentReport,
+  formatMoment,
   getAgentAnswerSnapshot,
   getAgentConversation,
   getAgentPlan,
@@ -463,6 +468,7 @@ import {
   undoFormWrite,
   streamAgentTaskEvents,
   submitAgentTaskInput,
+  timeOfISO,
   uploadAgentAttachment,
   type AgentApproval,
   type AgentConversationDetail,
@@ -491,7 +497,13 @@ type Citation = {
   sent_at?: string
   position?: Record<string, any> | null
 }
-type TodoResult = { todo_id: string; title?: string; due_at?: string | null; due_expression?: string | null }
+type TodoResult = {
+  todo_id: string
+  title?: string
+  due_at?: string | null
+  due_expression?: string | null
+  timezone?: string | null
+}
 type ReportTemplateCandidate = {
   attachment_id?: string
   file_name?: string
@@ -622,7 +634,7 @@ const textareaRef = ref<{ focus?: () => void } | null>(null)
 const activeTaskID = ref('')
 const conversationId = ref('')
 const restoringConversation = ref(false)
-const approvalEditors = reactive<Record<string, { title: string; dueDate: string }>>({})
+const approvalEditors = reactive<Record<string, { title: string; dueDate: string; dueTime: string }>>({})
 /**
  * The editable field list of a form.apply draft, keyed by message id. The
  * owner's edits are what the confirm call sends back, so the values written
@@ -743,6 +755,7 @@ async function prepareApproval(message: AgentMessage, event: AgentTaskEvent): Pr
   approvalEditors[message.id] = {
     title: String(args.title || approval.capability || '待确认操作'),
     dueDate: typeof args.due_at === 'string' ? dayOfISO(args.due_at, timezone) : '',
+    dueTime: typeof args.due_at === 'string' ? timeOfISO(args.due_at, timezone) : '',
   }
   if (approval.capability === 'form.apply') {
     formEditors[message.id] = formFieldsFrom(args.draft)
@@ -841,6 +854,7 @@ function handleTaskEvent(message: AgentMessage, event: AgentTaskEvent): boolean 
         title: typeof payload.title === 'string' ? payload.title : undefined,
         due_at: typeof payload.due_at === 'string' ? payload.due_at : null,
         due_expression: typeof payload.due_expression === 'string' ? payload.due_expression : null,
+        timezone: typeof payload.timezone === 'string' ? payload.timezone : null,
       }
       break
     case 'approval.rejected':
@@ -1301,10 +1315,20 @@ function todoFromObservations(observations: AgentObservation[]): TodoResult | un
         title: typeof output.title === 'string' ? output.title : undefined,
         due_at: typeof output.due_at === 'string' ? output.due_at : null,
         due_expression: typeof output.due_expression === 'string' ? output.due_expression : null,
+        timezone: typeof output.timezone === 'string' ? output.timezone : null,
       }
     }
   }
   return undefined
+}
+
+function todoTimeLabel(todo: TodoResult): string {
+  if (!todo.due_at) return todo.due_expression || '未设置截止时间'
+  return (
+    formatMoment(todo.due_at, todo.timezone || 'Asia/Shanghai') ||
+    todo.due_expression ||
+    todo.due_at
+  )
 }
 
 async function openSourceItem(source: SourceItem): Promise<void> {
@@ -1610,6 +1634,9 @@ function applyRestoredApproval(message: AgentMessage, approval: AgentApproval): 
     title: String(args.title || approval.capability || '待确认操作'),
     dueDate: typeof args.due_at === 'string'
       ? dayOfISO(args.due_at, String(args.timezone || 'Asia/Shanghai'))
+      : '',
+    dueTime: typeof args.due_at === 'string'
+      ? timeOfISO(args.due_at, String(args.timezone || 'Asia/Shanghai'))
       : '',
   }
   // The field list is seeded here too: an approval restored from conversation
@@ -1970,7 +1997,7 @@ function clearFile(): void {
 }
 
 function approvalEditor(message: AgentMessage) {
-  return approvalEditors[message.id] || { title: '', dueDate: '' }
+  return approvalEditors[message.id] || { title: '', dueDate: '', dueTime: '' }
 }
 
 function formFieldsFrom(draft: unknown): FormEditorField[] {
@@ -2198,11 +2225,24 @@ async function confirmApproval(message: AgentMessage): Promise<void> {
   try {
     const approval = message.approval
     const editor = approvalEditor(message)
-    let arguments_: Record<string, unknown> = approval.arguments || {}
+    const title = editor.title.trim()
+    let arguments_: Record<string, unknown> | undefined
     if (approval.capability === 'todo.create') {
       const draft = buildScheduleDraft({ task: { task_id: message.taskId || '', source_type: 'chat', owner_user_id: '', status: 'waiting_approval' }, approval })
-      const edited = composeEditedArguments(draft, { title: editor.title, dueDate: editor.dueDate })
-      arguments_ = { ...approval.arguments, ...edited.arguments, title: editor.title }
+      const originalDate = dayOfISO(draft.dueAt || draft.startTime, draft.timezone || 'Asia/Shanghai')
+      const originalTime = timeOfISO(draft.dueAt || draft.startTime, draft.timezone || 'Asia/Shanghai')
+      const changed =
+        title !== draft.title.trim() ||
+        editor.dueDate !== originalDate ||
+        editor.dueTime !== originalTime
+      if (changed) {
+        const edited = composeEditedArguments(draft, {
+          title,
+          dueDate: editor.dueDate,
+          dueTime: editor.dueTime,
+        })
+        arguments_ = { ...(approval.arguments || {}), ...edited.arguments, title }
+      }
     }
     if (approval.capability === 'form.apply') {
       // Send back exactly what is on the card: the backend overwrites the Step

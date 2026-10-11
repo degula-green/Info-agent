@@ -66,6 +66,14 @@
                 size="small"
                 @clear="clearDueDate(draft)"
               />
+
+              <label class="sidebar-schedules__edit-label" :for="`due-time-${draft.taskId}`">时间</label>
+              <input
+                :id="`due-time-${draft.taskId}`"
+                v-model="editDueTimes[draft.taskId]"
+                class="sidebar-schedules__fix-input"
+                type="time"
+              />
             </div>
 
             <dl v-else class="sidebar-schedules__facts">
@@ -199,6 +207,7 @@ import {
   draftSortKey,
   loadScheduleDrafts,
   submitAgentTaskInput,
+  timeOfISO,
   type ScheduleDraft,
 } from '../api/info-agent.ts'
 import { useTodoLedgerStore } from '../stores/todoLedger.ts'
@@ -226,6 +235,7 @@ const timeInputs = ref<Record<string, string>>({})
 // so a poll that returns a fresh draft cannot silently discard an edit.
 const editTitles = ref<Record<string, string>>({})
 const editDueDates = ref<Record<string, string>>({})
+const editDueTimes = ref<Record<string, string>>({})
 const editErrors = ref<Record<string, string>>({})
 // Once the owner clears the date, polling must not put it back.
 const clearedTimeTaskIDs = ref<string[]>([])
@@ -400,8 +410,12 @@ function syncEditBuffers(draft: ScheduleDraft) {
     editTitles.value = { ...editTitles.value, [draft.taskId]: draft.title }
   }
   if (editDueDates.value[draft.taskId] === undefined) {
-    const seeded = cleared ? '' : dayOfISO(draft.dueAt, draft.timezone || 'Asia/Shanghai')
+    const seeded = cleared ? '' : dayOfISO(draft.dueAt || draft.startTime, draft.timezone || 'Asia/Shanghai')
     editDueDates.value = { ...editDueDates.value, [draft.taskId]: seeded }
+  }
+  if (editDueTimes.value[draft.taskId] === undefined) {
+    const seeded = cleared ? '' : timeOfISO(draft.dueAt || draft.startTime, draft.timezone || 'Asia/Shanghai')
+    editDueTimes.value = { ...editDueTimes.value, [draft.taskId]: seeded }
   }
 }
 
@@ -417,6 +431,11 @@ function forgetEditBuffers(taskId: string) {
     delete next[taskId]
     editDueDates.value = next
   }
+  if (taskId in editDueTimes.value) {
+    const next = { ...editDueTimes.value }
+    delete next[taskId]
+    editDueTimes.value = next
+  }
   if (taskId in editErrors.value) {
     const next = { ...editErrors.value }
     delete next[taskId]
@@ -429,6 +448,7 @@ function forgetEditBuffers(taskId: string) {
 // next poll does not restore the date the owner just removed.
 function clearDueDate(draft: ScheduleDraft) {
   editDueDates.value = { ...editDueDates.value, [draft.taskId]: '' }
+  editDueTimes.value = { ...editDueTimes.value, [draft.taskId]: '' }
   if (!clearedTimeTaskIDs.value.includes(draft.taskId)) {
     clearedTimeTaskIDs.value = [...clearedTimeTaskIDs.value, draft.taskId]
   }
@@ -443,22 +463,30 @@ async function confirm(draft: ScheduleDraft) {
   delete remaining[draft.taskId]
   editErrors.value = remaining
   try {
-    // The card is the only place these values exist, so they are sent with the
-    // approval: the backend overwrites the Step arguments and re-fingerprints
-    // them before executing.
-    const { arguments: edited } = composeEditedArguments(draft, {
-      title,
-      dueDate: editDueDates.value[draft.taskId] || '',
-    })
-    edited.title = title
-    const original = { ...(draft.arguments || {}) }
-    const merged = { ...original, ...edited }
-    // Keep the keys the capability does not accept out of the payload.
-    delete (merged as Record<string, unknown>).start_time
-    delete (merged as Record<string, unknown>).end_time
-    delete (merged as Record<string, unknown>).time_expression
-    delete (merged as Record<string, unknown>).location
-    delete (merged as Record<string, unknown>).description
+    const dueDate = editDueDates.value[draft.taskId] || ''
+    const dueTime = editDueTimes.value[draft.taskId] || ''
+    const originalDate = dayOfISO(draft.dueAt || draft.startTime, draft.timezone || 'Asia/Shanghai')
+    const originalTime = timeOfISO(draft.dueAt || draft.startTime, draft.timezone || 'Asia/Shanghai')
+    const changed = title !== draft.title.trim() || dueDate !== originalDate || dueTime !== originalTime
+    let merged: Record<string, unknown> | undefined
+    if (changed) {
+      // The card is the only place these values exist, so they are sent with the
+      // approval: the backend overwrites the Step arguments and re-fingerprints
+      // them before executing.
+      const { arguments: edited } = composeEditedArguments(draft, {
+        title,
+        dueDate,
+        dueTime,
+      })
+      edited.title = title
+      merged = { ...(draft.arguments || {}), ...edited }
+      // Keep the keys the capability does not accept out of the payload.
+      delete merged.start_time
+      delete merged.end_time
+      delete merged.time_expression
+      delete merged.location
+      delete merged.description
+    }
     await approveAgentApproval(draft.approvalId, draft.approvalVersion, merged)
     todoLedger.scheduleRefresh()
     // Keep the card in place: it leaves the waiting_* list the moment the step
