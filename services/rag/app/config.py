@@ -354,6 +354,13 @@ class Settings:
     neighbor_radius: int = _int("RAG_NEIGHBOR_RADIUS", 1)
     qa_vector_min_score: float = _float("RAG_QA_VECTOR_MIN_SCORE", 0.72)
     qa_bm25_min_score: float = _float("RAG_QA_BM25_MIN_SCORE", 0.0)
+    # Global hybrid search must not return a result merely because a branch
+    # produced a ranked candidate. These floors are applied before RRF.
+    global_vector_min_score: float = _float("RAG_GLOBAL_VECTOR_MIN_SCORE", 0.72)
+    global_bm25_min_score: float = _float("RAG_GLOBAL_BM25_MIN_SCORE", 7.5)
+    global_bm25_minimum_should_match: str = _text(
+        "RAG_GLOBAL_BM25_MINIMUM_SHOULD_MATCH", "70%"
+    )
     rrf_k: int = _int("RAG_RRF_K", 60)
     rrf_keyword_weight: float = _float("RAG_RRF_KEYWORD_WEIGHT", 0.5)
     rrf_vector_weight: float = _float("RAG_RRF_VECTOR_WEIGHT", 0.5)

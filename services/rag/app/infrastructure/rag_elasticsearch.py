@@ -184,9 +184,19 @@ class RagChunkIndex:
             ))
         output: list[SearchResult] = []
         for index, filters in branches:
+            minimum_should_match = (
+                settings.global_bm25_minimum_should_match
+                if request.entry in {"global", "knowledge", "ai"}
+                and request.query.strip()
+                else None
+            )
             search_kwargs: dict[str, Any] = {
                 "index": index,
-                "query": _bm25_query(request.query, filters),
+                "query": _bm25_query(
+                    request.query,
+                    filters,
+                    minimum_should_match=minimum_should_match,
+                ),
                 "size": page_size,
                 "sort": (
                     [
@@ -411,18 +421,24 @@ class RagChunkIndex:
             raise ElasticsearchUnavailable("Elasticsearch search failed") from exc
 
 
-def _bm25_query(query: str, filters: list[dict[str, Any]]) -> dict[str, Any]:
+def _bm25_query(
+    query: str,
+    filters: list[dict[str, Any]],
+    *,
+    minimum_should_match: str | None = None,
+) -> dict[str, Any]:
     if not str(query or "").strip():
         return {"bool": {"filter": filters}}
+    multi_match: dict[str, Any] = {
+        "query": query,
+        "fields": ["title^3", "file_name^2", "heading_path", "content"],
+        "operator": "or",
+    }
+    if minimum_should_match:
+        multi_match["minimum_should_match"] = minimum_should_match
     return {
         "bool": {
-            "must": [{
-                "multi_match": {
-                    "query": query,
-                    "fields": ["title^3", "file_name^2", "heading_path", "content"],
-                    "operator": "or",
-                }
-            }],
+            "must": [{"multi_match": multi_match}],
             "filter": filters,
         }
     }

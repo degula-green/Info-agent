@@ -292,6 +292,18 @@ class RAGRetrievalService:
                 vector_min_score=settings.qa_vector_min_score,
                 bm25_min_score=settings.qa_bm25_min_score,
             )
+        elif request.entry == "global":
+            effective, gate_dropped = filter_qa_anchor_candidates(
+                effective,
+                vector_min_score=settings.global_vector_min_score,
+                bm25_min_score=settings.global_bm25_min_score,
+            )
+        elif request.entry == "knowledge":
+            effective, gate_dropped = filter_qa_anchor_candidates(
+                effective,
+                vector_min_score=1.1,
+                bm25_min_score=settings.global_bm25_min_score,
+            )
         fused = rrf_fuse(
             effective,
             k=settings.rrf_k,
@@ -413,6 +425,11 @@ class RAGRetrievalService:
                 "neighbor_radius": settings.neighbor_radius,
                 "qa_vector_min_score": settings.qa_vector_min_score,
                 "qa_bm25_min_score": settings.qa_bm25_min_score,
+                "global_vector_min_score": settings.global_vector_min_score,
+                "global_bm25_min_score": settings.global_bm25_min_score,
+                "global_bm25_minimum_should_match": (
+                    settings.global_bm25_minimum_should_match
+                ),
                 "bm25_top_k": settings.bm25_top_k,
                 "knn_top_k": settings.knn_top_k,
             },

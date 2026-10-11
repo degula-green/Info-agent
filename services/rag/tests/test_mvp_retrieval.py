@@ -548,7 +548,7 @@ class RetrievalTests(unittest.TestCase):
         display = SearchResult(
             chunk_id="d1",
             content="[密码已脱敏]",
-            score=1.0,
+            score=8.0,
             source={
                 "logical_position_key": "l1",
                 "resource_id": "r1",
@@ -840,6 +840,74 @@ class RetrievalTests(unittest.TestCase):
         ))
         self.assertEqual(response.results, [])
         self.assertEqual(response.diagnostics["score_gate_dropped_count"], 1)
+
+    def test_global_gate_drops_weak_vector_and_bm25_candidates(self) -> None:
+        weak_bm25 = SearchResult(
+            chunk_id="weak-bm25",
+            content="weak lexical match",
+            score=0.4,
+            source={
+                "logical_position_key": "weak-bm25",
+                "resource_id": "message-bm25",
+                "knowledge_item_id": "item-bm25",
+                "resource_type": "message",
+                "content_variant": "display",
+                "rag_eligible": True,
+            },
+        )
+        weak_vector = SearchResult(
+            chunk_id="weak-vector",
+            content="weak vector match",
+            score=0.64,
+            source={
+                "logical_position_key": "weak-vector",
+                "resource_id": "message-vector",
+                "knowledge_item_id": "item-vector",
+                "resource_type": "message",
+                "content_variant": "display",
+                "rag_eligible": True,
+            },
+        )
+        service = RAGRetrievalService(
+            repository=InMemoryRagMVPRepository(),
+            indexer=_Indexer(
+                bm25_results=[weak_bm25],
+                knn_results=[weak_vector],
+            ),
+            embedding=_Embedding(),
+            authorization=_Authorization(),
+        )
+
+        response = service.search(SearchRequest(
+            query="unrelated query",
+            user_id="user-1",
+            scope_type="organization",
+            scope_id="org-1",
+            entry="global",
+        ))
+
+        self.assertEqual(response.results, [])
+        self.assertEqual(response.diagnostics["score_gate_dropped_count"], 2)
+
+    def test_global_bm25_query_requires_minimum_should_match(self) -> None:
+        request = SearchRequest(
+            query="完全无关的词",
+            user_id="user-1",
+            scope_type="organization",
+            scope_id="org-1",
+            entry="global",
+        )
+        query = _bm25_query(
+            request.query,
+            _filters(request),
+            minimum_should_match=settings.global_bm25_minimum_should_match,
+        )
+
+        multi_match = query["bool"]["must"][0]["multi_match"]
+        self.assertEqual(
+            multi_match["minimum_should_match"],
+            settings.global_bm25_minimum_should_match,
+        )
 
     def test_qa_expands_neighbor_chunk_from_anchor(self) -> None:
         anchor = SearchResult(

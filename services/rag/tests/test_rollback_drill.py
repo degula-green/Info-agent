@@ -59,6 +59,7 @@ class _ScopedIndexer:
         return SearchResult(
             chunk_id=chunk_id,
             content=chunk_id,
+            score=8.0,
             source={
                 "logical_position_key": chunk_id,
                 "resource_id": chunk_id,
