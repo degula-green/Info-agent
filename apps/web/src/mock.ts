@@ -99,7 +99,6 @@ export function createInitialMockState(): InfoMockState {
         chat({ id: 'feishu-admin', name: '行政协作群', source: 'feishu', members: 9, collecting: true, collectionStatus: 'collecting', historyStart: '2026-08-16', lastSync: '22 分钟前', recentMessageTime: '昨天 14:06', messages: [{ id: 'm4', sender: '王璐', content: '会议室 A 已预订，访客信息请在今天下班前提交。', time: '昨天 14:06', timestamp: '2026-08-29T14:06:00+08:00' }] }),
         chat({ id: 'feishu-dm', name: '林默 ↔ 陈曦', source: 'feishu', members: 2, isDirect: true, collecting: false, collectionStatus: 'paused', historyStart: '2026-08-20', lastSync: '已暂停', recentMessageTime: '8 月 27 日 16:10', messages: [{ id: 'm7', sender: '陈曦', content: '数据库迁移方案我看过了，建议把回滚步骤再补充一下。', time: '8 月 27 日 16:10', timestamp: '2026-08-27T16:10:00+08:00' }] }),
       ] },
-      { key: 'wecom', name: '企业微信', kbName: '企业微信知识库', description: '企业微信知识库（当前不可采集消息）', account: '', bound: false, available: false, availableSessions: [], chats: [] },
       { key: 'wechat', name: '个人微信', kbName: '个人微信知识库', description: '个人微信群聊、私聊消息与文件', account: '', bound: false, availableSessions: [
         { id: 'wechat-weekend', name: '周末徒步群', members: 7 },
         { id: 'wechat-dm-yangfan', name: '林默 ↔ 杨帆', members: 2, isDirect: true },

@@ -43,7 +43,7 @@ const page = ref(1)
 const pageSize = 20
 let searchAbort: AbortController | null = null
 
-const platformOptions = [{ label: '全部数据', value: 'all' }, { label: '飞书', value: 'feishu' }, { label: '企业微信', value: 'wecom' }, { label: '个人微信', value: 'wechat' }]
+const platformOptions = [{ label: '全部数据', value: 'all' }, { label: '飞书', value: 'feishu' }, { label: '个人微信', value: 'wechat' }]
 const platformLabel = computed(() => platformOptions.find((item) => item.value === platform.value)?.label || '全部数据')
 const resultGroups = computed(() => ([['chat', '群聊', results.value.filter((item) => item.kind === 'chat')], ['message', '消息', results.value.filter((item) => item.kind === 'message')], ['file', '文件', results.value.filter((item) => item.kind === 'file')], ['qa', '历史问答', results.value.filter((item) => item.kind === 'qa')]] as const).filter(([, , items]) => items.length).map(([kind, label, items]) => ({ kind, label, items })))
 

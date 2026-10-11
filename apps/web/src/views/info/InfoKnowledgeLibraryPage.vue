@@ -42,7 +42,6 @@
       <t-select v-model="platform" clearable placeholder="全部平台" class="platform-filter" @change="onPlatformChange">
         <t-option value="feishu" label="飞书" />
         <t-option value="wechat" label="个人微信" />
-        <t-option value="wecom" label="企业微信" />
       </t-select>
       <t-button theme="primary" variant="outline" :loading="searchLoading" :disabled="!query.trim()" @click="runLibrarySearch">搜索</t-button>
       <span class="library-toolbar__count">{{ query.trim() ? `${searchResults.length} 条检索` : `${filteredItems.length} 项` }}</span>

@@ -22,7 +22,6 @@ export type Connector = ConnectorDTO
 export function connectorCatalog(): ConnectorDTO[] {
   return [
     { platform: 'feishu', display_name: '飞书', bound: false, status: 'unbound', availability: 'available' },
-    { platform: 'wecom', display_name: '企业微信', bound: false, status: 'unbound', availability: 'unavailable' },
     { platform: 'wechat', display_name: '个人微信', bound: false, status: 'unbound', availability: 'available' },
   ]
 }

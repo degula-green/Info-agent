@@ -44,7 +44,7 @@ function emptySource(key: SourceKey): InfoSource {
   return { key, ...sourceMeta[key], account: '', bound: false, availableSessions: [], chats: [], available: key !== 'wecom', status: 'unbound', discoveryLoading: false, discoveryLoaded: false, discoveryError: null }
 }
 
-function createSources() { return (['feishu', 'wecom', 'wechat'] as SourceKey[]).map(emptySource) }
+function createSources() { return (['feishu', 'wechat'] as SourceKey[]).map(emptySource) }
 
 function toDate(value?: string | null) {
   if (!value) return null
@@ -352,7 +352,7 @@ export const useInfoKnowledgeStore = defineStore('infoKnowledge', () => {
       }
       next.set(key, source)
     }
-    sources.value = (['feishu', 'wecom', 'wechat'] as SourceKey[]).map((key) => next.get(key) || emptySource(key))
+    sources.value = (['feishu', 'wechat'] as SourceKey[]).map((key) => next.get(key) || emptySource(key))
     loadedAt.value = Date.now()
     loadError.value = null
     return sources.value

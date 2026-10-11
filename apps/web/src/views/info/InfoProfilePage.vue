@@ -245,7 +245,8 @@ async function loadPage() {
     }
   })
   const connectorRequest = getConnectors().then((items) => {
-    connectors.value = items.length ? items : connectorCatalog()
+    const visible = items.filter((item) => item.platform !== 'wecom')
+    connectors.value = visible.length ? visible : connectorCatalog()
   }).catch((cause) => {
     connectors.value = connectorCatalog()
     MessagePlugin.error(errorMessage(cause, '连接器服务未启动，请启动 Knowledge 服务后重试'))
@@ -351,7 +352,7 @@ function heartbeatAge(value?: string | null) {
   return date.toLocaleDateString('zh-CN')
 }
 async function refreshConnectors() {
-  const next = await getConnectors()
+  const next = (await getConnectors()).filter((item) => item.platform !== 'wecom')
   connectors.value = next
   if (!feishuAuthorizationPending.value) return
   const feishu = next.find((item) => item.platform === 'feishu')
